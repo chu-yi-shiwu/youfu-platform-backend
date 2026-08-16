@@ -1,0 +1,489 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>优服家 · 主数据管理（⑦P1）</title>
+<style>
+  :root {
+    --bg: #f5f7fa; --card: #ffffff; --ink: #1f2933; --sub: #6b7785;
+    --line: #e3e8ef; --accent: #2563eb; --accent2: #0ea5e9;
+    --good: #16a34a; --warn: #d97706; --bad: #dc2626; --chip: #eef2ff;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: var(--bg); color: var(--ink); font-size: 14px; }
+  header { background: linear-gradient(120deg, #1e3a8a, #2563eb); color: #fff; padding: 18px 24px; }
+  header h1 { margin: 0; font-size: 19px; }
+  header p { margin: 4px 0 0; opacity: .85; font-size: 12px; }
+  .bar { display: flex; gap: 12px; align-items: flex-end; flex-wrap: wrap; padding: 14px 24px; background: #fff; border-bottom: 1px solid var(--line); }
+  .bar label { font-size: 12px; color: var(--sub); display: block; margin-bottom: 4px; }
+  .bar select, .bar input { padding: 7px 10px; border: 1px solid var(--line); border-radius: 8px; font-size: 13px; }
+  .bar button { padding: 8px 16px; background: var(--accent); color: #fff; border: 0; border-radius: 8px; cursor: pointer; font-size: 13px; }
+  .bar button:hover { background: #1d4ed8; }
+  .bar button.ghost { background: #fff; color: var(--accent); border: 1px solid var(--line); }
+  .tabs { display: flex; gap: 4px; padding: 0 24px; background: #fff; border-bottom: 1px solid var(--line); }
+  .tab { padding: 12px 18px; cursor: pointer; font-size: 14px; color: var(--sub); border-bottom: 2px solid transparent; }
+  .tab.active { color: var(--accent); border-bottom-color: var(--accent); font-weight: 600; }
+  main { padding: 18px 24px 40px; max-width: 1180px; margin: 0 auto; }
+  section.panel { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 18px; margin-top: 16px; }
+  .filters { display: flex; gap: 10px; align-items: flex-end; flex-wrap: wrap; margin-bottom: 14px; }
+  .filters label { font-size: 12px; color: var(--sub); display: block; margin-bottom: 4px; }
+  .filters input, .filters select { padding: 7px 10px; border: 1px solid var(--line); border-radius: 8px; font-size: 13px; }
+  .filters button { padding: 7px 14px; background: var(--accent); color: #fff; border: 0; border-radius: 8px; cursor: pointer; font-size: 13px; }
+  .filters button.ghost { background: #fff; color: var(--accent); border: 1px solid var(--line); }
+  .toolbar { margin-bottom: 12px; }
+  .toolbar button { padding: 8px 16px; background: var(--good); color: #fff; border: 0; border-radius: 8px; cursor: pointer; font-size: 13px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+  th { color: var(--sub); font-weight: 600; font-size: 12px; }
+  .pill { display: inline-block; padding: 2px 9px; border-radius: 12px; font-size: 11px; font-weight: 600; }
+  .pill.good { background: #dcfce7; color: var(--good); }
+  .pill.warn { background: #fef3c7; color: var(--warn); }
+  .pill.bad { background: #fee2e2; color: var(--bad); }
+  .acts { display: flex; gap: 6px; }
+  .acts button { padding: 4px 10px; font-size: 12px; border-radius: 6px; border: 1px solid var(--line); background: #fff; cursor: pointer; color: var(--ink); }
+  .acts button:hover { border-color: var(--accent); color: var(--accent); }
+  .acts button.danger:hover { border-color: var(--bad); color: var(--bad); }
+  .empty { color: var(--sub); font-size: 13px; padding: 22px; text-align: center; }
+  .note { font-size: 11px; color: var(--sub); margin-top: 10px; line-height: 1.5; }
+  .err { background: #fef2f2; border: 1px solid #fecaca; color: #b91c1c; padding: 12px; border-radius: 10px; margin-top: 14px; font-size: 13px; }
+  /* modal */
+  .overlay { position: fixed; inset: 0; background: rgba(15,23,42,.45); display: none; align-items: flex-start; justify-content: center; padding: 40px 16px; overflow: auto; z-index: 50; }
+  .overlay.show { display: flex; }
+  .modal { background: #fff; border-radius: 14px; padding: 22px; width: 460px; max-width: 100%; box-shadow: 0 12px 40px rgba(0,0,0,.2); }
+  .modal h3 { margin: 0 0 16px; font-size: 16px; }
+  .field { margin-bottom: 12px; }
+  .field label { display: block; font-size: 12px; color: var(--sub); margin-bottom: 4px; }
+  .field input, .field select { width: 100%; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; font-size: 13px; }
+  .field .req { color: var(--bad); }
+  .row2 { display: flex; gap: 12px; }
+  .row2 .field { flex: 1; }
+  .checkline { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--ink); }
+  .modal-acts { display: flex; gap: 10px; justify-content: flex-end; margin-top: 18px; }
+  .modal-acts button { padding: 8px 18px; border-radius: 8px; border: 0; cursor: pointer; font-size: 13px; }
+  .modal-acts .primary { background: var(--accent); color: #fff; }
+  .modal-acts .cancel { background: #fff; color: var(--sub); border: 1px solid var(--line); }
+  .hint { font-size: 11px; color: var(--sub); margin-top: 6px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>优服家 · 主数据管理</h1>
+  <p>⑦P1 让引擎"能用" — 资产 / 物料 配置与查看（RLS 租户隔离，dev 默认 admin 可写）</p>
+</header>
+
+<div class="bar">
+  <div>
+    <label>租户 (X-Tenant-Id, 留空=dev 默认)</label>
+    <input id="tenant" placeholder="t-verification" style="width:170px" />
+  </div>
+  <button id="refresh">刷新</button>
+</div>
+
+<div class="tabs">
+  <div class="tab active" data-entity="asset">资产设备</div>
+  <div class="tab" data-entity="material">仓库物料</div>
+</div>
+
+<main>
+  <div id="error"></div>
+
+  <!-- ============ 资产 ============ -->
+  <section class="panel" id="assetPanel">
+    <div class="filters">
+      <div><label>名称</label><input id="a_name" placeholder="模糊搜索" /></div>
+      <div><label>拼音</label><input id="a_pinyin" placeholder="首拼" /></div>
+      <div><label>位置</label><input id="a_location" placeholder="区域" /></div>
+      <div><label>状态</label>
+        <select id="a_status">
+          <option value="">全部</option>
+          <option value="in_use">在用</option>
+          <option value="repairing">维修中</option>
+          <option value="standby">备用</option>
+          <option value="disabled">停用</option>
+        </select>
+      </div>
+      <button id="a_search">查询</button>
+      <button class="ghost" id="a_reset">重置</button>
+    </div>
+    <div class="toolbar"><button id="a_new">+ 新建资产</button></div>
+    <table>
+      <thead><tr>
+        <th>资产编号</th><th>名称</th><th>型号</th><th>拼音</th><th>位置</th><th>状态</th><th>序列号</th><th>操作</th>
+      </tr></thead>
+      <tbody id="a_body"><tr><td colspan="8" class="empty">加载中…</td></tr></tbody>
+    </table>
+    <div class="note">资产档案为主数据；"调拨"改绑定位置，"报修"自动生成维修工单并进入派单流。后端暂无删除接口，故未提供删除。</div>
+  </section>
+
+  <!-- ============ 物料 ============ -->
+  <section class="panel" id="materialPanel" style="display:none">
+    <div class="filters">
+      <div><label>编码</label><input id="m_code" placeholder="编码模糊" /></div>
+      <div><label>名称</label><input id="m_name" placeholder="名称模糊" /></div>
+      <div><label>分类</label><input id="m_category" placeholder="如 电气照明" /></div>
+      <button id="m_search">查询</button>
+      <button class="ghost" id="m_reset">重置</button>
+    </div>
+    <div class="toolbar"><button id="m_new">+ 新建物料</button></div>
+    <table>
+      <thead><tr>
+        <th>编码</th><th>名称</th><th>分类</th><th>规格</th><th>单位</th><th>单价</th><th>启用</th><th>操作</th>
+      </tr></thead>
+      <tbody id="m_body"><tr><td colspan="8" class="empty">加载中…</td></tr></tbody>
+    </table>
+    <div class="note">物料为主数据；删除受库存台账/流水保护（仍有台账则拒绝）。编码在租户内唯一。</div>
+  </section>
+</main>
+
+<!-- 资产弹窗 -->
+<div class="overlay" id="assetModal">
+  <div class="modal">
+    <h3 id="a_title">新建资产</h3>
+    <input type="hidden" id="a_id" />
+    <div class="field"><label>名称 <span class="req">*</span></label><input id="a_f_name" placeholder="如 中央空调机组 A" /></div>
+    <div class="row2">
+      <div class="field"><label>型号</label><input id="a_f_model" placeholder="可选" /></div>
+      <div class="field"><label>拼音</label><input id="a_f_pinyin" placeholder="首拼，如 zyk" /></div>
+    </div>
+    <div class="field"><label>位置</label><input id="a_f_location" placeholder="如 1 号厂房 3 层" /></div>
+    <div class="row2">
+      <div class="field"><label>状态</label>
+        <select id="a_f_status">
+          <option value="in_use">在用</option>
+          <option value="repairing">维修中</option>
+          <option value="standby">备用</option>
+          <option value="disabled">停用</option>
+        </select>
+      </div>
+      <div class="field"><label>序列号</label><input id="a_f_sno" placeholder="有序列号时填" /></div>
+    </div>
+    <div class="field"><label class="checkline"><input type="checkbox" id="a_f_has_sno" /> 有序列号</label></div>
+    <div class="modal-acts">
+      <button class="cancel" onclick="closeModals()">取消</button>
+      <button class="primary" id="a_save">保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- 物料弹窗 -->
+<div class="overlay" id="materialModal">
+  <div class="modal">
+    <h3 id="m_title">新建物料</h3>
+    <input type="hidden" id="m_id" />
+    <div class="row2">
+      <div class="field"><label>编码 <span class="req">*</span></label><input id="m_f_code" placeholder="如 LED-001" /></div>
+      <div class="field"><label>名称 <span class="req">*</span></label><input id="m_f_name" placeholder="如 LED 灯管" /></div>
+    </div>
+    <div class="row2">
+      <div class="field"><label>分类</label><input id="m_f_category" placeholder="如 电气照明" /></div>
+      <div class="field"><label>规格</label><input id="m_f_spec" placeholder="如 T8 18W" /></div>
+    </div>
+    <div class="row2">
+      <div class="field"><label>单位</label><input id="m_f_unit" placeholder="支/个/米" /></div>
+      <div class="field"><label>单价</label><input id="m_f_price" type="number" step="0.01" min="0" placeholder="0.00" /></div>
+    </div>
+    <div class="field"><label class="checkline"><input type="checkbox" id="m_f_enabled" checked /> 启用</label></div>
+    <div class="modal-acts">
+      <button class="cancel" onclick="closeModals()">取消</button>
+      <button class="primary" id="m_save">保存</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const A = '/api/v1/assets';
+const M = '/api/v1/materials';
+
+// HTML 转义（防 XSS：主数据内容由用户录入，展示前必须转义）
+function esc(v) {
+  if (v === null || v === undefined) return '';
+  return String(v).replace(/[&<>"']/g, (c) => (
+    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+  ));
+}
+function escAttr(v) { return esc(v); }
+
+function authHeaders() {
+  const h = { 'Authorization': 'Bearer dev', 'Content-Type': 'application/json' };
+  const t = document.getElementById('tenant').value.trim();
+  if (t) h['X-Tenant-Id'] = t;
+  return h;
+}
+
+const ASSET_STATUS_MAP = { in_use: '在用', repairing: '维修中', standby: '备用', disabled: '停用' };
+const ASSET_STATUS_CLASS = { in_use: 'good', repairing: 'warn', standby: '', disabled: 'bad' };
+
+function setError(msg) {
+  document.getElementById('error').innerHTML = msg ? `<div class="err">${esc(msg)}</div>` : '';
+}
+
+// ============ 资产 ============
+async function loadAssets() {
+  const qs = new URLSearchParams();
+  const name = document.getElementById('a_name').value.trim();
+  const pinyin = document.getElementById('a_pinyin').value.trim();
+  const location = document.getElementById('a_location').value.trim();
+  const status = document.getElementById('a_status').value;
+  if (name) qs.set('name', name);
+  if (pinyin) qs.set('pinyin', pinyin);
+  if (location) qs.set('location', location);
+  if (status) qs.set('status', status);
+  const url = qs.toString() ? `${A}?${qs}` : A;
+  try {
+    const r = await fetch(url, { headers: authHeaders() });
+    const j = await r.json();
+    if (!j.ok) throw new Error(j.message || 'API 非 ok');
+    renderAssets(j.items || []);
+  } catch (e) {
+    document.getElementById('a_body').innerHTML = `<tr><td colspan="8" class="empty">加载失败：${esc(e.message)}</td></tr>`;
+    setError('资产加载失败：' + e.message);
+  }
+}
+
+function renderAssets(items) {
+  const body = document.getElementById('a_body');
+  if (!items.length) { body.innerHTML = `<tr><td colspan="8" class="empty">暂无资产。点击「新建资产」建档。</td></tr>`; return; }
+  body.innerHTML = items.map((it) => {
+    const st = it.status || 'in_use';
+    const cls = ASSET_STATUS_CLASS[st] || '';
+    const pill = cls ? `<span class="pill ${cls}">${esc(ASSET_STATUS_MAP[st] || st)}</span>` : esc(ASSET_STATUS_MAP[st] || st);
+    return `<tr>
+      <td>${esc(it.asset_no || it.id)}</td>
+      <td>${esc(it.name)}</td>
+      <td>${esc(it.model || '-')}</td>
+      <td>${esc(it.pinyin || '-')}</td>
+      <td>${esc(it.location || '-')}</td>
+      <td>${pill}</td>
+      <td>${esc(it.sno || '-')}</td>
+      <td><div class="acts">
+        <button onclick="editAsset('${escAttr(it.id)}')">编辑</button>
+        <button onclick="transferAsset('${escAttr(it.id)}','${escAttr(it.name)}')">调拨</button>
+        <button onclick="faultAsset('${escAttr(it.id)}','${escAttr(it.name)}')">报修</button>
+      </div></td>
+    </tr>`;
+  }).join('');
+}
+
+function openAssetModal(item) {
+  document.getElementById('a_title').textContent = item ? '编辑资产' : '新建资产';
+  document.getElementById('a_id').value = item ? item.id : '';
+  document.getElementById('a_f_name').value = item ? (item.name || '') : '';
+  document.getElementById('a_f_model').value = item ? (item.model || '') : '';
+  document.getElementById('a_f_pinyin').value = item ? (item.pinyin || '') : '';
+  document.getElementById('a_f_location').value = item ? (item.location || '') : '';
+  document.getElementById('a_f_status').value = item ? (item.status || 'in_use') : 'in_use';
+  document.getElementById('a_f_sno').value = item ? (item.sno || '') : '';
+  document.getElementById('a_f_has_sno').checked = item ? !!item.has_sno : false;
+  showModal('assetModal');
+}
+
+function editAsset(id) {
+  fetch(`${A}/${id}`, { headers: authHeaders() })
+    .then((r) => r.json())
+    .then((j) => { if (!j.ok) throw new Error(j.message || '获取失败'); openAssetModal(j.item || j.items && j.items[0]); })
+    .catch((e) => setError('获取资产详情失败：' + e.message));
+}
+
+async function saveAsset() {
+  const id = document.getElementById('a_id').value;
+  const body = {
+    name: document.getElementById('a_f_name').value.trim(),
+    model: document.getElementById('a_f_model').value.trim() || undefined,
+    pinyin: document.getElementById('a_f_pinyin').value.trim() || undefined,
+    location: document.getElementById('a_f_location').value.trim() || undefined,
+    status: document.getElementById('a_f_status').value,
+    sno: document.getElementById('a_f_sno').value.trim() || undefined,
+    has_sno: document.getElementById('a_f_has_sno').checked,
+  };
+  if (!body.name) { setError('资产名称必填'); return; }
+  try {
+    const r = await fetch(id ? `${A}/${id}` : A, {
+      method: id ? 'PUT' : 'POST',
+      headers: authHeaders(),
+      body: JSON.stringify(body),
+    });
+    const j = await r.json();
+    if (!j.ok) throw new Error(j.message || '保存失败');
+    closeModals();
+    setError('');
+    loadAssets();
+  } catch (e) { setError('保存资产失败：' + e.message); }
+}
+
+async function transferAsset(id, name) {
+  const loc = prompt(`调拨资产「${name}」到新位置：`, '');
+  if (loc === null) return;
+  if (!loc.trim()) { setError('调拨位置不能为空'); return; }
+  try {
+    const r = await fetch(`${A}/${id}/transfer`, {
+      method: 'POST', headers: authHeaders(), body: JSON.stringify({ location: loc.trim() }),
+    });
+    const j = await r.json();
+    if (!j.ok) throw new Error(j.message || '调拨失败');
+    setError(''); loadAssets();
+  } catch (e) { setError('调拨失败：' + e.message); }
+}
+
+async function faultAsset(id, name) {
+  if (!confirm(`确认将资产「${name}」报修？将自动生成维修工单。`)) return;
+  try {
+    const r = await fetch(`${A}/${id}/fault`, {
+      method: 'POST', headers: authHeaders(), body: JSON.stringify({ title: `资产故障报修·${name}` }),
+    });
+    const j = await r.json();
+    if (!j.ok) throw new Error(j.message || '报修失败');
+    setError(''); loadAssets();
+  } catch (e) { setError('报修失败：' + e.message); }
+}
+
+// ============ 物料 ============
+async function loadMaterials() {
+  const qs = new URLSearchParams();
+  const code = document.getElementById('m_code').value.trim();
+  const name = document.getElementById('m_name').value.trim();
+  const category = document.getElementById('m_category').value.trim();
+  if (code) qs.set('code', code);
+  if (name) qs.set('name', name);
+  if (category) qs.set('category', category);
+  const url = qs.toString() ? `${M}?${qs}` : M;
+  try {
+    const r = await fetch(url, { headers: authHeaders() });
+    const j = await r.json();
+    if (!j.ok) throw new Error(j.message || 'API 非 ok');
+    renderMaterials(j.items || []);
+  } catch (e) {
+    document.getElementById('m_body').innerHTML = `<tr><td colspan="8" class="empty">加载失败：${esc(e.message)}</td></tr>`;
+    setError('物料加载失败：' + e.message);
+  }
+}
+
+function renderMaterials(items) {
+  const body = document.getElementById('m_body');
+  if (!items.length) { body.innerHTML = `<tr><td colspan="8" class="empty">暂无物料。点击「新建物料」建档。</td></tr>`; return; }
+  body.innerHTML = items.map((it) => {
+    const en = it.enabled !== false;
+    const pill = en ? `<span class="pill good">启用</span>` : `<span class="pill bad">停用</span>`;
+    return `<tr>
+      <td>${esc(it.code)}</td>
+      <td>${esc(it.name)}</td>
+      <td>${esc(it.category || '-')}</td>
+      <td>${esc(it.spec || '-')}</td>
+      <td>${esc(it.unit || '-')}</td>
+      <td>${it.price != null ? '¥' + Number(it.price).toFixed(2) : '-'}</td>
+      <td>${pill}</td>
+      <td><div class="acts">
+        <button onclick="editMaterial('${escAttr(it.id)}')">编辑</button>
+        <button class="danger" onclick="deleteMaterial('${escAttr(it.id)}','${escAttr(it.code)}')">删除</button>
+      </div></td>
+    </tr>`;
+  }).join('');
+}
+
+function openMaterialModal(item) {
+  document.getElementById('m_title').textContent = item ? '编辑物料' : '新建物料';
+  document.getElementById('m_id').value = item ? item.id : '';
+  document.getElementById('m_f_code').value = item ? (item.code || '') : '';
+  document.getElementById('m_f_name').value = item ? (item.name || '') : '';
+  document.getElementById('m_f_category').value = item ? (item.category || '') : '';
+  document.getElementById('m_f_spec').value = item ? (item.spec || '') : '';
+  document.getElementById('m_f_unit').value = item ? (item.unit || '') : '';
+  document.getElementById('m_f_price').value = item && it_price(item) !== null ? it_price(item) : '';
+  document.getElementById('m_f_enabled').checked = item ? (item.enabled !== false) : true;
+  // 编辑时编码只读（租户内唯一键）
+  document.getElementById('m_f_code').readOnly = !!item;
+  showModal('materialModal');
+}
+function it_price(it) { return it.price == null ? null : Number(it.price).toFixed(2); }
+
+function editMaterial(id) {
+  fetch(`${M}/${id}`, { headers: authHeaders() })
+    .then((r) => r.json())
+    .then((j) => { if (!j.ok) throw new Error(j.message || '获取失败'); openMaterialModal(j.item || j.items && j.items[0]); })
+    .catch((e) => setError('获取物料详情失败：' + e.message));
+}
+
+async function saveMaterial() {
+  const id = document.getElementById('m_id').value;
+  const priceRaw = document.getElementById('m_f_price').value.trim();
+  const body = {
+    code: document.getElementById('m_f_code').value.trim(),
+    name: document.getElementById('m_f_name').value.trim(),
+    category: document.getElementById('m_f_category').value.trim() || undefined,
+    spec: document.getElementById('m_f_spec').value.trim() || undefined,
+    unit: document.getElementById('m_f_unit').value.trim() || undefined,
+    price: priceRaw === '' ? 0 : Number(priceRaw),
+    enabled: document.getElementById('m_f_enabled').checked,
+  };
+  if (!body.code || !body.name) { setError('物料编码与名称必填'); return; }
+  if (body.price < 0) { setError('单价不能为负'); return; }
+  try {
+    const r = await fetch(id ? `${M}/${id}` : M, {
+      method: id ? 'PUT' : 'POST',
+      headers: authHeaders(),
+      body: JSON.stringify(body),
+    });
+    const j = await r.json();
+    if (!j.ok) throw new Error(j.message || '保存失败');
+    closeModals();
+    setError('');
+    loadMaterials();
+  } catch (e) { setError('保存物料失败：' + e.message); }
+}
+
+async function deleteMaterial(id, code) {
+  if (!confirm(`确认删除物料「${code}」？若仍有库存台账/流水将被拒绝。`)) return;
+  try {
+    const r = await fetch(`${M}/${id}`, { method: 'DELETE', headers: authHeaders() });
+    const j = await r.json();
+    if (!j.ok) throw new Error(j.message || '删除失败');
+    setError(''); loadMaterials();
+  } catch (e) { setError('删除失败：' + e.message); }
+}
+
+// ============ 通用 ============
+function showModal(id) { document.getElementById(id).classList.add('show'); }
+function closeModals() {
+  document.getElementById('assetModal').classList.remove('show');
+  document.getElementById('materialModal').classList.remove('show');
+}
+document.getElementById('assetModal').addEventListener('click', (e) => { if (e.target.id === 'assetModal') closeModals(); });
+document.getElementById('materialModal').addEventListener('click', (e) => { if (e.target.id === 'materialModal') closeModals(); });
+
+function switchTab(entity) {
+  document.querySelectorAll('.tab').forEach((t) => t.classList.toggle('active', t.dataset.entity === entity));
+  document.getElementById('assetPanel').style.display = entity === 'asset' ? '' : 'none';
+  document.getElementById('materialPanel').style.display = entity === 'material' ? '' : 'none';
+  setError('');
+  if (entity === 'asset') loadAssets(); else loadMaterials();
+}
+
+document.querySelectorAll('.tab').forEach((t) => t.addEventListener('click', () => switchTab(t.dataset.entity)));
+document.getElementById('refresh').addEventListener('click', () => {
+  const active = document.querySelector('.tab.active').dataset.entity;
+  if (active === 'asset') loadAssets(); else loadMaterials();
+});
+document.getElementById('tenant').addEventListener('change', () => {
+  const active = document.querySelector('.tab.active').dataset.entity;
+  if (active === 'asset') loadAssets(); else loadMaterials();
+});
+document.getElementById('a_search').addEventListener('click', loadAssets);
+document.getElementById('a_reset').addEventListener('click', () => {
+  ['a_name','a_pinyin','a_location'].forEach((i) => document.getElementById(i).value = '');
+  document.getElementById('a_status').value = ''; loadAssets();
+});
+document.getElementById('a_new').addEventListener('click', () => openAssetModal(null));
+document.getElementById('a_save').addEventListener('click', saveAsset);
+document.getElementById('m_search').addEventListener('click', loadMaterials);
+document.getElementById('m_reset').addEventListener('click', () => {
+  ['m_code','m_name','m_category'].forEach((i) => document.getElementById(i).value = ''); loadMaterials();
+});
+document.getElementById('m_new').addEventListener('click', () => openMaterialModal(null));
+document.getElementById('m_save').addEventListener('click', saveMaterial);
+
+// 初始加载当前 Tab
+loadAssets();
+</script>
+</body>
+</html>

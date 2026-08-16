@@ -68,6 +68,14 @@ app.get('/process-mining', (_req, res) => {
   else res.status(404).json({ ok: false, code: 'NO_DASHBOARD', message: 'process-mining dashboard html not found' });
 });
 
+// ⑦P1 主数据管理：顶层公开托管单文件 HTML（资产/物料配置页，复用 /process-mining 同模式）。
+// 同样须注册在 SERVE_STATIC 的 SPA 兜底正则之前。
+app.get('/master-data', (_req, res) => {
+  const file = path.resolve(fileURLToPath(import.meta.url), '../../public/master-data.html');
+  if (fs.existsSync(file)) res.sendFile(file);
+  else res.status(404).json({ ok: false, code: 'NO_PAGE', message: 'master-data html not found' });
+});
+
 // 统一错误兜底
 app.use(errorMiddleware);
 
