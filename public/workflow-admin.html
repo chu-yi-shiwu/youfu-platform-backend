@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>优服家 · 流程自动优化（自动改流程开关）</title>
+<style>
+  :root {
+    --bg: #f5f7fa; --card: #ffffff; --ink: #1f2933; --sub: #6b7785;
+    --line: #e3e8ef; --accent: #2563eb; --accent2: #0ea5e9;
+    --good: #16a34a; --warn: #d97706; --bad: #dc2626; --chip: #eef2ff;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: var(--bg); color: var(--ink); font-size: 14px; }
+  header { background: linear-gradient(120deg, #1e3a8a, #2563eb); color: #fff; padding: 18px 24px; }
+  header h1 { margin: 0; font-size: 19px; }
+  header p { margin: 4px 0 0; opacity: .85; font-size: 12px; }
+  .bar { display: flex; gap: 12px; align-items: flex-end; flex-wrap: wrap; padding: 14px 24px; background: #fff; border-bottom: 1px solid var(--line); }
+  .bar label { font-size: 12px; color: var(--sub); display: block; margin-bottom: 4px; }
+  .bar input { padding: 7px 10px; border: 1px solid var(--line); border-radius: 8px; font-size: 13px; }
+  .bar button { padding: 8px 16px; background: var(--accent); color: #fff; border: 0; border-radius: 8px; cursor: pointer; font-size: 13px; }
+  .bar button:hover { background: #1d4ed8; }
+  .bar button.ghost { background: #fff; color: var(--accent); border: 1px solid var(--line); }
+  main { padding: 18px 24px 40px; max-width: 1180px; margin: 0 auto; }
+  section.panel { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 18px; margin-top: 16px; }
+  section.panel h2 { margin: 0 0 6px; font-size: 16px; }
+  .note { font-size: 12px; color: var(--sub); line-height: 1.6; margin-top: 8px; }
+
+  /* 开关卡片 */
+  .toggle-row { display: flex; align-items: center; gap: 18px; margin-top: 14px; flex-wrap: wrap; }
+  .switch { position: relative; display: inline-block; width: 58px; height: 30px; }
+  .switch input { opacity: 0; width: 0; height: 0; }
+  .slider { position: absolute; cursor: pointer; inset: 0; background: #cbd5e1; border-radius: 30px; transition: .2s; }
+  .slider:before { content: ""; position: absolute; height: 22px; width: 22px; left: 4px; bottom: 4px; background: #fff; border-radius: 50%; transition: .2s; }
+  .switch input:checked + .slider { background: var(--good); }
+  .switch input:checked + .slider:before { transform: translateX(28px); }
+  .switch input:disabled + .slider { opacity: .5; cursor: not-allowed; }
+
+  .state-badge { display: inline-flex; align-items: center; gap: 8px; padding: 8px 14px; border-radius: 10px; font-weight: 600; font-size: 14px; }
+  .state-badge.on { background: #dcfce7; color: var(--good); }
+  .state-badge.off { background: #f1f5f9; color: var(--sub); }
+  .state-badge.kill { background: #fee2e2; color: var(--bad); }
+  .state-sub { font-size: 12px; color: var(--sub); }
+
+  .acts { display: flex; gap: 10px; margin-top: 14px; flex-wrap: wrap; }
+  .acts button { padding: 8px 16px; background: var(--accent); color: #fff; border: 0; border-radius: 8px; cursor: pointer; font-size: 13px; }
+  .acts button.ghost { background: #fff; color: var(--accent); border: 1px solid var(--line); }
+
+  /* toast */
+  #toast { position: fixed; top: 18px; left: 50%; transform: translateX(-50%); z-index: 99;
+    padding: 11px 18px; border-radius: 10px; font-size: 13px; opacity: 0; pointer-events: none; transition: .25s; }
+  #toast.show { opacity: 1; }
+  #toast.ok { background: #dcfce7; color: var(--good); border: 1px solid #86efac; }
+  #toast.err { background: #fee2e2; color: var(--bad); border: 1px solid #fca5a5; }
+
+  pre.data { background: #0f172a; color: #e2e8f0; padding: 14px; border-radius: 10px; overflow: auto; font-size: 12px; max-height: 360px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 10px; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+  th { color: var(--sub); font-weight: 600; font-size: 12px; }
+  .pill { display: inline-block; padding: 2px 9px; border-radius: 12px; font-size: 11px; font-weight: 600; }
+  .pill.good { background: #dcfce7; color: var(--good); }
+  .pill.warn { background: #fef3c7; color: var(--warn); }
+  .pill.bad { background: #fee2e2; color: var(--bad); }
+  .empty { color: var(--sub); font-size: 13px; padding: 18px; text-align: center; }
+  .err { background: #fef2f2; border: 1px solid #fecaca; color: #b91c1c; padding: 12px; border-radius: 10px; margin-top: 14px; font-size: 13px; }
+  .quote { border-left: 3px solid var(--accent2); padding: 4px 12px; color: var(--sub); font-size: 12px; margin: 10px 0; }
+</style>
+</head>
+<body>
+<header>
+  <h1>优服家 · 流程自动优化（自动改流程开关）</h1>
+  <p>让租户操作员在界面上自主开启/关闭"系统根据数据自动改写流程定义"，实时生效、持久保存</p>
+</header>
+
+<div class="bar">
+  <div>
+    <label>租户 (X-Tenant-Id，留空=dev 默认 t-verification)</label>
+    <input id="tenant" placeholder="t-verification" style="width:230px" />
+  </div>
+  <button class="ghost" onclick="loadState()">读取开关状态</button>
+  <button class="ghost" onclick="loadDef()">查看当前流程定义</button>
+  <button class="ghost" onclick="loadList()">查看优化建议</button>
+</div>
+
+<main>
+  <!-- 开关卡片 -->
+  <section class="panel">
+    <h2>自动改流程</h2>
+    <div class="state-sub">开启后，系统每次运行"过程挖掘优化"会自动把建议写回流程定义（workflow_def），实现自我优化闭环。关闭则只记录建议、不改动流程。</div>
+    <div class="toggle-row">
+      <label class="switch">
+        <input type="checkbox" id="autoTune" onchange="onToggle(this)" />
+        <span class="slider"></span>
+      </label>
+      <span id="stateBadge" class="state-badge off">读取中…</span>
+      <span id="stateSub" class="state-sub"></span>
+    </div>
+    <div class="acts">
+      <button onclick="loadState()">刷新状态</button>
+    </div>
+    <div class="note" id="envNote"></div>
+    <div class="quote">安全说明：服务端环境变量 MODEL_AUTO_TUNE=false 时为全局熔断，界面开关将被禁用（fail-safe）。环境变量=true 时全局强制开启，覆盖本开关。</div>
+  </section>
+
+  <!-- 当前流程定义 -->
+  <section class="panel">
+    <h2>当前流程状态图（workflow_def）</h2>
+    <div id="defErr" class="err" style="display:none"></div>
+    <pre id="defData" class="data">点击"查看当前流程定义"加载…</pre>
+  </section>
+
+  <!-- 优化建议 -->
+  <section class="panel">
+    <h2>优化建议（optimization_feedback）</h2>
+    <div id="listErr" class="err" style="display:none"></div>
+    <div id="listBody"><div class="empty">点击"查看优化建议"加载…</div></div>
+  </section>
+</main>
+
+<div id="toast"></div>
+
+<script>
+function authHeaders() {
+  const h = { 'Authorization': 'Bearer dev', 'Content-Type': 'application/json' };
+  const t = document.getElementById('tenant').value.trim();
+  if (t) h['X-Tenant-Id'] = t;
+  return h;
+}
+
+let busy = false;
+function toast(msg, ok = true) {
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.className = 'show ' + (ok ? 'ok' : 'err');
+  setTimeout(() => { el.className = ''; }, 2600);
+}
+
+async function loadState() {
+  const r = await fetch('/api/v1/auto-tune', { headers: authHeaders() });
+  const j = await r.json();
+  if (!j.ok) { toast('读取开关失败：' + (j.message || j.code), false); return; }
+  const badge = document.getElementById('stateBadge');
+  const sub = document.getElementById('stateSub');
+  const cb = document.getElementById('autoTune');
+  const note = document.getElementById('envNote');
+
+  // effective 为真实生效值（含 env 覆盖）；enabled 为租户持久化值。
+  const eff = j.effective;
+  if (j.envOverride === 'false') {
+    badge.className = 'state-badge kill';
+    badge.textContent = '全局已熔断（不可用）';
+    cb.disabled = true; cb.checked = false;
+    sub.textContent = '服务端 MODEL_AUTO_TUNE=false，界面开关被禁用。';
+  } else {
+    cb.disabled = false; cb.checked = !!j.enabled;
+    if (eff) { badge.className = 'state-badge on'; badge.textContent = '● 自动改流程已启用'; }
+    else { badge.className = 'state-badge off'; badge.textContent = '○ 自动改流程已关闭'; }
+    sub.textContent = '租户持久化：' + (j.enabled ? '开' : '关') + '　实时生效·已持久化';
+  }
+  if (j.envOverride === 'true') note.textContent = '⚠ 服务端 MODEL_AUTO_TUNE=true：全局强制开启，覆盖本租户开关。';
+  else if (j.envOverride === 'false') note.textContent = '⚠ 服务端 MODEL_AUTO_TUNE=false：全局熔断，本开关不可用。';
+  else note.textContent = '当前无环境变量覆盖，行为完全由本租户开关决定。';
+}
+
+async function onToggle(cb) {
+  if (busy) { cb.checked = !cb.checked; return; }
+  busy = true;
+  const want = cb.checked;
+  const prev = !want;
+  try {
+    const r = await fetch('/api/v1/auto-tune', {
+      method: 'PUT',
+      headers: authHeaders(),
+      body: JSON.stringify({ enabled: want }),
+    });
+    const j = await r.json();
+    if (!j.ok) {
+      toast('操作失败：' + (j.message || j.code), false);
+      cb.checked = prev; // 失败回滚
+    } else {
+      toast(want ? '已启用自动改流程 ✅（实时生效·已保存）' : '已关闭自动改流程（实时生效·已保存）', true);
+      loadState();
+    }
+  } catch (e) {
+    toast('网络错误：' + e.message, false);
+    cb.checked = prev;
+  } finally {
+    busy = false;
+  }
+}
+
+async function loadDef() {
+  const err = document.getElementById('defErr');
+  err.style.display = 'none';
+  const r = await fetch('/api/v1/workflow/def?entity=work_order', { headers: authHeaders() });
+  const j = await r.json();
+  if (!j.ok) { err.style.display = 'block'; err.textContent = '加载失败：' + (j.message || j.code); return; }
+  document.getElementById('defData').textContent = JSON.stringify(j.def, null, 2);
+}
+
+async function loadList() {
+  const err = document.getElementById('listErr');
+  err.style.display = 'none';
+  const r = await fetch('/api/v1/optimize/list', { headers: authHeaders() });
+  const j = await r.json();
+  if (!j.ok) { err.style.display = 'block'; err.textContent = '加载失败：' + (j.message || j.code); return; }
+  const items = j.items || [];
+  const body = document.getElementById('listBody');
+  if (items.length === 0) { body.innerHTML = '<div class="empty">暂无优化建议</div>'; return; }
+  const rows = items.map((it) => {
+    const cls = it.status === 'applied' ? 'good' : it.status === 'dismissed' ? 'bad' : 'warn';
+    const rec = typeof it.recommendation === 'string' ? it.recommendation : JSON.stringify(it.recommendation);
+    return `<tr><td>${it.scope || ''}</td><td>${it.target || ''}</td>
+      <td><span class="pill ${cls}">${it.status}</span></td>
+      <td>${(it.reason || '').slice(0, 80)}</td><td>${rec.slice(0, 60)}</td>
+      <td>${new Date(it.created_at).toLocaleString()}</td></tr>`;
+  }).join('');
+  body.innerHTML = `<table><thead><tr><th>scope</th><th>target</th><th>status</th><th>reason</th><th>recommendation</th><th>created_at</th></tr></thead><tbody>${rows}</tbody></table>`;
+}
+
+// 进入页面即读取一次
+loadState();
+</script>
+</body>
+</html>

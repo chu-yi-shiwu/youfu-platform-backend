@@ -20,6 +20,7 @@ import serviceDeskRouter from './routes/serviceDesk.js';
 import statsRouter from './routes/stats.js';
 import optimizeRouter from './routes/optimize.js';
 import processMiningRouter from './routes/processMining.js';
+import autoTuneRouter from './routes/autoTune.js';
 
 // 试点/生产：用 ENV_FILE 指定环境文件（默认 .env，production 下默认 .env.pilot），
 // 同一份代码可同时跑 dev / pilot，无需改代码。
@@ -59,6 +60,7 @@ app.use('/api/v1', serviceDeskRouter);
 app.use('/api/v1', statsRouter);
 app.use('/api/v1', optimizeRouter);
 app.use('/api/v1', processMiningRouter);
+app.use('/api/v1', autoTuneRouter);
 
 // ⑦P0 过程挖掘看板：顶层公开托管单文件 HTML（pilot 同 SPA 策略；prod 上线前应在反向代理层加鉴权）。
 // 必须注册在 SERVE_STATIC 的 SPA 兜底正则之前，否则会被 index.html 兜底拦截。
@@ -74,6 +76,14 @@ app.get('/master-data', (_req, res) => {
   const file = path.resolve(fileURLToPath(import.meta.url), '../../public/master-data.html');
   if (fs.existsSync(file)) res.sendFile(file);
   else res.status(404).json({ ok: false, code: 'NO_PAGE', message: 'master-data html not found' });
+});
+
+// ④ 流程自动优化管理（自动改流程开关）：顶层公开托管单文件 HTML（复用 /master-data 同模式）。
+// 同样须注册在 SERVE_STATIC 的 SPA 兜底正则之前。
+app.get('/workflow-admin', (_req, res) => {
+  const file = path.resolve(fileURLToPath(import.meta.url), '../../public/workflow-admin.html');
+  if (fs.existsSync(file)) res.sendFile(file);
+  else res.status(404).json({ ok: false, code: 'NO_PAGE', message: 'workflow-admin html not found' });
 });
 
 // 统一错误兜底
