@@ -4,9 +4,11 @@ import {
   aggregateVariants,
   computeBottlenecks,
   computeThroughput,
-  computeConformance,
+  computeConformancePrecise,
+  computeConformanceApprox,
   type RawEvent,
 } from '../repo/processMining.js';
+import { DEFAULT_WORK_ORDER_DEF } from '../engine/stateMachine.js';
 
 // ⑦P0 过程挖掘纯函数单测（脱离 PG，验证聚合/回放/瓶颈/吞吐/合规逻辑）
 function ev(entityId: string | null, type: string, at: number, actor = 'system'): RawEvent {
@@ -99,27 +101,72 @@ describe('computeThroughput', () => {
   });
 });
 
-describe('computeConformance', () => {
+describe('computeConformancePrecise (③ 状态机逐跳校验)', () => {
+  const def = DEFAULT_WORK_ORDER_DEF; // draft→assigned→processing→completed
   it('无实例返回偏离率 0 + 不编造 note', () => {
-    const c = computeConformance([]);
+    const c = computeConformancePrecise(def, [], []);
     expect(c.deviation_rate).toBe(0);
     expect(c.happy_path).toEqual([]);
+    expect(c.precise).toBe(true);
     expect(c.note).toContain('无流程实例');
   });
 
-  it('全部遵循主导路径时偏离率 0', () => {
-    const variants = aggregateVariants(
-      replayTraces([
-        ev('c1', 'create', 1), ev('c1', 'complete', 2),
-        ev('c2', 'create', 1), ev('c2', 'complete', 2),
-      ]),
-    );
-    const c = computeConformance(variants);
+  it('全部遵循状态机时偏离率 0（create 引导→各状态合法跳转）', () => {
+    const traces = replayTraces([
+      ev('c1', 'create', 1), ev('c1', 'assigned', 2), ev('c1', 'processing', 3), ev('c1', 'completed', 4),
+      ev('c2', 'create', 1), ev('c2', 'assigned', 2), ev('c2', 'processing', 3), ev('c2', 'completed', 4),
+    ]);
+    const variants = aggregateVariants(traces);
+    const c = computeConformancePrecise(def, traces, variants);
     expect(c.deviation_rate).toBe(0);
     expect(c.deviating_variants).toHaveLength(0);
+    expect(c.precise).toBe(true);
+    expect(c.happy_path).toEqual(['create', 'assigned', 'processing', 'completed']);
   });
 
-  it('存在偏离变体时偏离率=1-主导占比', () => {
+  it('存在非法跳转轨迹时偏离率=不合规轨迹占比（驱动优化飞轮）', () => {
+    // c3 跳过 processing：assigned→completed 非法跳转 → 非合规
+    const traces = replayTraces([
+      ev('c1', 'create', 1), ev('c1', 'assigned', 2), ev('c1', 'processing', 3), ev('c1', 'completed', 4),
+      ev('c2', 'create', 1), ev('c2', 'assigned', 2), ev('c2', 'processing', 3), ev('c2', 'completed', 4),
+      ev('c3', 'create', 1), ev('c3', 'assigned', 2), ev('c3', 'completed', 3),
+    ]);
+    const variants = aggregateVariants(traces);
+    const c = computeConformancePrecise(def, traces, variants);
+    expect(c.deviation_rate).toBeCloseTo(1 / 3, 3);
+    expect(c.deviating_variants).toHaveLength(1);
+    expect(c.deviating_variants[0].seq).toEqual(['create', 'assigned', 'completed']);
+    expect(c.precise).toBe(true);
+  });
+
+  it('未纳入状态机的活动(如 recheck)被判为非合规 → 触发 recheck_gate 优化', () => {
+    // 4 态默认 def 不含 recheck 状态：rework 路径中的 recheck 属未知活动 → 非合规
+    const traces = replayTraces([
+      ev('c1', 'create', 1), ev('c1', 'assigned', 2), ev('c1', 'processing', 3), ev('c1', 'completed', 4),
+      ev('c2', 'create', 1), ev('c2', 'assigned', 2), ev('c2', 'processing', 3),
+      ev('c2', 'recheck', 4), ev('c2', 'processing', 5), ev('c2', 'completed', 6),
+    ]);
+    const variants = aggregateVariants(traces);
+    const c = computeConformancePrecise(def, traces, variants);
+    expect(c.deviation_rate).toBeCloseTo(1 / 2, 3); // 1/2 轨迹非合规
+    expect(c.precise).toBe(true);
+  });
+
+  it('生命周期事件兼容：历史 assign→assigned 映射 + sla_escalated 标注不改状态', () => {
+    // 真实事件总线口径混杂：'assign'(事件名)、'sla_escalated'(标注)。应被正确归一/跳过。
+    const traces = replayTraces([
+      ev('c1', 'create', 1), ev('c1', 'assign', 2), ev('c1', 'sla_escalated', 3),
+      ev('c1', 'processing', 4), ev('c1', 'completed', 5),
+    ]);
+    const variants = aggregateVariants(traces);
+    const c = computeConformancePrecise(def, traces, variants);
+    expect(c.deviation_rate).toBe(0); // 全部合规（assign 映射为 assigned，sla_escalated 跳过）
+    expect(c.precise).toBe(true);
+  });
+});
+
+describe('computeConformanceApprox (降级：未配置 workflow_def)', () => {
+  it('主导路径近似：偏离率=1-主导占比', () => {
     const variants = aggregateVariants(
       replayTraces([
         ev('c1', 'create', 1), ev('c1', 'complete', 2),
@@ -127,9 +174,9 @@ describe('computeConformance', () => {
         ev('c3', 'create', 1), ev('c3', 'assign', 2), ev('c3', 'complete', 3),
       ]),
     );
-    const c = computeConformance(variants);
+    const c = computeConformanceApprox(variants);
     expect(c.deviation_rate).toBeCloseTo(1 / 3, 3);
     expect(c.deviating_variants).toHaveLength(1);
-    expect(c.deviating_variants[0].seq).toEqual(['create', 'assign', 'complete']);
+    expect(c.precise).toBe(false);
   });
 });
