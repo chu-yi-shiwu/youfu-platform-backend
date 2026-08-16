@@ -14,7 +14,7 @@ function stub(over: Partial<ProcessMiningResult> = {}): ProcessMiningResult {
     variants: [],
     bottlenecks: { per_activity: [], per_edge: [], slowest_edge: null, slowest_activity: null },
     throughput: [],
-    conformance: { happy_path: [], deviation_rate: 0, deviating_variants: [], note: '' },
+    conformance: { happy_path: [], deviation_rate: 0, deviating_variants: [], precise: true, note: '' },
     ...over,
   };
 }
@@ -22,7 +22,7 @@ function stub(over: Partial<ProcessMiningResult> = {}): ProcessMiningResult {
 describe('generateMiningOptimizations', () => {
   it('空/健康数据：无偏离、无超慢边 → 不产生建议', () => {
     const r = stub({
-      conformance: { happy_path: ['create', 'complete'], deviation_rate: 0.1, deviating_variants: [], note: '' },
+      conformance: { happy_path: ['create', 'complete'], deviation_rate: 0.1, deviating_variants: [], precise: true, note: '' },
       bottlenecks: {
         per_activity: [],
         per_edge: [],
@@ -35,7 +35,7 @@ describe('generateMiningOptimizations', () => {
 
   it('偏离率 > 0.3 → 产生 work_order:recheck_gate 建议', () => {
     const r = stub({
-      conformance: { happy_path: ['create', 'complete'], deviation_rate: 0.4, deviating_variants: [], note: '' },
+      conformance: { happy_path: ['create', 'complete'], deviation_rate: 0.4, deviating_variants: [], precise: true, note: '' },
       bottlenecks: { per_activity: [], per_edge: [], slowest_edge: null, slowest_activity: null },
     });
     const d = generateMiningOptimizations(r);
@@ -48,7 +48,7 @@ describe('generateMiningOptimizations', () => {
   it('最慢边 > 8h(480分) → 产生 <entity>:auto_escalate 建议', () => {
     const r = stub({
       entity_type: 'work_order',
-      conformance: { happy_path: ['create', 'complete'], deviation_rate: 0.1, deviating_variants: [], note: '' },
+      conformance: { happy_path: ['create', 'complete'], deviation_rate: 0.1, deviating_variants: [], precise: true, note: '' },
       bottlenecks: {
         per_activity: [],
         per_edge: [],
@@ -65,7 +65,7 @@ describe('generateMiningOptimizations', () => {
   it('两者同时触发 → 两条建议（recheck_gate + auto_escalate）', () => {
     const r = stub({
       entity_type: 'work_order',
-      conformance: { happy_path: ['create', 'complete'], deviation_rate: 0.5, deviating_variants: [], note: '' },
+      conformance: { happy_path: ['create', 'complete'], deviation_rate: 0.5, deviating_variants: [], precise: true, note: '' },
       bottlenecks: {
         per_activity: [],
         per_edge: [],
@@ -81,7 +81,7 @@ describe('generateMiningOptimizations', () => {
 
   it('边界：偏离率恰好 0.3 不触发；最慢边恰好 480 分不触发', () => {
     const r = stub({
-      conformance: { happy_path: ['create', 'complete'], deviation_rate: 0.3, deviating_variants: [], note: '' },
+      conformance: { happy_path: ['create', 'complete'], deviation_rate: 0.3, deviating_variants: [], precise: true, note: '' },
       bottlenecks: {
         per_activity: [],
         per_edge: [],

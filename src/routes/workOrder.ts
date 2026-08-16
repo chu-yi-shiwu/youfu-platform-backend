@@ -124,7 +124,8 @@ router.post('/open/work_order', async (req, res, next) => {
            VALUES ($1,$2,'assign','draft','assigned','auto_dispatch', $3)`,
           [tenantId, row.id, JSON.stringify({ worker_id: picked.id })],
         );
-        await emitDomainEvent(client, { tenantId, entityType: 'work_order', entityId: row.id, type: 'assign', actor: 'auto_dispatch', payload: { worker_id: picked.id } });
+        // ④ 口径对齐：domain_event.type 一律为"结果状态"（与 transition() 一致），自动派单落入 'assigned'。
+        await emitDomainEvent(client, { tenantId, entityType: 'work_order', entityId: row.id, type: 'assigned', actor: 'auto_dispatch', payload: { worker_id: picked.id } });
       }
       const final = await findOne(client, tenantId, row.id);
       return { final, autoFlow, assignee, reason, created };

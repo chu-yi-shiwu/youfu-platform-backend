@@ -51,7 +51,7 @@ WITH cases AS (
 ev (eid, type, actor, ts) AS (
   SELECT eid, 'create',     'system',        t0 FROM cases
   UNION ALL
-  SELECT eid, 'assign',     'auto_dispatch', t0 + interval '2 minutes' FROM cases
+  SELECT eid, 'assigned',   'auto_dispatch', t0 + interval '2 minutes' FROM cases
   UNION ALL
   SELECT eid, 'processing', 'worker',        t0 + interval '10 hours' FROM cases
   UNION ALL
