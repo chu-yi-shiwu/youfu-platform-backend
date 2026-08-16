@@ -105,6 +105,12 @@
     <div class="note" id="conf-note"></div>
   </section>
 
+  <section>
+    <h2>优化建议 <span class="tag">⑦P2 飞轮</span></h2>
+    <div id="suggestions"><div class="empty">加载中…</div></div>
+    <div class="note">由过程挖掘结果自动生成（数据→模型方向，模数共振）。dev 仅记录 pending；生产开启 <code>MODEL_AUTO_TUNE=true</code> 后调用 <code>/optimize/apply-workflow</code> 改写 workflow_def 收口闭环。生成入口：<code>/optimize/generate</code>（粗粒度）与 <code>/optimize/generate-mining</code>（挖掘驱动）。</div>
+  </section>
+
   <div class="note">
     数据源：<code>domain_event</code>（统一事件总线，020）。算法：按 <code>entity_id</code> 回放时序 → 变体聚合 + 直接后继边时长 + 按天吞吐 + 主导路径偏离。
     合规为 P0 近似（主导路径依从），精确状态机合规（<code>ticket_event</code>↔<code>workflow_def</code>）为后续增强。
@@ -235,6 +241,29 @@ function render(d) {
   }
   document.getElementById('conformance').innerHTML = ch;
   document.getElementById('conf-note').textContent = c.note || '';
+  loadSuggestions();
+}
+
+function loadSuggestions() {
+  const box = document.getElementById('suggestions');
+  fetch('/api/v1/optimize/list', { headers: authHeaders() })
+    .then((r) => r.json())
+    .then((j) => {
+      if (!j.ok) throw new Error(j.message || 'list 非 ok');
+      const items = (j.items || []).slice(0, 20);
+      if (!items.length) {
+        box.innerHTML = '<div class="empty">暂无优化建议。运行 /optimize/generate 或 /optimize/generate-mining 后，此处出现 pending 建议。</div>';
+        return;
+      }
+      box.innerHTML = `<table><thead><tr><th>范围</th><th>目标</th><th>状态</th><th>建议理由</th></tr></thead><tbody>` +
+        items.map((it) => {
+          const st = it.status || 'pending';
+          const sp = st === 'applied' ? 'good' : (st === 'dismissed' ? 'bad' : 'warn');
+          const rec = it.recommendation ? ' <code>' + JSON.stringify(it.recommendation) + '</code>' : '';
+          return `<tr><td>${it.scope}</td><td>${it.target}</td><td><span class="pill ${sp}">${st}</span></td><td>${it.reason || ''}${rec}</td></tr>`;
+        }).join('') + `</tbody></table>`;
+    })
+    .catch((e) => { box.innerHTML = `<div class="err">建议加载失败：${e.message}</div>`; });
 }
 
 function card(k, v, s) {
@@ -244,6 +273,7 @@ function card(k, v, s) {
 document.getElementById('go').addEventListener('click', load);
 document.getElementById('entityType').addEventListener('change', load);
 document.getElementById('days').addEventListener('change', load);
+document.getElementById('tenant').addEventListener('change', load);
 load();
 </script>
 </body>
