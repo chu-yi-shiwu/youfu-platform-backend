@@ -95,6 +95,16 @@ router.put('/accounts/:id', async (req, res, next) => {
     const item = await withTenantClient(tenantId, async (client) => {
       const cur = await client.query(`SELECT ${COLS} FROM account_user WHERE id=$1 AND tenant_id=$2`, [req.params.id, tenantId]);
       if (cur.rowCount === 0) throw new AppError('NOT_FOUND', 'account not found', 404);
+      // 保护：停用管理员时不得使活跃管理员数降到 0（避免锁定登录/自锁门外）
+      if (b.active === false && cur.rows[0].role === 'admin' && cur.rows[0].active) {
+        const admins = await client.query(
+          `SELECT 1 FROM account_user WHERE tenant_id=$1 AND role='admin' AND active=true`,
+          [tenantId],
+        );
+        if (admins.rowCount && admins.rowCount <= 1) {
+          throw new AppError('CONFLICT', '至少需保留一个活跃管理员，无法停用该账户', 409);
+        }
+      }
       const sets: string[] = [];
       const params: unknown[] = [req.params.id, tenantId];
       const set = (col: string, v: unknown) => {
