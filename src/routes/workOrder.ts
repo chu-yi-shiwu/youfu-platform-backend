@@ -41,12 +41,19 @@ const createSchema = z.object({
   assets: z.array(z.any()).optional(),
   // 派单所需技能线索（来自动态字段元数据，非写死业务值）
   skill_tags: z.array(z.string()).optional(),
+  // UOne 颗粒度维度（取之所长）
+  source: z.enum(['wechat', 'backend', 'phone']).optional(),
+  fault_type: z.string().optional(),
+  service_desk: z.string().optional(),
+  ext: z.record(z.string(), z.unknown()).optional(),
 });
 
 // T-①：to 放开为任意状态字符串，合法性由 workflow_def（可配置状态机）在 transition() 内校验。
 // 这样 C1 优化建议注入的 recheck / escalated 等新状态也能正常流转，无需改前端契约。
+// score 为可选满意度评分（评价完成时回写 satisfaction_score）。
 const transitionSchema = z.object({
   to: z.string().min(1),
+  score: z.number().int().min(0).max(5).optional(),
 });
 
 // 生成对齐前端的响应：未命中派单诚实返回 claim_hall（A 点确认）
@@ -54,7 +61,11 @@ const transitionSchema = z.object({
 // DEF-3 修复：返回内部 id（uuid）—— /transition/:id 需要它，否则建单后无法流转（契约错配）。
 export function toCreateRes(row: any, autoFlow: boolean, assignee: string | null, reason: string) {
   const status: string = autoFlow ? 'assigned' : 'claim_hall';
-  return { ok: true, code: 0, id: row.id, order_no: row.order_no, status, auto_flow: autoFlow, assignee, reason };
+  return {
+    ok: true, code: 0, id: row.id, order_no: row.order_no, status, auto_flow: autoFlow, assignee, reason,
+    source: row.source ?? 'backend', fault_type: row.fault_type ?? null,
+    service_desk: row.service_desk ?? null, ext: row.ext ?? {},
+  };
 }
 
 // POST /api/v1/open/work_order
@@ -75,6 +86,10 @@ router.post('/open/work_order', async (req, res, next) => {
         description: body.description,
         contact: body.contact,
         assets: body.assets,
+        source: body.source,
+        faultType: body.fault_type,
+        serviceDesk: body.service_desk,
+        ext: body.ext,
         idempotencyKey: idem,
       });
       // P4：建单即起算 SLA（draft 态即计时，符合"建单进入 SLA 计时"）
@@ -148,7 +163,7 @@ router.post('/open/work_order', async (req, res, next) => {
 router.post('/open/work_order/:id/transition', async (req, res, next) => {
   try {
     const tenantId = res.locals.auth.tenantId;
-    const { to } = transitionSchema.parse(req.body);
+    const { to, score } = transitionSchema.parse(req.body);
     const before = await withTenantClient(tenantId, (client) => findOne(client, tenantId, req.params.id));
       let learnError: string | null = null;
       const row = await withTenantClient(tenantId, async (client) => {
@@ -162,6 +177,13 @@ router.post('/open/work_order/:id/transition', async (req, res, next) => {
             learnError = e instanceof Error ? e.message : String(e);
             console.error('[T-A incrementalLearn] FAILED', { workOrderId: req.params.id, tenantId, err: e });
           }
+        }
+        // 评价完成回写满意度评分（UOne 满意度颗粒度）
+        if (to === 'evaluated' && typeof score === 'number') {
+          await client.query(
+            'UPDATE work_orders SET satisfaction_score = $1 WHERE id = $2 AND tenant_id = $3',
+            [score, req.params.id, tenantId],
+          );
         }
         return r;
       });
@@ -244,7 +266,7 @@ router.post('/sla/scan', async (req, res, next) => {
     const escalations = await withTenantClient(tenantId, async (client) => {
       const active = await client.query<SlaScanRow>(
         `SELECT id, status, sla_due_at, escalated_at FROM work_orders
-         WHERE tenant_id = $1 AND status IN ('draft','assigned','processing')`,
+         WHERE tenant_id = $1 AND status NOT IN ('completed','closed','cancelled','evaluated')`,
         [tenantId],
       );
       const hits = slaScan(

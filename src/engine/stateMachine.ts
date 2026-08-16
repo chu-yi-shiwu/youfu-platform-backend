@@ -20,14 +20,58 @@ export interface WorkflowDef {
   config?: Record<string, unknown>;
 }
 
-// work_order 默认状态图（向后兼容：等同原 draft -> assigned -> processing -> completed）
+// work_order 默认状态图（取老系统 UOne 工单全生命周期粒度之所长，扩展为超集）。
+// 保留原 4 态(draft/assigned/processing/completed)作为子集以保证历史工单合法流转。
+// 差异化：老系统写死流程，此处流程存 workflow_def，可配置、可租户定制（设计支柱②）。
 export const DEFAULT_WORK_ORDER_DEF: WorkflowDef = {
   initial: 'draft',
-  states: ['draft', 'assigned', 'processing', 'completed'],
+  states: [
+    'draft',            // 草稿/新建
+    'pending_accept',   // 待受理
+    'pending_dispatch', // 待派单
+    'assigned',         // 已派单/待接收（兼容原 auto_dispatch 写入）
+    'pending_confirm',  // 待确认
+    'processing',       // 处理中
+    'paused',           // 暂停中/已挂起
+    'pending_review',   // 待审核
+    'completed',        // 已完成
+    'closed',           // 已关闭
+    'cancelled',        // 已撤销/已作废
+    'rejected',         // 已拒绝（审核驳回）
+    'evaluated',        // 已评价
+  ],
   transitions: [
+    // 原 4 态兼容路径
     { from: 'draft', to: 'assigned', event: 'assign' },
     { from: 'assigned', to: 'processing', event: 'start' },
     { from: 'processing', to: 'completed', event: 'complete' },
+    // UOne 粒度扩展（受理→派单→接单→确认→处理→审核→结束→评价）
+    { from: 'draft', to: 'pending_accept', event: 'submit' },
+    { from: 'pending_accept', to: 'pending_dispatch', event: 'accept' },
+    { from: 'pending_dispatch', to: 'assigned', event: 'dispatch' },
+    { from: 'assigned', to: 'pending_dispatch', event: 'return' },
+    { from: 'assigned', to: 'pending_confirm', event: 'confirm_pending' },
+    { from: 'pending_confirm', to: 'processing', event: 'confirm' },
+    { from: 'pending_confirm', to: 'pending_dispatch', event: 'return' },
+    { from: 'processing', to: 'paused', event: 'pause' },
+    { from: 'paused', to: 'processing', event: 'resume' },
+    { from: 'processing', to: 'pending_review', event: 'submit_review' },
+    { from: 'pending_review', to: 'completed', event: 'approve' },
+    { from: 'pending_review', to: 'processing', event: 'reject' },
+    { from: 'completed', to: 'closed', event: 'close' },
+    { from: 'completed', to: 'evaluated', event: 'satisfy' },
+    { from: 'evaluated', to: 'closed', event: 'close' },
+    // 撤销（各活跃态 → cancelled）
+    { from: 'draft', to: 'cancelled', event: 'cancel' },
+    { from: 'pending_accept', to: 'cancelled', event: 'cancel' },
+    { from: 'pending_dispatch', to: 'cancelled', event: 'cancel' },
+    { from: 'assigned', to: 'cancelled', event: 'cancel' },
+    { from: 'pending_confirm', to: 'cancelled', event: 'cancel' },
+    { from: 'processing', to: 'cancelled', event: 'cancel' },
+    { from: 'paused', to: 'cancelled', event: 'cancel' },
+    { from: 'pending_review', to: 'cancelled', event: 'cancel' },
+    // 审核驳回后重新处理
+    { from: 'rejected', to: 'processing', event: 'resubmit' },
   ],
   config: {},
 };

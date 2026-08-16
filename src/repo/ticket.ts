@@ -17,6 +17,11 @@ export interface CreateDto {
   description?: string;
   contact?: string;
   assets?: unknown[];
+  // UOne 颗粒度维度（取之所长）
+  source?: string;        // 工单来源: wechat/backend/phone
+  faultType?: string;     // 故障类型
+  serviceDesk?: string;   // 所属服务台
+  ext?: Record<string, unknown>; // 工单模板动态字段
   idempotencyKey?: string;
 }
 
@@ -64,13 +69,15 @@ export async function createWithIdem(
   const orderNo = genOrderNo();
   const ins = await client.query<WorkOrderRow>(
     `INSERT INTO work_orders
-       (id, tenant_id, order_no, business_type, catalog, priority, location, title, description, contact, assets, status)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'draft')
+       (id, tenant_id, order_no, business_type, catalog, priority, location, title, description, contact, assets, status, source, fault_type, service_desk, ext)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'draft',$12,$13,$14,$15)
      RETURNING *`,
     [
       dto.id, dto.tenantId, orderNo, dto.businessType, dto.catalog ?? null, dto.priority ?? 'normal',
       dto.location ?? null, dto.title ?? null, dto.description ?? null, dto.contact ?? null,
       JSON.stringify(dto.assets ?? []),
+      dto.source ?? 'backend', dto.faultType ?? null, dto.serviceDesk ?? null,
+      JSON.stringify(dto.ext ?? {}),
     ],
   );
   if (dto.idempotencyKey) {
