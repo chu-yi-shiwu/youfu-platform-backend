@@ -84,6 +84,9 @@
 <div class="tabs">
   <div class="tab active" data-entity="asset">资产设备</div>
   <div class="tab" data-entity="material">仓库物料</div>
+  <div class="tab" data-entity="worker">人员</div>
+  <div class="tab" data-entity="account">账号</div>
+  <div class="tab" data-entity="product">商品目录</div>
 </div>
 
 <main>
@@ -134,6 +137,67 @@
       <tbody id="m_body"><tr><td colspan="8" class="empty">加载中…</td></tr></tbody>
     </table>
     <div class="note">物料为主数据；删除受库存台账/流水保护（仍有台账则拒绝）。编码在租户内唯一。</div>
+  </section>
+
+  <!-- ============ 人员 ============ -->
+  <section class="panel" id="workerPanel" style="display:none">
+    <div class="filters">
+      <div><label>姓名</label><input id="w_name" placeholder="姓名模糊" /></div>
+      <div><label>技能</label><input id="w_skill" placeholder="如 electric" /></div>
+      <div><label>状态</label>
+        <select id="w_active">
+          <option value="">全部</option>
+          <option value="1">启用</option>
+          <option value="0">停用</option>
+        </select>
+      </div>
+      <button id="w_search">查询</button>
+      <button class="ghost" id="w_reset">重置</button>
+    </div>
+    <div class="toolbar"><button id="w_new">+ 新建人员</button></div>
+    <table>
+      <thead><tr>
+        <th>工号</th><th>姓名</th><th>技能</th><th>在途工单</th><th>状态</th><th>操作</th>
+      </tr></thead>
+      <tbody id="w_body"><tr><td colspan="6" class="empty">加载中…</td></tr></tbody>
+    </table>
+    <div class="note">人员为派单候选池主数据；技能标签用于技能匹配派单，在途工单(load)用于 least_load 取最低负载。工号为租户内主键。</div>
+  </section>
+
+  <!-- ============ 账号 ============ -->
+  <section class="panel" id="accountPanel" style="display:none">
+    <div class="filters">
+      <div><label>用户名</label><input id="ac_username" placeholder="用户名模糊" /></div>
+      <button id="ac_search">查询</button>
+      <button class="ghost" id="ac_reset">重置</button>
+    </div>
+    <div class="toolbar"><button id="ac_new">+ 新建账号</button></div>
+    <table>
+      <thead><tr>
+        <th>用户名</th><th>显示名</th><th>角色</th><th>状态</th><th>操作</th>
+      </tr></thead>
+      <tbody id="ac_body"><tr><td colspan="5" class="empty">加载中…</td></tr></tbody>
+    </table>
+    <div class="note">账号为登录账户主数据（密码 scrypt 哈希存储，列表不外露）。删除受保护：至少保留一个活跃管理员，避免锁死登录。</div>
+  </section>
+
+  <!-- ============ 商品目录 ============ -->
+  <section class="panel" id="productPanel" style="display:none">
+    <div class="filters">
+      <div><label>编码</label><input id="p_code" placeholder="编码模糊" /></div>
+      <div><label>名称</label><input id="p_name" placeholder="名称模糊" /></div>
+      <div><label>分类</label><input id="p_category" placeholder="如 维修服务" /></div>
+      <button id="p_search">查询</button>
+      <button class="ghost" id="p_reset">重置</button>
+    </div>
+    <div class="toolbar"><button id="p_new">+ 新建商品</button></div>
+    <table>
+      <thead><tr>
+        <th>编码</th><th>名称</th><th>分类</th><th>单位</th><th>单价</th><th>启用</th><th>操作</th>
+      </tr></thead>
+      <tbody id="p_body"><tr><td colspan="7" class="empty">加载中…</td></tr></tbody>
+    </table>
+    <div class="note">商品目录为可计价标准服务项/耗材目录主数据；编码在租户内唯一。供工单报价、服务台引用。</div>
   </section>
 </main>
 
@@ -192,9 +256,80 @@
   </div>
 </div>
 
+<!-- 人员弹窗 -->
+<div class="overlay" id="workerModal">
+  <div class="modal">
+    <h3 id="w_title">新建人员</h3>
+    <input type="hidden" id="w_id" />
+    <div class="field"><label>工号 <span class="req">*</span></label><input id="w_f_id" placeholder="如 w-elec-003" /></div>
+    <div class="field"><label>姓名 <span class="req">*</span></label><input id="w_f_name" placeholder="如 电工-丙" /></div>
+    <div class="field"><label>技能标签（逗号分隔）</label><input id="w_f_skill" placeholder="如 electric,plumbing" /></div>
+    <div class="row2">
+      <div class="field"><label>在途工单(load)</label><input id="w_f_load" type="number" min="0" step="1" placeholder="0" /></div>
+      <div class="field"><label class="checkline"><input type="checkbox" id="w_f_active" checked /> 启用</label></div>
+    </div>
+    <div class="modal-acts">
+      <button class="cancel" onclick="closeModals()">取消</button>
+      <button class="primary" id="w_save">保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- 账号弹窗 -->
+<div class="overlay" id="accountModal">
+  <div class="modal">
+    <h3 id="ac_title">新建账号</h3>
+    <input type="hidden" id="ac_id" />
+    <div class="field"><label>用户名 <span class="req">*</span></label><input id="ac_f_username" placeholder="登录用，租户内唯一" /></div>
+    <div class="field"><label>密码 <span class="req">*</span></label><input id="ac_f_password" type="password" placeholder="至少 6 位（编辑时留空=不修改）" /></div>
+    <div class="row2">
+      <div class="field"><label>显示名</label><input id="ac_f_display" placeholder="如 张工" /></div>
+      <div class="field"><label>角色</label>
+        <select id="ac_f_role">
+          <option value="operator">操作员 operator</option>
+          <option value="admin">管理员 admin</option>
+        </select>
+      </div>
+    </div>
+    <div class="field"><label class="checkline"><input type="checkbox" id="ac_f_active" checked /> 启用</label></div>
+    <div class="modal-acts">
+      <button class="cancel" onclick="closeModals()">取消</button>
+      <button class="primary" id="ac_save">保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- 商品目录弹窗 -->
+<div class="overlay" id="productModal">
+  <div class="modal">
+    <h3 id="p_title">新建商品</h3>
+    <input type="hidden" id="p_id" />
+    <div class="row2">
+      <div class="field"><label>编码 <span class="req">*</span></label><input id="p_f_code" placeholder="如 REPAIR-AC" /></div>
+      <div class="field"><label>名称 <span class="req">*</span></label><input id="p_f_name" placeholder="如 空调维修套餐" /></div>
+    </div>
+    <div class="row2">
+      <div class="field"><label>分类</label><input id="p_f_category" placeholder="如 维修服务" /></div>
+      <div class="field"><label>单位</label><input id="p_f_unit" placeholder="次/项/个" /></div>
+    </div>
+    <div class="row2">
+      <div class="field"><label>单价</label><input id="p_f_price" type="number" step="0.01" min="0" placeholder="0.00" /></div>
+      <div class="field"><label class="checkline"><input type="checkbox" id="p_f_enabled" checked /> 启用</label></div>
+    </div>
+    <div class="field"><label>描述</label><input id="p_f_desc" placeholder="可选" /></div>
+    <div class="modal-acts">
+      <button class="cancel" onclick="closeModals()">取消</button>
+      <button class="primary" id="p_save">保存</button>
+    </div>
+  </div>
+</div>
+
 <script>
 const A = '/api/v1/assets';
 const M = '/api/v1/materials';
+const W = '/api/v1/workers';
+const AC = '/api/v1/accounts';
+const P = '/api/v1/product-catalog';
 
 // HTML 转义（防 XSS：主数据内容由用户录入，展示前必须转义）
 function esc(v) {
@@ -442,31 +577,311 @@ async function deleteMaterial(id, code) {
   } catch (e) { setError('删除失败：' + e.message); }
 }
 
+// ============ 人员 ============
+async function loadWorkers() {
+  const qs = new URLSearchParams();
+  const name = document.getElementById('w_name').value.trim();
+  const skill = document.getElementById('w_skill').value.trim();
+  const active = document.getElementById('w_active').value;
+  if (name) qs.set('name', name);
+  if (skill) qs.set('skill', skill);
+  if (active) qs.set('active', active);
+  const url = qs.toString() ? `${W}?${qs}` : W;
+  try {
+    const r = await fetch(url, { headers: authHeaders() });
+    const j = await r.json();
+    if (!j.ok) throw new Error(j.message || 'API 非 ok');
+    renderWorkers(j.items || []);
+  } catch (e) {
+    document.getElementById('w_body').innerHTML = `<tr><td colspan="6" class="empty">加载失败：${esc(e.message)}</td></tr>`;
+    setError('人员加载失败：' + e.message);
+  }
+}
+function renderWorkers(items) {
+  const body = document.getElementById('w_body');
+  if (!items.length) { body.innerHTML = `<tr><td colspan="6" class="empty">暂无人员。点击「新建人员」建档。</td></tr>`; return; }
+  body.innerHTML = items.map((it) => {
+    const en = it.active !== false;
+    const pill = en ? `<span class="pill good">启用</span>` : `<span class="pill bad">停用</span>`;
+    const skills = Array.isArray(it.skill_tags) ? it.skill_tags.join(', ') : (it.skill_tags || '-');
+    return `<tr>
+      <td>${esc(it.id)}</td>
+      <td>${esc(it.name)}</td>
+      <td>${esc(skills)}</td>
+      <td>${esc(it.load != null ? it.load : 0)}</td>
+      <td>${pill}</td>
+      <td><div class="acts">
+        <button onclick="editWorker('${escAttr(it.id)}')">编辑</button>
+        <button class="danger" onclick="deleteWorker('${escAttr(it.id)}','${escAttr(it.name)}')">删除</button>
+      </div></td>
+    </tr>`;
+  }).join('');
+}
+function openWorkerModal(item) {
+  document.getElementById('w_title').textContent = item ? '编辑人员' : '新建人员';
+  document.getElementById('w_id').value = item ? item.id : '';
+  document.getElementById('w_f_id').value = item ? (item.id || '') : '';
+  document.getElementById('w_f_id').readOnly = !!item;
+  document.getElementById('w_f_name').value = item ? (item.name || '') : '';
+  document.getElementById('w_f_skill').value = item ? (Array.isArray(item.skill_tags) ? item.skill_tags.join(', ') : (item.skill_tags || '')) : '';
+  document.getElementById('w_f_load').value = item && it_num(item) !== null ? it_num(item) : '0';
+  document.getElementById('w_f_active').checked = item ? (item.active !== false) : true;
+  showModal('workerModal');
+}
+function it_num(it) { return it.load == null ? null : Number(it.load); }
+function editWorker(id) {
+  fetch(`${W}/${id}`, { headers: authHeaders() })
+    .then((r) => r.json())
+    .then((j) => { if (!j.ok) throw new Error(j.message || '获取失败'); openWorkerModal(j.item || j.items && j.items[0]); })
+    .catch((e) => setError('获取人员详情失败：' + e.message));
+}
+async function saveWorker() {
+  const id = document.getElementById('w_id').value;
+  const skillRaw = document.getElementById('w_f_skill').value.trim();
+  const loadRaw = document.getElementById('w_f_load').value.trim();
+  const body = {
+    id: document.getElementById('w_f_id').value.trim(),
+    name: document.getElementById('w_f_name').value.trim(),
+    skill_tags: skillRaw ? skillRaw.split(',').map((s) => s.trim()).filter(Boolean) : [],
+    load: loadRaw === '' ? 0 : Number(loadRaw),
+    active: document.getElementById('w_f_active').checked,
+  };
+  if (!body.id || !body.name) { setError('工号与姓名必填'); return; }
+  try {
+    const r = await fetch(id ? `${W}/${id}` : W, {
+      method: id ? 'PUT' : 'POST',
+      headers: authHeaders(),
+      body: JSON.stringify(body),
+    });
+    const j = await r.json();
+    if (!j.ok) throw new Error(j.message || '保存失败');
+    closeModals(); setError(''); loadWorkers();
+  } catch (e) { setError('保存人员失败：' + e.message); }
+}
+async function deleteWorker(id, name) {
+  if (!confirm(`确认删除人员「${name}」？`)) return;
+  try {
+    const r = await fetch(`${W}/${id}`, { method: 'DELETE', headers: authHeaders() });
+    const j = await r.json();
+    if (!j.ok) throw new Error(j.message || '删除失败');
+    setError(''); loadWorkers();
+  } catch (e) { setError('删除失败：' + e.message); }
+}
+
+// ============ 账号 ============
+async function loadAccounts() {
+  const qs = new URLSearchParams();
+  const username = document.getElementById('ac_username').value.trim();
+  if (username) qs.set('username', username);
+  const url = qs.toString() ? `${AC}?${qs}` : AC;
+  try {
+    const r = await fetch(url, { headers: authHeaders() });
+    const j = await r.json();
+    if (!j.ok) throw new Error(j.message || 'API 非 ok');
+    renderAccounts(j.items || []);
+  } catch (e) {
+    document.getElementById('ac_body').innerHTML = `<tr><td colspan="5" class="empty">加载失败：${esc(e.message)}</td></tr>`;
+    setError('账号加载失败：' + e.message);
+  }
+}
+function renderAccounts(items) {
+  const body = document.getElementById('ac_body');
+  if (!items.length) { body.innerHTML = `<tr><td colspan="5" class="empty">暂无账号。点击「新建账号」建档。</td></tr>`; return; }
+  body.innerHTML = items.map((it) => {
+    const en = it.active !== false;
+    const pill = en ? `<span class="pill good">启用</span>` : `<span class="pill bad">停用</span>`;
+    const rolePill = it.role === 'admin' ? `<span class="pill warn">管理员</span>` : `<span class="pill">操作员</span>`;
+    return `<tr>
+      <td>${esc(it.username)}</td>
+      <td>${esc(it.display_name || '-')}</td>
+      <td>${rolePill}</td>
+      <td>${pill}</td>
+      <td><div class="acts">
+        <button onclick="editAccount('${escAttr(it.id)}')">编辑</button>
+        <button class="danger" onclick="deleteAccount('${escAttr(it.id)}','${escAttr(it.username)}')">删除</button>
+      </div></td>
+    </tr>`;
+  }).join('');
+}
+function openAccountModal(item) {
+  document.getElementById('ac_title').textContent = item ? '编辑账号' : '新建账号';
+  document.getElementById('ac_id').value = item ? item.id : '';
+  document.getElementById('ac_f_username').value = item ? (item.username || '') : '';
+  document.getElementById('ac_f_username').readOnly = !!item;
+  document.getElementById('ac_f_password').value = '';
+  document.getElementById('ac_f_password').placeholder = item ? '留空=不修改' : '至少 6 位';
+  document.getElementById('ac_f_display').value = item ? (item.display_name || '') : '';
+  document.getElementById('ac_f_role').value = item ? (item.role || 'operator') : 'operator';
+  document.getElementById('ac_f_active').checked = item ? (item.active !== false) : true;
+  showModal('accountModal');
+}
+function editAccount(id) {
+  fetch(`${AC}/${id}`, { headers: authHeaders() })
+    .then((r) => r.json())
+    .then((j) => { if (!j.ok) throw new Error(j.message || '获取失败'); openAccountModal(j.item || j.items && j.items[0]); })
+    .catch((e) => setError('获取账号详情失败：' + e.message));
+}
+async function saveAccount() {
+  const id = document.getElementById('ac_id').value;
+  const pw = document.getElementById('ac_f_password').value;
+  const body = {
+    username: document.getElementById('ac_f_username').value.trim(),
+    display_name: document.getElementById('ac_f_display').value.trim() || undefined,
+    role: document.getElementById('ac_f_role').value,
+    active: document.getElementById('ac_f_active').checked,
+  };
+  if (pw) body.password = pw;
+  if (!body.username) { setError('用户名必填'); return; }
+  if (!id && !pw) { setError('新建账号必须设置密码'); return; }
+  try {
+    const r = await fetch(id ? `${AC}/${id}` : AC, {
+      method: id ? 'PUT' : 'POST',
+      headers: authHeaders(),
+      body: JSON.stringify(body),
+    });
+    const j = await r.json();
+    if (!j.ok) throw new Error(j.message || '保存失败');
+    closeModals(); setError(''); loadAccounts();
+  } catch (e) { setError('保存账号失败：' + e.message); }
+}
+async function deleteAccount(id, username) {
+  if (!confirm(`确认删除账号「${username}」？若其为唯一活跃管理员将被拒绝。`)) return;
+  try {
+    const r = await fetch(`${AC}/${id}`, { method: 'DELETE', headers: authHeaders() });
+    const j = await r.json();
+    if (!j.ok) throw new Error(j.message || '删除失败');
+    setError(''); loadAccounts();
+  } catch (e) { setError('删除失败：' + e.message); }
+}
+
+// ============ 商品目录 ============
+async function loadProducts() {
+  const qs = new URLSearchParams();
+  const code = document.getElementById('p_code').value.trim();
+  const name = document.getElementById('p_name').value.trim();
+  const category = document.getElementById('p_category').value.trim();
+  if (code) qs.set('code', code);
+  if (name) qs.set('name', name);
+  if (category) qs.set('category', category);
+  const url = qs.toString() ? `${P}?${qs}` : P;
+  try {
+    const r = await fetch(url, { headers: authHeaders() });
+    const j = await r.json();
+    if (!j.ok) throw new Error(j.message || 'API 非 ok');
+    renderProducts(j.items || []);
+  } catch (e) {
+    document.getElementById('p_body').innerHTML = `<tr><td colspan="7" class="empty">加载失败：${esc(e.message)}</td></tr>`;
+    setError('商品目录加载失败：' + e.message);
+  }
+}
+function renderProducts(items) {
+  const body = document.getElementById('p_body');
+  if (!items.length) { body.innerHTML = `<tr><td colspan="7" class="empty">暂无商品。点击「新建商品」建档。</td></tr>`; return; }
+  body.innerHTML = items.map((it) => {
+    const en = it.enabled !== false;
+    const pill = en ? `<span class="pill good">启用</span>` : `<span class="pill bad">停用</span>`;
+    return `<tr>
+      <td>${esc(it.code)}</td>
+      <td>${esc(it.name)}</td>
+      <td>${esc(it.category || '-')}</td>
+      <td>${esc(it.unit || '-')}</td>
+      <td>${it.price != null ? '¥' + Number(it.price).toFixed(2) : '-'}</td>
+      <td>${pill}</td>
+      <td><div class="acts">
+        <button onclick="editProduct('${escAttr(it.id)}')">编辑</button>
+        <button class="danger" onclick="deleteProduct('${escAttr(it.id)}','${escAttr(it.code)}')">删除</button>
+      </div></td>
+    </tr>`;
+  }).join('');
+}
+function openProductModal(item) {
+  document.getElementById('p_title').textContent = item ? '编辑商品' : '新建商品';
+  document.getElementById('p_id').value = item ? item.id : '';
+  document.getElementById('p_f_code').value = item ? (item.code || '') : '';
+  document.getElementById('p_f_code').readOnly = !!item;
+  document.getElementById('p_f_name').value = item ? (item.name || '') : '';
+  document.getElementById('p_f_category').value = item ? (item.category || '') : '';
+  document.getElementById('p_f_unit').value = item ? (item.unit || '') : '';
+  document.getElementById('p_f_price').value = item && it_pprice(item) !== null ? it_pprice(item) : '';
+  document.getElementById('p_f_enabled').checked = item ? (item.enabled !== false) : true;
+  document.getElementById('p_f_desc').value = item ? (item.description || '') : '';
+  showModal('productModal');
+}
+function it_pprice(it) { return it.price == null ? null : Number(it.price).toFixed(2); }
+function editProduct(id) {
+  fetch(`${P}/${id}`, { headers: authHeaders() })
+    .then((r) => r.json())
+    .then((j) => { if (!j.ok) throw new Error(j.message || '获取失败'); openProductModal(j.item || j.items && j.items[0]); })
+    .catch((e) => setError('获取商品详情失败：' + e.message));
+}
+async function saveProduct() {
+  const id = document.getElementById('p_id').value;
+  const priceRaw = document.getElementById('p_f_price').value.trim();
+  const body = {
+    code: document.getElementById('p_f_code').value.trim(),
+    name: document.getElementById('p_f_name').value.trim(),
+    category: document.getElementById('p_f_category').value.trim() || undefined,
+    unit: document.getElementById('p_f_unit').value.trim() || undefined,
+    price: priceRaw === '' ? 0 : Number(priceRaw),
+    enabled: document.getElementById('p_f_enabled').checked,
+    description: document.getElementById('p_f_desc').value.trim() || undefined,
+  };
+  if (!body.code || !body.name) { setError('编码与名称必填'); return; }
+  if (body.price < 0) { setError('单价不能为负'); return; }
+  try {
+    const r = await fetch(id ? `${P}/${id}` : P, {
+      method: id ? 'PUT' : 'POST',
+      headers: authHeaders(),
+      body: JSON.stringify(body),
+    });
+    const j = await r.json();
+    if (!j.ok) throw new Error(j.message || '保存失败');
+    closeModals(); setError(''); loadProducts();
+  } catch (e) { setError('保存商品失败：' + e.message); }
+}
+async function deleteProduct(id, code) {
+  if (!confirm(`确认删除商品「${code}」？`)) return;
+  try {
+    const r = await fetch(`${P}/${id}`, { method: 'DELETE', headers: authHeaders() });
+    const j = await r.json();
+    if (!j.ok) throw new Error(j.message || '删除失败');
+    setError(''); loadProducts();
+  } catch (e) { setError('删除失败：' + e.message); }
+}
+
 // ============ 通用 ============
 function showModal(id) { document.getElementById(id).classList.add('show'); }
 function closeModals() {
   document.getElementById('assetModal').classList.remove('show');
   document.getElementById('materialModal').classList.remove('show');
+  document.getElementById('workerModal').classList.remove('show');
+  document.getElementById('accountModal').classList.remove('show');
+  document.getElementById('productModal').classList.remove('show');
 }
 document.getElementById('assetModal').addEventListener('click', (e) => { if (e.target.id === 'assetModal') closeModals(); });
 document.getElementById('materialModal').addEventListener('click', (e) => { if (e.target.id === 'materialModal') closeModals(); });
+document.getElementById('workerModal').addEventListener('click', (e) => { if (e.target.id === 'workerModal') closeModals(); });
+document.getElementById('accountModal').addEventListener('click', (e) => { if (e.target.id === 'accountModal') closeModals(); });
+document.getElementById('productModal').addEventListener('click', (e) => { if (e.target.id === 'productModal') closeModals(); });
 
 function switchTab(entity) {
   document.querySelectorAll('.tab').forEach((t) => t.classList.toggle('active', t.dataset.entity === entity));
-  document.getElementById('assetPanel').style.display = entity === 'asset' ? '' : 'none';
-  document.getElementById('materialPanel').style.display = entity === 'material' ? '' : 'none';
+  ['asset', 'material', 'worker', 'account', 'product'].forEach((e) => {
+    document.getElementById(e + 'Panel').style.display = e === entity ? '' : 'none';
+  });
   setError('');
-  if (entity === 'asset') loadAssets(); else loadMaterials();
+  const loaders = { asset: loadAssets, material: loadMaterials, worker: loadWorkers, account: loadAccounts, product: loadProducts };
+  (loaders[entity] || loadAssets)();
 }
 
 document.querySelectorAll('.tab').forEach((t) => t.addEventListener('click', () => switchTab(t.dataset.entity)));
 document.getElementById('refresh').addEventListener('click', () => {
   const active = document.querySelector('.tab.active').dataset.entity;
-  if (active === 'asset') loadAssets(); else loadMaterials();
+  ({ asset: loadAssets, material: loadMaterials, worker: loadWorkers, account: loadAccounts, product: loadProducts }[active] || loadAssets)();
 });
 document.getElementById('tenant').addEventListener('change', () => {
   const active = document.querySelector('.tab.active').dataset.entity;
-  if (active === 'asset') loadAssets(); else loadMaterials();
+  ({ asset: loadAssets, material: loadMaterials, worker: loadWorkers, account: loadAccounts, product: loadProducts }[active] || loadAssets)();
 });
 document.getElementById('a_search').addEventListener('click', loadAssets);
 document.getElementById('a_reset').addEventListener('click', () => {
@@ -481,6 +896,30 @@ document.getElementById('m_reset').addEventListener('click', () => {
 });
 document.getElementById('m_new').addEventListener('click', () => openMaterialModal(null));
 document.getElementById('m_save').addEventListener('click', saveMaterial);
+
+// 人员
+document.getElementById('w_search').addEventListener('click', loadWorkers);
+document.getElementById('w_reset').addEventListener('click', () => {
+  ['w_name', 'w_skill'].forEach((i) => (document.getElementById(i).value = ''));
+  document.getElementById('w_active').value = ''; loadWorkers();
+});
+document.getElementById('w_new').addEventListener('click', () => openWorkerModal(null));
+document.getElementById('w_save').addEventListener('click', saveWorker);
+// 账号
+document.getElementById('ac_search').addEventListener('click', loadAccounts);
+document.getElementById('ac_reset').addEventListener('click', () => {
+  document.getElementById('ac_username').value = ''; loadAccounts();
+});
+document.getElementById('ac_new').addEventListener('click', () => openAccountModal(null));
+document.getElementById('ac_save').addEventListener('click', saveAccount);
+// 商品目录
+document.getElementById('p_search').addEventListener('click', loadProducts);
+document.getElementById('p_reset').addEventListener('click', () => {
+  ['p_code', 'p_name', 'p_category'].forEach((i) => (document.getElementById(i).value = ''));
+  loadProducts();
+});
+document.getElementById('p_new').addEventListener('click', () => openProductModal(null));
+document.getElementById('p_save').addEventListener('click', saveProduct);
 
 // 初始加载当前 Tab
 loadAssets();
