@@ -1,0 +1,36 @@
+{
+  "name": "youfu-backend-m1",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "优服家业务流程平台 后端最小闭环（M3 Step1）：接单->派单->处理->完成，4 接口 + 最小落库",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "start": "tsx src/server.ts",
+    "start:pilot": "tsx src/server.ts",
+    "start:prod": "tsx src/server.ts",
+    "migrate": "tsx src/db/migrate.ts",
+    "init-db": "tsx scripts/init-db.ts",
+    "seed:accounts": "tsx scripts/seed-accounts.ts",
+    "register:webhook": "node scripts/register-webhook.mjs",
+    "test": "vitest run",
+    "release-gate": "tsx scripts/releaseGate.ts"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "pg": "^8.12.0",
+    "zod": "^3.23.8",
+    "tsx": "^3.14.0"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^22.0.0",
+    "@types/pg": "^8.11.6",
+    "typescript": "^5.5.0",
+    "vitest": "^2.0.0"
+  },
+  "engines": {
+    "node": ">=16.0.0"
+  }
+}

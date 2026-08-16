@@ -1,0 +1,117 @@
+// 服务反馈模块（批次 B · PRD §D）：满意度/意见提交，轻量无派单，后台统计归类。
+// 提交仅需登录（患者/用户），回复需 admin/operator。契约 snake_case 对齐 013 表（含 reply 列）。
+// B1 统一事件总线：提交/回复 emit domain_event（过程挖掘统一数据源）。
+import { Router } from 'express';
+import { z } from 'zod';
+import { withTenantClient } from '../db/pool.js';
+import { AppError } from '../middleware/error.js';
+import { requireConfigRole } from '../middleware/role.js';
+import { emitDomainEvent } from '../db/eventBus.js';
+
+const router = Router();
+
+const submitSchema = z.object({
+  type: z.enum(['satisfaction', 'opinion']).default('opinion'),
+  content: z.string().min(1),
+  rating: z.number().int().min(1).max(5).optional(),
+  images: z.array(z.string()).optional(),
+  audio: z.string().optional(),
+  channel: z.enum(['mobile', 'desk']).default('mobile'),
+});
+
+router.get('/', async (req, res, next) => {
+  try {
+    const tenantId = res.locals.auth.tenantId;
+    const { type, status } = req.query as Record<string, string>;
+    const clauses = ['tenant_id = $1'];
+    const params: unknown[] = [tenantId];
+    const add = (sql: string, v: unknown) => {
+      params.push(v);
+      clauses.push(sql.replace('?', `$${params.length}`));
+    };
+    if (type) add('type = ?', type);
+    if (status) add('status = ?', status);
+    const items = await withTenantClient(tenantId, (client) =>
+      client
+        .query(`SELECT * FROM feedback WHERE ${clauses.join(' AND ')} ORDER BY created_at DESC`, params)
+        .then((r) => r.rows),
+    );
+    return res.json({ ok: true, code: 0, items });
+  } catch (e) {
+    next(e);
+  }
+});
+
+router.post('/', async (req, res, next) => {
+  try {
+    const tenantId = res.locals.auth.tenantId;
+    const b = submitSchema.parse(req.body);
+    const item = await withTenantClient(tenantId, async (client) => {
+      const r = await client.query(
+        `INSERT INTO feedback (tenant_id, type, content, rating, images, audio, channel, status)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,'new') RETURNING *`,
+        [tenantId, b.type, b.content, b.rating ?? null, b.images ? JSON.stringify(b.images) : '[]', b.audio ?? null, b.channel],
+      );
+      const row = r.rows[0];
+      await emitDomainEvent(client, {
+        tenantId,
+        entityType: 'feedback',
+        entityId: row.id,
+        type: 'submit',
+        actor: 'user',
+        payload: { feedback_type: b.type, rating: b.rating ?? null },
+      });
+      return row;
+    });
+    return res.status(201).json({ ok: true, code: 0, item });
+  } catch (e) {
+    next(e);
+  }
+});
+
+router.post('/:id/reply', async (req, res, next) => {
+  try {
+    requireConfigRole(req, res);
+    const tenantId = res.locals.auth.tenantId;
+    const b = z.object({ reply: z.string().min(1) }).parse(req.body);
+    const item = await withTenantClient(tenantId, async (client) => {
+      const cur = await client.query(`SELECT * FROM feedback WHERE id = $1 AND tenant_id = $2`, [req.params.id, tenantId]);
+      if (cur.rowCount === 0) throw new AppError('NOT_FOUND', 'feedback not found', 404);
+      const r = await client.query(
+        `UPDATE feedback SET status = 'replied', reply = $3, replied_at = now() WHERE id = $1 AND tenant_id = $2 RETURNING *`,
+        [req.params.id, tenantId, b.reply],
+      );
+      const row = r.rows[0];
+      await emitDomainEvent(client, { tenantId, entityType: 'feedback', entityId: row.id, type: 'reply', actor: 'config_role' });
+      return row;
+    });
+    return res.json({ ok: true, code: 0, item });
+  } catch (e) {
+    next(e);
+  }
+});
+
+router.get('/stats', async (req, res, next) => {
+  try {
+    const tenantId = res.locals.auth.tenantId;
+    const stats = await withTenantClient(tenantId, (client) =>
+      client
+        .query(
+          `SELECT
+             COUNT(*) FILTER (WHERE type = 'satisfaction') AS satisfaction_count,
+             COUNT(*) FILTER (WHERE type = 'opinion') AS opinion_count,
+             COUNT(*) FILTER (WHERE status = 'new') AS new_count,
+             COUNT(*) FILTER (WHERE status = 'replied') AS replied_count,
+             COALESCE(AVG(rating) FILTER (WHERE type = 'satisfaction' AND rating IS NOT NULL), 0) AS avg_rating
+           FROM feedback WHERE tenant_id = $1`,
+          [tenantId],
+        )
+        .then((r) => r.rows[0]),
+    );
+    return res.json({ ok: true, code: 0, stats });
+  } catch (e) {
+    next(e);
+  }
+});
+
+export default router;

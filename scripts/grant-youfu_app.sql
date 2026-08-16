@@ -1,0 +1,4 @@
+-- 迁移后执行：补全库授权（001 建的三张表缺少 GRANT）
+GRANT ALL ON ALL TABLES IN SCHEMA public TO youfu_app;
+GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO youfu_app;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO youfu_app;
