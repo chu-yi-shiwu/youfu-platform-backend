@@ -19,6 +19,7 @@ import assetRouter from './routes/asset.js';
 import serviceDeskRouter from './routes/serviceDesk.js';
 import statsRouter from './routes/stats.js';
 import optimizeRouter from './routes/optimize.js';
+import processMiningRouter from './routes/processMining.js';
 
 // 试点/生产：用 ENV_FILE 指定环境文件（默认 .env，production 下默认 .env.pilot），
 // 同一份代码可同时跑 dev / pilot，无需改代码。
@@ -57,6 +58,15 @@ app.use('/api/v1', assetRouter);
 app.use('/api/v1', serviceDeskRouter);
 app.use('/api/v1', statsRouter);
 app.use('/api/v1', optimizeRouter);
+app.use('/api/v1', processMiningRouter);
+
+// ⑦P0 过程挖掘看板：顶层公开托管单文件 HTML（pilot 同 SPA 策略；prod 上线前应在反向代理层加鉴权）。
+// 必须注册在 SERVE_STATIC 的 SPA 兜底正则之前，否则会被 index.html 兜底拦截。
+app.get('/process-mining', (_req, res) => {
+  const file = path.resolve(fileURLToPath(import.meta.url), '../../public/process-mining.html');
+  if (fs.existsSync(file)) res.sendFile(file);
+  else res.status(404).json({ ok: false, code: 'NO_DASHBOARD', message: 'process-mining dashboard html not found' });
+});
 
 // 统一错误兜底
 app.use(errorMiddleware);
