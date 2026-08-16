@@ -119,6 +119,17 @@ export async function transition(
      VALUES ($1,$2,'transition',$3,$4,$5)`,
     [tenantId, id, cur.status, to, actor],
   );
+  // ④ 真实事件总线：每次状态流转自动记账到 domain_event（type=新状态=过程挖掘活动节点）。
+  // 覆盖 processing/completed 及 T-①/T-② 注入的 recheck/escalated 等新状态，飞轮从此吃真数据；
+  // create/assign 已在 createWithIdem / workOrder 建单路由内 emit，此处不重复。
+  await emitDomainEvent(client, {
+    tenantId,
+    entityType: 'work_order',
+    entityId: id,
+    type: to,
+    actor,
+    payload: { from_status: cur.status, to_status: to },
+  });
   return upd.rows[0];
 }
 
