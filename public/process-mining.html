@@ -121,7 +121,8 @@
 const API = '/api/v1/process-mining';
 
 function authHeaders() {
-  const h = { 'Authorization': 'Bearer dev', 'Content-Type': 'application/json' };
+  const tk = localStorage.getItem('youfu_token');
+  const h = { 'Authorization': 'Bearer ' + (tk || 'dev'), 'Content-Type': 'application/json' };
   const t = document.getElementById('tenant').value.trim();
   if (t) h['X-Tenant-Id'] = t;
   return h;
@@ -276,5 +277,42 @@ document.getElementById('days').addEventListener('change', load);
 document.getElementById('tenant').addEventListener('change', load);
 load();
 </script>
+<!-- ===== 生产登录遮罩（prod 真实 JWT 鉴权） ===== -->
+<div id="loginMask" style="position:fixed;inset:0;background:#0f172a;display:none;align-items:center;justify-content:center;z-index:9999;color:#e2e8f0;font-family:system-ui,sans-serif">
+  <div style="background:#1e293b;padding:32px 28px;border-radius:12px;width:320px;box-shadow:0 10px 40px rgba(0,0,0,.5)">
+    <h2 style="margin:0 0 4px;font-size:20px">优服家 · 登录</h2>
+    <p style="margin:0 0 16px;color:#94a3b8;font-size:13px">生产模式需账号密码登录</p>
+    <input id="lgUser" placeholder="用户名" style="width:100%;padding:10px;margin-bottom:10px;border-radius:6px;border:1px solid #334155;background:#0f172a;color:#e2e8f0;box-sizing:border-box" />
+    <input id="lgPwd" type="password" placeholder="密码" style="width:100%;padding:10px;margin-bottom:10px;border-radius:6px;border:1px solid #334155;background:#0f172a;color:#e2e8f0;box-sizing:border-box" />
+    <button id="lgBtn" style="width:100%;padding:10px;border:0;border-radius:6px;background:#2563eb;color:#fff;font-size:15px;cursor:pointer">登录</button>
+    <div id="lgErr" style="color:#f87171;font-size:13px;margin-top:10px;min-height:18px"></div>
+  </div>
+</div>
+<button id="logoutBtn" style="display:none;position:fixed;top:10px;right:10px;z-index:9998;padding:6px 12px;border:0;border-radius:6px;background:#334155;color:#e2e8f0;font-size:12px;cursor:pointer">退出登录</button>
+<script>
+(function(){
+  var TOKEN_KEY='youfu_token';
+  function getToken(){ return localStorage.getItem(TOKEN_KEY); }
+  function doLogin(){
+    var u=document.getElementById('lgUser').value.trim();
+    var p=document.getElementById('lgPwd').value;
+    var ten=document.getElementById('tenant'); var tv=ten&&ten.value&&ten.value.trim();
+    var err=document.getElementById('lgErr'); err.textContent='';
+    fetch('/api/v1/auth/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:u,password:p,tenant:tv||undefined})})
+      .then(function(r){ return r.json().then(function(d){ return {r:r,d:d}; }); })
+      .then(function(o){
+        if(o.r.ok && o.d.ok && o.d.token){ localStorage.setItem(TOKEN_KEY,o.d.token); location.reload(); }
+        else { err.textContent=(o.d&&o.d.message)||('登录失败('+o.r.status+')'); }
+      })
+      .catch(function(e){ err.textContent='网络错误：'+e.message; });
+  }
+  var lb=document.getElementById('lgBtn'); if(lb) lb.onclick=doLogin;
+  var lp=document.getElementById('lgPwd'); if(lp) lp.addEventListener('keydown',function(e){ if(e.key==='Enter') doLogin(); });
+  var lo=document.getElementById('logoutBtn'); if(lo) lo.onclick=function(){ localStorage.removeItem(TOKEN_KEY); location.reload(); };
+  if(getToken()){ document.getElementById('loginMask').style.display='none'; if(lo) lo.style.display='block'; }
+  else { document.getElementById('loginMask').style.display='flex'; }
+})();
+</script>
+<!-- ===== /生产登录遮罩 ===== -->
 </body>
 </html>
