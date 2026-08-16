@@ -8,6 +8,8 @@
 import type { PoolClient } from 'pg';
 import { createWithIdem } from '../repo/ticket.js';
 import { pickWorker, resolveDispatch, getActiveRules } from '../engine/dispatch.js';
+import { autoRouteFor } from '../engine/stateMachine.js';
+import { getWorkflowDef } from '../engine/workflowDef.js';
 import { setSlaDueAt } from '../engine/sla.js';
 
 export interface LinkedWoPayload {
@@ -81,7 +83,13 @@ export async function createLinkedWorkOrder(
     priority: p.priority,
   };
   const rules = await getActiveRules(client, p.tenantId);
-  const resolved = resolveDispatch(workers.rows, rules, need);
+  // ④⑤ 模数共振：读 workflow_def.autoRoutes，决定本租户自动派发的目标态与策略（缺省保持旧行为：落 assigned、规则优先）
+  const def = await getWorkflowDef(client, p.tenantId, 'work_order');
+  const initial = def.initial;
+  const route = autoRouteFor(def, initial);
+  const dispatchTarget = route?.to ?? 'assigned';
+  const useLeastLoadOnly = route?.strategy === 'least_load';
+  const resolved = useLeastLoadOnly ? null : resolveDispatch(workers.rows, rules, need);
   const picked = resolved ? resolved.worker : pickWorker(workers.rows, { skillTags: p.skillTags });
   let autoFlow = false;
   let assignee: string | null = null;
@@ -92,13 +100,13 @@ export async function createLinkedWorkOrder(
     reason = resolved ? resolved.reason : 'auto dispatched by least_load fallback';
     await client.query(
       'UPDATE work_orders SET status = $1, assignee_id = $2, auto_flow = true, updated_at = now() WHERE id = $3',
-      ['assigned', picked.id, row.id],
+      [dispatchTarget, picked.id, row.id],
     );
     await client.query('UPDATE worker SET load = load + 1 WHERE id = $1', [picked.id]);
     await client.query(
       `INSERT INTO ticket_event (tenant_id, work_order_id, type, from_status, to_status, actor, payload)
-       VALUES ($1,$2,'assign','draft','assigned','auto_dispatch',$3)`,
-      [p.tenantId, row.id, JSON.stringify({ worker_id: picked.id })],
+       VALUES ($1,$2,'assign',$3,$4,'auto_dispatch',$5)`,
+      [p.tenantId, row.id, initial, dispatchTarget, JSON.stringify({ worker_id: picked.id })],
     );
   }
   return { id: row.id, orderNo: row.order_no, autoFlow, assignee, reason, created: true };

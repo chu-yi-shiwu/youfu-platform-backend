@@ -18,7 +18,7 @@ import { incrementalLearn } from '../services/modelTrainer.js';
 import { emitDomainEvent } from '../db/eventBus.js';
 import type { WorkOrderStatus } from '../engine/stateMachine.js';
 import { getWorkflowDef } from '../engine/workflowDef.js';
-import { doneStates, terminalStates, availableTransitions } from '../engine/stateMachine.js';
+import { doneStates, terminalStates, availableTransitions, learningTriggerStates, autoRouteFor } from '../engine/stateMachine.js';
 
 /** pg 驱动对 jsonb 可能返回字符串；统一归一化。 */
 function safeParseJsonb(v: any): any {
@@ -62,8 +62,8 @@ const transitionSchema = z.object({
 // 生成对齐前端的响应：未命中派单诚实返回 claim_hall（A 点确认）
 // DEF-1 修复：code 仅作成功标记（0），真实业务工单号通过 order_no 返回。
 // DEF-3 修复：返回内部 id（uuid）—— /transition/:id 需要它，否则建单后无法流转（契约错配）。
-export function toCreateRes(row: any, autoFlow: boolean, assignee: string | null, reason: string) {
-  const status: string = autoFlow ? 'assigned' : 'claim_hall';
+export function toCreateRes(row: any, autoFlow: boolean, assignee: string | null, reason: string, landedStatus = 'assigned') {
+  const status: string = autoFlow ? landedStatus : 'claim_hall';
   return {
     ok: true, code: 0, id: row.id, order_no: row.order_no, status, auto_flow: autoFlow, assignee, reason,
     source: row.source ?? 'backend', fault_type: row.fault_type ?? null,
@@ -113,6 +113,12 @@ router.post('/open/work_order', async (req, res, next) => {
         priority: body.priority,
       };
       const rules = await getActiveRules(client, tenantId);
+      // ④⑤ 模数共振：读 workflow_def.autoRoutes，决定本租户自动派发的目标态与策略（缺省保持旧行为：落 assigned、规则优先）
+      const def = await getWorkflowDef(client, tenantId, 'work_order');
+      const initial = def.initial;
+      const route = autoRouteFor(def, initial);
+      const dispatchTarget = route?.to ?? 'assigned';
+      const useLeastLoadOnly = route?.strategy === 'least_load';
       // 派单自适应：加载租户模型（无则默认新模型），用模型评分参与候选排序
       const modelParams = await client.query<{ params: any }>(
         'SELECT params FROM model_state WHERE tenant_id = $1 AND model_key = $2',
@@ -120,7 +126,7 @@ router.post('/open/work_order', async (req, res, next) => {
       );
       const loadedParams = safeParseJsonb(modelParams.rows[0]?.params) ?? undefined;
       const model: ModelBackend = new StatsModelBackend(loadedParams);
-      const resolved = resolveDispatch(workerRows, rules, need, model);
+      const resolved = useLeastLoadOnly ? null : resolveDispatch(workerRows, rules, need, model);
       const picked = resolved ? resolved.worker : pickWorker(workerRows, { skillTags: body.skill_tags });
       let autoFlow = false;
       let assignee: string | null = null;
@@ -131,7 +137,7 @@ router.post('/open/work_order', async (req, res, next) => {
         reason = resolved ? resolved.reason : 'auto dispatched by least_load fallback';
         await client.query(
           'UPDATE work_orders SET status = $1, assignee_id = $2, auto_flow = true, updated_at = now() WHERE id = $3',
-          ['assigned', picked.id, row.id],
+          [dispatchTarget, picked.id, row.id],
         );
         await client.query(
           'UPDATE worker SET load = load + 1 WHERE id = $1',
@@ -139,23 +145,23 @@ router.post('/open/work_order', async (req, res, next) => {
         );
         await client.query(
           `INSERT INTO ticket_event (tenant_id, work_order_id, type, from_status, to_status, actor, payload)
-           VALUES ($1,$2,'assign','draft','assigned','auto_dispatch', $3)`,
-          [tenantId, row.id, JSON.stringify({ worker_id: picked.id })],
+           VALUES ($1,$2,'assign',$3,$4,'auto_dispatch', $5)`,
+          [tenantId, row.id, initial, dispatchTarget, JSON.stringify({ worker_id: picked.id })],
         );
-        // ④ 口径对齐：domain_event.type 一律为"结果状态"（与 transition() 一致），自动派单落入 'assigned'。
-        await emitDomainEvent(client, { tenantId, entityType: 'work_order', entityId: row.id, type: 'assigned', actor: 'auto_dispatch', payload: { worker_id: picked.id } });
+        // ④ 口径对齐：domain_event.type 一律为"结果状态"（与 transition() 一致），自动派单落入 dispatchTarget。
+        await emitDomainEvent(client, { tenantId, entityType: 'work_order', entityId: row.id, type: dispatchTarget, actor: 'auto_dispatch', payload: { worker_id: picked.id } });
       }
       const final = await findOne(client, tenantId, row.id);
-      return { final, autoFlow, assignee, reason, created };
+      return { final, autoFlow, assignee, reason, created, dispatchTarget };
     });
     // P5 Webhook：主事务提交后 fire-and-forget 投递事件（失败不阻断主流程）
     const woId = result.final!.id;
     void dispatchEvent(tenantId, { type: 'create', workOrderId: woId, fromStatus: null, toStatus: 'draft', actor: 'system' }).catch(() => {});
     if (result.autoFlow) {
-      void dispatchEvent(tenantId, { type: 'assign', workOrderId: woId, fromStatus: 'draft', toStatus: 'assigned', actor: 'auto_dispatch', payload: { worker_id: result.assignee } }).catch(() => {});
+      void dispatchEvent(tenantId, { type: 'assign', workOrderId: woId, fromStatus: 'draft', toStatus: result.dispatchTarget, actor: 'auto_dispatch', payload: { worker_id: result.assignee } }).catch(() => {});
     }
     return res.status(result.created ? 201 : 200).json(
-      toCreateRes(result.final, result.autoFlow, result.assignee, result.reason),
+      toCreateRes(result.final, result.autoFlow, result.assignee, result.reason, result.dispatchTarget),
     );
   } catch (e) {
     next(e);
@@ -184,8 +190,9 @@ router.post('/open/work_order/:id/transition', async (req, res, next) => {
         // 仅在"首次踏入完成态"触发（避免 completed→closed→evaluated 间重复学习）；受 MODEL_AUTO_TUNE 控制是否写回。
         // 不静默吞错：失败记日志并回传 learn_error，便于试点验证定位根因（T-A 缺陷1修复）
         const def = await getWorkflowDef(client, tenantId, 'work_order');
-        const done = doneStates(def);
-        if (done.includes(to) && !(before?.status && done.includes(before.status))) {
+        // ⑤ 模数共振：学习触发态优先读 def.config.learningTriggers（per-def 控制），缺省回退 doneStates（向后兼容）
+        const learnOn = learningTriggerStates(def);
+        if (learnOn.includes(to) && !(before?.status && learnOn.includes(before.status))) {
           try {
             await incrementalLearn(client, tenantId, req.params.id, process.env.MODEL_AUTO_TUNE === 'true');
           } catch (e) {
