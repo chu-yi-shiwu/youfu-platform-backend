@@ -3,8 +3,10 @@
 import { Router } from 'express';
 import { withTenantClient } from '../db/pool.js';
 import { processMetrics } from '../repo/stats.js';
+import { processMining } from '../repo/processMining.js';
 import {
   generateOptimizations,
+  generateMiningOptimizations,
   getModelParams,
   applyDispatchOptimizations,
   recordWorkflowRecommendations,
@@ -43,6 +45,40 @@ router.post('/optimize/generate', async (req, res, next) => {
       return list.rows;
     });
     return res.json({ ok: true, code: 0, applied: autoTune, decisions });
+  } catch (e) {
+    next(e);
+  }
+});
+
+// ⑦P2 自适应优化飞轮：消费过程挖掘（飞轮"眼睛"）产出精确实例级优化建议并落库 pending。
+// 与 /optimize/generate（粗粒度 processMetrics）互补，本接口驱动"数据→模型"方向（模数共振）。
+// 安全：dev（MODEL_AUTO_TUNE 未开）仅记录建议不应用；AUTO_TUNE=true 时调用 applyWorkflowOptimizations
+//   改写 workflow_def 收口闭环（与 dispatch 写回受同一开关控制，避免试点误改流程定义）。
+router.post('/optimize/generate-mining', async (req, res, next) => {
+  try {
+    const tenantId = res.locals.auth.tenantId;
+    const autoTune = process.env.MODEL_AUTO_TUNE === 'true';
+    const entityType = typeof req.query.entityType === 'string' ? req.query.entityType : undefined;
+    const daysRaw = typeof req.query.days === 'string' ? Number(req.query.days) : undefined;
+    if (req.query.days !== undefined && !Number.isFinite(daysRaw)) {
+      return res.status(400).json({ ok: false, code: 'BAD_PARAM', message: 'days must be a finite number' });
+    }
+    const decisions = await withTenantClient(tenantId, async (client) => {
+      const result = await processMining(client, tenantId, { entityType, days: daysRaw });
+      const dec = generateMiningOptimizations(result);
+      for (const d of dec) {
+        await client.query(
+          `INSERT INTO optimization_feedback (tenant_id, scope, target, recommendation, reason, status)
+           VALUES ($1, $2, $3, $4, $5, 'pending')`,
+          [tenantId, d.scope, d.target, JSON.stringify(d.recommendation), d.reason],
+        );
+      }
+      if (autoTune) {
+        await applyWorkflowOptimizations(client, tenantId);
+      }
+      return dec;
+    });
+    return res.json({ ok: true, code: 0, applied: autoTune, generated: decisions });
   } catch (e) {
     next(e);
   }

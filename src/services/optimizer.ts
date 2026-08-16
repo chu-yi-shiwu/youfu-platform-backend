@@ -8,10 +8,15 @@
 // 属 T-①（排在 T-C 之后，代码尚未存在）。本实现不越界建完整状态机引擎，而是把 workflow 类优化
 // 决策落库为 pending 建议，待 T-① 引擎建成即可直接消费——既让飞轮可见、可审计，又不阻塞 T-C。
 //
-// 纯函数 generateOptimizations 脱离 PG 单测；apply*/record* 负责 DB 读写。
+// ⑦P2 扩展：新增 generateMiningOptimizations，消费 ⑦P0 过程挖掘结果（飞轮"眼睛"）产出精确实例级
+//   优化建议（最慢转移→自动升级、偏离率→复核闸门），与 generateOptimizations（粗粒度 processMetrics）
+//   互补，共同驱动 ④ 自我优化闭环 + ⑤ 模数共振。
+//
+// 纯函数 generateOptimizations / generateMiningOptimizations 脱离 PG 单测；apply*/record* 负责 DB 读写。
 import type { PoolClient } from 'pg';
 import type { ModelParams } from '../engine/model/ModelBackend.js';
 import type { ProcessMetrics } from '../repo/stats.js';
+import type { ProcessMiningResult } from '../repo/processMining.js';
 import type { WorkflowDef } from '../engine/stateMachine.js';
 import { ensureWorkflowDef, saveWorkflowDef } from '../engine/workflowDef.js';
 
@@ -78,6 +83,37 @@ export function generateOptimizations(
       target: `${topBottleneck.entity_type}:auto_escalate`,
       recommendation: { action: 'enable_auto_escalation', active: topBottleneck.active },
       reason: `瓶颈模块 ${topBottleneck.entity_type} 活跃堆积=${topBottleneck.active}，建议启用自动升级`,
+    });
+  }
+  return decisions;
+}
+
+/**
+ * ⑦P2：由过程挖掘结果（⑦P0，飞轮"眼睛"）生成"数据驱动"的优化决策（模数共振·数据→模型方向）。
+ * 与 generateOptimizations（消费粗粒度 processMetrics）互补，本函数消费精细挖掘结果：
+ *   - 合规偏离率 > 0.3 → work_order:recheck_gate（派单后加复核，降变体发散）
+ *   - 最慢直接后继边 > 8h（480 分）→ <entity>:auto_escalate（防该业务流堆积）
+ * 产出的 target 与 applyRecommendationToDef 约定一致，故可被现有 applyWorkflowOptimizations 直接消费应用。
+ * 纯函数，不碰 DB，可单测。
+ */
+export function generateMiningOptimizations(result: ProcessMiningResult): OptimizationDecision[] {
+  const decisions: OptimizationDecision[] = [];
+  const devRate = result.conformance?.deviation_rate ?? 0;
+  if (devRate > 0.3) {
+    decisions.push({
+      scope: 'workflow',
+      target: 'work_order:recheck_gate',
+      recommendation: { trigger: 'deviation_rate>0.3', deviation_rate: devRate },
+      reason: `主导路径依从偏离率=${(devRate * 100).toFixed(1)}% 偏高，建议派单后增加复核闸门降低变体发散`,
+    });
+  }
+  const se = result.bottlenecks?.slowest_edge;
+  if (se && typeof se.avg_minutes === 'number' && se.avg_minutes > 480) {
+    decisions.push({
+      scope: 'workflow',
+      target: `${result.entity_type}:auto_escalate`,
+      recommendation: { edge: [se.from, se.to], avg_minutes: se.avg_minutes },
+      reason: `最慢转移 ${se.from}→${se.to}=${Math.round(se.avg_minutes)} 分 (>8h)，建议在该业务流启用自动升级防止堆积`,
     });
   }
   return decisions;
