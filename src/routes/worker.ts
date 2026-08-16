@@ -113,16 +113,23 @@ router.put('/workers/:id', async (req, res, next) => {
   }
 });
 
-// ============ 删除人员 ============
+// ============ 删除人员（保护：在途工单孤儿引用） ============
 router.delete('/workers/:id', async (req, res, next) => {
   try {
     requireConfigRole(req, res);
     const tenantId = res.locals.auth.tenantId;
-    const n = await withTenantClient(tenantId, (client) =>
-      client
-        .query(`DELETE FROM worker WHERE id=$1 AND tenant_id=$2`, [req.params.id, tenantId])
-        .then((r) => r.rowCount ?? 0),
-    );
+    const n = await withTenantClient(tenantId, async (client) => {
+      // 在途工单（已派单且未完成）仍指向该人员时拒绝删除，避免孤儿引用
+      const inFlight = await client.query(
+        `SELECT 1 FROM work_orders WHERE tenant_id=$1 AND assignee_id=$2 AND status <> 'completed' LIMIT 1`,
+        [tenantId, req.params.id],
+      );
+      if (inFlight.rowCount && inFlight.rowCount > 0) {
+        throw new AppError('CONFLICT', '该人员仍关联在途工单，无法删除', 409);
+      }
+      const r = await client.query(`DELETE FROM worker WHERE id=$1 AND tenant_id=$2`, [req.params.id, tenantId]);
+      return r.rowCount ?? 0;
+    });
     if (n === 0) throw new AppError('NOT_FOUND', 'worker not found', 404);
     return res.json({ ok: true, code: 0 });
   } catch (e) {
