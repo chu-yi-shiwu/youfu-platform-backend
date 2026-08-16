@@ -2,7 +2,7 @@
 // 双保险：每条读/写显式 WHERE tenant_id = $1（P1）。
 import type { PoolClient } from 'pg';
 import { AppError } from '../middleware/error.js';
-import { canTransition, isKnownState, type WorkOrderStatus } from '../engine/stateMachine.js';
+import { isKnownState, type WorkOrderStatus, type WorkflowTransition } from '../engine/stateMachine.js';
 import { getWorkflowDef } from '../engine/workflowDef.js';
 import { emitDomainEvent } from '../db/eventBus.js';
 
@@ -17,6 +17,11 @@ export interface CreateDto {
   description?: string;
   contact?: string;
   assets?: unknown[];
+  // UOne 颗粒度维度（取之所长）
+  source?: string;        // 工单来源: wechat/backend/phone
+  faultType?: string;     // 故障类型
+  serviceDesk?: string;   // 所属服务台
+  ext?: Record<string, unknown>; // 工单模板动态字段
   idempotencyKey?: string;
 }
 
@@ -64,13 +69,15 @@ export async function createWithIdem(
   const orderNo = genOrderNo();
   const ins = await client.query<WorkOrderRow>(
     `INSERT INTO work_orders
-       (id, tenant_id, order_no, business_type, catalog, priority, location, title, description, contact, assets, status)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'draft')
+       (id, tenant_id, order_no, business_type, catalog, priority, location, title, description, contact, assets, status, source, fault_type, service_desk, ext)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'draft',$12,$13,$14,$15)
      RETURNING *`,
     [
       dto.id, dto.tenantId, orderNo, dto.businessType, dto.catalog ?? null, dto.priority ?? 'normal',
       dto.location ?? null, dto.title ?? null, dto.description ?? null, dto.contact ?? null,
       JSON.stringify(dto.assets ?? []),
+      dto.source ?? 'backend', dto.faultType ?? null, dto.serviceDesk ?? null,
+      JSON.stringify(dto.ext ?? {}),
     ],
   );
   if (dto.idempotencyKey) {
@@ -88,14 +95,19 @@ export async function createWithIdem(
   return { row: ins.rows[0], created: true };
 }
 
-/** 状态流转：校验合法跳转，更新状态 + 审计。 */
+export interface TransitionResult {
+  row: WorkOrderRow;
+  transition: WorkflowTransition | null;
+}
+
+/** 状态流转：校验合法跳转（拓扑 + 角色门禁 + 必填），更新状态 + 审计 + 副作用。 */
 export async function transition(
   client: PoolClient,
   tenantId: string,
   id: string,
   to: WorkOrderStatus,
-  actor = 'system',
-): Promise<WorkOrderRow> {
+  opts?: { actor?: string; role?: string; fields?: Record<string, unknown> },
+): Promise<TransitionResult> {
   const cur = await findOne(client, tenantId, id);
   if (!cur) throw new AppError('NOT_FOUND', 'work order not found', 404);
   // T-①：状态合法性由 workflow_def（可配置状态机）校验，不再写死固定字典
@@ -103,34 +115,60 @@ export async function transition(
   if (!isKnownState(def, cur.status) || !isKnownState(def, to)) {
     throw new AppError('CONFLICT', `unknown state: from=${cur.status} to=${to}`, 422);
   }
-  if (!canTransition(def, cur.status, to)) {
-    throw new AppError(
-      'CONFLICT',
-      `illegal transition ${cur.status} -> ${to}`,
-      422,
-    );
+  // 匹配具体 transition（含规则），拓扑非法直接 422
+  const tdef = def.transitions.find((t) => t.from === cur.status && t.to === to) ?? null;
+  if (!tdef) {
+    throw new AppError('CONFLICT', `illegal transition ${cur.status} -> ${to}`, 422);
   }
+  // A+ 角色门禁：allowedRoles 为空/未定义 = 放行（向后兼容，避免门死自己）；显式配置且不在其中 → 403
+  const role = opts?.role;
+  if (tdef.allowedRoles && tdef.allowedRoles.length > 0 && role && !tdef.allowedRoles.includes(role)) {
+    throw new AppError('FORBIDDEN', `role ${role} not allowed for ${cur.status}->${to}`, 403);
+  }
+  // A+ 必填校验：缺失任一 requiredFields → 422
+  const fields = opts?.fields ?? {};
+  if (tdef.requiredFields && tdef.requiredFields.length > 0) {
+    const missing = tdef.requiredFields.filter(
+      (f) => fields[f] === undefined || fields[f] === null || fields[f] === '',
+    );
+    if (missing.length > 0) {
+      throw new AppError('BAD_REQUEST', `missing required fields: ${missing.join(',')}`, 422);
+    }
+  }
+  // A+：若流转携带 assignee（dispatch 等需必填 assignee 的转移），同步落库 assignee_id，使人工派单真正生效。
+  const assignee = typeof fields.assignee === 'string' && fields.assignee ? fields.assignee : null;
   const upd = await client.query<WorkOrderRow>(
-    `UPDATE work_orders SET status = $1, updated_at = now() WHERE id = $2 AND tenant_id = $3 RETURNING *`,
-    [to, id, tenantId],
+    `UPDATE work_orders SET status = $1, updated_at = now()${assignee ? ', assignee_id = $4' : ''} WHERE id = $2 AND tenant_id = $3 RETURNING *`,
+    assignee ? [to, id, tenantId, assignee] : [to, id, tenantId],
   );
   await client.query(
-    `INSERT INTO ticket_event (tenant_id, work_order_id, type, from_status, to_status, actor)
-     VALUES ($1,$2,'transition',$3,$4,$5)`,
-    [tenantId, id, cur.status, to, actor],
+    `INSERT INTO ticket_event (tenant_id, work_order_id, type, from_status, to_status, actor, payload)
+     VALUES ($1,$2,'transition',$3,$4,$5,$6)`,
+    [tenantId, id, cur.status, to, opts?.actor ?? 'system', JSON.stringify({ fields, transition_event: tdef.event })],
   );
   // ④ 真实事件总线：每次状态流转自动记账到 domain_event（type=新状态=过程挖掘活动节点）。
-  // 覆盖 processing/completed 及 T-①/T-② 注入的 recheck/escalated 等新状态，飞轮从此吃真数据；
-  // create/assign 已在 createWithIdem / workOrder 建单路由内 emit，此处不重复。
   await emitDomainEvent(client, {
     tenantId,
     entityType: 'work_order',
     entityId: id,
     type: to,
-    actor,
-    payload: { from_status: cur.status, to_status: to },
+    actor: opts?.actor ?? 'system',
+    payload: { from_status: cur.status, to_status: to, transition_event: tdef.event },
   });
-  return upd.rows[0];
+  // A+ 副作用：SLA 暂停/恢复（真实落库，可断言）；notify_* 记录 domain_event（无短信网关，诚实标注 logged-not-delivered）
+  const se = tdef.sideEffects ?? [];
+  if (se.includes('pause_sla')) {
+    await client.query('UPDATE work_orders SET sla_paused_at = now() WHERE id = $1 AND tenant_id = $2', [id, tenantId]);
+  } else if (se.includes('resume_sla')) {
+    await client.query('UPDATE work_orders SET sla_paused_at = NULL WHERE id = $1 AND tenant_id = $2', [id, tenantId]);
+  }
+  if (se.some((x) => x.startsWith('notify_'))) {
+    await emitDomainEvent(client, {
+      tenantId, entityType: 'work_order', entityId: id, type: 'notify', actor: opts?.actor ?? 'system',
+      payload: { sideEffects: se.filter((x) => x.startsWith('notify_')) },
+    });
+  }
+  return { row: upd.rows[0], transition: tdef };
 }
 
 export async function findOne(

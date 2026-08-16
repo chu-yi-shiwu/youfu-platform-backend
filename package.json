@@ -12,6 +12,8 @@
     "migrate": "tsx src/db/migrate.ts",
     "init-db": "tsx scripts/init-db.ts",
     "seed:accounts": "tsx scripts/seed-accounts.ts",
+    "seed:workflow": "tsx scripts/seed-workflow-def.ts",
+    "seed:workflow:reset": "tsx scripts/seed-workflow-def.ts --reset",
     "register:webhook": "node scripts/register-webhook.mjs",
     "test": "vitest run",
     "release-gate": "tsx scripts/releaseGate.ts"

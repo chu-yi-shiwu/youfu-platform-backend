@@ -1,9 +1,11 @@
 // C1 自适应优化层路由：生成并应用优化决策（飞轮写回 dispatch_rule + workflow 建议落库）。
 // 安全：dispatch 写回受 MODEL_AUTO_TUNE 控制（dev 默认关，只记录建议不应用，避免试点炸配置）。
 import { Router } from 'express';
+import { z } from 'zod';
 import { withTenantClient } from '../db/pool.js';
 import { processMetrics } from '../repo/stats.js';
 import { processMining } from '../repo/processMining.js';
+import { AppError } from '../middleware/error.js';
 import {
   generateOptimizations,
   generateMiningOptimizations,
@@ -12,8 +14,9 @@ import {
   recordWorkflowRecommendations,
   applyWorkflowOptimizations,
 } from '../services/optimizer.js';
-import { getWorkflowDef } from '../engine/workflowDef.js';
+import { getWorkflowDef, saveWorkflowDef } from '../engine/workflowDef.js';
 import { isAutoTuneEffective } from '../repo/tenantSettings.js';
+import { DEFAULT_WORK_ORDER_DEF, RICH_WORK_ORDER_DEF, type WorkflowDef } from '../engine/stateMachine.js';
 
 const router = Router();
 
@@ -111,6 +114,77 @@ router.get('/workflow/def', async (req, res, next) => {
     const entityType = (req.query.entity as string) || 'work_order';
     const def = await withTenantClient(tenantId, (client) => getWorkflowDef(client, tenantId, entityType));
     return res.json({ ok: true, code: 0, entity_type: entityType, def });
+  } catch (e) {
+    next(e);
+  }
+});
+
+// A+ Phase5：返回可选状态图模板（默认最小 4 态 / 富 13 态 UOne 颗粒度），供薄配置器一键应用。
+router.get('/workflow/templates', async (_req, res, next) => {
+  try {
+    return res.json({ ok: true, code: 0, default: DEFAULT_WORK_ORDER_DEF, rich: RICH_WORK_ORDER_DEF });
+  } catch (e) {
+    next(e);
+  }
+});
+
+// A+ Phase2：管理员显式保存某业务流状态图（零代码配置 T-① 的写通道；设计支柱②）。
+// 与"自动改流程"租户开关（④）解耦：此处为人工配置口径，需 admin 角色；自动改写为 optimize 飞轮路径。
+// 校验：states 非空字符串数组、transitions 每项含 from/to/event；其余字段透传。
+const putDefSchema = z.object({
+  entity: z.string().min(1).optional(),
+  def: z.object({
+    initial: z.string().min(1),
+    states: z.array(z.string().min(1)).min(1),
+    transitions: z
+      .array(
+        z.object({
+          from: z.string().min(1),
+          to: z.string().min(1),
+          event: z.string().min(1),
+          requiredFields: z.array(z.string()).optional(),
+          allowedRoles: z.array(z.string()).optional(),
+          sideEffects: z.array(z.string()).optional(),
+        }),
+      )
+      .optional()
+      .default([]),
+    config: z.record(z.string(), z.unknown()).optional(),
+  }),
+});
+
+router.put('/workflow/def', async (req, res, next) => {
+  try {
+    const tenantId = res.locals.auth.tenantId;
+    const role = res.locals.auth.role;
+    if (role !== 'admin') {
+      throw new AppError('FORBIDDEN', 'only admin can reconfigure workflow definition', 403);
+    }
+    const { entity, def } = putDefSchema.parse(req.body);
+    const entityType = entity || 'work_order';
+    // 诚实校验：所有 transition 的 from/to 必须落在 states 集合内，initial 也须在 states 内（避免写坏引擎）
+    if (!def.states.includes(def.initial)) {
+      throw new AppError('BAD_REQUEST', `initial "${def.initial}" not in states`, 422);
+    }
+    const unknown = def.transitions.filter((t) => !def.states.includes(t.from) || !def.states.includes(t.to));
+    if (unknown.length) {
+      throw new AppError('BAD_REQUEST', `transition references unknown state: ${JSON.stringify(unknown[0])}`, 422);
+    }
+    const cleanDef: WorkflowDef = {
+      initial: def.initial,
+      states: def.states,
+      transitions: def.transitions,
+      config: def.config ?? {},
+    };
+    const version = await withTenantClient(tenantId, async (client) => {
+      await saveWorkflowDef(client, tenantId, entityType, cleanDef);
+      const r = await client.query<{ version: number }>(
+        `SELECT version FROM workflow_def WHERE tenant_id = $1 AND entity_type = $2`,
+        [tenantId, entityType],
+      );
+      return r.rows[0]?.version ?? 1;
+    });
+    return res.json({ ok: true, code: 0, entity_type: entityType, version, def: cleanDef });
   } catch (e) {
     next(e);
   }
