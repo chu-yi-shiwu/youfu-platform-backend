@@ -5,6 +5,8 @@
 import type { PoolClient } from 'pg';
 import { StatsModelBackend, type ModelBackend, type ModelParams } from '../engine/model/ModelBackend.js';
 import { generateOptimizations, applyDispatchOptimizations } from './optimizer.js';
+import { getWorkflowDef } from '../engine/workflowDef.js';
+import { doneStates } from '../engine/stateMachine.js';
 
 /** pg 驱动对 jsonb 可能返回字符串或已解析对象；统一归一化（T-A 缺陷2修复）。 */
 function safeParsePayload(p: any): any {
@@ -118,11 +120,15 @@ export async function trainFromDb(
   const loaded = typeof raw === 'string' ? safeParsePayload(raw) : raw;
   const model = new StatsModelBackend(loaded ?? undefined);
 
+  // A+ Phase1.5：训练样本取"完成态"工单（def 派生：DEFAULT=completed；RICH=completed/closed/evaluated），
+  // 富模板下不漏训 closed/evaluated，且不把 cancelled 当完成样本喂模型。
+  const def = await getWorkflowDef(client, tenantId, 'work_order');
+  const done = doneStates(def);
   const orders = await client.query<{ id: string; business_type: string }>(
     `SELECT id, business_type FROM work_orders
-     WHERE tenant_id = $1 AND status = 'completed'
+     WHERE tenant_id = $1 AND status = ANY($2::text[])
      ORDER BY updated_at DESC LIMIT 200`,
-    [tenantId],
+    [tenantId, done],
   );
   for (const o of orders.rows) {
     if (!o.business_type) continue; // C2 n3 封死：无 business_type 不喂模型

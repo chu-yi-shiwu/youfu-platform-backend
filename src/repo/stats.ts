@@ -7,6 +7,8 @@
 //   是否有人工 transition 干预）。真实无人值守闭环率待工程接 ticket_event 审计聚合细化，
 //   此处不编造"演示自动完成"数据（已消除演示自动置 completed 的旧问题）。
 import type { PoolClient } from 'pg';
+import { getWorkflowDef } from '../engine/workflowDef.js';
+import { doneStates, terminalStates } from '../engine/stateMachine.js';
 
 export interface TicketStats {
   tenant_id: string;
@@ -20,6 +22,10 @@ export interface TicketStats {
 }
 
 export async function ticketStats(client: PoolClient, tenantId: string): Promise<TicketStats> {
+  // A+ Phase1.5：完成态口径由 workflow_def 派生（DEFAULT=['completed']；RICH=['completed','closed','evaluated']），
+  // 富模板下不漏计 closed/evaluated，且不把 cancelled 算完成。
+  const def = await getWorkflowDef(client, tenantId, 'work_order');
+  const done = doneStates(def);
   const r = await client.query<{
     total: string;
     completed: string;
@@ -28,11 +34,11 @@ export async function ticketStats(client: PoolClient, tenantId: string): Promise
   }>(
     `SELECT
        COUNT(*)::text                                          AS total,
-       COUNT(*) FILTER (WHERE status = 'completed')::text      AS completed,
+       COUNT(*) FILTER (WHERE status = ANY($2::text[]))::text  AS completed,
        COUNT(*) FILTER (WHERE auto_flow = true)::text          AS auto_dispatched,
-       COUNT(*) FILTER (WHERE auto_flow = true AND status = 'completed')::text AS auto_closed
+       COUNT(*) FILTER (WHERE auto_flow = true AND status = ANY($2::text[]))::text AS auto_closed
      FROM work_orders WHERE tenant_id = $1`,
-    [tenantId],
+    [tenantId, done],
   );
   const row = r.rows[0];
   const total = Number(row.total);
@@ -98,6 +104,10 @@ export function bucketDuration(minutesArr: number[]): { lt_1h: number; h1_4: num
 }
 
 export async function processMetrics(client: PoolClient, tenantId: string): Promise<ProcessMetrics> {
+  // A+ Phase1.5：由 workflow_def 派生"活跃集/完成态"，富模板下不写死 4 态。
+  const def = await getWorkflowDef(client, tenantId, 'work_order');
+  const terminals = terminalStates(def); // 终态（含 cancelled/closed/evaluated）→ 不计入活跃堆
+  const done = doneStates(def); // 成功完成态（含 completed 里程碑态）
   // 1) 派单命中率 + 转派率
   const base = await client.query<{ total: string; auto_dispatched: string }>(
     `SELECT COUNT(*)::text AS total, COUNT(*) FILTER (WHERE auto_flow = true)::text AS auto_dispatched
@@ -115,32 +125,32 @@ export async function processMetrics(client: PoolClient, tenantId: string): Prom
   const reCount = Number(reassigned.rows[0].c);
   const { dispatch_hit_rate, reassign_rate } = calcRates(total, autoDispatched, reCount);
 
-  // 2) SLA 达成率
+  // 2) SLA 达成率（完成态由 def 派生：DEFAULT=completed；RICH=completed/closed/evaluated）
   const sla = await client.query<{ with_sla: string; sla_met: string }>(
     `SELECT
        COUNT(*) FILTER (WHERE sla_due_at IS NOT NULL)::text AS with_sla,
-       COUNT(*) FILTER (WHERE sla_due_at IS NOT NULL AND status = 'completed' AND updated_at <= sla_due_at)::text AS sla_met
+       COUNT(*) FILTER (WHERE sla_due_at IS NOT NULL AND status = ANY($2::text[]) AND updated_at <= sla_due_at)::text AS sla_met
      FROM work_orders WHERE tenant_id = $1`,
-    [tenantId],
+    [tenantId, done],
   );
   const { sla_rate, sla_note } = calcSlaRate(Number(sla.rows[0].with_sla), Number(sla.rows[0].sla_met));
 
-  // 3) 工单时长分布（completed 工单，分钟）
+  // 3) 工单时长分布（完成态工单，分钟）
   const dur = await client.query<{ minutes: string | null }>(
     `SELECT EXTRACT(EPOCH FROM (updated_at - created_at)) / 60 AS minutes
-     FROM work_orders WHERE tenant_id = $1 AND status = 'completed'`,
-    [tenantId],
+     FROM work_orders WHERE tenant_id = $1 AND status = ANY($2::text[])`,
+    [tenantId, done],
   );
   const duration_buckets = bucketDuration(dur.rows.map((r) => (r.minutes != null ? Number(r.minutes) : 0)));
 
-  // 4) 瓶颈定位：各模块活跃（待处理/进行中）实体堆积
+  // 4) 瓶颈定位：各模块活跃（非终态）实体堆积；work_order 活跃集由 def 终态派生（富模板不漏计评审/完成态）
   const bottleneck = await client.query<{ entity_type: string; active: string }>(
-    `SELECT 'work_order' AS entity_type, COUNT(*)::text AS active FROM work_orders WHERE tenant_id=$1 AND status IN ('draft','assigned','processing')
+    `SELECT 'work_order' AS entity_type, COUNT(*)::text AS active FROM work_orders WHERE tenant_id=$1 AND status <> ALL($2::text[])
      UNION ALL SELECT 'inspection_task', COUNT(*)::text FROM inspection_task WHERE tenant_id=$1 AND status IN ('pending','in_progress')
      UNION ALL SELECT 'volunteer_record', COUNT(*)::text FROM volunteer_record WHERE tenant_id=$1 AND status IN ('registered','checked_in')
      UNION ALL SELECT 'feedback', COUNT(*)::text FROM feedback WHERE tenant_id=$1 AND status='new'
      UNION ALL SELECT 'monitor_alert', COUNT(*)::text FROM monitor_alert WHERE tenant_id=$1 AND status='active'`,
-    [tenantId],
+    [tenantId, terminals],
   );
   const bottleneckArr = bottleneck.rows
     .map((r) => ({ entity_type: r.entity_type, active: Number(r.active) }))
