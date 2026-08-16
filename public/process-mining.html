@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>优服家 · 过程挖掘看板（⑦P0）</title>
+<style>
+  :root {
+    --bg: #f5f7fa; --card: #ffffff; --ink: #1f2933; --sub: #6b7785;
+    --line: #e3e8ef; --accent: #2563eb; --accent2: #0ea5e9;
+    --good: #16a34a; --warn: #d97706; --bad: #dc2626; --chip: #eef2ff;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: var(--bg); color: var(--ink); font-size: 14px; }
+  header { background: linear-gradient(120deg, #1e3a8a, #2563eb); color: #fff; padding: 18px 24px; }
+  header h1 { margin: 0; font-size: 19px; }
+  header p { margin: 4px 0 0; opacity: .85; font-size: 12px; }
+  .bar { display: flex; gap: 12px; align-items: flex-end; flex-wrap: wrap; padding: 14px 24px; background: #fff; border-bottom: 1px solid var(--line); }
+  .bar label { font-size: 12px; color: var(--sub); display: block; margin-bottom: 4px; }
+  .bar select, .bar input { padding: 7px 10px; border: 1px solid var(--line); border-radius: 8px; font-size: 13px; }
+  .bar button { padding: 8px 16px; background: var(--accent); color: #fff; border: 0; border-radius: 8px; cursor: pointer; font-size: 13px; }
+  .bar button:hover { background: #1d4ed8; }
+  main { padding: 18px 24px 40px; max-width: 1180px; margin: 0 auto; }
+  .grid { display: grid; gap: 16px; }
+  .cards { grid-template-columns: repeat(4, 1fr); }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px; }
+  .card .k { font-size: 12px; color: var(--sub); }
+  .card .v { font-size: 26px; font-weight: 700; margin-top: 6px; }
+  .card .s { font-size: 11px; color: var(--sub); margin-top: 4px; }
+  section { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 18px; margin-top: 16px; }
+  section h2 { margin: 0 0 14px; font-size: 15px; display: flex; align-items: center; gap: 8px; }
+  section h2 .tag { font-size: 11px; background: var(--chip); color: var(--accent); padding: 2px 8px; border-radius: 6px; font-weight: 600; }
+  .row { display: flex; align-items: center; gap: 10px; margin: 7px 0; }
+  .row .name { width: 170px; font-size: 13px; color: var(--ink); flex: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .track { flex: 1; background: #eef2f7; border-radius: 6px; height: 18px; position: relative; overflow: hidden; }
+  .fill { height: 100%; background: linear-gradient(90deg, var(--accent), var(--accent2)); border-radius: 6px; }
+  .row .pct { width: 92px; text-align: right; font-size: 12px; color: var(--sub); flex: none; }
+  .flow { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+  .node { background: var(--chip); border: 1px solid var(--line); color: var(--accent); padding: 6px 12px; border-radius: 20px; font-size: 13px; font-weight: 600; }
+  .edge { color: var(--sub); font-size: 11px; }
+  .empty { color: var(--sub); font-size: 13px; padding: 22px; text-align: center; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); }
+  th { color: var(--sub); font-weight: 600; font-size: 12px; }
+  .pill { display: inline-block; padding: 2px 9px; border-radius: 12px; font-size: 11px; font-weight: 600; }
+  .pill.good { background: #dcfce7; color: var(--good); }
+  .pill.warn { background: #fef3c7; color: var(--warn); }
+  .pill.bad { background: #fee2e2; color: var(--bad); }
+  .note { font-size: 11px; color: var(--sub); margin-top: 10px; line-height: 1.5; }
+  .err { background: #fef2f2; border: 1px solid #fecaca; color: #b91c1c; padding: 12px; border-radius: 10px; margin-top: 14px; font-size: 13px; }
+  svg text { font-family: inherit; }
+</style>
+</head>
+<body>
+<header>
+  <h1>优服家 · 过程挖掘看板</h1>
+  <p>⑦P0 飞轮"眼睛" — 消费统一事件总线 domain_event，只读、RLS 隔离、不落脏数据</p>
+</header>
+
+<div class="bar">
+  <div>
+    <label>业务流 (entity_type)</label>
+    <select id="entityType"></select>
+  </div>
+  <div>
+    <label>时间窗 (天)</label>
+    <select id="days">
+      <option value="7">近 7 天</option>
+      <option value="30" selected>近 30 天</option>
+      <option value="90">近 90 天</option>
+      <option value="365">近 1 年</option>
+    </select>
+  </div>
+  <div>
+    <label>租户 (X-Tenant-Id, 留空=dev 默认)</label>
+    <input id="tenant" placeholder="t-verification" style="width:160px" />
+  </div>
+  <button id="go">刷新看板</button>
+</div>
+
+<main>
+  <div id="error"></div>
+  <div class="grid cards" id="overview"></div>
+
+  <section>
+    <h2>主导流程路径 <span class="tag">变体发现</span></h2>
+    <div id="flow"></div>
+    <div id="variants"></div>
+  </section>
+
+  <section>
+    <h2>瓶颈定位 <span class="tag">停留时长</span></h2>
+    <div id="bottleneck"></div>
+  </section>
+
+  <section>
+    <h2>吞吐趋势 <span class="tag">按天</span></h2>
+    <div id="throughput"></div>
+  </section>
+
+  <section>
+    <h2>合规偏离 <span class="tag">主导路径依从</span></h2>
+    <div id="conformance"></div>
+    <div class="note" id="conf-note"></div>
+  </section>
+
+  <div class="note">
+    数据源：<code>domain_event</code>（统一事件总线，020）。算法：按 <code>entity_id</code> 回放时序 → 变体聚合 + 直接后继边时长 + 按天吞吐 + 主导路径偏离。
+    合规为 P0 近似（主导路径依从），精确状态机合规（<code>ticket_event</code>↔<code>workflow_def</code>）为后续增强。
+  </div>
+</main>
+
+<script>
+const API = '/api/v1/process-mining';
+
+function authHeaders() {
+  const h = { 'Authorization': 'Bearer dev', 'Content-Type': 'application/json' };
+  const t = document.getElementById('tenant').value.trim();
+  if (t) h['X-Tenant-Id'] = t;
+  return h;
+}
+
+function fmtMin(m) {
+  if (m == null) return '-';
+  if (m < 60) return m.toFixed(0) + ' 分';
+  if (m < 1440) return (m / 60).toFixed(1) + ' 时';
+  return (m / 1440).toFixed(1) + ' 天';
+}
+
+function bar(name, pct, sub) {
+  return `<div class="row"><div class="name" title="${name}">${name}</div>
+    <div class="track"><div class="fill" style="width:${Math.max(2, pct)}%"></div></div>
+    <div class="pct">${sub}</div></div>`;
+}
+
+async function load() {
+  document.getElementById('error').innerHTML = '';
+  const et = document.getElementById('entityType').value;
+  const days = document.getElementById('days').value;
+  const qs = new URLSearchParams({ entityType: et, days });
+  let data;
+  try {
+    const r = await fetch(`${API}?${qs}`, { headers: authHeaders() });
+    const j = await r.json();
+    if (!j.ok) throw new Error(j.message || 'API 返回非 ok');
+    data = j.result;
+  } catch (e) {
+    document.getElementById('error').innerHTML = `<div class="err">加载失败：${e.message}。请确认后端已启动（默认 :4001）且已跑迁移产生 domain_event 数据。</div>`;
+    return;
+  }
+  render(data);
+}
+
+function render(d) {
+  // overview
+  const ov = d.overview;
+  document.getElementById('overview').innerHTML = [
+    card('流程实例 (cases)', ov.case_count, `${d.entity_type}`),
+    card('事件总量', ov.event_count, 'domain_event 行'),
+    card('业务流类型', ov.available_entity_types.length, ov.available_entity_types.slice(0,3).join('/') || '-'),
+    card('时间窗', d.scope.days + ' 天', '回溯范围'),
+  ].join('');
+  if (ov.available_entity_types.length && document.getElementById('entityType').options.length <= 1) {
+    document.getElementById('entityType').innerHTML = ov.available_entity_types.map(t => `<option value="${t}">${t}</option>`).join('');
+    document.getElementById('entityType').value = d.entity_type;
+  }
+
+  // flow (dominant variant)
+  const happy = d.conformance.happy_path || [];
+  document.getElementById('flow').innerHTML = happy.length
+    ? `<div class="flow">` + happy.map((a,i) => {
+        const e = d.bottlenecks.per_edge.find(x => x.from === a);
+        const lbl = (i < happy.length - 1 && e) ? `<span class="edge">→ ${fmtMin(e.avg_minutes)} →</span>` : (i < happy.length-1 ? '<span class="edge">→</span>' : '');
+        return `<span class="node">${a}</span>${lbl}`;
+      }).join('') + `</div>`
+    : `<div class="empty">无流程实例</div>`;
+
+  // variants
+  if (!d.variants.length) {
+    document.getElementById('variants').innerHTML = `<div class="empty">当前范围无变体数据，请确认已有业务流在跑（domain_event 有 emit）。</div>`;
+  } else {
+    const max = d.variants[0].count || 1;
+    document.getElementById('variants').innerHTML = d.variants.slice(0, 12).map(v =>
+      bar(v.seq.join(' → '), v.count / max * 100, `×${v.count} · ${(v.share*100).toFixed(1)}%`)
+    ).join('') + (d.variants.length > 12 ? `<div class="note">仅显示前 12 / 共 ${d.variants.length} 个变体</div>` : '');
+  }
+
+  // bottleneck
+  const be = d.bottlenecks.per_edge.slice(0, 10);
+  const act = d.bottlenecks.per_activity.slice(0, 10);
+  let html = '';
+  if (be.length) {
+    const maxBe = be[0].avg_minutes || 1;
+    html += `<div class="k" style="color:var(--sub);font-size:12px;margin-bottom:6px">最慢直接后继边（活动→活动）</div>`;
+    html += be.map(e => bar(`${e.from} → ${e.to}`, e.avg_minutes / maxBe * 100, fmtMin(e.avg_minutes) + ` · ×${e.count}`)).join('');
+  }
+  if (act.length) {
+    const maxAct = act[0].avg_minutes || 1;
+    html += `<div class="k" style="color:var(--sub);font-size:12px;margin:14px 0 6px">每活动停留时长（到下一事件）</div>`;
+    html += act.map(a => bar(a.activity, a.avg_minutes / maxAct * 100, fmtMin(a.avg_minutes) + ` · ×${a.count}`)).join('');
+  }
+  document.getElementById('bottleneck').innerHTML = html || `<div class="empty">无时序数据（实例均只有单事件，无法计算停留时长）</div>`;
+
+  // throughput
+  const tp = d.throughput;
+  if (!tp.length) {
+    document.getElementById('throughput').innerHTML = `<div class="empty">时间窗内无事件</div>`;
+  } else {
+    const maxE = Math.max(...tp.map(p => p.events), 1);
+    const W = 100;
+    document.getElementById('throughput').innerHTML = `<div style="display:flex;gap:2px;align-items:flex-end;height:160px">` +
+      tp.map(p => {
+        const h = Math.max(2, p.events / maxE * 150);
+        const title = `${p.day}\n事件 ${p.events} · 实例 ${p.cases}`;
+        return `<div title="${title}" style="flex:1;background:linear-gradient(180deg,var(--accent2),var(--accent));height:${h}px;border-radius:3px 3px 0 0"></div>`;
+      }).join('') + `</div>` +
+      `<div style="display:flex;gap:2px;font-size:9px;color:var(--sub);margin-top:4px">` +
+      tp.map(p => `<div style="flex:1;text-align:center;overflow:hidden">${p.day.slice(5)}</div>`).join('') + `</div>`;
+  }
+
+  // conformance
+  const c = d.conformance;
+  const rate = (c.deviation_rate * 100).toFixed(1);
+  const pill = c.deviation_rate === 0 ? 'good' : (c.deviation_rate < 0.3 ? 'warn' : 'bad');
+  let ch = `<div class="row"><div class="name">合规偏离率</div>
+    <div class="track"><div class="fill" style="width:${Math.max(2, c.deviation_rate*100)}%;background:linear-gradient(90deg,var(--good),${pill==='bad'?'var(--bad)':'var(--warn)'})"></div></div>
+    <div class="pct"><span class="pill ${pill}">${rate}%</span></div></div>`;
+  if (c.deviating_variants.length) {
+    ch += `<table style="margin-top:12px"><thead><tr><th>偏离变体（路径）</th><th>实例数</th><th>占比</th></tr></thead><tbody>` +
+      c.deviating_variants.slice(0, 8).map(v => `<tr><td>${v.seq.join(' → ')}</td><td>${v.count}</td><td>${(v.share*100).toFixed(1)}%</td></tr>`).join('') +
+      `</tbody></table>`;
+  } else if (c.happy_path.length) {
+    ch += `<div class="note">全部实例均遵循主导路径，无偏离。</div>`;
+  }
+  document.getElementById('conformance').innerHTML = ch;
+  document.getElementById('conf-note').textContent = c.note || '';
+}
+
+function card(k, v, s) {
+  return `<div class="card"><div class="k">${k}</div><div class="v">${v}</div><div class="s">${s}</div></div>`;
+}
+
+document.getElementById('go').addEventListener('click', load);
+document.getElementById('entityType').addEventListener('change', load);
+document.getElementById('days').addEventListener('change', load);
+load();
+</script>
+</body>
+</html>
