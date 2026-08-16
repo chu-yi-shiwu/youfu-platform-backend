@@ -13,6 +13,7 @@ import {
   applyWorkflowOptimizations,
 } from '../services/optimizer.js';
 import { getWorkflowDef } from '../engine/workflowDef.js';
+import { isAutoTuneEffective } from '../repo/tenantSettings.js';
 
 const router = Router();
 
@@ -52,12 +53,12 @@ router.post('/optimize/generate', async (req, res, next) => {
 
 // ⑦P2 自适应优化飞轮：消费过程挖掘（飞轮"眼睛"）产出精确实例级优化建议并落库 pending。
 // 与 /optimize/generate（粗粒度 processMetrics）互补，本接口驱动"数据→模型"方向（模数共振）。
-// 安全：dev（MODEL_AUTO_TUNE 未开）仅记录建议不应用；AUTO_TUNE=true 时调用 applyWorkflowOptimizations
-//   改写 workflow_def 收口闭环（与 dispatch 写回受同一开关控制，避免试点误改流程定义）。
+// 安全：自动改写 workflow_def 由"自动改流程"租户开关（④）控制——GET/PUT /api/v1/auto-tune 在
+//   /workflow-admin 界面自主翻转、实时生效、落库持久化；ENV MODEL_AUTO_TUNE 仅作全局覆盖/熔断。
 router.post('/optimize/generate-mining', async (req, res, next) => {
   try {
     const tenantId = res.locals.auth.tenantId;
-    const autoTune = process.env.MODEL_AUTO_TUNE === 'true';
+    const autoTune = await isAutoTuneEffective(tenantId);
     const entityType = typeof req.query.entityType === 'string' ? req.query.entityType : undefined;
     const daysRaw = typeof req.query.days === 'string' ? Number(req.query.days) : undefined;
     if (req.query.days !== undefined && !Number.isFinite(daysRaw)) {
@@ -120,13 +121,13 @@ router.get('/workflow/def', async (req, res, next) => {
 router.post('/optimize/apply-workflow', async (req, res, next) => {
   try {
     const tenantId = res.locals.auth.tenantId;
-    const autoTune = process.env.MODEL_AUTO_TUNE === 'true';
+    const autoTune = await isAutoTuneEffective(tenantId);
     if (!autoTune) {
       return res.json({
         ok: true,
         code: 0,
         applied: false,
-        reason: 'MODEL_AUTO_TUNE 未开启，仅记录建议不应用（dev 安全）；生产试点开启后调用本接口才改写流程定义',
+        reason: '自动改流程未开启（租户开关关闭或全局熔断），仅记录建议不应用；在 /workflow-admin 开启开关后调用本接口才改写流程定义',
       });
     }
     const result = await withTenantClient(tenantId, (client) => applyWorkflowOptimizations(client, tenantId));
