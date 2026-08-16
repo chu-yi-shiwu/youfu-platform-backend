@@ -21,6 +21,9 @@ import statsRouter from './routes/stats.js';
 import optimizeRouter from './routes/optimize.js';
 import processMiningRouter from './routes/processMining.js';
 import autoTuneRouter from './routes/autoTune.js';
+import workerRouter from './routes/worker.js';
+import catalogRouter from './routes/catalog.js';
+import accountsRouter from './routes/accounts.js';
 
 // 试点/生产：用 ENV_FILE 指定环境文件（默认 .env，production 下默认 .env.pilot），
 // 同一份代码可同时跑 dev / pilot，无需改代码。
@@ -61,6 +64,10 @@ app.use('/api/v1', statsRouter);
 app.use('/api/v1', optimizeRouter);
 app.use('/api/v1', processMiningRouter);
 app.use('/api/v1', autoTuneRouter);
+// ② 主数据补全：人员 / 商品目录 / 账号 三类 CRUD（dev 默认 admin 可写）
+app.use('/api/v1', workerRouter);
+app.use('/api/v1', catalogRouter);
+app.use('/api/v1', accountsRouter);
 
 // ⑦P0 过程挖掘看板：顶层公开托管单文件 HTML（pilot 同 SPA 策略；prod 上线前应在反向代理层加鉴权）。
 // 必须注册在 SERVE_STATIC 的 SPA 兜底正则之前，否则会被 index.html 兜底拦截。
