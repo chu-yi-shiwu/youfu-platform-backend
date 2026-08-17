@@ -366,6 +366,59 @@ router.get('/open/work_order/:id', async (req, res, next) => {
   }
 });
 
+// POST /api/v1/open/work_order/:id/photos —— P0 移动 H5「现场拍照真落库」
+// 把 base64 data URL 追加进 ext.photos（租户内隔离，跨 PC/H5 可见、刷新不丢）。
+// 诚实：文件本身存于 DB jsonb（pilot 规模足够）；后续接入对象存储只需改此端点落 URL。
+const photoSchema = z.object({
+  photo: z.string().min(1).max(8 * 1024 * 1024), // data URL，限 8MB 防滥用
+  caption: z.string().max(200).optional(),
+});
+router.post('/open/work_order/:id/photos', async (req, res, next) => {
+  try {
+    const tenantId = res.locals.auth.tenantId;
+    const { photo, caption } = photoSchema.parse(req.body);
+    const result = await withTenantClient(tenantId, async (client) => {
+      const row = await findOne(client, tenantId, req.params.id);
+      if (!row) return null;
+      const ext: Record<string, unknown> = row.ext && typeof row.ext === 'object' ? { ...row.ext } : {};
+      const photos = Array.isArray(ext.photos) ? (ext.photos as any[]) : [];
+      photos.push({ url: photo, caption: caption ?? null, at: new Date().toISOString() });
+      ext.photos = photos;
+      await client.query(
+        'UPDATE work_orders SET ext = $1::jsonb, updated_at = now() WHERE id = $2 AND tenant_id = $3',
+        [JSON.stringify(ext), req.params.id, tenantId],
+      );
+      return ext;
+    });
+    if (!result) return res.status(404).json({ ok: false, code: 'NOT_FOUND', message: 'work order not found' });
+    return res.json({ ok: true, code: 0, ext: result });
+  } catch (e) {
+    next(e);
+  }
+});
+
+// GET /api/v1/open/notifications?recipient=workerId —— P0 移动 H5「消息中心」
+// 读取已落库通知（in_app 落库即可达；sms/push 为 stub 未真发，诚实标注）。
+router.get('/open/notifications', async (req, res, next) => {
+  try {
+    const tenantId = res.locals.auth.tenantId;
+    const recipient = (req.query.recipient as string) || '';
+    if (!recipient) return res.json({ ok: true, code: 0, items: [] });
+    const rows = await withTenantClient(tenantId, (client) =>
+      client
+        .query(
+          `SELECT id, type, title, body, channel, delivered, read, work_order_id, payload, created_at
+           FROM notification WHERE tenant_id = $1 AND recipient = $2 ORDER BY created_at DESC LIMIT 100`,
+          [tenantId, recipient],
+        )
+        .then((r) => r.rows),
+    );
+    return res.json({ ok: true, code: 0, items: rows });
+  } catch (e) {
+    next(e);
+  }
+});
+
 // GET /api/v1/stats —— P6 自动派单率/自动闭环率口径（诚实，不编造演示数据）
 router.get('/stats', async (req, res, next) => {
   try {
