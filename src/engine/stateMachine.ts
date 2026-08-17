@@ -61,6 +61,7 @@ export const RICH_WORK_ORDER_DEF: WorkflowDef = {
     'draft',           // 草稿/新建
     'pending_accept',  // 待受理
     'pending_dispatch', // 待派单
+    'claim_hall',      // 抢单大厅(未命中自动派单时归属，待人员抢单)
     'assigned',        // 已派单/待接收
     'processing',      // 处理中
     'paused',          // 暂停中
@@ -83,6 +84,7 @@ export const RICH_WORK_ORDER_DEF: WorkflowDef = {
     { from: 'pending_dispatch', to: 'assigned', event: 'dispatch', allowedRoles: ['admin', 'dispatcher', 'service_desk'], requiredFields: ['assignee'] },
     { from: 'assigned', to: 'processing', event: 'receive', allowedRoles: ['admin', 'worker'] },
     { from: 'assigned', to: 'pending_dispatch', event: 'return', requiredFields: ['return_reason'] },
+    { from: 'assigned', to: 'assigned', event: 'forward', requiredFields: ['assignee'], allowedRoles: ['admin', 'dispatcher', 'service_desk'] },
     { from: 'processing', to: 'paused', event: 'pause', sideEffects: ['pause_sla'] },
     { from: 'paused', to: 'processing', event: 'resume', sideEffects: ['resume_sla'] },
     { from: 'processing', to: 'suspended', event: 'suspend', requiredFields: ['suspend_reason'], sideEffects: ['pause_sla'] },
@@ -93,8 +95,12 @@ export const RICH_WORK_ORDER_DEF: WorkflowDef = {
     { from: 'review_passed', to: 'completed', event: 'complete' },
     { from: 'completed', to: 'closed', event: 'close', requiredFields: ['close_reason'] },
     { from: 'closed', to: 'evaluated', event: 'satisfy', requiredFields: ['satisfaction_score'] },
+    // —— 抢单大厅（滴滴式未命中自动派单时归属，人员可抢单）——
+    { from: 'claim_hall', to: 'assigned', event: 'claim', allowedRoles: ['worker', 'admin', 'dispatcher', 'service_desk'] },
+    { from: 'claim_hall', to: 'assigned', event: 'dispatch', requiredFields: ['assignee'], allowedRoles: ['admin', 'dispatcher', 'service_desk'] },
     // —— 撤销（活跃态 → cancelled）——
     { from: 'draft', to: 'cancelled', event: 'cancel', requiredFields: ['cancel_reason'], allowedRoles: ['admin', 'dispatcher'] },
+    { from: 'claim_hall', to: 'cancelled', event: 'cancel', requiredFields: ['cancel_reason'], allowedRoles: ['admin', 'dispatcher'] },
     { from: 'pending_accept', to: 'cancelled', event: 'cancel', requiredFields: ['cancel_reason'], allowedRoles: ['admin', 'dispatcher'] },
     { from: 'pending_dispatch', to: 'cancelled', event: 'cancel', requiredFields: ['cancel_reason'], allowedRoles: ['admin', 'dispatcher'] },
     { from: 'assigned', to: 'cancelled', event: 'cancel', requiredFields: ['cancel_reason'], allowedRoles: ['admin', 'dispatcher'] },

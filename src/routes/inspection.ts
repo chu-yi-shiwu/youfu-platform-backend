@@ -10,6 +10,45 @@ import { AppError } from '../middleware/error.js';
 import { requireConfigRole } from '../middleware/role.js';
 import { createLinkedWorkOrder } from '../services/linkedWorkOrder.js';
 import { emitDomainEvent } from '../db/eventBus.js';
+import { getWorkflowDefOrDefault } from '../engine/workflowDef.js';
+import { applyEvent, availableTransitions } from '../engine/stateMachine.js';
+import { INSPECTION_DEF } from '../engine/themes.js';
+
+/**
+ * 状态流转统一走 workflow_def 引擎（红线：所有业务流必须过 workflow_def，不再硬编码状态机）。
+ * 读取 inspection_task 当前 status → 用引擎校验 event 合法性 → 写入目标态。
+ * 租户无自定义 inspection_task 定义时回退内置 INSPECTION_DEF，保证既有语义（pending→in_progress→done/exception）不变。
+ */
+async function transitionTask(
+  client: any,
+  tenantId: string,
+  taskId: string,
+  event: string,
+  extra: Record<string, unknown> = {},
+): Promise<any> {
+  const cur = await client.query(`SELECT * FROM inspection_task WHERE id = $1 AND tenant_id = $2`, [taskId, tenantId]);
+  if (cur.rowCount === 0) throw new AppError('NOT_FOUND', 'task not found', 404);
+  const t = cur.rows[0];
+  const def = await getWorkflowDefOrDefault(client, tenantId, 'inspection_task', INSPECTION_DEF);
+  const target = applyEvent(def, t.status, event);
+  if (!target) {
+    throw new AppError('BAD_STATE', `illegal transition ${t.status} --${event}-->`, 422);
+  }
+  const extraKeys = Object.keys(extra);
+  const filteredKeys = extraKeys.filter((k) => extra[k] !== 'now()');
+  const assigns = [
+    'status = $3',
+    ...filteredKeys.map((k, idx) => `${k} = $${4 + idx}`),
+    ...extraKeys.filter((k) => extra[k] === 'now()').map((k) => `${k} = now()`),
+  ];
+  const values = [taskId, tenantId, target, ...filteredKeys.map((k) => extra[k])];
+  const r = await client.query(
+    `UPDATE inspection_task SET ${assigns.join(', ')}, updated_at = now() WHERE id = $1 AND tenant_id = $2 RETURNING *`,
+    values,
+  );
+  await emitDomainEvent(client, { tenantId, entityType: 'inspection_task', entityId: taskId, type: event, actor: 'config_role' });
+  return r.rows[0];
+}
 
 const router = Router();
 
@@ -137,6 +176,27 @@ router.get('/tasks', async (req, res, next) => {
   }
 });
 
+// 巡检单详情：返回任务 + 引擎算出的 available（供前端动态渲染动作按钮，不硬编码状态机）。
+router.get('/tasks/:id', async (req, res, next) => {
+  try {
+    const tenantId = res.locals.auth.tenantId;
+    const item = await withTenantClient(tenantId, async (client) => {
+      const cur = await client.query(`SELECT * FROM inspection_task WHERE id = $1 AND tenant_id = $2`, [
+        req.params.id,
+        tenantId,
+      ]);
+      if (cur.rowCount === 0) throw new AppError('NOT_FOUND', 'task not found', 404);
+      const t = cur.rows[0];
+      const def = await getWorkflowDefOrDefault(client, tenantId, 'inspection_task', INSPECTION_DEF);
+      const available = availableTransitions(def, t.status);
+      return { ...t, available };
+    });
+    return res.json({ ok: true, code: 0, item });
+  } catch (e) {
+    next(e);
+  }
+});
+
 router.post('/tasks', async (req, res, next) => {
   try {
     requireConfigRole(req, res);
@@ -163,18 +223,13 @@ router.post('/tasks/:id/checkin', async (req, res, next) => {
     requireConfigRole(req, res);
     const tenantId = res.locals.auth.tenantId;
     const b = z.object({ geo_lat: z.number().optional(), geo_lng: z.number().optional(), note: z.string().optional() }).parse(req.body);
-    const item = await withTenantClient(tenantId, async (client) => {
-      const cur = await client.query(`SELECT * FROM inspection_task WHERE id = $1 AND tenant_id = $2`, [req.params.id, tenantId]);
-      if (cur.rowCount === 0) throw new AppError('NOT_FOUND', 'task not found', 404);
-      const r = await client.query(
-        `UPDATE inspection_task SET status = 'in_progress', geo_lat = $3, geo_lng = $4, note = COALESCE($5, note), updated_at = now()
-         WHERE id = $1 AND tenant_id = $2 RETURNING *`,
-        [req.params.id, tenantId, b.geo_lat ?? null, b.geo_lng ?? null, b.note ?? null],
-      );
-      const row = r.rows[0];
-      await emitDomainEvent(client, { tenantId, entityType: 'inspection_task', entityId: row.id, type: 'checkin', actor: 'config_role' });
-      return row;
-    });
+    const item = await withTenantClient(tenantId, (client) =>
+      transitionTask(client, tenantId, req.params.id, 'checkin', {
+        geo_lat: b.geo_lat ?? null,
+        geo_lng: b.geo_lng ?? null,
+        note: b.note ?? null,
+      }),
+    );
     return res.json({ ok: true, code: 0, item });
   } catch (e) {
     next(e);
@@ -186,18 +241,11 @@ router.post('/tasks/:id/complete', async (req, res, next) => {
     requireConfigRole(req, res);
     const tenantId = res.locals.auth.tenantId;
     const b = z.object({ note: z.string().optional(), photos: z.array(z.string()).optional() }).parse(req.body);
-    const item = await withTenantClient(tenantId, async (client) => {
-      const cur = await client.query(`SELECT * FROM inspection_task WHERE id = $1 AND tenant_id = $2`, [req.params.id, tenantId]);
-      if (cur.rowCount === 0) throw new AppError('NOT_FOUND', 'task not found', 404);
-      const r = await client.query(
-        `UPDATE inspection_task SET status = 'done', done_at = now(), note = COALESCE($3, note), photos = COALESCE($4, photos), updated_at = now()
-         WHERE id = $1 AND tenant_id = $2 RETURNING *`,
-        [req.params.id, tenantId, b.note ?? null, b.photos ? JSON.stringify(b.photos) : null],
-      );
-      const row = r.rows[0];
-      await emitDomainEvent(client, { tenantId, entityType: 'inspection_task', entityId: row.id, type: 'complete', actor: 'config_role' });
-      return row;
-    });
+    const extra: Record<string, unknown> = { done_at: 'now()', note: b.note ?? null };
+    if (b.photos) extra.photos = JSON.stringify(b.photos); // photos 为 NOT NULL，仅在提供时写入，避免置空破坏约束
+    const item = await withTenantClient(tenantId, (client) =>
+      transitionTask(client, tenantId, req.params.id, 'complete', extra),
+    );
     return res.json({ ok: true, code: 0, item });
   } catch (e) {
     next(e);
@@ -209,17 +257,26 @@ router.post('/tasks/:id/exception', async (req, res, next) => {
     requireConfigRole(req, res);
     const tenantId = res.locals.auth.tenantId;
     const b = z.object({ note: z.string().min(1) }).parse(req.body);
-    const item = await withTenantClient(tenantId, async (client) => {
-      const cur = await client.query(`SELECT * FROM inspection_task WHERE id = $1 AND tenant_id = $2`, [req.params.id, tenantId]);
-      if (cur.rowCount === 0) throw new AppError('NOT_FOUND', 'task not found', 404);
-      const r = await client.query(
-        `UPDATE inspection_task SET status = 'exception', note = $3, updated_at = now() WHERE id = $1 AND tenant_id = $2 RETURNING *`,
-        [req.params.id, tenantId, b.note],
-      );
-      const row = r.rows[0];
-      await emitDomainEvent(client, { tenantId, entityType: 'inspection_task', entityId: row.id, type: 'exception', actor: 'config_role' });
-      return row;
-    });
+    const item = await withTenantClient(tenantId, (client) =>
+      transitionTask(client, tenantId, req.params.id, 'exception', { note: b.note }),
+    );
+    return res.json({ ok: true, code: 0, item });
+  } catch (e) {
+    next(e);
+  }
+});
+
+// 通用流转端点：复用 transitionTask（引擎校验 + 写库 + 事件记账）。
+// 前端按 available 的 event 统一调用，避免为每事件单独硬编码端点（覆盖 cancel 等）。
+router.post('/tasks/:id/transition', async (req, res, next) => {
+  try {
+    requireConfigRole(req, res);
+    const tenantId = res.locals.auth.tenantId;
+    const { event, ...fields } = req.body as { event: string; [k: string]: unknown };
+    if (!event || typeof event !== 'string') throw new AppError('BAD_REQUEST', 'event is required', 400);
+    const item = await withTenantClient(tenantId, (client) =>
+      transitionTask(client, tenantId, req.params.id, event, fields),
+    );
     return res.json({ ok: true, code: 0, item });
   } catch (e) {
     next(e);

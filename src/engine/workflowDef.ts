@@ -3,19 +3,29 @@
 import type { PoolClient } from 'pg';
 import { DEFAULT_WORK_ORDER_DEF, type WorkflowDef } from './stateMachine.js';
 
-/** 读状态图；租户无定义时回退默认（不写库，避免只读操作产生副作用）。 */
-export async function getWorkflowDef(
+/** 读状态图；租户无定义时回退指定兜底（不写库，避免只读操作产生副作用）。 */
+export async function getWorkflowDefOrDefault(
   client: PoolClient,
   tenantId: string,
   entityType: string,
+  fallback: WorkflowDef,
 ): Promise<WorkflowDef> {
   const r = await client.query<{ def: unknown }>(
     'SELECT def FROM workflow_def WHERE tenant_id = $1 AND entity_type = $2',
     [tenantId, entityType],
   );
   const raw = r.rows[0]?.def;
-  if (!raw) return cloneDef(DEFAULT_WORK_ORDER_DEF);
+  if (!raw) return cloneDef(fallback);
   return normalizeDef(typeof raw === 'string' ? JSON.parse(raw) : raw);
+}
+
+/** 读状态图；租户无定义时回退默认（不写库，避免只读操作产生副作用）。 */
+export async function getWorkflowDef(
+  client: PoolClient,
+  tenantId: string,
+  entityType: string,
+): Promise<WorkflowDef> {
+  return getWorkflowDefOrDefault(client, tenantId, entityType, DEFAULT_WORK_ORDER_DEF);
 }
 
 /** 确保状态图存在：无则 upsert 默认定义并返回；有则原样返回。 */
