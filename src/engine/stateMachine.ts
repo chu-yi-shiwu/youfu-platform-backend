@@ -17,11 +17,23 @@ export interface WorkflowTransition {
   sideEffects?: string[];    // 副作用标记：pause_sla / resume_sla / notify_*（真实落库或记录）
 }
 
+export interface AutoRoute {
+  to: string;
+  strategy?: string; // 派单策略提示：'least_load' 强制走负载兜底选人；未声明则保持 规则优先→least_load 兜底
+}
+
+export interface WorkflowDefConfig {
+  doneStates?: string[];                     // 完成态口径（成功结束），用于统计/训练样本
+  learningTriggers?: string[];               // 触发增量学习的状态集合（数据→模型共振控制点）；缺省回退 doneStates
+  autoRoutes?: Record<string, AutoRoute>;    // 各初态自动派发目标（配置=模型 surface 反写入口）
+  [key: string]: unknown;                    // 允许优化层写入 sla_tighten/target_sla_rate/auto_escalate 等
+}
+
 export interface WorkflowDef {
   initial: string;
   states: string[];
   transitions: WorkflowTransition[];
-  config?: Record<string, unknown>;
+  config?: WorkflowDefConfig;
 }
 
 // work_order 默认状态图（最小 4 态，仅作无 workflow_def 行时的兜底，不绑死租户）。
@@ -142,4 +154,34 @@ export function doneStates(def: WorkflowDef): string[] {
   const cfg = def.config?.doneStates as string[] | undefined;
   if (Array.isArray(cfg) && cfg.length > 0) return cfg;
   return terminalStates(def).filter((s) => s !== 'cancelled' && s !== 'voided');
+}
+
+/**
+ * 学习触发态（数据→模型共振控制点）：优先读 def.config.learningTriggers（仅保留声明在 states 内的合法状态），
+ * 缺省回退 doneStates（向后兼容：未配置则与旧行为一致）。
+ *  - 用途：workOrder.ts 在工单首次踏入这些态时触发 incrementalLearn。
+ */
+export function learningTriggerStates(def: WorkflowDef): string[] {
+  const raw = def.config?.learningTriggers;
+  if (Array.isArray(raw) && raw.length > 0) {
+    const valid = raw.filter((s) => def.states.includes(s));
+    if (valid.length > 0) return valid;
+  }
+  return doneStates(def);
+}
+
+/** 自动派发路由（配置=模型 surface）：返回某初态声明的自动派发目标态与策略；目标态非法（不在 states）则返回 null。 */
+export function autoRouteFor(def: WorkflowDef, from: string): AutoRoute | null {
+  const ar = def.config?.autoRoutes?.[from];
+  if (ar && typeof ar.to === 'string' && def.states.includes(ar.to)) {
+    return { to: ar.to, strategy: ar.strategy };
+  }
+  return null;
+}
+
+/** 返回所有声明了合法 autoRoute 的初态（供管理端可视化/测试）。 */
+export function autoRouteStates(def: WorkflowDef): string[] {
+  const ar = def.config?.autoRoutes;
+  if (!ar || typeof ar !== 'object') return [];
+  return Object.keys(ar).filter((from) => autoRouteFor(def, from) !== null);
 }
