@@ -15,6 +15,16 @@ function stub(over: Partial<ProcessMiningResult> = {}): ProcessMiningResult {
     bottlenecks: { per_activity: [], per_edge: [], slowest_edge: null, slowest_activity: null },
     throughput: [],
     conformance: { happy_path: [], deviation_rate: 0, deviating_variants: [], precise: true, note: '' },
+    resonance: {
+      configured: true,
+      initial: 'draft',
+      done_states: ['completed'],
+      learning_triggers: ['completed'],
+      auto_routes: [],
+      learning_hits_in_scope: 0,
+      auto_dispatched_in_scope: 0,
+      model_version: 0,
+    },
     ...over,
   };
 }
