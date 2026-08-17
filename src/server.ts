@@ -24,6 +24,9 @@ import autoTuneRouter from './routes/autoTune.js';
 import workerRouter from './routes/worker.js';
 import catalogRouter from './routes/catalog.js';
 import accountsRouter from './routes/accounts.js';
+import tenantInfoRouter from './routes/tenantInfo.js';
+import workflowDefRouter from './routes/workflowDef.js';
+import businessFlowRouter from './routes/businessFlow.js';
 
 // 试点/生产：用 ENV_FILE 指定环境文件（默认 .env，production 下默认 .env.pilot），
 // 同一份代码可同时跑 dev / pilot，无需改代码。
@@ -68,6 +71,10 @@ app.use('/api/v1', autoTuneRouter);
 app.use('/api/v1', workerRouter);
 app.use('/api/v1', catalogRouter);
 app.use('/api/v1', accountsRouter);
+app.use('/api/v1', tenantInfoRouter);
+app.use('/api/v1/workflow-defs', workflowDefRouter);
+// P3 横向克隆：通用业务流路由（运送/应急/循环签到… 按 entity_type 区分，流转统一过 workflow_def 引擎）
+app.use('/api/v1/flow', businessFlowRouter);
 
 // ⑦P0 过程挖掘看板：顶层公开托管单文件 HTML（pilot 同 SPA 策略；prod 上线前应在反向代理层加鉴权）。
 // 必须注册在 SERVE_STATIC 的 SPA 兜底正则之前，否则会被 index.html 兜底拦截。

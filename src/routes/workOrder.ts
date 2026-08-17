@@ -6,7 +6,7 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import { withTenantClient } from '../db/pool.js';
-import { createWithIdem, transition, list, findOne } from '../repo/ticket.js';
+import { createWithIdem, transition, list, findOne, findOneForUpdate } from '../repo/ticket.js';
 import { ticketStats } from '../repo/stats.js';
 import { pickWorker, resolveDispatch, getActiveRules } from '../engine/dispatch.js';
 import { AppError } from '../middleware/error.js';
@@ -16,6 +16,7 @@ import { dispatchEvent } from '../webhook/dispatch.js';
 import { StatsModelBackend, type ModelBackend } from '../engine/model/ModelBackend.js';
 import { incrementalLearn } from '../services/modelTrainer.js';
 import { emitDomainEvent } from '../db/eventBus.js';
+import { insertNotification } from '../services/notify.js';
 import type { WorkOrderStatus } from '../engine/stateMachine.js';
 import { getWorkflowDef } from '../engine/workflowDef.js';
 import { doneStates, terminalStates, availableTransitions, learningTriggerStates, autoRouteFor, shouldTriggerLearning } from '../engine/stateMachine.js';
@@ -32,6 +33,7 @@ const createSchema = z.object({
   title: z.string().optional(),
   description: z.string().optional(),
   contact: z.string().optional(),
+  reporter_name: z.string().optional(), // P1 收尾：申告人真实姓名（顶层列）
   assets: z.array(z.any()).optional(),
   // 派单所需技能线索（来自动态字段元数据，非写死业务值）
   skill_tags: z.array(z.string()).optional(),
@@ -39,6 +41,7 @@ const createSchema = z.object({
   source: z.enum(['wechat', 'backend', 'phone']).optional(),
   fault_type: z.string().optional(),
   service_desk: z.string().optional(),
+  department: z.string().optional(),
   ext: z.record(z.string(), z.unknown()).optional(),
 });
 
@@ -54,12 +57,11 @@ const transitionSchema = z.object({
 // 生成对齐前端的响应：未命中派单诚实返回 claim_hall（A 点确认）
 // DEF-1 修复：code 仅作成功标记（0），真实业务工单号通过 order_no 返回。
 // DEF-3 修复：返回内部 id（uuid）—— /transition/:id 需要它，否则建单后无法流转（契约错配）。
-export function toCreateRes(row: any, autoFlow: boolean, assignee: string | null, reason: string, landedStatus = 'assigned') {
-  const status: string = autoFlow ? landedStatus : 'claim_hall';
+export function toCreateRes(row: any, autoFlow: boolean, assignee: string | null, reason: string, _landedStatus = 'assigned') {
   return {
-    ok: true, code: 0, id: row.id, order_no: row.order_no, status, auto_flow: autoFlow, assignee, reason,
+    ok: true, code: 0, id: row.id, order_no: row.order_no, status: row.status, auto_flow: autoFlow, assignee, reason,
     source: row.source ?? 'backend', fault_type: row.fault_type ?? null,
-    service_desk: row.service_desk ?? null, ext: row.ext ?? {},
+    service_desk: row.service_desk ?? null, department: row.department ?? null, ext: row.ext ?? {},
   };
 }
 
@@ -80,10 +82,12 @@ router.post('/open/work_order', async (req, res, next) => {
         title: body.title,
         description: body.description,
         contact: body.contact,
+        reporterName: body.reporter_name,
         assets: body.assets,
         source: body.source,
         faultType: body.fault_type,
         serviceDesk: body.service_desk,
+        department: body.department,
         ext: body.ext,
         idempotencyKey: idem,
       });
@@ -142,6 +146,23 @@ router.post('/open/work_order', async (req, res, next) => {
         );
         // ④ 口径对齐：domain_event.type 一律为"结果状态"（与 transition() 一致），自动派单落入 dispatchTarget。
         await emitDomainEvent(client, { tenantId, entityType: 'work_order', entityId: row.id, type: dispatchTarget, actor: 'auto_dispatch', payload: { worker_id: picked.id } });
+        // A5 派单通知：落库通知被派单人（sms/push 为 stub，诚实未真实发送）
+        await insertNotification(client, {
+          tenantId, recipient: picked.id, type: 'dispatch', workOrderId: row.id,
+          title: '您有一条新工单', body: `工单 ${row.order_no} 已自动派给您`,
+          payload: { order_no: row.order_no, from_status: initial, to_status: dispatchTarget },
+        });
+      } else {
+        // 滴滴式未命中自动派单：归属抢单大厅（claim_hall），待人员抢单
+        await client.query(
+          'UPDATE work_orders SET status = $1, auto_flow = false, updated_at = now() WHERE id = $2',
+          ['claim_hall', row.id],
+        );
+        await client.query(
+          `INSERT INTO ticket_event (tenant_id, work_order_id, type, from_status, to_status, actor, payload)
+           VALUES ($1,$2,'enter_hall',$3,$3,'system', $4)`,
+          [tenantId, row.id, 'claim_hall', JSON.stringify({ reason: 'no worker auto-matched' })],
+        );
       }
       const final = await findOne(client, tenantId, row.id);
       return { final, autoFlow, assignee, reason, created, dispatchTarget };
@@ -177,6 +198,24 @@ router.post('/open/work_order/:id/transition', async (req, res, next) => {
         fields,
       });
       const woRow = r.row;
+      // A5 手动派单/改派通知（forward/dispatched 经通用 transition 触发）
+      if (r.transition?.event === 'forward' || r.transition?.event === 'dispatch') {
+        const newAssignee =
+          (typeof fields.assignee === 'string' && fields.assignee)
+            ? fields.assignee
+            : r.row.assignee_id;
+        if (newAssignee) {
+          await insertNotification(client, {
+            tenantId,
+            recipient: newAssignee,
+            type: r.transition.event === 'forward' ? 'forward' : 'dispatch',
+            workOrderId: req.params.id,
+            title: '工单已改派给您',
+            body: `工单 ${r.row.order_no} 已指派给您`,
+            payload: { order_no: r.row.order_no, event: r.transition.event },
+          });
+        }
+      }
       // 工单进入"完成态"（def 派生：DEFAULT=completed；RICH=completed/closed/evaluated）即增量学习（数→模闭环）；
       // 仅在"首次踏入完成态"触发（避免 completed→closed→evaluated 间重复学习）；受 MODEL_AUTO_TUNE 控制是否写回。
       // 不静默吞错：失败记日志并回传 learn_error，便于试点验证定位根因（T-A 缺陷1修复）
@@ -407,6 +446,146 @@ router.post('/sla/scan', async (req, res, next) => {
       escalated: escalations.length,
       items: escalations.map((h) => ({ work_order_id: h.workOrderId, from_status: h.fromStatus, escal_minutes: h.escalMinutes })),
     });
+  } catch (e) {
+    next(e);
+  }
+});
+
+// GET /api/v1/open/notifications —— 当前租户通知列表（按创建时间倒序，验证 A5 派单通知钩子用）
+router.get('/open/notifications', async (req, res, next) => {
+  try {
+    const tenantId = res.locals.auth.tenantId;
+    const items = await withTenantClient(tenantId, (client) =>
+      client
+        .query(
+          `SELECT id, recipient, recipient_kind, type, work_order_id, title, body, channel, delivered, read, created_at
+           FROM notification WHERE tenant_id=$1 ORDER BY created_at DESC LIMIT 100`,
+          [tenantId],
+        )
+        .then((r) => r.rows),
+    );
+    return res.json({ ok: true, code: 0, items, total: items.length });
+  } catch (e) {
+    next(e);
+  }
+});
+
+// POST /api/v1/open/work_order/:id/transpond —— 转台（把工单从一个服务台转移到另一个服务台）
+// 门禁同 dispatch/forward：仅 admin/dispatcher/service_desk 可操作。
+router.post('/open/work_order/:id/transpond', async (req, res, next) => {
+  try {
+    const tenantId = res.locals.auth.tenantId;
+    const role = res.locals.auth.role;
+    if (role && !['admin', 'dispatcher', 'service_desk'].includes(role)) {
+      throw new AppError('FORBIDDEN', `role ${role} not allowed to transpond`, 403);
+    }
+    const b = z.object({ deskId: z.string().min(1), reason: z.string().optional() }).parse(req.body);
+    const ticket = await withTenantClient(tenantId, async (client) => {
+      const desk = await client.query('SELECT id, name FROM service_desk WHERE id=$1 AND tenant_id=$2', [b.deskId, tenantId]);
+      if (desk.rowCount === 0) throw new AppError('NOT_FOUND', 'target service desk not found', 404);
+      const cur = await findOneForUpdate(client, tenantId, req.params.id);
+      if (!cur) throw new AppError('NOT_FOUND', 'work order not found', 404);
+      await client.query(
+        'UPDATE work_orders SET service_desk=$1, updated_at=now() WHERE id=$2 AND tenant_id=$3',
+        [b.deskId, req.params.id, tenantId],
+      );
+      await client.query(
+        `INSERT INTO ticket_event (tenant_id, work_order_id, type, from_status, to_status, actor, payload)
+         VALUES ($1,$2,'transpond',$3,$3,'system',$4)`,
+        [tenantId, req.params.id, cur.status, JSON.stringify({ from_desk: cur.service_desk, to_desk: b.deskId, reason: b.reason ?? null })],
+      );
+      await emitDomainEvent(client, { tenantId, entityType: 'work_order', entityId: req.params.id, type: 'transpond', actor: 'system', payload: { from_desk: cur.service_desk, to_desk: b.deskId } });
+      // A5 转台通知：通知目标服务台（desk 级）+ 现任处理人
+      await insertNotification(client, {
+        tenantId, recipient: b.deskId, recipientKind: 'desk', type: 'transpond', workOrderId: req.params.id,
+        title: '工单已转入本服务台', body: `工单 ${cur.order_no} 已转入服务台 ${desk.rows[0].name}`,
+        payload: { order_no: cur.order_no, from_desk: cur.service_desk, to_desk: b.deskId },
+      });
+      if (cur.assignee_id) {
+        await insertNotification(client, {
+          tenantId, recipient: cur.assignee_id, type: 'transpond', workOrderId: req.params.id,
+          title: '工单已转台', body: `工单 ${cur.order_no} 已转至服务台 ${desk.rows[0].name}`,
+          payload: { order_no: cur.order_no, from_desk: cur.service_desk, to_desk: b.deskId },
+        });
+      }
+      return findOne(client, tenantId, req.params.id);
+    });
+    return res.json({ ok: true, code: 0, ticket });
+  } catch (e) {
+    next(e);
+  }
+});
+
+// GET /api/v1/open/claim-hall —— 抢单大厅：列出未分配(claim_hall/pending_dispatch)工单，可按部门过滤
+router.get('/open/claim-hall', async (req, res, next) => {
+  try {
+    const tenantId = res.locals.auth.tenantId;
+    const department = req.query.department as string | undefined;
+    const items = await withTenantClient(tenantId, (client) => {
+      const conds = ['tenant_id=$1', "status IN ('claim_hall','pending_dispatch')"];
+      const params: unknown[] = [tenantId];
+      if (department) { params.push(department); conds.push(`department = $${params.length}`); }
+      return client
+        .query(`SELECT * FROM work_orders WHERE ${conds.join(' AND ')} ORDER BY created_at ASC`, params)
+        .then((r) => r.rows);
+    });
+    const def = await withTenantClient(tenantId, (client) => getWorkflowDef(client, tenantId, 'work_order'));
+    const out = items.map((it: any) => ({
+      ...it,
+      code: it.order_no,
+      available: availableTransitions(def, it.status).map((t) => ({
+        to: t.to, event: t.event, requiredFields: t.requiredFields ?? [], allowedRoles: t.allowedRoles ?? [], sideEffects: t.sideEffects ?? [],
+      })),
+    }));
+    return res.json({ ok: true, code: 0, items: out, total: out.length });
+  } catch (e) {
+    next(e);
+  }
+});
+
+// POST /api/v1/open/work_order/:id/claim —— 抢单（人员认领未分配工单，部门不匹配驳回）
+// 门禁同 RICH def claim 转移：worker/admin/dispatcher/service_desk 可抢。
+router.post('/open/work_order/:id/claim', async (req, res, next) => {
+  try {
+    const tenantId = res.locals.auth.tenantId;
+    const role = res.locals.auth.role;
+    if (role && !['worker', 'admin', 'dispatcher', 'service_desk'].includes(role)) {
+      throw new AppError('FORBIDDEN', `role ${role} not allowed to claim`, 403);
+    }
+    const b = z.object({ workerId: z.string().min(1), department: z.string().optional() }).parse(req.body);
+    const ticket = await withTenantClient(tenantId, async (client) => {
+      const cur = await findOneForUpdate(client, tenantId, req.params.id);
+      if (!cur) throw new AppError('NOT_FOUND', 'work order not found', 404);
+      if (cur.status !== 'claim_hall' && cur.status !== 'pending_dispatch') {
+        throw new AppError('CONFLICT', `work order not in claim hall (status=${cur.status})`, 409);
+      }
+      const worker = await client.query('SELECT id, department FROM worker WHERE id=$1 AND tenant_id=$2', [b.workerId, tenantId]);
+      if (worker.rowCount === 0) throw new AppError('NOT_FOUND', 'worker not found', 404);
+      const wDept = worker.rows[0].department;
+      const woDept = cur.department;
+      // 部门级抢单：工单与人员均有部门且不一致 → 驳回（保持简单，跨部由调度/管理员另行处理）
+      if (woDept && wDept && woDept !== wDept) {
+        throw new AppError('FORBIDDEN', `worker department ${wDept} mismatch work order department ${woDept}`, 403);
+      }
+      await client.query(
+        'UPDATE work_orders SET status=$1, assignee_id=$2, auto_flow=false, updated_at=now() WHERE id=$3 AND tenant_id=$4',
+        ['assigned', b.workerId, req.params.id, tenantId],
+      );
+      await client.query('UPDATE worker SET load = load + 1 WHERE id=$1', [b.workerId]);
+      await client.query(
+        `INSERT INTO ticket_event (tenant_id, work_order_id, type, from_status, to_status, actor, payload)
+         VALUES ($1,$2,'claim',$3,$4,'worker',$5)`,
+        [tenantId, req.params.id, cur.status, 'assigned', JSON.stringify({ worker_id: b.workerId })],
+      );
+      await emitDomainEvent(client, { tenantId, entityType: 'work_order', entityId: req.params.id, type: 'assigned', actor: 'worker', payload: { worker_id: b.workerId, via: 'claim' } });
+      await insertNotification(client, {
+        tenantId, recipient: b.workerId, type: 'claim', workOrderId: req.params.id,
+        title: '您已抢到工单', body: `工单 ${cur.order_no} 已由您认领`,
+        payload: { order_no: cur.order_no },
+      });
+      return findOne(client, tenantId, req.params.id);
+    });
+    return res.json({ ok: true, code: 0, ticket });
   } catch (e) {
     next(e);
   }

@@ -16,11 +16,13 @@ export interface CreateDto {
   title?: string;
   description?: string;
   contact?: string;
+  reporterName?: string; // P1 收尾：申告人真实姓名（顶层列，独立于 ext 动态字段）
   assets?: unknown[];
   // UOne 颗粒度维度（取之所长）
   source?: string;        // 工单来源: wechat/backend/phone
   faultType?: string;     // 故障类型
   serviceDesk?: string;   // 所属服务台
+  department?: string;    // 归属部门（部门级抢单维度）
   ext?: Record<string, unknown>; // 工单模板动态字段
   idempotencyKey?: string;
 }
@@ -36,10 +38,17 @@ export interface WorkOrderRow {
   title: string | null;
   description: string | null;
   contact: string | null;
+  reporter_name?: string | null;
   status: WorkOrderStatus;
   assignee_id: string | null;
   auto_flow: boolean;
   assets: unknown;
+  source?: string;
+  fault_type?: string | null;
+  service_desk?: string | null;
+  department?: string | null;
+  satisfaction_score?: number | null;
+  ext?: unknown;
   created_at: string;
   updated_at: string;
 }
@@ -69,14 +78,15 @@ export async function createWithIdem(
   const orderNo = genOrderNo();
   const ins = await client.query<WorkOrderRow>(
     `INSERT INTO work_orders
-       (id, tenant_id, order_no, business_type, catalog, priority, location, title, description, contact, assets, status, source, fault_type, service_desk, ext)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'draft',$12,$13,$14,$15)
+       (id, tenant_id, order_no, business_type, catalog, priority, location, title, description, contact, reporter_name, assets, status, source, fault_type, service_desk, department, ext)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'draft',$13,$14,$15,$16,$17)
      RETURNING *`,
     [
       dto.id, dto.tenantId, orderNo, dto.businessType, dto.catalog ?? null, dto.priority ?? 'normal',
       dto.location ?? null, dto.title ?? null, dto.description ?? null, dto.contact ?? null,
+      dto.reporterName ?? null,
       JSON.stringify(dto.assets ?? []),
-      dto.source ?? 'backend', dto.faultType ?? null, dto.serviceDesk ?? null,
+      dto.source ?? 'backend', dto.faultType ?? null, dto.serviceDesk ?? null, dto.department ?? null,
       JSON.stringify(dto.ext ?? {}),
     ],
   );

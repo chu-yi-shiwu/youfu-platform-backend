@@ -16,6 +16,12 @@ DELETE FROM domain_event        WHERE tenant_id = 't-demo-pm';
 DELETE FROM work_orders         WHERE tenant_id = 't-demo-pm';
 DELETE FROM optimization_feedback WHERE tenant_id = 't-demo-pm';
 DELETE FROM workflow_def        WHERE tenant_id = 't-demo-pm';
+DELETE FROM system_config       WHERE tenant_id = 't-verification';
+
+-- 0) 租户品牌配置（顶部租户名 + 服务热线）
+INSERT INTO system_config (tenant_id, key, value) VALUES
+  ('t-verification', 'brand_name', '长沙市第四医院'),
+  ('t-verification', 'hotline',    '0731-85536356');
 
 -- 2) 基线 workflow_def（4 态，飞轮改写前后对照用）
 INSERT INTO workflow_def (tenant_id, entity_type, def, version) VALUES (
