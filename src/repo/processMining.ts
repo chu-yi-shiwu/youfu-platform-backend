@@ -8,7 +8,7 @@
 // 全程只读、全 $1 参数化（满足发布闸门 SQL 注入扫描）；不新增任何迁移。
 // 纯函数与 PG 查询分离，便于单测（模仿 repo/stats.ts 的 calc* 纯函数模式）。
 import type { PoolClient } from 'pg';
-import { canTransition, isKnownState, type WorkflowDef } from '../engine/stateMachine.js';
+import { canTransition, isKnownState, doneStates, learningTriggerStates, autoRouteStates, autoRouteFor, type WorkflowDef } from '../engine/stateMachine.js';
 import { getWorkflowDef } from '../engine/workflowDef.js';
 
 export interface RawEvent {
@@ -64,6 +64,17 @@ export interface Conformance {
   note: string;
 }
 
+export interface ResonanceInfo {
+  configured: boolean; // 该业务流是否配置了 workflow_def（共振控制点存在）
+  initial: string;
+  done_states: string[]; // 完成态口径（统计/训练样本）
+  learning_triggers: string[]; // 数据→模型共振触发态（per-def，Task179 接线）
+  auto_routes: { from: string; to: string; strategy: string | null }[]; // 自动派发路由（模型 surface 反写入口）
+  learning_hits_in_scope: number; // 范围内实际踏入学习触发态的工单数（共振已发生）
+  auto_dispatched_in_scope: number; // 范围内自动派发工单数（autoRoutes 已生效）
+  model_version: number; // 模型已学习次数（累计；incrementalLearn 每次 +1）
+}
+
 export interface ProcessMiningResult {
   tenant_id: string;
   entity_type: string;
@@ -79,6 +90,7 @@ export interface ProcessMiningResult {
   };
   throughput: ThroughputPoint[];
   conformance: Conformance;
+  resonance: ResonanceInfo; // ④⑤ 模数共振可视化（Task186）
 }
 
 // ============ 纯函数（脱离 PG，便于单测） ============
@@ -333,6 +345,38 @@ export async function processMining(
     ? computeConformancePrecise(def, traces, variants)
     : computeConformanceApprox(variants);
 
+  // ④⑤ 模数共振可视化（Task186）：把刚接线的 per-def 配置与其实际作用诚实呈现。
+  const lt = learningTriggerStates(def);
+  const arFroms = autoRouteStates(def);
+  const arList = arFroms.map((from) => {
+    const r = autoRouteFor(def, from)!;
+    return { from, to: r.to, strategy: r.strategy ?? null };
+  });
+  const hitR = await client.query<{ n: number }>(
+    `SELECT COUNT(DISTINCT work_order_id)::int AS n
+     FROM ticket_event
+     WHERE tenant_id = $1 AND to_status = ANY($2::text[]) AND created_at >= $3 AND created_at <= $4`,
+    [tenantId, lt, from, to],
+  );
+  const autoR = await client.query<{ n: number }>(
+    `SELECT COUNT(*)::int AS n FROM work_orders WHERE tenant_id = $1 AND auto_flow = true AND created_at >= $2 AND created_at <= $3`,
+    [tenantId, from, to],
+  );
+  const mvR = await client.query<{ version: number }>(
+    `SELECT version FROM model_state WHERE tenant_id = $1 AND model_key = $2`,
+    [tenantId, 'dispatch_score'],
+  );
+  const resonance: ResonanceInfo = {
+    configured: hasDef,
+    initial: def.initial,
+    done_states: doneStates(def),
+    learning_triggers: lt,
+    auto_routes: arList,
+    learning_hits_in_scope: hitR.rows[0]?.n ?? 0,
+    auto_dispatched_in_scope: autoR.rows[0]?.n ?? 0,
+    model_version: mvR.rows[0]?.version ?? 0,
+  };
+
   return {
     tenant_id: tenantId,
     entity_type: entityType,
@@ -343,5 +387,6 @@ export async function processMining(
     bottlenecks,
     throughput,
     conformance,
+    resonance,
   };
 }
