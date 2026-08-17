@@ -185,11 +185,25 @@ router.post('/open/work_order/:id/transition', async (req, res, next) => {
       const learnOn = learningTriggerStates(def);
       // 用 transition() 锁内返回的 r.from（已加行锁，并发串行化）判定"首次进入"，杜绝事务外快照并发双触发。
       if (shouldTriggerLearning(to, r.from, learnOn)) {
-        try {
-          await incrementalLearn(client, tenantId, req.params.id, process.env.MODEL_AUTO_TUNE === 'true');
-        } catch (e) {
-          learnError = e instanceof Error ? e.message : String(e);
-          console.error('[T-A incrementalLearn] FAILED', { workOrderId: req.params.id, tenantId, err: e });
+        // 结构性幂等守卫（支柱④⑤ 兜底）：唯一键 (tenant_id, work_order_id, trigger_state) 保证
+        // 即便过程式判定被绕过（如未来事件驱动 at-least-once 重放），同一"工单+触发态"也仅学一次。
+        // INSERT ... ON CONFLICT DO NOTHING：rowCount===1 表示本次是首条，才真正调用增量学习。
+        const guard = await client.query(
+          `INSERT INTO ticket_learn_log (tenant_id, work_order_id, trigger_state, model_version)
+           VALUES ($1,$2,$3,(SELECT version FROM model_state WHERE tenant_id=$1 AND model_key='dispatch_score'))
+           ON CONFLICT (tenant_id, work_order_id, trigger_state) DO NOTHING`,
+          [tenantId, req.params.id, to],
+        );
+        if (guard.rowCount === 1) {
+          try {
+            await incrementalLearn(client, tenantId, req.params.id, process.env.MODEL_AUTO_TUNE === 'true');
+          } catch (e) {
+            learnError = e instanceof Error ? e.message : String(e);
+            console.error('[T-A incrementalLearn] FAILED', { workOrderId: req.params.id, tenantId, err: e });
+          }
+        } else {
+          // 唯一键已存在：本次被结构性守卫拦截（重复学习），不调用、不报错（属正常幂等）。
+          console.info('[T-A incrementalLearn] SKIPPED by idempotency guard', { workOrderId: req.params.id, tenantId, triggerState: to });
         }
       }
       // 评价完成回写满意度评分（UOne 满意度颗粒度）
