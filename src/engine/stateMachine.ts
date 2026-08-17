@@ -5,7 +5,10 @@
 // 红线保留：引擎只做"是否合法"判定，绝不自动把状态推进到终态
 // （completed / escalated 必须由显式事件驱动；P6 验收只报自动派单率，不自动闭环）。
 
-export type WorkOrderStatus = string; // 放宽：状态集合由 workflow_def 声明，不再写死枚举
+// 放宽：状态集合由 workflow_def 声明，不再写死枚举。
+// 注意：非法状态不会被静默接受——transition() 内部用 isKnownState() 校验 from/to，
+// 非法态直接抛 422（CONFLICT），前端不可任意传状态，维护者无需担心类型放宽引入脏数据。
+export type WorkOrderStatus = string;
 
 export interface WorkflowTransition {
   from: string;
@@ -168,6 +171,16 @@ export function learningTriggerStates(def: WorkflowDef): string[] {
     if (valid.length > 0) return valid;
   }
   return doneStates(def);
+}
+
+/**
+ * 是否触发增量学习（数→模闭环的触发点判定，纯函数可单测）。
+ * 规则：目标态 to 在触发集 learnOn 内，且"更新前状态 from"不在触发集内（即首次踏入触发态，
+ * 避免 completed→closed→evaluated 之间重复学习）。from 必须来自 transition() 锁内返回，
+ * 以杜绝并发双触发——本函数只负责判定逻辑，并发串行化由 transition() 的行锁保证。
+ */
+export function shouldTriggerLearning(to: string, from: string, learnOn: string[]): boolean {
+  return learnOn.includes(to) && !learnOn.includes(from);
 }
 
 /** 自动派发路由（配置=模型 surface）：返回某初态声明的自动派发目标态与策略；目标态非法（不在 states）则返回 null。 */

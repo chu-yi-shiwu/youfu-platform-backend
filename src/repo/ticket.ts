@@ -98,6 +98,8 @@ export async function createWithIdem(
 export interface TransitionResult {
   row: WorkOrderRow;
   transition: WorkflowTransition | null;
+  /** 更新前的状态（锁内读取，权威）。供调用方做"首次进入触发态"等判定，避免事务外快照并发双触发。 */
+  from: string;
 }
 
 /** 状态流转：校验合法跳转（拓扑 + 角色门禁 + 必填），更新状态 + 审计 + 副作用。 */
@@ -108,7 +110,9 @@ export async function transition(
   to: WorkOrderStatus,
   opts?: { actor?: string; role?: string; fields?: Record<string, unknown> },
 ): Promise<TransitionResult> {
-  const cur = await findOne(client, tenantId, id);
+  // 行锁：并发流转同一工单时串行化（A 提交释放锁后 B 才拿到锁，此时 cur.status 为最新），
+  // 同时让下方"首次进入触发态"判定基于锁内权威快照，杜绝 READ COMMITTED 下双触发增量学习。
+  const cur = await findOneForUpdate(client, tenantId, id);
   if (!cur) throw new AppError('NOT_FOUND', 'work order not found', 404);
   // T-①：状态合法性由 workflow_def（可配置状态机）校验，不再写死固定字典
   const def = await getWorkflowDef(client, tenantId, 'work_order');
@@ -168,7 +172,7 @@ export async function transition(
       payload: { sideEffects: se.filter((x) => x.startsWith('notify_')) },
     });
   }
-  return { row: upd.rows[0], transition: tdef };
+  return { row: upd.rows[0], transition: tdef, from: cur.status };
 }
 
 export async function findOne(
@@ -178,6 +182,19 @@ export async function findOne(
 ): Promise<WorkOrderRow | null> {
   const r = await client.query<WorkOrderRow>(
     'SELECT * FROM work_orders WHERE id = $1 AND tenant_id = $2',
+    [id, tenantId],
+  );
+  return r.rows[0] ?? null;
+}
+
+/** 带行锁读取单个工单，用于状态流转等需串行化的写前读取（FOR UPDATE）。 */
+export async function findOneForUpdate(
+  client: PoolClient,
+  tenantId: string,
+  id: string,
+): Promise<WorkOrderRow | null> {
+  const r = await client.query<WorkOrderRow>(
+    'SELECT * FROM work_orders WHERE id = $1 AND tenant_id = $2 FOR UPDATE',
     [id, tenantId],
   );
   return r.rows[0] ?? null;

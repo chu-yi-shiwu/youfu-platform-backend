@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   canTransition, nextStates, DEFAULT_WORK_ORDER_DEF, RICH_WORK_ORDER_DEF,
-  learningTriggerStates, autoRouteFor, autoRouteStates,
+  learningTriggerStates, autoRouteFor, autoRouteStates, shouldTriggerLearning,
   type WorkflowDef,
 } from '../engine/stateMachine.js';
 
@@ -64,6 +64,19 @@ describe('④⑤ per-def 模数共振（learningTriggers / autoRoutes 真正生�
       config: { autoRoutes: { draft: { to: 'nowhere' } } },
     };
     expect(autoRouteFor(bad, 'draft')).toBeNull();
+  });
+
+  it('shouldTriggerLearning：首次踏入触发态触发，已在触发态则不重复触发', () => {
+    // RICH 触发集 = ['completed','review_passed']
+    const learnOn = ['completed', 'review_passed'];
+    // 从 processing 进入 completed：首次踏入 → 触发
+    expect(shouldTriggerLearning('completed', 'processing', learnOn)).toBe(true);
+    // 从 completed 进入 closed：from 已在触发集（completed 在 learnOn）→ 不触发（避免双学习）
+    expect(shouldTriggerLearning('closed', 'completed', learnOn)).toBe(false);
+    // to 不在触发集 → 不触发
+    expect(shouldTriggerLearning('processing', 'assigned', learnOn)).toBe(false);
+    // review_passed → evaluated：from 在触发集 → 不重复触发
+    expect(shouldTriggerLearning('evaluated', 'review_passed', learnOn)).toBe(false);
   });
 
   it('autoRouteFor：未声明返回 null', () => {
