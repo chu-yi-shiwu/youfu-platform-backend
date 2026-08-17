@@ -419,6 +419,31 @@ router.get('/open/notifications', async (req, res, next) => {
   }
 });
 
+// PATCH /api/v1/open/work_order/:id/ext —— P0 字段级配置：合并自定义字段值到 ext（租户隔离）
+// 用于把业务流程配置的自定义字段（config.fields）在工单/业务流表单上填写后落库。
+const extPatchSchema = z.object({ patch: z.record(z.string(), z.unknown()) });
+router.patch('/open/work_order/:id/ext', async (req, res, next) => {
+  try {
+    const tenantId = res.locals.auth.tenantId;
+    const { patch } = extPatchSchema.parse(req.body);
+    const result = await withTenantClient(tenantId, async (client) => {
+      const row = await findOne(client, tenantId, req.params.id);
+      if (!row) return null;
+      const ext: Record<string, unknown> = row.ext && typeof row.ext === 'object' ? { ...row.ext } : {};
+      Object.assign(ext, patch);
+      await client.query(
+        'UPDATE work_orders SET ext = $1::jsonb, updated_at = now() WHERE id = $2 AND tenant_id = $3',
+        [JSON.stringify(ext), req.params.id, tenantId],
+      );
+      return ext;
+    });
+    if (!result) return res.status(404).json({ ok: false, code: 'NOT_FOUND', message: 'work order not found' });
+    return res.json({ ok: true, code: 0, ext: result });
+  } catch (e) {
+    next(e);
+  }
+});
+
 // GET /api/v1/stats —— P6 自动派单率/自动闭环率口径（诚实，不编造演示数据）
 router.get('/stats', async (req, res, next) => {
   try {
