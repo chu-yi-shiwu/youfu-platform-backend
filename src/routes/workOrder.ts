@@ -18,16 +18,8 @@ import { incrementalLearn } from '../services/modelTrainer.js';
 import { emitDomainEvent } from '../db/eventBus.js';
 import type { WorkOrderStatus } from '../engine/stateMachine.js';
 import { getWorkflowDef } from '../engine/workflowDef.js';
-import { doneStates, terminalStates, availableTransitions, learningTriggerStates, autoRouteFor } from '../engine/stateMachine.js';
-
-/** pg 驱动对 jsonb 可能返回字符串；统一归一化。 */
-function safeParseJsonb(v: any): any {
-  if (v == null) return v;
-  if (typeof v === 'string') {
-    try { return JSON.parse(v); } catch { return v; }
-  }
-  return v;
-}
+import { doneStates, terminalStates, availableTransitions, learningTriggerStates, autoRouteFor, shouldTriggerLearning } from '../engine/stateMachine.js';
+import { safeParseJsonb } from '../util/jsonb.js';
 
 const router = Router();
 
@@ -177,39 +169,39 @@ router.post('/open/work_order/:id/transition', async (req, res, next) => {
     // 必填字段透传（含满意度评分映射），供 transition() 做 A+ 必填校验
     const fields: Record<string, unknown> = { ...rest };
     if (typeof score === 'number') fields.satisfaction_score = score;
-    const before = await withTenantClient(tenantId, (client) => findOne(client, tenantId, req.params.id));
-      let learnError: string | null = null;
-      const row = await withTenantClient(tenantId, async (client) => {
-        const r = await transition(client, tenantId, req.params.id, to as WorkOrderStatus, {
-          actor: role ?? 'system',
-          role,
-          fields,
-        });
-        const woRow = r.row;
-        // 工单进入"完成态"（def 派生：DEFAULT=completed；RICH=completed/closed/evaluated）即增量学习（数→模闭环）；
-        // 仅在"首次踏入完成态"触发（避免 completed→closed→evaluated 间重复学习）；受 MODEL_AUTO_TUNE 控制是否写回。
-        // 不静默吞错：失败记日志并回传 learn_error，便于试点验证定位根因（T-A 缺陷1修复）
-        const def = await getWorkflowDef(client, tenantId, 'work_order');
-        // ⑤ 模数共振：学习触发态优先读 def.config.learningTriggers（per-def 控制），缺省回退 doneStates（向后兼容）
-        const learnOn = learningTriggerStates(def);
-        if (learnOn.includes(to) && !(before?.status && learnOn.includes(before.status))) {
-          try {
-            await incrementalLearn(client, tenantId, req.params.id, process.env.MODEL_AUTO_TUNE === 'true');
-          } catch (e) {
-            learnError = e instanceof Error ? e.message : String(e);
-            console.error('[T-A incrementalLearn] FAILED', { workOrderId: req.params.id, tenantId, err: e });
-          }
-        }
-        // 评价完成回写满意度评分（UOne 满意度颗粒度）
-        if (to === 'evaluated' && typeof score === 'number') {
-          await client.query(
-            'UPDATE work_orders SET satisfaction_score = $1 WHERE id = $2 AND tenant_id = $3',
-            [score, req.params.id, tenantId],
-          );
-        }
-        return r;
+    let learnError: string | null = null;
+    const row = await withTenantClient(tenantId, async (client) => {
+      const r = await transition(client, tenantId, req.params.id, to as WorkOrderStatus, {
+        actor: role ?? 'system',
+        role,
+        fields,
       });
-      void dispatchEvent(tenantId, { type: 'transition', workOrderId: req.params.id, fromStatus: before?.status ?? null, toStatus: to, actor: 'system' }).catch(() => {});
+      const woRow = r.row;
+      // 工单进入"完成态"（def 派生：DEFAULT=completed；RICH=completed/closed/evaluated）即增量学习（数→模闭环）；
+      // 仅在"首次踏入完成态"触发（避免 completed→closed→evaluated 间重复学习）；受 MODEL_AUTO_TUNE 控制是否写回。
+      // 不静默吞错：失败记日志并回传 learn_error，便于试点验证定位根因（T-A 缺陷1修复）
+      const def = await getWorkflowDef(client, tenantId, 'work_order');
+      // ⑤ 模数共振：学习触发态优先读 def.config.learningTriggers（per-def 控制），缺省回退 doneStates（向后兼容）
+      const learnOn = learningTriggerStates(def);
+      // 用 transition() 锁内返回的 r.from（已加行锁，并发串行化）判定"首次进入"，杜绝事务外快照并发双触发。
+      if (shouldTriggerLearning(to, r.from, learnOn)) {
+        try {
+          await incrementalLearn(client, tenantId, req.params.id, process.env.MODEL_AUTO_TUNE === 'true');
+        } catch (e) {
+          learnError = e instanceof Error ? e.message : String(e);
+          console.error('[T-A incrementalLearn] FAILED', { workOrderId: req.params.id, tenantId, err: e });
+        }
+      }
+      // 评价完成回写满意度评分（UOne 满意度颗粒度）
+      if (to === 'evaluated' && typeof score === 'number') {
+        await client.query(
+          'UPDATE work_orders SET satisfaction_score = $1 WHERE id = $2 AND tenant_id = $3',
+          [score, req.params.id, tenantId],
+        );
+      }
+      return r;
+    });
+    void dispatchEvent(tenantId, { type: 'transition', workOrderId: req.params.id, fromStatus: row.from ?? null, toStatus: to, actor: 'system' }).catch(() => {});
       return res.json({ ok: true, code: 0, status: row.row.status, auto_flow: row.row.auto_flow, assignee: row.row.assignee_id, reason: 'transition ok', learn_error: learnError });
   } catch (e) {
     next(e);

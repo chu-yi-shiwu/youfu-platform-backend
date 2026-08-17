@@ -14,6 +14,7 @@
 //
 // 纯函数 generateOptimizations / generateMiningOptimizations 脱离 PG 单测；apply*/record* 负责 DB 读写。
 import type { PoolClient } from 'pg';
+import { safeParseJsonb } from '../util/jsonb.js';
 import type { ModelParams } from '../engine/model/ModelBackend.js';
 import type { ProcessMetrics } from '../repo/stats.js';
 import type { ProcessMiningResult } from '../repo/processMining.js';
@@ -28,15 +29,6 @@ export interface OptimizationDecision {
 }
 
 const WEIGHT_MIN = 0.1; // 与 T-A AUTO_TUNE 写回下限一致（规则权不允许塌到 0）
-
-/** pg 驱动对 jsonb 可能返回字符串；统一归一化。 */
-function safeParseJsonb(v: any): any {
-  if (v == null) return v;
-  if (typeof v === 'string') {
-    try { return JSON.parse(v); } catch { return v; }
-  }
-  return v;
-}
 
 /** 纯函数：由模型参数 + 过程度量生成优化决策（不碰 DB，可单测）。 */
 export function generateOptimizations(

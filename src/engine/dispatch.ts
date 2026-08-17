@@ -5,15 +5,7 @@
 // 红线：本模块只做"选人"，绝不推进工单到 completed（P6）。
 import type { PoolClient } from 'pg';
 import type { ModelBackend } from './model/ModelBackend.js';
-
-/** pg 驱动对 jsonb 可能返回字符串；统一归一化。 */
-function safeParseJsonb(v: any): any {
-  if (v == null) return v;
-  if (typeof v === 'string') {
-    try { return JSON.parse(v); } catch { return v; }
-  }
-  return v;
-}
+import { safeParseJsonb } from '../util/jsonb.js';
 
 export interface WorkerRow {
   id: string;
