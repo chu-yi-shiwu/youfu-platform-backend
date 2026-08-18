@@ -114,4 +114,32 @@ router.get('/stats', async (req, res, next) => {
   }
 });
 
+// ============ 反馈 CSV 导出（UOne H 导出） ============
+function csvEscape(v: unknown): string {
+  if (v === null || v === undefined) return '';
+  const s = String(v);
+  return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+}
+const FEEDBACK_CSV_COLS = ['created_at', 'type', 'content', 'rating', 'status', 'channel', 'reply', 'replied_at'];
+router.get('/export', async (req, res, next) => {
+  try {
+    const tenantId = res.locals.auth.tenantId;
+    const items = await withTenantClient(tenantId, (client) =>
+      client
+        .query(`SELECT * FROM feedback WHERE tenant_id=$1 ORDER BY created_at DESC`, [tenantId])
+        .then((r) => r.rows),
+    );
+    const lines = [FEEDBACK_CSV_COLS.join(',')];
+    for (const row of items) {
+      lines.push(FEEDBACK_CSV_COLS.map((h) => csvEscape((row as any)[h])).join(','));
+    }
+    const csv = '﻿' + lines.join('\r\n');
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', 'attachment; filename="feedback.csv"');
+    return res.send(csv);
+  } catch (e) {
+    next(e);
+  }
+});
+
 export default router;

@@ -11,6 +11,8 @@ import webhookRouter from './webhook/routes.js';
 import authRouter from './routes/auth.js';
 import configRouter from './routes/config.js';
 import inspectionRouter from './routes/inspection.js';
+import emergencyRouter from './routes/emergency.js';
+import transportRouter from './routes/transport.js';
 import volunteerRouter from './routes/volunteer.js';
 import feedbackRouter from './routes/feedback.js';
 import monitorRouter from './routes/monitor.js';
@@ -23,10 +25,13 @@ import processMiningRouter from './routes/processMining.js';
 import autoTuneRouter from './routes/autoTune.js';
 import workerRouter from './routes/worker.js';
 import catalogRouter from './routes/catalog.js';
+import faultCategoryRouter from './routes/faultCategory.js';
 import accountsRouter from './routes/accounts.js';
 import tenantInfoRouter from './routes/tenantInfo.js';
 import workflowDefRouter from './routes/workflowDef.js';
 import businessFlowRouter from './routes/businessFlow.js';
+import basicDataRouter from './routes/basicData.js';
+import equipmentRouter from './routes/equipment.js';
 
 // 试点/生产：用 ENV_FILE 指定环境文件（默认 .env，production 下默认 .env.pilot），
 // 同一份代码可同时跑 dev / pilot，无需改代码。
@@ -57,6 +62,9 @@ app.use('/api/v1', webhookRouter);
 app.use('/api/v1', authRouter);
 app.use('/api/v1', configRouter);
 app.use('/api/v1/inspection', inspectionRouter);
+// P2 第二刀：应急预案库 + 预警中心 / 运送轨迹
+app.use('/api/v1/emergency', emergencyRouter);
+app.use('/api/v1/transport', transportRouter);
 app.use('/api/v1/volunteer', volunteerRouter);
 app.use('/api/v1/feedback', feedbackRouter);
 app.use('/api/v1/monitor', monitorRouter);
@@ -70,10 +78,12 @@ app.use('/api/v1', autoTuneRouter);
 // ② 主数据补全：人员 / 商品目录 / 账号 三类 CRUD（dev 默认 admin 可写）
 app.use('/api/v1', workerRouter);
 app.use('/api/v1', catalogRouter);
+app.use('/api/v1', faultCategoryRouter);
 app.use('/api/v1', accountsRouter);
 app.use('/api/v1', tenantInfoRouter);
 app.use('/api/v1/workflow-defs', workflowDefRouter);
-// P3 横向克隆：通用业务流路由（运送/应急/循环签到… 按 entity_type 区分，流转统一过 workflow_def 引擎）
+app.use('/api/v1', basicDataRouter);
+app.use('/api/v1', equipmentRouter);// P4 设备管理（设备 / 设备类型 / 设备厂商，主数据 CRUD，对齐 UOne C 族）
 app.use('/api/v1/flow', businessFlowRouter);
 
 // ⑦P0 过程挖掘看板：顶层公开托管单文件 HTML（pilot 同 SPA 策略；prod 上线前应在反向代理层加鉴权）。

@@ -13,6 +13,7 @@ import { emitDomainEvent } from '../db/eventBus.js';
 import { getWorkflowDefOrDefault } from '../engine/workflowDef.js';
 import { applyEvent, availableTransitions } from '../engine/stateMachine.js';
 import { INSPECTION_DEF } from '../engine/themes.js';
+import { createAlert } from './emergency.js';
 
 /**
  * 状态流转统一走 workflow_def 引擎（红线：所有业务流必须过 workflow_def，不再硬编码状态机）。
@@ -257,9 +258,18 @@ router.post('/tasks/:id/exception', async (req, res, next) => {
     requireConfigRole(req, res);
     const tenantId = res.locals.auth.tenantId;
     const b = z.object({ note: z.string().min(1) }).parse(req.body);
-    const item = await withTenantClient(tenantId, (client) =>
-      transitionTask(client, tenantId, req.params.id, 'exception', { note: b.note }),
-    );
+    const item = await withTenantClient(tenantId, async (client) => {
+      const row = await transitionTask(client, tenantId, req.params.id, 'exception', { note: b.note });
+      // 预警深化：巡检异常自动生成 L1 预警，落入预警中心统一处理
+      await createAlert(client, tenantId, {
+        source_type: 'inspection',
+        source_id: req.params.id,
+        level: 'L1',
+        title: `巡检异常：${row.title}`,
+        message: b.note,
+      });
+      return row;
+    });
     return res.json({ ok: true, code: 0, item });
   } catch (e) {
     next(e);
@@ -356,6 +366,105 @@ router.post('/tasks/:id/convert', async (req, res, next) => {
       return wo;
     });
     return res.json({ ok: true, code: 0, result });
+  } catch (e) {
+    next(e);
+  }
+});
+
+// ============ 统计报表（P2：闭合巡检“缺报表/统计”缺口） ============
+// 汇总：总量、按状态分布、今日计划数、完成率、异常率、热点点位 Top5。
+router.get('/stats', async (req, res, next) => {
+  try {
+    const tenantId = res.locals.auth.tenantId;
+    const stats = await withTenantClient(tenantId, async (client) => {
+      const byStatus = await client
+        .query(
+          `SELECT status, COUNT(*)::int AS c FROM inspection_task WHERE tenant_id=$1 GROUP BY status`,
+          [tenantId],
+        )
+        .then((r) => r.rows);
+      const total = byStatus.reduce((s, x) => s + Number(x.c), 0);
+      const byStatusMap: Record<string, number> = {};
+      for (const x of byStatus) byStatusMap[x.status] = Number(x.c);
+      const done = byStatusMap['done'] ?? 0;
+      const exception = byStatusMap['exception'] ?? 0;
+      const pending = byStatusMap['pending'] ?? 0;
+      const inProgress = byStatusMap['in_progress'] ?? 0;
+      const today = await client
+        .query(
+          `SELECT COUNT(*)::int AS c FROM inspection_task WHERE tenant_id=$1 AND DATE(COALESCE(scheduled_at, created_at)) = CURRENT_DATE`,
+          [tenantId],
+        )
+        .then((r) => Number(r.rows[0].c));
+      const byPoint = await client
+        .query(
+          `SELECT p.name AS point_name, COUNT(*)::int AS c
+           FROM inspection_task t LEFT JOIN inspection_point p ON p.id = t.point_id
+           WHERE t.tenant_id=$1 AND t.point_id IS NOT NULL
+           GROUP BY p.name ORDER BY c DESC LIMIT 5`,
+          [tenantId],
+        )
+        .then((r) => r.rows.map((x: any) => ({ point_name: x.point_name, count: Number(x.c) })));
+      return {
+        total,
+        by_status: byStatusMap,
+        pending,
+        in_progress: inProgress,
+        done,
+        exception,
+        completion_rate: total ? Math.round((done / total) * 1000) / 10 : 0,
+        exception_rate: total ? Math.round((exception / total) * 1000) / 10 : 0,
+        today_count: today,
+        by_point_top: byPoint,
+      };
+    });
+    return res.json({ ok: true, code: 0, stats });
+  } catch (e) {
+    next(e);
+  }
+});
+
+// 巡检月报 CSV 导出（含点位名、完成时间）。text/csv + BOM，前端直接下载。
+router.get('/export', async (req, res, next) => {
+  try {
+    const tenantId = res.locals.auth.tenantId;
+    const { month } = req.query as Record<string, string>;
+    const rows = await withTenantClient(tenantId, (client) =>
+      client
+        .query(
+          `SELECT t.id, t.title, t.type, t.status, t.assignee, p.name AS point_name,
+                  t.scheduled_at, t.done_at, t.created_at
+           FROM inspection_task t LEFT JOIN inspection_point p ON p.id = t.point_id
+           WHERE t.tenant_id=$1 ${month ? 'AND TO_CHAR(COALESCE(t.scheduled_at, t.created_at), \'YYYY-MM\') = $2' : ''}
+           ORDER BY t.scheduled_at ASC NULLS LAST, t.created_at DESC`,
+          month ? [tenantId, month] : [tenantId],
+        )
+        .then((r) => r.rows),
+    );
+    const esc = (v: unknown) => {
+      const s = v == null ? '' : String(v);
+      return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+    };
+    const header = ['工单ID', '标题', '类型', '状态', '负责人', '点位', '计划时间', '完成时间', '创建时间'];
+    const lines = rows.map((r: any) =>
+      [
+        r.id,
+        r.title,
+        r.type === 'free' ? '自由巡检' : '计划巡检',
+        r.status,
+        r.assignee ?? '',
+        r.point_name ?? '',
+        r.scheduled_at ?? '',
+        r.done_at ?? '',
+        r.created_at ?? '',
+      ]
+        .map(esc)
+        .join(','),
+    );
+    const csv = '﻿' + [header.join(','), ...lines].join('\r\n');
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="inspection_report_${month || 'all'}.csv"`);
+    return res.send(csv);
   } catch (e) {
     next(e);
   }
