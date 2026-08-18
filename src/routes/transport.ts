@@ -60,12 +60,14 @@ const orderSchema = z.object({
   carrier: z.string().optional(),
   priority: z.enum(['urgent', 'normal', 'low']).default('normal'),
   plan_depart_at: z.string().optional(),
+  item_category: z.string().optional(), // UOne A3 物品分类（标本/药品/文件/器械...）
+  order_type: z.enum(['scheduled', 'free']).default('scheduled'), // scheduled 计划运送 | free 自由运送
 });
 
 router.get('/orders', async (req, res, next) => {
   try {
     const tenantId = res.locals.auth.tenantId;
-    const { status, priority } = req.query as Record<string, string>;
+    const { status, priority, item_category, order_type } = req.query as Record<string, string>;
     const clauses = ['tenant_id = $1'];
     const params: unknown[] = [tenantId];
     const add = (sql: string, v: unknown) => {
@@ -74,6 +76,8 @@ router.get('/orders', async (req, res, next) => {
     };
     if (status) add('status = ?', status);
     if (priority) add('priority = ?', priority);
+    if (item_category) add('item_category = ?', item_category);
+    if (order_type) add('order_type = ?', order_type);
     const items = await withTenantClient(tenantId, (client) =>
       client
         .query(
@@ -122,8 +126,8 @@ router.post('/orders', async (req, res, next) => {
     const b = orderSchema.parse(req.body);
     const item = await withTenantClient(tenantId, async (client) => {
       const r = await client.query(
-        `INSERT INTO transport_order (tenant_id, code, item_name, from_loc, to_loc, carrier, priority, plan_depart_at, status)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending') RETURNING *`,
+        `INSERT INTO transport_order (tenant_id, code, item_name, from_loc, to_loc, carrier, priority, plan_depart_at, item_category, order_type, status)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'pending') RETURNING *`,
         [
           tenantId,
           `T${Date.now()}`,
@@ -133,6 +137,8 @@ router.post('/orders', async (req, res, next) => {
           b.carrier ?? null,
           b.priority,
           b.plan_depart_at ?? null,
+          b.item_category ?? null,
+          b.order_type,
         ],
       );
       const row = r.rows[0];
