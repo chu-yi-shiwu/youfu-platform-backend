@@ -32,6 +32,7 @@ import workflowDefRouter from './routes/workflowDef.js';
 import businessFlowRouter from './routes/businessFlow.js';
 import basicDataRouter from './routes/basicData.js';
 import equipmentRouter from './routes/equipment.js';
+import uploadRouter from './routes/upload.js';// B0 文件上传（H5 拍照落库）
 
 // 试点/生产：用 ENV_FILE 指定环境文件（默认 .env，production 下默认 .env.pilot），
 // 同一份代码可同时跑 dev / pilot，无需改代码。
@@ -45,7 +46,8 @@ const app = express();
 if (process.env.TRUST_PROXY === '1') {
   app.set('trust proxy', true);
 }
-app.use(express.json());
+// B0：放宽 JSON body 上限到 10MB（base64 上传图片可能较大）；其余路由均为小 JSON，无影响。
+app.use(express.json({ limit: '10mb' }));
 
 // 健康检查（不含 DB，永远 200）
 app.get('/health', (_req, res) => {
@@ -85,6 +87,12 @@ app.use('/api/v1/workflow-defs', workflowDefRouter);
 app.use('/api/v1', basicDataRouter);
 app.use('/api/v1', equipmentRouter);// P4 设备管理（设备 / 设备类型 / 设备厂商，主数据 CRUD，对齐 UOne C 族）
 app.use('/api/v1/flow', businessFlowRouter);
+// B0 文件上传（H5 拍照落库）：挂在 /api/v1，自动过 authMiddleware 获得租户隔离。
+app.use('/api/v1', uploadRouter);
+
+// B0 静态服务上传文件（须注册在 SPA 兜底正则之前，否则 /uploads/* 会被 index.html 吞掉）。
+const UPLOAD_ROOT = process.env.UPLOAD_DIR ?? '/opt/youfu/uploads';
+app.use('/uploads', express.static(UPLOAD_ROOT));
 
 // ⑦P0 过程挖掘看板：顶层公开托管单文件 HTML（pilot 同 SPA 策略；prod 上线前应在反向代理层加鉴权）。
 // 必须注册在 SERVE_STATIC 的 SPA 兜底正则之前，否则会被 index.html 兜底拦截。
