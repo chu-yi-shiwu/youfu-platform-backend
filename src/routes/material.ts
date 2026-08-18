@@ -20,6 +20,7 @@ const materialSchema = z.object({
   unit: z.string().optional(),
   price: z.number().nonnegative().optional(),
   enabled: z.boolean().optional(),
+  doc: z.string().optional(), // P1 耗材文档/附件说明
 });
 
 router.get('/materials', async (req, res, next) => {
@@ -54,9 +55,9 @@ router.post('/materials', async (req, res, next) => {
     const item = await withTenantClient(tenantId, (client) =>
       client
         .query(
-          `INSERT INTO material (tenant_id, code, name, category, spec, unit, price, enabled)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
-          [tenantId, b.code, b.name, b.category ?? null, b.spec ?? null, b.unit ?? null, b.price ?? 0, b.enabled ?? true],
+          `INSERT INTO material (tenant_id, code, name, category, spec, unit, price, enabled, doc)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`,
+          [tenantId, b.code, b.name, b.category ?? null, b.spec ?? null, b.unit ?? null, b.price ?? 0, b.enabled ?? true, b.doc ?? null],
         )
         .then((r) => r.rows[0]),
     );
@@ -77,9 +78,9 @@ router.put('/materials/:id', async (req, res, next) => {
       const c = cur.rows[0];
       const r = await client.query(
         `UPDATE material SET code=COALESCE($3,code), name=COALESCE($4,name), category=COALESCE($5,category),
-           spec=COALESCE($6,spec), unit=COALESCE($7,unit), price=COALESCE($8,price), enabled=COALESCE($9,enabled), updated_at=now()
+           spec=COALESCE($6,spec), unit=COALESCE($7,unit), price=COALESCE($8,price), enabled=COALESCE($9,enabled), doc=COALESCE($10,doc), updated_at=now()
          WHERE id=$1 AND tenant_id=$2 RETURNING *`,
-        [req.params.id, tenantId, b.code ?? null, b.name ?? null, b.category ?? null, b.spec ?? null, b.unit ?? null, b.price ?? null, b.enabled ?? null],
+        [req.params.id, tenantId, b.code ?? null, b.name ?? null, b.category ?? null, b.spec ?? null, b.unit ?? null, b.price ?? null, b.enabled ?? null, b.doc ?? undefined],
       );
       return r.rows[0];
     });
@@ -238,6 +239,79 @@ router.get('/inventory/logs', async (req, res, next) => {
   } catch (e) {
     next(e);
   }
+});
+
+// ============ P1：CSV 导入导出 ============
+function csvCell(v: unknown): string {
+  const s = v == null ? '' : String(v);
+  if (/[",\r\n]/.test(s)) return '"' + s.replace(/"/g, '""') + '"';
+  return s;
+}
+function parseCsv(text: string): string[][] {
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let cur = '';
+  let inQ = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (inQ) {
+      if (ch === '"') { if (text[i + 1] === '"') { cur += '"'; i++; } else inQ = false; }
+      else cur += ch;
+    } else if (ch === '"') inQ = true;
+    else if (ch === ',') { row.push(cur); cur = ''; }
+    else if (ch === '\r') { /* skip */ }
+    else if (ch === '\n') { row.push(cur); rows.push(row); row = []; cur = ''; }
+    else cur += ch;
+  }
+  if (cur.length || row.length) { row.push(cur); rows.push(row); }
+  if (rows.length && rows[0][0] && rows[0][0].startsWith('﻿')) rows[0][0] = rows[0][0].slice(1);
+  return rows;
+}
+const MAT_CSV_HEADER = ['code', 'name', 'category', 'spec', 'unit', 'price', 'enabled', 'doc'];
+
+router.get('/materials/export', async (req, res, next) => {
+  try {
+    const tenantId = res.locals.auth.tenantId;
+    const items = await withTenantClient(tenantId, (client) =>
+      client.query(`SELECT * FROM material WHERE tenant_id=$1 ORDER BY created_at DESC`, [tenantId]).then((r) => r.rows),
+    );
+    const lines = [MAT_CSV_HEADER.join(',')];
+    for (const row of items) lines.push(MAT_CSV_HEADER.map((h) => csvCell(row[h])).join(','));
+    const csv = '﻿' + lines.join('\r\n');
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="materials_${Date.now()}.csv"`);
+    return res.send(csv);
+  } catch (e) { next(e); }
+});
+
+router.post('/materials/import', async (req, res, next) => {
+  try {
+    requireConfigRole(req, res);
+    const tenantId = res.locals.auth.tenantId;
+    const csv = (req.body?.csv as string) || '';
+    const rows = parseCsv(csv);
+    if (rows.length < 2) throw new AppError('EMPTY', 'CSV 无数据行', 400);
+    const header = rows[0].map((h) => h.trim());
+    if (!header.includes('code') || !header.includes('name')) throw new AppError('HEADER', '缺少必填列: code,name', 400);
+    let inserted = 0;
+    for (const r of rows.slice(1)) {
+      if (r.every((c) => !c.trim())) continue;
+      const obj: Record<string, string> = {};
+      header.forEach((h, i) => { obj[h] = (r[i] ?? '').trim(); });
+      if (!obj.code || !obj.name) continue;
+      try {
+        await withTenantClient(tenantId, (client) =>
+          client.query(
+            `INSERT INTO material (tenant_id, code, name, category, spec, unit, price, enabled, doc)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+            [tenantId, obj.code, obj.name, obj.category || null, obj.spec || null, obj.unit || null, obj.price ? Number(obj.price) : 0, obj.enabled === 'false' ? false : true, obj.doc || null],
+          ),
+        );
+        inserted++;
+      } catch { /* 跳过重复 code 等 */ }
+    }
+    return res.json({ ok: true, code: 0, inserted });
+  } catch (e) { next(e); }
 });
 
 export default router;
