@@ -627,7 +627,7 @@ router.post('/open/work_order/:id/claim', async (req, res, next) => {
   try {
     const tenantId = res.locals.auth.tenantId;
     const role = res.locals.auth.role;
-    if (role && !['worker', 'admin', 'dispatcher', 'service_desk'].includes(role)) {
+    if (role && !['worker', 'admin', 'dispatcher', 'service_desk', 'operator'].includes(role)) {
       throw new AppError('FORBIDDEN', `role ${role} not allowed to claim`, 403);
     }
     const b = z.object({ workerId: z.string().min(1), department: z.string().optional() }).parse(req.body);
