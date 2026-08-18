@@ -20,6 +20,7 @@ const materialSchema = z.object({
   unit: z.string().optional(),
   price: z.number().nonnegative().optional(),
   enabled: z.boolean().optional(),
+  doc: z.string().optional(), // 文档（UOne B 耗材文档）
 });
 
 router.get('/materials', async (req, res, next) => {
@@ -54,9 +55,9 @@ router.post('/materials', async (req, res, next) => {
     const item = await withTenantClient(tenantId, (client) =>
       client
         .query(
-          `INSERT INTO material (tenant_id, code, name, category, spec, unit, price, enabled)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
-          [tenantId, b.code, b.name, b.category ?? null, b.spec ?? null, b.unit ?? null, b.price ?? 0, b.enabled ?? true],
+          `INSERT INTO material (tenant_id, code, name, category, spec, unit, price, enabled, doc)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`,
+          [tenantId, b.code, b.name, b.category ?? null, b.spec ?? null, b.unit ?? null, b.price ?? 0, b.enabled ?? true, b.doc ?? null],
         )
         .then((r) => r.rows[0]),
     );
@@ -77,9 +78,9 @@ router.put('/materials/:id', async (req, res, next) => {
       const c = cur.rows[0];
       const r = await client.query(
         `UPDATE material SET code=COALESCE($3,code), name=COALESCE($4,name), category=COALESCE($5,category),
-           spec=COALESCE($6,spec), unit=COALESCE($7,unit), price=COALESCE($8,price), enabled=COALESCE($9,enabled), updated_at=now()
+           spec=COALESCE($6,spec), unit=COALESCE($7,unit), price=COALESCE($8,price), enabled=COALESCE($9,enabled), doc=COALESCE($10,doc), updated_at=now()
          WHERE id=$1 AND tenant_id=$2 RETURNING *`,
-        [req.params.id, tenantId, b.code ?? null, b.name ?? null, b.category ?? null, b.spec ?? null, b.unit ?? null, b.price ?? null, b.enabled ?? null],
+        [req.params.id, tenantId, b.code ?? null, b.name ?? null, b.category ?? null, b.spec ?? null, b.unit ?? null, b.price ?? null, b.enabled ?? null, b.doc ?? null],
       );
       return r.rows[0];
     });
@@ -235,6 +236,82 @@ router.get('/inventory/logs', async (req, res, next) => {
         .then((r) => r.rows),
     );
     return res.json({ ok: true, code: 0, items });
+  } catch (e) {
+    next(e);
+  }
+});
+
+// ============ 耗材 CSV 导出 / 导入 ============
+const MAT_CSV_COLS = ['code', 'name', 'category', 'spec', 'unit', 'price', 'doc'];
+function parseCsv(text: string): string[][] {
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let field = '';
+  let inQuotes = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (inQuotes) {
+      if (c === '"') {
+        if (text[i + 1] === '"') { field += '"'; i++; } else { inQuotes = false; }
+      } else field += c;
+    } else if (c === '"') inQuotes = true;
+    else if (c === ',') { row.push(field); field = ''; }
+    else if (c === '\n' || c === '\r') {
+      if (c === '\r' && text[i + 1] === '\n') i++;
+      row.push(field); rows.push(row); row = []; field = '';
+    } else field += c;
+  }
+  if (field.length > 0 || row.length > 0) { row.push(field); rows.push(row); }
+  return rows.filter((r) => r.length > 1 || (r.length === 1 && r[0] !== ''));
+}
+
+router.get('/materials/export', async (req, res, next) => {
+  try {
+    const tenantId = res.locals.auth.tenantId;
+    const items = await withTenantClient(tenantId, (client) =>
+      client.query(`SELECT * FROM material WHERE tenant_id=$1 ORDER BY created_at DESC`, [tenantId]).then((r) => r.rows),
+    );
+    const escape = (v: unknown) => {
+      if (v === null || v === undefined) return '';
+      const s = String(v);
+      return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+    };
+    const lines = [MAT_CSV_COLS.join(',')];
+    for (const row of items) lines.push(MAT_CSV_COLS.map((h) => escape(row[h])).join(','));
+    const csv = '﻿' + lines.join('\r\n');
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', 'attachment; filename="material.csv"');
+    return res.send(csv);
+  } catch (e) {
+    next(e);
+  }
+});
+
+router.post('/materials/import', async (req, res, next) => {
+  try {
+    requireConfigRole(req, res);
+    const tenantId = res.locals.auth.tenantId;
+    const text = typeof req.body === 'string' ? req.body : (req.body as any)?.csv;
+    if (!text || typeof text !== 'string') throw new AppError('BAD_INPUT', 'csv text required', 400);
+    const rows = parseCsv(text);
+    if (rows.length < 2) return res.json({ ok: true, code: 0, inserted: 0 });
+    const headers = rows[0].map((h) => h.trim());
+    const dataRows = rows.slice(1);
+    let inserted = 0;
+    await withTenantClient(tenantId, async (client) => {
+      for (const r of dataRows) {
+        const obj: Record<string, unknown> = {};
+        headers.forEach((h, i) => { if (MAT_CSV_COLS.includes(h)) obj[h] = r[i] ?? null; });
+        if (!obj.code || !obj.name) continue;
+        const id = randomUUID();
+        const cols = ['id', 'tenant_id', ...MAT_CSV_COLS];
+        const ph = cols.map((_, i) => `$${i + 1}`).join(', ');
+        const vals = [id, tenantId, ...MAT_CSV_COLS.map((c) => obj[c] ?? null)];
+        await client.query(`INSERT INTO material (${cols.join(', ')}) VALUES (${ph})`, vals);
+        inserted++;
+      }
+    });
+    return res.json({ ok: true, code: 0, inserted });
   } catch (e) {
     next(e);
   }

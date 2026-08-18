@@ -22,6 +22,9 @@ const assetSchema = z.object({
   status: z.enum(ASSET_STATUS).optional(),
   has_sno: z.boolean().optional(),
   sno: z.string().optional(),
+  financial_category: z.string().optional(), // 财务分类（UOne A4）
+  price: z.union([z.number(), z.string()]).optional(), // 购置金额
+  supplier: z.string().optional(), // 供应商
 });
 
 router.get('/assets', async (req, res, next) => {
@@ -58,8 +61,8 @@ router.post('/assets', async (req, res, next) => {
     const item = await withTenantClient(tenantId, (client) =>
       client
         .query(
-          `INSERT INTO asset (tenant_id, asset_no, name, model, pinyin, location, status, has_sno, sno, qr_code)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,
+          `INSERT INTO asset (tenant_id, asset_no, name, model, pinyin, location, status, has_sno, sno, qr_code, financial_category, price, supplier)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING *`,
           [
             tenantId,
             `ASSET-${id.slice(0, 8).toUpperCase()}`, // 建档即生成可读资产编号
@@ -71,6 +74,9 @@ router.post('/assets', async (req, res, next) => {
             b.has_sno ?? false,
             b.sno ?? null,
             `ASSET:${id}`, // 二维码内容（前端展示，扫码真机【部署后补验】）
+            b.financial_category ?? null,
+            b.price ?? null,
+            b.supplier ?? null,
           ],
         )
         .then((r) => r.rows[0]),
@@ -102,6 +108,9 @@ router.put('/assets/:id', async (req, res, next) => {
       if (b.status !== undefined) set('status', b.status);
       if (b.has_sno !== undefined) set('has_sno', b.has_sno);
       if (b.sno !== undefined) set('sno', b.sno);
+      if (b.financial_category !== undefined) set('financial_category', b.financial_category);
+      if (b.price !== undefined) set('price', b.price);
+      if (b.supplier !== undefined) set('supplier', b.supplier);
       if (sets.length === 0) return cur.rows[0];
       sets.push('updated_at = now()');
       const r = await client.query(
@@ -194,6 +203,172 @@ router.get('/assets/:id/history', async (req, res, next) => {
       return r.rows;
     });
     return res.json({ ok: true, code: 0, items: summarizeLinkedOrders(rows) });
+  } catch (e) {
+    next(e);
+  }
+});
+
+// ============ 维保台账（asset_maintenance） ============
+const maintSchema = z.object({
+  maintain_date: z.string().optional(),
+  type: z.string().optional(),
+  cost: z.union([z.number(), z.string()]).optional(),
+  vendor: z.string().optional(),
+  note: z.string().optional(),
+});
+
+router.get('/assets/:id/maintenance', async (req, res, next) => {
+  try {
+    const tenantId = res.locals.auth.tenantId;
+    const items = await withTenantClient(tenantId, (client) =>
+      client
+        .query(
+          `SELECT * FROM asset_maintenance WHERE tenant_id=$1 AND asset_id=$2 ORDER BY maintain_date DESC NULLS LAST, created_at DESC`,
+          [tenantId, req.params.id],
+        )
+        .then((r) => r.rows),
+    );
+    return res.json({ ok: true, code: 0, items });
+  } catch (e) {
+    next(e);
+  }
+});
+
+router.post('/assets/:id/maintenance', async (req, res, next) => {
+  try {
+    requireConfigRole(req, res);
+    const tenantId = res.locals.auth.tenantId;
+    const b = maintSchema.parse(req.body);
+    const item = await withTenantClient(tenantId, (client) =>
+      client
+        .query(
+          `INSERT INTO asset_maintenance (tenant_id, asset_id, maintain_date, type, cost, vendor, note)
+           VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *`,
+          [tenantId, req.params.id, b.maintain_date ?? null, b.type ?? null, b.cost ?? null, b.vendor ?? null, b.note ?? null],
+        )
+        .then((r) => r.rows[0]),
+    );
+    return res.status(201).json({ ok: true, code: 0, item });
+  } catch (e) {
+    next(e);
+  }
+});
+
+router.put('/assets/maintenance/:mid', async (req, res, next) => {
+  try {
+    requireConfigRole(req, res);
+    const tenantId = res.locals.auth.tenantId;
+    const b = maintSchema.partial().parse(req.body);
+    const item = await withTenantClient(tenantId, async (client) => {
+      const cur = await client.query(`SELECT * FROM asset_maintenance WHERE id=$1 AND tenant_id=$2`, [req.params.mid, tenantId]);
+      if (cur.rowCount === 0) throw new AppError('NOT_FOUND', 'maintenance not found', 404);
+      const sets: string[] = [];
+      const params: unknown[] = [req.params.mid, tenantId];
+      const set = (col: string, v: unknown) => { params.push(v); sets.push(`${col} = $${params.length}`); };
+      if (b.maintain_date !== undefined) set('maintain_date', b.maintain_date);
+      if (b.type !== undefined) set('type', b.type);
+      if (b.cost !== undefined) set('cost', b.cost);
+      if (b.vendor !== undefined) set('vendor', b.vendor);
+      if (b.note !== undefined) set('note', b.note);
+      if (sets.length === 0) return cur.rows[0];
+      sets.push('updated_at = now()');
+      const r = await client.query(
+        `UPDATE asset_maintenance SET ${sets.join(', ')} WHERE id=$1 AND tenant_id=$2 RETURNING *`,
+        params,
+      );
+      return r.rows[0];
+    });
+    return res.json({ ok: true, code: 0, item });
+  } catch (e) {
+    next(e);
+  }
+});
+
+router.delete('/assets/maintenance/:mid', async (req, res, next) => {
+  try {
+    requireConfigRole(req, res);
+    const tenantId = res.locals.auth.tenantId;
+    const n = await withTenantClient(tenantId, (client) =>
+      client.query(`DELETE FROM asset_maintenance WHERE id=$1 AND tenant_id=$2`, [req.params.mid, tenantId]).then((r) => r.rowCount ?? 0),
+    );
+    if (n === 0) throw new AppError('NOT_FOUND', 'maintenance not found', 404);
+    return res.json({ ok: true, code: 0 });
+  } catch (e) {
+    next(e);
+  }
+});
+
+// ============ 资产 CSV 导出 / 导入 ============
+const ASSET_CSV_COLS = ['name', 'model', 'pinyin', 'location', 'status', 'sno', 'financial_category', 'price', 'supplier'];
+function parseCsv(text: string): string[][] {
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let field = '';
+  let inQuotes = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (inQuotes) {
+      if (c === '"') {
+        if (text[i + 1] === '"') { field += '"'; i++; } else { inQuotes = false; }
+      } else field += c;
+    } else if (c === '"') inQuotes = true;
+    else if (c === ',') { row.push(field); field = ''; }
+    else if (c === '\n' || c === '\r') {
+      if (c === '\r' && text[i + 1] === '\n') i++;
+      row.push(field); rows.push(row); row = []; field = '';
+    } else field += c;
+  }
+  if (field.length > 0 || row.length > 0) { row.push(field); rows.push(row); }
+  return rows.filter((r) => r.length > 1 || (r.length === 1 && r[0] !== ''));
+}
+
+router.get('/assets/export', async (req, res, next) => {
+  try {
+    const tenantId = res.locals.auth.tenantId;
+    const items = await withTenantClient(tenantId, (client) =>
+      client.query(`SELECT * FROM asset WHERE tenant_id=$1 ORDER BY created_at DESC`, [tenantId]).then((r) => r.rows),
+    );
+    const escape = (v: unknown) => {
+      if (v === null || v === undefined) return '';
+      const s = String(v);
+      return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+    };
+    const lines = [['asset_no', ...ASSET_CSV_COLS].join(',')];
+    for (const row of items) lines.push([row.asset_no ?? '', ...ASSET_CSV_COLS.map((h) => escape(row[h]))].join(','));
+    const csv = '﻿' + lines.join('\r\n');
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', 'attachment; filename="asset.csv"');
+    return res.send(csv);
+  } catch (e) {
+    next(e);
+  }
+});
+
+router.post('/assets/import', async (req, res, next) => {
+  try {
+    requireConfigRole(req, res);
+    const tenantId = res.locals.auth.tenantId;
+    const text = typeof req.body === 'string' ? req.body : (req.body as any)?.csv;
+    if (!text || typeof text !== 'string') throw new AppError('BAD_INPUT', 'csv text required', 400);
+    const rows = parseCsv(text);
+    if (rows.length < 2) return res.json({ ok: true, code: 0, inserted: 0 });
+    const headers = rows[0].map((h) => h.trim());
+    const dataRows = rows.slice(1);
+    let inserted = 0;
+    await withTenantClient(tenantId, async (client) => {
+      for (const r of dataRows) {
+        const obj: Record<string, unknown> = {};
+        headers.forEach((h, i) => { if (ASSET_CSV_COLS.includes(h)) obj[h] = r[i] ?? null; });
+        if (!obj.name) continue;
+        const id = randomUUID();
+        const cols = ['id', 'tenant_id', 'asset_no', ...ASSET_CSV_COLS];
+        const ph = cols.map((_, i) => `$${i + 1}`).join(', ');
+        const vals = [id, tenantId, `ASSET-${id.slice(0, 8).toUpperCase()}`, ...ASSET_CSV_COLS.map((c) => obj[c] ?? null)];
+        await client.query(`INSERT INTO asset (${cols.join(', ')}) VALUES (${ph})`, vals);
+        inserted++;
+      }
+    });
+    return res.json({ ok: true, code: 0, inserted });
   } catch (e) {
     next(e);
   }
