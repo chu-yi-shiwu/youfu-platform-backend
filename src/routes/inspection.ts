@@ -13,6 +13,7 @@ import { emitDomainEvent } from '../db/eventBus.js';
 import { getWorkflowDefOrDefault } from '../engine/workflowDef.js';
 import { applyEvent, availableTransitions } from '../engine/stateMachine.js';
 import { INSPECTION_DEF } from '../engine/themes.js';
+import { createAlert } from './emergency.js';
 
 /**
  * 状态流转统一走 workflow_def 引擎（红线：所有业务流必须过 workflow_def，不再硬编码状态机）。
@@ -257,9 +258,18 @@ router.post('/tasks/:id/exception', async (req, res, next) => {
     requireConfigRole(req, res);
     const tenantId = res.locals.auth.tenantId;
     const b = z.object({ note: z.string().min(1) }).parse(req.body);
-    const item = await withTenantClient(tenantId, (client) =>
-      transitionTask(client, tenantId, req.params.id, 'exception', { note: b.note }),
-    );
+    const item = await withTenantClient(tenantId, async (client) => {
+      const row = await transitionTask(client, tenantId, req.params.id, 'exception', { note: b.note });
+      // 预警深化：巡检异常自动生成 L1 预警，落入预警中心统一处理
+      await createAlert(client, tenantId, {
+        source_type: 'inspection',
+        source_id: req.params.id,
+        level: 'L1',
+        title: `巡检异常：${row.title}`,
+        message: b.note,
+      });
+      return row;
+    });
     return res.json({ ok: true, code: 0, item });
   } catch (e) {
     next(e);

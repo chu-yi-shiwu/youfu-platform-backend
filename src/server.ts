@@ -11,6 +11,8 @@ import webhookRouter from './webhook/routes.js';
 import authRouter from './routes/auth.js';
 import configRouter from './routes/config.js';
 import inspectionRouter from './routes/inspection.js';
+import emergencyRouter from './routes/emergency.js';
+import transportRouter from './routes/transport.js';
 import volunteerRouter from './routes/volunteer.js';
 import feedbackRouter from './routes/feedback.js';
 import monitorRouter from './routes/monitor.js';
@@ -57,6 +59,9 @@ app.use('/api/v1', webhookRouter);
 app.use('/api/v1', authRouter);
 app.use('/api/v1', configRouter);
 app.use('/api/v1/inspection', inspectionRouter);
+// P2 第二刀：应急预案库 + 预警中心 / 运送轨迹
+app.use('/api/v1/emergency', emergencyRouter);
+app.use('/api/v1/transport', transportRouter);
 app.use('/api/v1/volunteer', volunteerRouter);
 app.use('/api/v1/feedback', feedbackRouter);
 app.use('/api/v1/monitor', monitorRouter);
