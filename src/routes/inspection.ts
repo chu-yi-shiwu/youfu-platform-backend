@@ -344,6 +344,39 @@ async function createPlanOccurrence(
   return out;
 }
 
+/**
+ * 真 cron 调度入口（G3 后续增强落地）：对某租户扫描到期未暂停计划，自动生成逾期/当期实例并推进 next_run_at。
+ * - 复用 createPlanOccurrence（已含 domain_event 记账）与 addPlanInterval，保持与手动"生成下一期"完全一致的行为。
+ * - catch-up：若 next_run_at 远早于 now（服务宕机/新建即过期），循环补齐至多 60 期，避免无限生成。
+ * - 必须在 withTenantClient 内调用（已设 RLS 租户隔离）。
+ */
+export async function runDuePlansForTenant(tenantId: string): Promise<number> {
+  return withTenantClient(tenantId, async (client) => {
+    const due = await client.query(
+      `SELECT id, name, point_ids, frequency, interval_n, next_run_at
+       FROM inspection_plan WHERE tenant_id=$1 AND paused=false AND next_run_at IS NOT NULL AND next_run_at <= now()`,
+      [tenantId],
+    );
+    let generated = 0;
+    for (const plan of due.rows) {
+      let occ = new Date(plan.next_run_at);
+      const now = new Date();
+      let guard = 0;
+      while (occ <= now && guard < 60) {
+        await createPlanOccurrence(client, tenantId, plan, occ);
+        generated += Array.isArray(plan.point_ids) ? plan.point_ids.length : 0;
+        occ = addPlanInterval(occ, plan.frequency, plan.interval_n || 1);
+        guard++;
+      }
+      await client.query(`UPDATE inspection_plan SET next_run_at=$2, updated_at=now() WHERE id=$1`, [
+        plan.id,
+        toPgTs(occ),
+      ]);
+    }
+    return generated;
+  });
+}
+
 // 计划生成：批量为若干点位生成 pending 巡检单（纯函数便于单测）
 export function generatePlanTasks(
   points: { id: string }[],

@@ -33,6 +33,7 @@ import businessFlowRouter from './routes/businessFlow.js';
 import basicDataRouter from './routes/basicData.js';
 import equipmentRouter from './routes/equipment.js';
 import uploadRouter from './routes/upload.js';// B0 文件上传（H5 拍照落库）
+import { startInspectionScheduler } from './scheduler/inspectionScheduler.js';// G3 真 cron 调度
 
 // 试点/生产：用 ENV_FILE 指定环境文件（默认 .env，production 下默认 .env.pilot），
 // 同一份代码可同时跑 dev / pilot，无需改代码。
@@ -144,4 +145,6 @@ const PORT = Number(process.env.PORT ?? 4001);
 // 容器环境必须监听 0.0.0.0，否则 CloudRun 无法路由进来
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`youfu-backend-m1 listening on 0.0.0.0:${PORT}`);
+  // G3 真 cron：后端进程内定时扫描到期巡检计划并自动生成实例（单进程部署，无重复触发）。
+  startInspectionScheduler();
 });
