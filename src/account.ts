@@ -127,6 +127,20 @@ export async function findUserById(
   return r.rows[0];
 }
 
+// 仅更新密码哈希（改密/重置）。调用方须已通过鉴权与旧密码校验，且传入正确的租户与用户。
+export async function updateUserPassword(
+  client: PoolClient,
+  tenantId: string,
+  userId: string,
+  newPassword: string,
+): Promise<void> {
+  await client.query(
+    `UPDATE account_user SET password_hash = $1, updated_at = now()
+     WHERE tenant_id = $2 AND id = $3`,
+    [hashPassword(newPassword), tenantId, userId],
+  );
+}
+
 export async function listUsers(client: PoolClient, tenantId: string): Promise<AccountUser[]> {
   const r = await client.query<AccountUser>(
     `SELECT id, tenant_id, username, password_hash, display_name, role, active

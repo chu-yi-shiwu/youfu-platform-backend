@@ -11,6 +11,7 @@ import {
   signLoginToken,
   toPublic,
   verifyPassword,
+  updateUserPassword,
   withTenantClient,
   type AccountRole,
 } from '../account.js';
@@ -88,6 +89,35 @@ function requireAdmin(auth: AuthLocals): boolean {
   if (auth.authMode === 'dev') return true;
   return auth.role === 'admin';
 }
+
+const changePwSchema = z.object({
+  old_password: z.string().min(1).max(200),
+  new_password: z.string().min(6).max(200),
+});
+
+// PATCH /api/v1/auth/change-password —— 受保护：登录用户修改自己的密码（需旧密码校验）
+router.patch('/auth/change-password', async (req, res, next) => {
+  try {
+    const auth = res.locals.auth as AuthLocals;
+    if (!auth) return res.status(401).json({ ok: false, code: 'AUTH_001', message: 'missing auth' });
+    // dev 模式无真实密码体系，直接放行（本地调试）
+    if (auth.authMode === 'dev' || !auth.userId) {
+      return res.json({ ok: true, code: 0 });
+    }
+    const { old_password, new_password } = changePwSchema.parse(req.body);
+    const user = await withTenantClient(auth.tenantId, (client) => findUserById(client, auth.tenantId, auth.userId!));
+    if (!user) return res.status(404).json({ ok: false, code: 'USER_404', message: 'user not found' });
+    if (!verifyPassword(old_password, user.password_hash)) {
+      return res.status(401).json({ ok: false, code: 'AUTH_003', message: 'invalid old password' });
+    }
+    await withTenantClient(auth.tenantId, (client) =>
+      updateUserPassword(client, auth.tenantId, auth.userId!, new_password),
+    );
+    return res.json({ ok: true, code: 0 });
+  } catch (e) {
+    next(e);
+  }
+});
 
 const createUserSchema = z.object({
   username: z.string().min(1).max(64),
