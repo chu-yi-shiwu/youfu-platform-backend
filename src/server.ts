@@ -25,6 +25,7 @@ import processMiningRouter from './routes/processMining.js';
 import autoTuneRouter from './routes/autoTune.js';
 import workerRouter from './routes/worker.js';
 import catalogRouter from './routes/catalog.js';
+import faultCategoryRouter from './routes/faultCategory.js';
 import accountsRouter from './routes/accounts.js';
 import tenantInfoRouter from './routes/tenantInfo.js';
 import workflowDefRouter from './routes/workflowDef.js';
@@ -76,6 +77,7 @@ app.use('/api/v1', autoTuneRouter);
 // ② 主数据补全：人员 / 商品目录 / 账号 三类 CRUD（dev 默认 admin 可写）
 app.use('/api/v1', workerRouter);
 app.use('/api/v1', catalogRouter);
+app.use('/api/v1', faultCategoryRouter);
 app.use('/api/v1', accountsRouter);
 app.use('/api/v1', tenantInfoRouter);
 app.use('/api/v1/workflow-defs', workflowDefRouter);
