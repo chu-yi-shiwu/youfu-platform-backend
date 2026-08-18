@@ -116,6 +116,40 @@
     <div id="listErr" class="err" style="display:none"></div>
     <div id="listBody"><div class="empty">点击"查看优化建议"加载…</div></div>
   </section>
+
+  <!-- 字段级配置（P0） -->
+  <section class="panel">
+    <h2>业务流字段级配置（自定义字段 / 自定义状态）</h2>
+    <div class="state-sub">按业务流（entityType）独立配置自定义字段与自定义状态，保存后实时生效，工单/业务流表单将按此渲染。</div>
+    <div class="bar" style="border:0;padding:10px 0">
+      <div>
+        <label>业务流</label>
+        <select id="fcEntity" style="padding:7px 10px;border:1px solid var(--line);border-radius:8px;font-size:13px">
+          <option value="work_order">工单 work_order</option>
+          <option value="inspection">巡检 inspection</option>
+          <option value="transport">运送 transport</option>
+          <option value="emergency">应急 emergency</option>
+          <option value="recurring_check">循环签到 recurring_check</option>
+        </select>
+      </div>
+      <button class="ghost" onclick="fcLoad()">载入配置</button>
+      <button onclick="fcSave()">保存配置</button>
+    </div>
+
+    <h3 style="margin:14px 0 6px;font-size:14px">初始状态</h3>
+    <input id="fcInitial" placeholder="initial" style="padding:7px 10px;border:1px solid var(--line);border-radius:8px;font-size:13px;width:220px" />
+
+    <h3 style="margin:14px 0 6px;font-size:14px">自定义状态（每行一个）</h3>
+    <div id="fcStates"></div>
+    <button class="ghost" onclick="fcAddState()">+ 添加状态</button>
+
+    <h3 style="margin:14px 0 6px;font-size:14px">自定义字段</h3>
+    <div id="fcFields"></div>
+    <button class="ghost" onclick="fcAddField()">+ 添加字段</button>
+
+    <div class="note" id="fcErr" style="color:var(--bad)"></div>
+    <pre id="fcPreview" class="data" style="margin-top:12px">载入配置后显示…</pre>
+  </section>
 </main>
 
 <div id="toast"></div>
@@ -218,6 +252,84 @@ async function loadList() {
       <td>${new Date(it.created_at).toLocaleString()}</td></tr>`;
   }).join('');
   body.innerHTML = `<table><thead><tr><th>scope</th><th>target</th><th>status</th><th>reason</th><th>recommendation</th><th>created_at</th></tr></thead><tbody>${rows}</tbody></table>`;
+}
+
+// ===== 字段级配置编辑器（P0） =====
+let fcDef = { initial: '', states: [], transitions: [], config: { fields: [] } };
+
+async function fcLoad() {
+  const entity = document.getElementById('fcEntity').value;
+  const err = document.getElementById('fcErr'); err.textContent = '';
+  try {
+    const r = await fetch('/api/v1/workflow-defs/' + entity, { headers: authHeaders() });
+    const j = await r.json();
+    if (j.ok && j.def) fcDef = j.def;
+    else fcDef = { initial: '', states: [], transitions: [], config: { fields: [] } };
+    document.getElementById('fcInitial').value = fcDef.initial || '';
+    fcRenderStates();
+    fcRenderFields();
+    document.getElementById('fcPreview').textContent = JSON.stringify(fcDef, null, 2);
+  } catch (e) { err.textContent = '载入失败：' + e.message; }
+}
+
+function fcRenderStates() {
+  const box = document.getElementById('fcStates');
+  box.innerHTML = '';
+  (fcDef.states || []).forEach((s, i) => {
+    const row = document.createElement('div');
+    row.style.cssText = 'display:flex;gap:8px;margin:4px 0;align-items:center';
+    row.innerHTML = `<input value="${s}" style="padding:6px 8px;border:1px solid var(--line);border-radius:6px;flex:1" onchange="fcDef.states[${i}]=this.value" />
+      <button class="ghost" style="padding:5px 10px" onclick="fcDef.states.splice(${i},1);fcRenderStates();fcSync()">删</button>`;
+    box.appendChild(row);
+  });
+}
+function fcAddState() { fcDef.states.push('new_state'); fcRenderStates(); fcSync(); }
+
+function fcRenderFields() {
+  const box = document.getElementById('fcFields');
+  box.innerHTML = '';
+  const fields = (fcDef.config && fcDef.config.fields) || [];
+  fields.forEach((f, i) => {
+    const row = document.createElement('div');
+    row.style.cssText = 'border:1px solid var(--line);border-radius:8px;padding:8px;margin:6px 0';
+    row.innerHTML = `
+      <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
+        <input placeholder="字段key" value="${f.key || ''}" style="padding:5px 7px;border:1px solid var(--line);border-radius:6px;width:120px" onchange="fcDef.config.fields[${i}].key=this.value;fcSync()" />
+        <input placeholder="显示名" value="${f.label || ''}" style="padding:5px 7px;border:1px solid var(--line);border-radius:6px;width:130px" onchange="fcDef.config.fields[${i}].label=this.value;fcSync()" />
+        <select style="padding:5px 7px;border:1px solid var(--line);border-radius:6px" onchange="fcDef.config.fields[${i}].type=this.value;fcSync()">
+          ${['text','textarea','number','date','select','checkbox'].map(t=>`<option ${f.type===t?'selected':''}>${t}</option>`).join('')}
+        </select>
+        <label style="font-size:12px"><input type="checkbox" ${f.required?'checked':''} onchange="fcDef.config.fields[${i}].required=this.checked;fcSync()" />必填</label>
+        <button class="ghost" style="padding:4px 9px" onclick="fcDef.config.fields.splice(${i},1);fcRenderFields();fcSync()">删</button>
+      </div>
+      <input placeholder="选项(select用，逗号分隔)" value="${(f.options||[]).join(',')}" style="padding:5px 7px;border:1px solid var(--line);border-radius:6px;width:100%;margin-top:5px" onchange="fcDef.config.fields[${i}].options=this.value.split(',').map(s=>s.trim()).filter(Boolean);fcSync()" />`;
+    box.appendChild(row);
+  });
+}
+function fcAddField() {
+  if (!fcDef.config) fcDef.config = {};
+  if (!fcDef.config.fields) fcDef.config.fields = [];
+  fcDef.config.fields.push({ key: 'field_' + (fcDef.config.fields.length + 1), label: '新字段', type: 'text', required: false, options: [] });
+  fcRenderFields(); fcSync();
+}
+function fcSync() { document.getElementById('fcPreview').textContent = JSON.stringify(fcDef, null, 2); }
+
+async function fcSave() {
+  const entity = document.getElementById('fcEntity').value;
+  const err = document.getElementById('fcErr'); err.textContent = '';
+  fcDef.initial = document.getElementById('fcInitial').value.trim();
+  if (!fcDef.initial) { err.textContent = '初始状态不能为空'; return; }
+  if (!fcDef.states || fcDef.states.length === 0) { err.textContent = '至少配置一个状态'; return; }
+  const payload = { def: { initial: fcDef.initial, states: fcDef.states, transitions: fcDef.transitions || [], config: fcDef.config || {} } };
+  try {
+    const r = await fetch('/api/v1/workflow-defs/' + entity, {
+      method: 'PUT', headers: authHeaders(), body: JSON.stringify(payload),
+    });
+    const j = await r.json();
+    if (!j.ok) { err.textContent = '保存失败：' + (j.message || j.code); return; }
+    toast('字段级配置已保存 ✅（实时生效·已持久化）', true);
+    fcLoad();
+  } catch (e) { err.textContent = '网络错误：' + e.message; }
 }
 
 // 进入页面即读取一次
