@@ -151,7 +151,7 @@ const taskSchema = z.object({
 router.get('/tasks', async (req, res, next) => {
   try {
     const tenantId = res.locals.auth.tenantId;
-    const { status, point_id, type, scheduled_from, scheduled_to } = req.query as Record<string, string>;
+    const { status, point_id, type, scheduled_from, scheduled_to, plan_id } = req.query as Record<string, string>;
     const clauses = ['tenant_id = $1'];
     const params: unknown[] = [tenantId];
     const add = (sql: string, v: unknown) => {
@@ -161,6 +161,7 @@ router.get('/tasks', async (req, res, next) => {
     if (status) add('status = ?', status);
     if (point_id) add('point_id = ?', point_id);
     if (type) add('type = ?', type);
+    if (plan_id) add('plan_id = ?', plan_id);
     if (scheduled_from) add('scheduled_at >= ?', scheduled_from);
     if (scheduled_to) add('scheduled_at <= ?', scheduled_to);
     const items = await withTenantClient(tenantId, (client) =>
@@ -293,6 +294,56 @@ router.post('/tasks/:id/transition', async (req, res, next) => {
   }
 });
 
+// ============ 周期/循环计划（G3 · MVP） ============
+// 设计：inspection_plan 记录频率/间隔/下次执行/暂停；建计划时按规则批量生成未来 N 期
+// scheduled 巡检单（plan_id 关联），暂停则不再推进。真 cron 调度列为后续增强。
+type PlanFrequency = 'daily' | 'weekly' | 'monthly';
+
+function addPlanInterval(base: Date, freq: PlanFrequency, n: number): Date {
+  const d = new Date(base);
+  if (freq === 'daily') d.setDate(d.getDate() + n);
+  else if (freq === 'weekly') d.setDate(d.getDate() + n * 7);
+  else if (freq === 'monthly') d.setMonth(d.getMonth() + n);
+  return d;
+}
+function toPgTs(d: Date): string {
+  return d.toISOString();
+}
+
+const planSchema = z.object({
+  name: z.string().min(1),
+  point_ids: z.array(z.string().uuid()),
+  frequency: z.enum(['daily', 'weekly', 'monthly']),
+  interval_n: z.number().int().min(1).max(365).optional(),
+  start_from: z.string().optional(),
+  generate_ahead: z.number().int().min(1).max(24).optional(),
+});
+const planUpdateSchema = planSchema.partial().extend({
+  paused: z.boolean().optional(),
+  next_run_at: z.string().optional(),
+});
+
+// 为某计划的某一期生成各点位的 pending 巡检单（plan_id 关联，便于查实例）。
+async function createPlanOccurrence(
+  client: any,
+  tenantId: string,
+  plan: { id: string; name: string; point_ids: string[] },
+  occurrenceDate: Date,
+): Promise<unknown[]> {
+  const out: unknown[] = [];
+  for (const pid of plan.point_ids) {
+    const r = await client.query(
+      `INSERT INTO inspection_task (tenant_id, plan_id, point_id, type, title, scheduled_at, status)
+       VALUES ($1,$2,$3,'plan',$4,$5,'pending') RETURNING *`,
+      [tenantId, plan.id, pid, `${plan.name}·巡检`, toPgTs(occurrenceDate)],
+    );
+    const ins = r.rows[0];
+    await emitDomainEvent(client, { tenantId, entityType: 'inspection_task', entityId: ins.id, type: 'create', actor: 'config_role' });
+    out.push(ins);
+  }
+  return out;
+}
+
 // 计划生成：批量为若干点位生成 pending 巡检单（纯函数便于单测）
 export function generatePlanTasks(
   points: { id: string }[],
@@ -366,6 +417,108 @@ router.post('/tasks/:id/convert', async (req, res, next) => {
       return wo;
     });
     return res.json({ ok: true, code: 0, result });
+  } catch (e) {
+    next(e);
+  }
+});
+
+// ============ 周期计划 CRUD + 手动生成下一期 ============
+router.get('/plans', async (req, res, next) => {
+  try {
+    const tenantId = res.locals.auth.tenantId;
+    const items = await withTenantClient(tenantId, (client) =>
+      client
+        .query(`SELECT * FROM inspection_plan WHERE tenant_id=$1 ORDER BY created_at DESC`, [tenantId])
+        .then((r: any) => r.rows),
+    );
+    return res.json({ ok: true, code: 0, items });
+  } catch (e) {
+    next(e);
+  }
+});
+
+router.post('/plans', async (req, res, next) => {
+  try {
+    requireConfigRole(req, res);
+    const tenantId = res.locals.auth.tenantId;
+    const b = planSchema.parse(req.body);
+    const interval_n = b.interval_n ?? 1;
+    const generate_ahead = b.generate_ahead ?? 1;
+    const startFrom = b.start_from ? new Date(b.start_from) : new Date();
+    const id = randomUUID();
+    const created = await withTenantClient(tenantId, async (client) => {
+      await client.query(
+        `INSERT INTO inspection_plan (id, tenant_id, name, point_ids, frequency, interval_n, paused, next_run_at)
+         VALUES ($1,$2,$3,$4,$5,$6,false,$7) RETURNING *`,
+        [id, tenantId, b.name, b.point_ids, b.frequency, interval_n, null],
+      );
+      let cursor = startFrom;
+      const out: unknown[] = [];
+      for (let i = 0; i < generate_ahead; i++) {
+        out.push(...(await createPlanOccurrence(client, tenantId, { id, name: b.name, point_ids: b.point_ids }, cursor)));
+        cursor = addPlanInterval(cursor, b.frequency, interval_n);
+      }
+      await client.query(`UPDATE inspection_plan SET next_run_at=$2, updated_at=now() WHERE id=$1`, [id, toPgTs(cursor)]);
+      await emitDomainEvent(client, { tenantId, entityType: 'inspection_plan', entityId: id, type: 'create', actor: 'config_role' });
+      return out;
+    });
+    return res.status(201).json({ ok: true, code: 0, plan_id: id, count: created.length });
+  } catch (e) {
+    next(e);
+  }
+});
+
+router.put('/plans/:id', async (req, res, next) => {
+  try {
+    requireConfigRole(req, res);
+    const tenantId = res.locals.auth.tenantId;
+    const b = planUpdateSchema.parse(req.body);
+    const item = await withTenantClient(tenantId, async (client) => {
+      const cur = await client.query(`SELECT * FROM inspection_plan WHERE id=$1 AND tenant_id=$2`, [req.params.id, tenantId]);
+      if (cur.rowCount === 0) throw new AppError('NOT_FOUND', 'plan not found', 404);
+      const sets: string[] = [];
+      const params: unknown[] = [req.params.id, tenantId];
+      const set = (col: string, v: unknown) => {
+        params.push(v);
+        sets.push(`${col} = $${params.length}`);
+      };
+      if (b.name !== undefined) set('name', b.name);
+      if (b.point_ids !== undefined) set('point_ids', b.point_ids);
+      if (b.frequency !== undefined) set('frequency', b.frequency);
+      if (b.interval_n !== undefined) set('interval_n', b.interval_n);
+      if (b.paused !== undefined) set('paused', b.paused);
+      if (b.next_run_at !== undefined) set('next_run_at', b.next_run_at ?? null);
+      if (sets.length === 0) return cur.rows[0];
+      sets.push('updated_at = now()');
+      const r = await client.query(
+        `UPDATE inspection_plan SET ${sets.join(', ')} WHERE id=$1 AND tenant_id=$2 RETURNING *`,
+        params,
+      );
+      return r.rows[0];
+    });
+    return res.json({ ok: true, code: 0, item });
+  } catch (e) {
+    next(e);
+  }
+});
+
+// 手动生成下一期（暂停则拒绝）；生成后推进 next_run_at。
+router.post('/plans/:id/generate', async (req, res, next) => {
+  try {
+    requireConfigRole(req, res);
+    const tenantId = res.locals.auth.tenantId;
+    const created = await withTenantClient(tenantId, async (client) => {
+      const cur = await client.query(`SELECT * FROM inspection_plan WHERE id=$1 AND tenant_id=$2`, [req.params.id, tenantId]);
+      if (cur.rowCount === 0) throw new AppError('NOT_FOUND', 'plan not found', 404);
+      const plan = cur.rows[0];
+      if (plan.paused) throw new AppError('BAD_STATE', 'plan is paused', 409);
+      const occurrenceDate = plan.next_run_at ? new Date(plan.next_run_at) : new Date();
+      const out = await createPlanOccurrence(client, tenantId, plan, occurrenceDate);
+      const next = addPlanInterval(occurrenceDate, plan.frequency, plan.interval_n);
+      await client.query(`UPDATE inspection_plan SET next_run_at=$2, updated_at=now() WHERE id=$1`, [plan.id, toPgTs(next)]);
+      return out;
+    });
+    return res.status(201).json({ ok: true, code: 0, count: created.length, items: created });
   } catch (e) {
     next(e);
   }
