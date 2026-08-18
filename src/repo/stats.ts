@@ -14,10 +14,14 @@ export interface TicketStats {
   tenant_id: string;
   total: number;
   completed: number;
+  cancelled: number;              // 已撤销（废弃态）单数
   auto_dispatched: number;        // auto_flow=true 单数
   auto_closed: number;            // auto_flow=true 且 status=completed（诚实口径自动闭环）
   auto_dispatch_rate: number;     // 自动派单率（过程指标）
   auto_close_rate: number;        // 自动闭环率（验收口径，诚实）
+  cancellation_rate: number;      // 撤销率 = cancelled / total（UOne 颗粒度：撤销率统计）
+  satisfaction_avg: number;       // 满意度均分（UOne 颗粒度：满意度统计；无评价单返回 0）
+  satisfaction_count: number;     // 已评价单数
   note: string;
 }
 
@@ -29,31 +33,44 @@ export async function ticketStats(client: PoolClient, tenantId: string): Promise
   const r = await client.query<{
     total: string;
     completed: string;
+    cancelled: string;
     auto_dispatched: string;
     auto_closed: string;
+    satisfaction_avg: string | null;
+    satisfaction_count: string;
   }>(
     `SELECT
        COUNT(*)::text                                          AS total,
        COUNT(*) FILTER (WHERE status = ANY($2::text[]))::text  AS completed,
+       COUNT(*) FILTER (WHERE status = 'cancelled')::text      AS cancelled,
        COUNT(*) FILTER (WHERE auto_flow = true)::text          AS auto_dispatched,
-       COUNT(*) FILTER (WHERE auto_flow = true AND status = ANY($2::text[]))::text AS auto_closed
+       COUNT(*) FILTER (WHERE auto_flow = true AND status = ANY($2::text[]))::text AS auto_closed,
+       AVG(satisfaction_score)::text                          AS satisfaction_avg,
+       COUNT(satisfaction_score)::text                        AS satisfaction_count
      FROM work_orders WHERE tenant_id = $1`,
     [tenantId, done],
   );
   const row = r.rows[0];
   const total = Number(row.total);
   const completed = Number(row.completed);
+  const cancelled = Number(row.cancelled);
   const autoDispatched = Number(row.auto_dispatched);
   const autoClosed = Number(row.auto_closed);
+  const satisfactionAvg = row.satisfaction_avg != null ? Number(row.satisfaction_avg) : 0;
+  const satisfactionCount = Number(row.satisfaction_count);
   return {
     tenant_id: tenantId,
     total,
     completed,
+    cancelled,
     auto_dispatched: autoDispatched,
     auto_closed: autoClosed,
     auto_dispatch_rate: total ? Number((autoDispatched / total).toFixed(4)) : 0,
     auto_close_rate: total ? Number((autoClosed / total).toFixed(4)) : 0,
-    note: 'auto_close_rate 为诚实口径（auto_flow 命中且最终 completed）；非严格无人值守口径，严格口径待接 ticket_event 审计聚合',
+    cancellation_rate: total ? Number((cancelled / total).toFixed(4)) : 0,
+    satisfaction_avg: satisfactionAvg,
+    satisfaction_count: satisfactionCount,
+    note: 'auto_close_rate 为诚实口径（auto_flow 命中且最终 completed）；非严格无人值守口径，严格口径待接 ticket_event 审计聚合；撤销率=已撤销/总数；满意度均分基于已评价单',
   };
 }
 
