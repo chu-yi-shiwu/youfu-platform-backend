@@ -25,6 +25,7 @@ const assetSchema = z.object({
   financial_category: z.string().optional(), // 财务分类（UOne A4）
   price: z.union([z.number(), z.string()]).optional(), // 购置金额
   supplier: z.string().optional(), // 供应商
+  purchase_date: z.string().optional(), // 购置日期（YYYY-MM-DD）
 });
 
 router.get('/assets', async (req, res, next) => {
@@ -61,8 +62,8 @@ router.post('/assets', async (req, res, next) => {
     const item = await withTenantClient(tenantId, (client) =>
       client
         .query(
-          `INSERT INTO asset (tenant_id, asset_no, name, model, pinyin, location, status, has_sno, sno, qr_code, financial_category, price, supplier)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING *`,
+          `INSERT INTO asset (tenant_id, asset_no, name, model, pinyin, location, status, has_sno, sno, qr_code, financial_category, price, supplier, purchase_date)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING *`,
           [
             tenantId,
             `ASSET-${id.slice(0, 8).toUpperCase()}`, // 建档即生成可读资产编号
@@ -77,6 +78,7 @@ router.post('/assets', async (req, res, next) => {
             b.financial_category ?? null,
             b.price ?? null,
             b.supplier ?? null,
+            b.purchase_date ?? null,
           ],
         )
         .then((r) => r.rows[0]),
@@ -111,6 +113,7 @@ router.put('/assets/:id', async (req, res, next) => {
       if (b.financial_category !== undefined) set('financial_category', b.financial_category);
       if (b.price !== undefined) set('price', b.price);
       if (b.supplier !== undefined) set('supplier', b.supplier);
+      if (b.purchase_date !== undefined) set('purchase_date', b.purchase_date);
       if (sets.length === 0) return cur.rows[0];
       sets.push('updated_at = now()');
       const r = await client.query(
@@ -299,7 +302,7 @@ router.delete('/assets/maintenance/:mid', async (req, res, next) => {
 });
 
 // ============ 资产 CSV 导出 / 导入 ============
-const ASSET_CSV_COLS = ['name', 'model', 'pinyin', 'location', 'status', 'sno', 'financial_category', 'price', 'supplier'];
+const ASSET_CSV_COLS = ['name', 'model', 'pinyin', 'location', 'status', 'sno', 'financial_category', 'price', 'supplier', 'purchase_date'];
 function parseCsv(text: string): string[][] {
   const rows: string[][] = [];
   let row: string[] = [];

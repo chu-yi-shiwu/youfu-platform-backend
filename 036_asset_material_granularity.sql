@@ -4,10 +4,11 @@
 -- 全部 IF NOT EXISTS / DROP POLICY IF EXISTS 幂等，可重复执行；与线上 DB 现状对齐，保证全新库可复现部署。
 -- 须以 superuser(postgres) 执行：psql "$DATABASE_URL_POSTGRES" -f 036_asset_material_granularity.sql
 
--- ============ asset 补列（财务分类/价格/供应商） ============
+-- ============ asset 补列（财务分类/价格/供应商/购置日期） ============
 ALTER TABLE asset ADD COLUMN IF NOT EXISTS financial_category text;
 ALTER TABLE asset ADD COLUMN IF NOT EXISTS price numeric(12,2);
 ALTER TABLE asset ADD COLUMN IF NOT EXISTS supplier text;
+ALTER TABLE asset ADD COLUMN IF NOT EXISTS purchase_date date;
 
 -- ============ asset_maintenance 维保台账 ============
 CREATE TABLE IF NOT EXISTS asset_maintenance (
