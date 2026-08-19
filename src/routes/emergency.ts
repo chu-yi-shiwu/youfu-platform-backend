@@ -23,6 +23,12 @@ const planSchema = z.object({
   owner: z.string().optional(),
   contact_phone: z.string().optional(),
   enabled: z.boolean().optional(),
+  applicable_scene: z.string().optional(),
+  trigger_condition: z.string().optional(),
+  response_org: z.string().optional(),
+  materials: z.string().optional(),
+  related_asset_area: z.string().optional(),
+  drill_record: z.string().optional(),
 });
 
 router.get('/plans', async (req, res, next) => {
@@ -88,8 +94,8 @@ router.post('/plans', async (req, res, next) => {
     const b = planSchema.parse(req.body);
     const item = await withTenantClient(tenantId, async (client) => {
       const r = await client.query(
-        `INSERT INTO emergency_plan (tenant_id, code, title, category, level, content, steps, owner, contact_phone, enabled)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,
+        `INSERT INTO emergency_plan (tenant_id, code, title, category, level, content, steps, owner, contact_phone, enabled, applicable_scene, trigger_condition, response_org, materials, related_asset_area, drill_record)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING *`,
         [
           tenantId,
           b.code ?? null,
@@ -101,6 +107,12 @@ router.post('/plans', async (req, res, next) => {
           b.owner ?? null,
           b.contact_phone ?? null,
           b.enabled ?? true,
+          b.applicable_scene ?? null,
+          b.trigger_condition ?? null,
+          b.response_org ?? null,
+          b.materials ?? null,
+          b.related_asset_area ?? null,
+          b.drill_record ?? null,
         ],
       );
       const row = r.rows[0];
@@ -131,6 +143,12 @@ router.put('/plans/:id', async (req, res, next) => {
              level=COALESCE($6,level), content=COALESCE($7,content),
              steps=COALESCE($8,steps), owner=COALESCE($9,owner),
              contact_phone=COALESCE($10,contact_phone), enabled=COALESCE($11,enabled),
+             applicable_scene=COALESCE($12,applicable_scene),
+             trigger_condition=COALESCE($13,trigger_condition),
+             response_org=COALESCE($14,response_org),
+             materials=COALESCE($15,materials),
+             related_asset_area=COALESCE($16,related_asset_area),
+             drill_record=COALESCE($17,drill_record),
              updated_at=now()
          WHERE id=$1 AND tenant_id=$2 RETURNING *`,
         [
@@ -145,6 +163,12 @@ router.put('/plans/:id', async (req, res, next) => {
           b.owner ?? c.owner,
           b.contact_phone ?? c.contact_phone,
           b.enabled ?? c.enabled,
+          b.applicable_scene ?? c.applicable_scene,
+          b.trigger_condition ?? c.trigger_condition,
+          b.response_org ?? c.response_org,
+          b.materials ?? c.materials,
+          b.related_asset_area ?? c.related_asset_area,
+          b.drill_record ?? c.drill_record,
         ],
       );
       return r.rows[0];

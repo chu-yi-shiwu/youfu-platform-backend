@@ -164,14 +164,14 @@ router.get('/tasks', async (req, res, next) => {
     if (plan_id) add('plan_id = ?', plan_id);
     if (scheduled_from) add('scheduled_at >= ?', scheduled_from);
     if (scheduled_to) add('scheduled_at <= ?', scheduled_to);
-    const items = await withTenantClient(tenantId, (client) =>
-      client
-        .query(
-          `SELECT * FROM inspection_task WHERE ${clauses.join(' AND ')} ORDER BY scheduled_at ASC NULLS LAST, created_at DESC`,
-          params,
-        )
-        .then((r) => r.rows),
-    );
+      const items = await withTenantClient(tenantId, (client) =>
+        client
+          .query(
+            `SELECT t.*, p.name AS point_name FROM inspection_task t LEFT JOIN inspection_point p ON p.id = t.point_id WHERE ${clauses.join(' AND ')} ORDER BY t.scheduled_at ASC NULLS LAST, t.created_at DESC`,
+            params,
+          )
+          .then((r) => r.rows),
+      );
     return res.json({ ok: true, code: 0, items });
   } catch (e) {
     next(e);
@@ -183,7 +183,7 @@ router.get('/tasks/:id', async (req, res, next) => {
   try {
     const tenantId = res.locals.auth.tenantId;
     const item = await withTenantClient(tenantId, async (client) => {
-      const cur = await client.query(`SELECT * FROM inspection_task WHERE id = $1 AND tenant_id = $2`, [
+      const cur = await client.query(`SELECT t.*, p.name AS point_name FROM inspection_task t LEFT JOIN inspection_point p ON p.id = t.point_id WHERE t.id = $1 AND t.tenant_id = $2`, [
         req.params.id,
         tenantId,
       ]);
