@@ -139,6 +139,115 @@ router.delete('/points/:id', async (req, res, next) => {
   }
 });
 
+// ============ 检查项模板（巡检内容） ============
+// 检查项 = 巡检要「查什么」：名称 / 类型[是否|数值|文本] / 标准值 / 单位 / 归类。
+const itemTemplateSchema = z.object({
+  name: z.string().min(1),
+  type: z.enum(['bool', 'number', 'text']).default('bool'),
+  standard_value: z.string().optional(),
+  unit: z.string().optional(),
+  category: z.string().optional(),
+});
+
+function seedItemsSnapshot(client: any, tenantId: string, itemIds: string[]): Promise<unknown[]> {
+  if (!itemIds || itemIds.length === 0) return Promise.resolve([]);
+  return client
+    .query(
+      `SELECT id, name, type, standard_value, unit, category FROM inspection_item
+       WHERE tenant_id = $1 AND id = ANY($2)`,
+      [tenantId, itemIds],
+    )
+    .then((r: any) =>
+      r.rows.map((x: any) => ({
+        item_id: x.id,
+        name: x.name,
+        type: x.type,
+        standard_value: x.standard_value ?? null,
+        unit: x.unit ?? null,
+        category: x.category ?? null,
+        actual_value: null,
+        passed: null,
+        photo: null,
+        remark: null,
+      })),
+    );
+}
+
+router.get('/items', async (req, res, next) => {
+  try {
+    const tenantId = res.locals.auth.tenantId;
+    const items = await withTenantClient(tenantId, (client) =>
+      client
+        .query(
+          `SELECT id, name, type, standard_value, unit, category, created_at FROM inspection_item WHERE tenant_id = $1 ORDER BY category NULLS LAST, created_at DESC`,
+          [tenantId],
+        )
+        .then((r: any) => r.rows),
+    );
+    return res.json({ ok: true, code: 0, items });
+  } catch (e) {
+    next(e);
+  }
+});
+
+router.post('/items', async (req, res, next) => {
+  try {
+    requireConfigRole(req, res);
+    const tenantId = res.locals.auth.tenantId;
+    const b = itemTemplateSchema.parse(req.body);
+    const item = await withTenantClient(tenantId, async (client) => {
+      const r = await client.query(
+        `INSERT INTO inspection_item (tenant_id, name, type, standard_value, unit, category)
+         VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`,
+        [tenantId, b.name, b.type, b.standard_value ?? null, b.unit ?? null, b.category ?? null],
+      );
+      const row = r.rows[0];
+      await emitDomainEvent(client, { tenantId, entityType: 'inspection_item', entityId: row.id, type: 'create', actor: 'config_role' });
+      return row;
+    });
+    return res.status(201).json({ ok: true, code: 0, item });
+  } catch (e) {
+    next(e);
+  }
+});
+
+router.put('/items/:id', async (req, res, next) => {
+  try {
+    requireConfigRole(req, res);
+    const tenantId = res.locals.auth.tenantId;
+    const b = itemTemplateSchema.partial().parse(req.body);
+    const item = await withTenantClient(tenantId, async (client) => {
+      const cur = await client.query(`SELECT * FROM inspection_item WHERE id = $1 AND tenant_id = $2`, [req.params.id, tenantId]);
+      if (cur.rowCount === 0) throw new AppError('NOT_FOUND', 'item not found', 404);
+      const c = cur.rows[0];
+      const r = await client.query(
+        `UPDATE inspection_item SET name=$3, type=$4, standard_value=$5, unit=$6, category=$7 WHERE id=$1 AND tenant_id=$2 RETURNING *`,
+        [req.params.id, tenantId, b.name ?? c.name, b.type ?? c.type, b.standard_value ?? c.standard_value, b.unit ?? c.unit, b.category ?? c.category],
+      );
+      return r.rows[0];
+    });
+    return res.json({ ok: true, code: 0, item });
+  } catch (e) {
+    next(e);
+  }
+});
+
+router.delete('/items/:id', async (req, res, next) => {
+  try {
+    requireConfigRole(req, res);
+    const tenantId = res.locals.auth.tenantId;
+    const n = await withTenantClient(tenantId, (client) =>
+      client
+        .query(`DELETE FROM inspection_item WHERE id = $1 AND tenant_id = $2`, [req.params.id, tenantId])
+        .then((r: any) => r.rowCount ?? 0),
+    );
+    if (n === 0) throw new AppError('NOT_FOUND', 'item not found', 404);
+    return res.json({ ok: true, code: 0 });
+  } catch (e) {
+    next(e);
+  }
+});
+
 // ============ 巡检单 ============
 const taskSchema = z.object({
   point_id: z.string().uuid().optional(),
@@ -146,6 +255,7 @@ const taskSchema = z.object({
   title: z.string().min(1),
   assignee: z.string().optional(),
   scheduled_at: z.string().optional(),
+  item_ids: z.array(z.string().uuid()).optional(),           // 选定检查项模板，创建时 seed 进 items_json
 });
 
 router.get('/tasks', async (req, res, next) => {
@@ -178,7 +288,8 @@ router.get('/tasks', async (req, res, next) => {
   }
 });
 
-// 巡检单详情：返回任务 + 引擎算出的 available（供前端动态渲染动作按钮，不硬编码状态机）。
+// 巡检单详情：返回任务 + 引擎算出的 available（供前端动态渲染动作按钮，不硬编码状态机）
+// + 检查项快照(items_json) + 已填实测记录(records)。
 router.get('/tasks/:id', async (req, res, next) => {
   try {
     const tenantId = res.locals.auth.tenantId;
@@ -191,7 +302,20 @@ router.get('/tasks/:id', async (req, res, next) => {
       const t = cur.rows[0];
       const def = await getWorkflowDefOrDefault(client, tenantId, 'inspection_task', INSPECTION_DEF);
       const available = availableTransitions(def, t.status);
-      return { ...t, available };
+      const rec = await client
+        .query(`SELECT * FROM inspection_record WHERE tenant_id = $1 AND task_id = $2 ORDER BY created_at ASC`, [tenantId, t.id])
+        .then((r: any) => r.rows);
+      const itemsSnapshot = Array.isArray(t.items_json) ? t.items_json : [];
+      // items_json 快照叠加实测回填：以 snapshot 为基础，用 records 覆盖 actual_value/passed/photo/remark。
+      const recMap = new Map<string, any>();
+      for (const x of rec) recMap.set(String(x.item_id), x);
+      const items = itemsSnapshot.map((s: any) => {
+        const recx = recMap.get(String(s.item_id));
+        return recx
+          ? { ...s, actual_value: recx.actual_value ?? null, passed: recx.passed ?? null, photo: recx.photo ?? null, remark: recx.remark ?? null }
+          : s;
+      });
+      return { ...t, available, items, records: rec };
     });
     return res.json({ ok: true, code: 0, item });
   } catch (e) {
@@ -205,10 +329,11 @@ router.post('/tasks', async (req, res, next) => {
     const tenantId = res.locals.auth.tenantId;
     const b = taskSchema.parse(req.body);
     const item = await withTenantClient(tenantId, async (client) => {
+      const snapshot = await seedItemsSnapshot(client, tenantId, b.item_ids ?? []);
       const r = await client.query(
-        `INSERT INTO inspection_task (tenant_id, plan_id, point_id, type, title, assignee, scheduled_at, status)
-         VALUES ($1, NULL, $2, $3, $4, $5, $6, 'pending') RETURNING *`,
-        [tenantId, b.point_id ?? null, b.type, b.title, b.assignee ?? null, b.scheduled_at ?? null],
+        `INSERT INTO inspection_task (tenant_id, plan_id, point_id, type, title, assignee, scheduled_at, status, items_json)
+         VALUES ($1, NULL, $2, $3, $4, $5, $6, 'pending', $7) RETURNING *`,
+        [tenantId, b.point_id ?? null, b.type, b.title, b.assignee ?? null, b.scheduled_at ?? null, JSON.stringify(snapshot)],
       );
       const row = r.rows[0];
       await emitDomainEvent(client, { tenantId, entityType: 'inspection_task', entityId: row.id, type: 'create', actor: 'config_role' });
@@ -242,13 +367,88 @@ router.post('/tasks/:id/complete', async (req, res, next) => {
   try {
     requireConfigRole(req, res);
     const tenantId = res.locals.auth.tenantId;
-    const b = z.object({ note: z.string().optional(), photos: z.array(z.string()).optional() }).parse(req.body);
+    const b = z.object({
+      note: z.string().optional(),
+      photos: z.array(z.string()).optional(),
+      records: z
+        .array(
+          z.object({
+            item_id: z.string().uuid(),
+            actual_value: z.string().optional(),
+            passed: z.boolean().optional(),
+            photo: z.string().optional(),
+            remark: z.string().optional(),
+          }),
+        )
+        .optional(),
+    }).parse(req.body);
     const extra: Record<string, unknown> = { done_at: 'now()', note: b.note ?? null };
     if (b.photos) extra.photos = JSON.stringify(b.photos); // photos 为 NOT NULL，仅在提供时写入，避免置空破坏约束
-    const item = await withTenantClient(tenantId, (client) =>
-      transitionTask(client, tenantId, req.params.id, 'complete', extra),
-    );
+    const item = await withTenantClient(tenantId, async (client) => {
+      const task = await transitionTask(client, tenantId, req.params.id, 'complete', extra);
+      if (b.records && b.records.length) {
+        await upsertRecords(client, tenantId, req.params.id, b.records);
+      }
+      return task;
+    });
     return res.json({ ok: true, code: 0, item });
+  } catch (e) {
+    next(e);
+  }
+});
+
+// 巡检实测记录写入：UPSERT（同一巡检单+检查项唯一），同时回填 items_json 快照，保证单表与快照一致。
+async function upsertRecords(client: any, tenantId: string, taskId: string, records: { item_id: string; actual_value?: string; passed?: boolean; photo?: string; remark?: string }[]): Promise<void> {
+  for (const rec of records) {
+    await client.query(
+      `INSERT INTO inspection_record (tenant_id, task_id, item_id, actual_value, passed, photo, remark)
+       VALUES ($1,$2,$3,$4,$5,$6,$7)
+       ON CONFLICT ON CONSTRAINT uq_inspection_record_task_item
+       DO UPDATE SET actual_value=$4, passed=$5, photo=$6, remark=$7`,
+      [tenantId, taskId, rec.item_id, rec.actual_value ?? null, rec.passed ?? null, rec.photo ?? null, rec.remark ?? null],
+    );
+  }
+  // 用最新 records 回填 items_json 快照（与 detail 端叠加逻辑保持一致）。
+  const cur = await client.query(`SELECT items_json, tenant_id FROM inspection_task WHERE id=$1 AND tenant_id=$2`, [taskId, tenantId]);
+  if (cur.rowCount === 0) return;
+  const snap: any[] = Array.isArray(cur.rows[0].items_json) ? cur.rows[0].items_json : [];
+  const byId = new Map<string, any>();
+  for (const r of records) byId.set(String(r.item_id), r);
+  const next = snap.map((s) => {
+    const r = byId.get(String(s.item_id));
+    return r ? { ...s, actual_value: r.actual_value ?? null, passed: r.passed ?? null, photo: r.photo ?? null, remark: r.remark ?? null } : s;
+  });
+  await client.query(`UPDATE inspection_task SET items_json=$2 WHERE id=$1 AND tenant_id=$3`, [taskId, JSON.stringify(next), tenantId]);
+}
+
+// 单独写入/修改实测记录（未点完成时也可逐项暂存）。
+router.post('/tasks/:id/records', async (req, res, next) => {
+  try {
+    requireConfigRole(req, res);
+    const tenantId = res.locals.auth.tenantId;
+    const b = z
+      .object({
+        records: z.array(
+          z.object({
+            item_id: z.string().uuid(),
+            actual_value: z.string().optional(),
+            passed: z.boolean().optional(),
+            photo: z.string().optional(),
+            remark: z.string().optional(),
+          }),
+        ),
+      })
+      .parse(req.body);
+    const out = await withTenantClient(tenantId, async (client) => {
+      const cur = await client.query(`SELECT id FROM inspection_task WHERE id=$1 AND tenant_id=$2`, [req.params.id, tenantId]);
+      if (cur.rowCount === 0) throw new AppError('NOT_FOUND', 'task not found', 404);
+      await upsertRecords(client, tenantId, req.params.id, b.records);
+      const rec = await client
+        .query(`SELECT * FROM inspection_record WHERE tenant_id=$1 AND task_id=$2 ORDER BY created_at ASC`, [tenantId, req.params.id])
+        .then((r: any) => r.rows);
+      return rec;
+    });
+    return res.json({ ok: true, code: 0, records: out });
   } catch (e) {
     next(e);
   }
@@ -317,6 +517,7 @@ const planSchema = z.object({
   interval_n: z.number().int().min(1).max(365).optional(),
   start_from: z.string().optional(),
   generate_ahead: z.number().int().min(1).max(24).optional(),
+  item_ids: z.array(z.string().uuid()).optional(),               // 每次生成实例自动带的检查项
 });
 const planUpdateSchema = planSchema.partial().extend({
   paused: z.boolean().optional(),
@@ -327,15 +528,16 @@ const planUpdateSchema = planSchema.partial().extend({
 async function createPlanOccurrence(
   client: any,
   tenantId: string,
-  plan: { id: string; name: string; point_ids: string[] },
+  plan: { id: string; name: string; point_ids: string[]; item_ids?: string[] },
   occurrenceDate: Date,
 ): Promise<unknown[]> {
+  const snapshot = await seedItemsSnapshot(client, tenantId, plan.item_ids ?? []);
   const out: unknown[] = [];
   for (const pid of plan.point_ids) {
     const r = await client.query(
-      `INSERT INTO inspection_task (tenant_id, plan_id, point_id, type, title, scheduled_at, status)
-       VALUES ($1,$2,$3,'plan',$4,$5,'pending') RETURNING *`,
-      [tenantId, plan.id, pid, `${plan.name}·巡检`, toPgTs(occurrenceDate)],
+      `INSERT INTO inspection_task (tenant_id, plan_id, point_id, type, title, scheduled_at, status, items_json)
+       VALUES ($1,$2,$3,'plan',$4,$5,'pending',$6) RETURNING *`,
+      [tenantId, plan.id, pid, `${plan.name}·巡检`, toPgTs(occurrenceDate), JSON.stringify(snapshot)],
     );
     const ins = r.rows[0];
     await emitDomainEvent(client, { tenantId, entityType: 'inspection_task', entityId: ins.id, type: 'create', actor: 'config_role' });
@@ -395,8 +597,9 @@ router.post('/generate', async (req, res, next) => {
   try {
     requireConfigRole(req, res);
     const tenantId = res.locals.auth.tenantId;
-    const b = z.object({ point_ids: z.array(z.string().uuid()), scheduled_at: z.string().optional() }).parse(req.body);
+    const b = z.object({ point_ids: z.array(z.string().uuid()), scheduled_at: z.string().optional(), item_ids: z.array(z.string().uuid()).optional() }).parse(req.body);
     const created = await withTenantClient(tenantId, async (client) => {
+      const snapshot = await seedItemsSnapshot(client, tenantId, b.item_ids ?? []);
       const rows = generatePlanTasks(
         b.point_ids.map((id) => ({ id })),
         b.scheduled_at ?? null,
@@ -404,9 +607,9 @@ router.post('/generate', async (req, res, next) => {
       const out: unknown[] = [];
       for (const row of rows) {
         const r = await client.query(
-          `INSERT INTO inspection_task (tenant_id, plan_id, point_id, type, title, scheduled_at, status)
-           VALUES ($1, NULL, $2, 'plan', $3, $4, 'pending') RETURNING *`,
-          [tenantId, row.point_id, row.title, row.scheduled_at],
+          `INSERT INTO inspection_task (tenant_id, plan_id, point_id, type, title, scheduled_at, status, items_json)
+           VALUES ($1, NULL, $2, 'plan', $3, $4, 'pending', $5) RETURNING *`,
+          [tenantId, row.point_id, row.title, row.scheduled_at, JSON.stringify(snapshot)],
         );
         const ins = r.rows[0];
         await emitDomainEvent(client, { tenantId, entityType: 'inspection_task', entityId: ins.id, type: 'create', actor: 'config_role' });
@@ -481,9 +684,9 @@ router.post('/plans', async (req, res, next) => {
     const id = randomUUID();
     const created = await withTenantClient(tenantId, async (client) => {
       await client.query(
-        `INSERT INTO inspection_plan (id, tenant_id, name, point_ids, frequency, interval_n, paused, next_run_at)
-         VALUES ($1,$2,$3,$4,$5,$6,false,$7) RETURNING *`,
-        [id, tenantId, b.name, b.point_ids, b.frequency, interval_n, null],
+        `INSERT INTO inspection_plan (id, tenant_id, name, point_ids, frequency, interval_n, paused, next_run_at, item_ids)
+         VALUES ($1,$2,$3,$4,$5,$6,false,$7,$8) RETURNING *`,
+        [id, tenantId, b.name, b.point_ids, b.frequency, interval_n, null, b.item_ids ?? []],
       );
       let cursor = startFrom;
       const out: unknown[] = [];
@@ -519,6 +722,7 @@ router.put('/plans/:id', async (req, res, next) => {
       if (b.point_ids !== undefined) set('point_ids', b.point_ids);
       if (b.frequency !== undefined) set('frequency', b.frequency);
       if (b.interval_n !== undefined) set('interval_n', b.interval_n);
+      if (b.item_ids !== undefined) set('item_ids', b.item_ids);
       if (b.paused !== undefined) set('paused', b.paused);
       if (b.next_run_at !== undefined) set('next_run_at', b.next_run_at ?? null);
       if (sets.length === 0) return cur.rows[0];
@@ -591,6 +795,20 @@ router.get('/stats', async (req, res, next) => {
           [tenantId],
         )
         .then((r) => r.rows.map((x: any) => ({ point_name: x.point_name, count: Number(x.c) })));
+      // 按项合格率：已填实测的巡检项里，通过数 / 总实测数（无实测则诚实置 null，不虚构）。
+      const itemAgg = await client
+        .query(
+          `SELECT
+             COUNT(*)::int AS total_items,
+             COUNT(*) FILTER (WHERE passed = true)::int AS passed,
+             COUNT(*) FILTER (WHERE passed = false)::int AS failed
+           FROM inspection_record WHERE tenant_id=$1`,
+          [tenantId],
+        )
+        .then((r: any) => r.rows[0]);
+      const totalItems = Number(itemAgg.total_items);
+      const passedItems = Number(itemAgg.passed);
+      const failedItems = Number(itemAgg.failed);
       return {
         total,
         by_status: byStatusMap,
@@ -602,6 +820,9 @@ router.get('/stats', async (req, res, next) => {
         exception_rate: total ? Math.round((exception / total) * 1000) / 10 : 0,
         today_count: today,
         by_point_top: byPoint,
+        // 按项合格率：巡检实测通过率（无实测则为 null，诚实不虚构）。
+        item_pass_rate: totalItems ? Math.round((passedItems / totalItems) * 1000) / 10 : null,
+        item_stats: { total_items: totalItems, passed: passedItems, failed: failedItems },
       };
     });
     return res.json({ ok: true, code: 0, stats });
@@ -619,7 +840,7 @@ router.get('/export', async (req, res, next) => {
       client
         .query(
           `SELECT t.id, t.title, t.type, t.status, t.assignee, p.name AS point_name,
-                  t.scheduled_at, t.done_at, t.created_at
+                  t.scheduled_at, t.done_at, t.created_at, t.items_json
            FROM inspection_task t LEFT JOIN inspection_point p ON p.id = t.point_id
            WHERE t.tenant_id=$1 ${month ? 'AND TO_CHAR(COALESCE(t.scheduled_at, t.created_at), \'YYYY-MM\') = $2' : ''}
            ORDER BY t.scheduled_at ASC NULLS LAST, t.created_at DESC`,
@@ -631,9 +852,12 @@ router.get('/export', async (req, res, next) => {
       const s = v == null ? '' : String(v);
       return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
     };
-    const header = ['工单ID', '标题', '类型', '状态', '负责人', '点位', '计划时间', '完成时间', '创建时间'];
-    const lines = rows.map((r: any) =>
-      [
+    const header = ['工单ID', '标题', '类型', '状态', '负责人', '点位', '计划时间', '完成时间', '创建时间', '检查项数量', '合格项数', '不合格项数'];
+    const lines = rows.map((r: any) => {
+      const items: any[] = Array.isArray(r.items_json) ? r.items_json : [];
+      const passed = items.filter((x) => x.passed === true).length;
+      const failed = items.filter((x) => x.passed === false).length;
+      return [
         r.id,
         r.title,
         r.type === 'free' ? '自由巡检' : '计划巡检',
@@ -643,10 +867,13 @@ router.get('/export', async (req, res, next) => {
         r.scheduled_at ?? '',
         r.done_at ?? '',
         r.created_at ?? '',
+        items.length,
+        passed,
+        failed,
       ]
         .map(esc)
-        .join(','),
-    );
+        .join(',');
+    });
     const csv = '﻿' + [header.join(','), ...lines].join('\r\n');
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
     res.setHeader('Content-Disposition', `attachment; filename="inspection_report_${month || 'all'}.csv"`);
