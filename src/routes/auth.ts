@@ -44,6 +44,14 @@ router.post('/auth/login', loginRateLimit(), async (req, res, next) => {
     const { username, password, tenant } = loginSchema.parse(req.body);
     const tenantId = tenant ?? req.header('X-Tenant-Id') ?? DEFAULT_LOGIN_TENANT;
 
+    // 平台层停用租户禁止登录（E_min：tenant_registry.status=suspended）
+    const reg = await withTenantClient(tenantId, (client) =>
+      client.query(`SELECT status FROM tenant_registry WHERE tenant_id=$1`, [tenantId]),
+    );
+    if (reg.rowCount && reg.rowCount > 0 && reg.rows[0].status === 'suspended') {
+      return res.status(403).json({ ok: false, code: 'TENANT_SUSPENDED', message: 'tenant suspended by platform' });
+    }
+
     const user = await withTenantClient(tenantId, (client) => findUserByUsername(client, tenantId, username));
     // 统一返回 401，避免暴露"用户是否存在"（防枚举）
     if (!user || !user.active || !verifyPassword(password, user.password_hash)) {
