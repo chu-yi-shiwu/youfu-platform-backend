@@ -4,7 +4,7 @@ import path from 'node:path';
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import dotenv from 'dotenv';
-import { authMiddleware, refreshAuthMode } from './middleware/auth.js';
+import { authMiddleware, refreshAuthMode, verifyJwt, AUTH_MODE } from './middleware/auth.js';
 import { errorMiddleware } from './middleware/error.js';
 import workOrderRouter from './routes/workOrder.js';
 import webhookRouter from './webhook/routes.js';
@@ -33,6 +33,7 @@ import businessFlowRouter from './routes/businessFlow.js';
 import basicDataRouter from './routes/basicData.js';
 import equipmentRouter from './routes/equipment.js';
 import uploadRouter from './routes/upload.js';// B0 文件上传（H5 拍照落库）
+import platformRouter from './routes/platform.js';// 城市级平台层（E_min）
 import { startInspectionScheduler } from './scheduler/inspectionScheduler.js';// G3 真 cron 调度
 
 // 试点/生产：用 ENV_FILE 指定环境文件（默认 .env，production 下默认 .env.pilot），
@@ -42,6 +43,12 @@ const envFile =
 dotenv.config({ path: envFile });
 refreshAuthMode();
 
+// S-1 启动期断言：prod 模式必须配置 JWT_SECRET，否则拒绝启动（避免以不安全默认密钥跑生产）。
+if (AUTH_MODE === 'prod' && !process.env.JWT_SECRET) {
+  console.error('[fatal] AUTH_MODE=prod 但 JWT_SECRET 未配置，拒绝启动（生产中缺失密钥将导致全量 500/fail-closed）。');
+  process.exit(1);
+}
+
 const app = express();
 // 生产环境经 CLB/Nginx 反向代理，启用 trust proxy 以正确识别客户端 IP
 if (process.env.TRUST_PROXY === '1') {
@@ -50,10 +57,48 @@ if (process.env.TRUST_PROXY === '1') {
 // B0：放宽 JSON body 上限到 10MB（base64 上传图片可能较大）；其余路由均为小 JSON，无影响。
 app.use(express.json({ limit: '10mb' }));
 
+// S-4 显式 CORS 策略：仅放行配置的来源（默认生产域名），禁用通配 *，凭据跨域拒绝。
+const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS ?? 'https://youfu.banerz.cn')
+  .split(',').map((s) => s.trim()).filter(Boolean);
+app.use((req, res, next) => {
+  const origin = req.header('Origin');
+  if (origin && ALLOWED_ORIGINS.includes(origin)) {
+    res.set('Access-Control-Allow-Origin', origin);
+    res.set('Access-Control-Allow-Credentials', 'true');
+    res.set('Access-Control-Allow-Methods', 'GET,POST,PATCH,PUT,DELETE,OPTIONS');
+    res.set('Access-Control-Allow-Headers', 'Content-Type,Authorization,X-Tenant-Id,X-Role,X-Request-Id,Idempotency-Key');
+  }
+  if (req.method === 'OPTIONS') return res.sendStatus(204);
+  next();
+});
+
+// A-1：看板/管理页鉴权（仅 prod）。Accept Bearer 头或登录时种下的 youfu_dash cookie（sameSite，随同域导航自动携带）。
+// 底层 /api 数据本就受 JWT 保护；此处再对"页面外壳"加一层，避免未登录即可探得管理界面。
+function requireDashboardAuth(req: import('express').Request, res: import('express').Response, next: import('express').NextFunction) {
+  if (AUTH_MODE !== 'prod') return next();
+  const auth = req.header('Authorization');
+  const bearer = auth ? /^Bearer\s+(.+)$/i.exec(auth.trim()) : null;
+  let token: string | null = bearer ? bearer[1] : null;
+  if (!token) {
+    const cookie = req.headers.cookie ?? '';
+    const m = /(?:^|;\s*)youfu_dash=([^;]+)/.exec(cookie);
+    token = m ? decodeURIComponent(m[1]) : null;
+  }
+  if (!token) return res.status(401).json({ ok: false, code: 'DASH_AUTH', message: 'unauthorized dashboard access' });
+  const secret = process.env.JWT_SECRET;
+  if (!secret) return res.status(500).json({ ok: false, code: 'AUTH_CFG', message: 'JWT_SECRET not configured' });
+  if (!verifyJwt(token, secret)) return res.status(401).json({ ok: false, code: 'DASH_AUTH', message: 'invalid token' });
+  return next();
+}
+
 // 健康检查（不含 DB，永远 200）
 app.get('/health', (_req, res) => {
   res.json({ ok: true, status: 'up' });
 });
+
+// 城市级平台层（E_min）：挂在租户 authMiddleware 之前（G1 平台上下文独立，
+// 平台管理员与租户账号两套体系互不干扰；登录公开，其余 platformAdminAuth 保护）。
+app.use('/api/v1/platform', platformRouter);
 
 // 认证/租户（生产化①：AUTH_MODE=dev|prod，prod 强制 JWT）：仅对 /api 生效，
 // 静态首页与 SPA 路由（试点模式公开可访问，无需鉴权）。
@@ -90,6 +135,8 @@ app.use('/api/v1', equipmentRouter);// P4 设备管理（设备 / 设备类型 /
 app.use('/api/v1/flow', businessFlowRouter);
 // B0 文件上传（H5 拍照落库）：挂在 /api/v1，自动过 authMiddleware 获得租户隔离。
 app.use('/api/v1', uploadRouter);
+// 城市级平台层：/api/v1/platform（登录公开，其余 platformAdminAuth 保护，独立于租户 auth）
+app.use('/api/v1/platform', platformRouter);
 
 // B0 静态服务上传文件（须注册在 SPA 兜底正则之前，否则 /uploads/* 会被 index.html 吞掉）。
 const UPLOAD_ROOT = process.env.UPLOAD_DIR ?? '/opt/youfu/uploads';
@@ -97,7 +144,7 @@ app.use('/uploads', express.static(UPLOAD_ROOT));
 
 // ⑦P0 过程挖掘看板：顶层公开托管单文件 HTML（pilot 同 SPA 策略；prod 上线前应在反向代理层加鉴权）。
 // 必须注册在 SERVE_STATIC 的 SPA 兜底正则之前，否则会被 index.html 兜底拦截。
-app.get('/process-mining', (_req, res) => {
+app.get('/process-mining', requireDashboardAuth, (_req, res) => {
   const file = path.resolve(fileURLToPath(import.meta.url), '../../public/process-mining.html');
   if (fs.existsSync(file)) res.sendFile(file);
   else res.status(404).json({ ok: false, code: 'NO_DASHBOARD', message: 'process-mining dashboard html not found' });
@@ -105,7 +152,7 @@ app.get('/process-mining', (_req, res) => {
 
 // ⑦P1 主数据管理：顶层公开托管单文件 HTML（资产/物料配置页，复用 /process-mining 同模式）。
 // 同样须注册在 SERVE_STATIC 的 SPA 兜底正则之前。
-app.get('/master-data', (_req, res) => {
+app.get('/master-data', requireDashboardAuth, (_req, res) => {
   const file = path.resolve(fileURLToPath(import.meta.url), '../../public/master-data.html');
   if (fs.existsSync(file)) res.sendFile(file);
   else res.status(404).json({ ok: false, code: 'NO_PAGE', message: 'master-data html not found' });
@@ -113,7 +160,7 @@ app.get('/master-data', (_req, res) => {
 
 // ④ 流程自动优化管理（自动改流程开关）：顶层公开托管单文件 HTML（复用 /master-data 同模式）。
 // 同样须注册在 SERVE_STATIC 的 SPA 兜底正则之前。
-app.get('/workflow-admin', (_req, res) => {
+app.get('/workflow-admin', requireDashboardAuth, (_req, res) => {
   const file = path.resolve(fileURLToPath(import.meta.url), '../../public/workflow-admin.html');
   if (fs.existsSync(file)) res.sendFile(file);
   else res.status(404).json({ ok: false, code: 'NO_PAGE', message: 'workflow-admin html not found' });
