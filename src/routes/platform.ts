@@ -242,4 +242,54 @@ router.put('/auth/password', async (req, res, next) => {
   }
 });
 
+// ---- 审计日志查询（平台操作 audit + 开放 API 调用 log；append-only 只读） ----
+router.get('/audit-logs', async (req, res, next) => {
+  try {
+    const actor = (req.query.actor as string) || '';
+    const action = (req.query.action as string) || '';
+    const tenant = (req.query.tenant as string) || '';
+    const limit = Math.min(Number(req.query.limit) || 50, 200);
+    const offset = Math.max(Number(req.query.offset) || 0, 0);
+    const conds: string[] = [];
+    const params: unknown[] = [];
+    if (actor) { params.push(actor); conds.push(`actor ILIKE '%' || $${params.length} || '%'`); }
+    if (action) { params.push(action); conds.push(`action ILIKE '%' || $${params.length} || '%'`); }
+    if (tenant) { params.push(tenant); conds.push(`target_tenant = $${params.length}`); }
+    const where = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
+    params.push(limit, offset);
+    const r = await pool.query(
+      `SELECT id, actor, action, resource, target_tenant, payload, at FROM platform_audit
+       ${where} ORDER BY at DESC LIMIT $${params.length - 1} OFFSET $${params.length}`,
+      params,
+    );
+    const cnt = await pool.query(`SELECT count(*)::int AS c FROM platform_audit ${where}`, params.slice(0, params.length - 2));
+    return res.json({ ok: true, code: 0, items: r.rows, total: cnt.rows[0]?.c ?? 0 });
+  } catch (e) {
+    next(e);
+  }
+});
+
+router.get('/open-api-logs', async (req, res, next) => {
+  try {
+    const appId = (req.query.appId as string) || '';
+    const limit = Math.min(Number(req.query.limit) || 50, 200);
+    const offset = Math.max(Number(req.query.offset) || 0, 0);
+    const conds: string[] = [];
+    const params: unknown[] = [];
+    if (appId) { params.push(appId); conds.push(`l.app_id = $${params.length}`); }
+    const where = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
+    params.push(limit, offset);
+    const r = await pool.query(
+      `SELECT l.id, a.app_name, l.app_id, l.endpoint, l.method, l.status_code, l.at
+       FROM open_api_call_log l LEFT JOIN open_api_app a ON a.id = l.app_id
+       ${where} ORDER BY l.at DESC LIMIT $${params.length - 1} OFFSET $${params.length}`,
+      params,
+    );
+    const cnt = await pool.query(`SELECT count(*)::int AS c FROM open_api_call_log l ${where}`, params.slice(0, params.length - 2));
+    return res.json({ ok: true, code: 0, items: r.rows, total: cnt.rows[0]?.c ?? 0 });
+  } catch (e) {
+    next(e);
+  }
+});
+
 export default router;
