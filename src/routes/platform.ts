@@ -8,7 +8,7 @@ import crypto from 'node:crypto';
 import pool from '../db/pool.js';
 import { signJwt, AUTH_MODE } from '../middleware/auth.js';
 import { platformAdminAuth } from '../middleware/platformAuth.js';
-import { verifyPassword } from '../account.js';
+import { verifyPassword, hashPassword } from '../account.js';
 
 const router = Router();
 
@@ -215,6 +215,28 @@ router.put('/apps/:id/revoke', async (req, res, next) => {
     }
     await audit(res.locals.platformAdmin!.username, 'app.revoke', r.rows[0].id, null, { name: r.rows[0].app_name });
     return res.json({ ok: true, code: 0, item: r.rows[0] });
+  } catch (e) {
+    next(e);
+  }
+});
+
+// ---- PUT /platform/auth/password —— 平台管理员修改自己的密码（登录态 + 旧密码校验） ----
+router.put('/auth/password', async (req, res, next) => {
+  try {
+    const admin = res.locals.platformAdmin as { id: string; username: string } | undefined;
+    if (!admin) return res.status(401).json({ ok: false, code: 'AUTH_001', message: 'missing platform auth' });
+    const { old_password, new_password } = z.object({
+      old_password: z.string().min(1).max(200),
+      new_password: z.string().min(6).max(200),
+    }).parse(req.body);
+    const r = await pool.query(`SELECT id, password_hash FROM platform_admin WHERE id = $1`, [admin.id]);
+    if (r.rowCount === 0) return res.status(404).json({ ok: false, code: 'USER_404', message: 'platform admin not found' });
+    if (!verifyPassword(old_password, r.rows[0].password_hash)) {
+      return res.status(401).json({ ok: false, code: 'AUTH_003', message: 'invalid old password' });
+    }
+    await pool.query(`UPDATE platform_admin SET password_hash = $1 WHERE id = $2`, [hashPassword(new_password), admin.id]);
+    await audit(admin.username, 'platform.password.change', admin.id, null, null);
+    return res.json({ ok: true, code: 0 });
   } catch (e) {
     next(e);
   }
