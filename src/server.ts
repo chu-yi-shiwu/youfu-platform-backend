@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import dotenv from 'dotenv';
 import { authMiddleware, refreshAuthMode, verifyJwt, AUTH_MODE } from './middleware/auth.js';
 import { errorMiddleware } from './middleware/error.js';
+import publicReportRouter from './routes/publicReport.js';// P1 需求侧：public 免登录报修（挂 auth 之前）
 import workOrderRouter from './routes/workOrder.js';
 import webhookRouter from './webhook/routes.js';
 import authRouter from './routes/auth.js';
@@ -108,6 +109,9 @@ app.use('/api/v1/platform', templateMarketRouter);
 // E0_open 开放 API（第三方/上级平台/ISV 凭 app_key 调聚合）：独立于租户/平台 JWT，
 // 走 openApiAuth（app_key+secret 双因子 + scopes + 调用审计）。
 app.use('/api/v1/open-api', openApiRouter);
+
+// P1 需求侧 public 报修（免登录，挂 auth 之前；org 显式指定机构 + 限流 + D3 硬拒）
+app.use('/api/v1', publicReportRouter);
 
 // 认证/租户（生产化①：AUTH_MODE=dev|prod，prod 强制 JWT）：仅对 /api 生效，
 // 静态首页与 SPA 路由（试点模式公开可访问，无需鉴权）。
