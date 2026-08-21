@@ -34,6 +34,7 @@ import basicDataRouter from './routes/basicData.js';
 import equipmentRouter from './routes/equipment.js';
 import uploadRouter from './routes/upload.js';// B0 文件上传（H5 拍照落库）
 import platformRouter from './routes/platform.js';// 城市级平台层（E_min）
+import openApiRouter from './routes/openApi.js';// E0_open 开放 API（app_key 认证）
 import { startInspectionScheduler } from './scheduler/inspectionScheduler.js';// G3 真 cron 调度
 
 // 试点/生产：用 ENV_FILE 指定环境文件（默认 .env，production 下默认 .env.pilot），
@@ -99,6 +100,10 @@ app.get('/health', (_req, res) => {
 // 城市级平台层（E_min）：挂在租户 authMiddleware 之前（G1 平台上下文独立，
 // 平台管理员与租户账号两套体系互不干扰；登录公开，其余 platformAdminAuth 保护）。
 app.use('/api/v1/platform', platformRouter);
+
+// E0_open 开放 API（第三方/上级平台/ISV 凭 app_key 调聚合）：独立于租户/平台 JWT，
+// 走 openApiAuth（app_key+secret 双因子 + scopes + 调用审计）。
+app.use('/api/v1/open-api', openApiRouter);
 
 // 认证/租户（生产化①：AUTH_MODE=dev|prod，prod 强制 JWT）：仅对 /api 生效，
 // 静态首页与 SPA 路由（试点模式公开可访问，无需鉴权）。
