@@ -8,6 +8,7 @@ import { withTenantClient } from '../db/pool.js';
 import { saveWorkflowDef, getWorkflowDefVersion } from '../engine/workflowDef.js';
 import { AppError } from '../middleware/error.js';
 import { platformAdminAuth } from '../middleware/platformAuth.js';
+import { refreshApplyEffect } from '../services/templateEffects.js';
 
 const router = Router();
 
@@ -152,32 +153,10 @@ router.get('/templates/:id/effects', async (req, res, next) => {
 // 刷新单条 apply 的 after 指标（7/30 天 cron 落地前的惰性刷新；R7 样本门槛）
 router.post('/applies/:id/refresh', async (req, res, next) => {
   try {
-    const ap = await pool.query(`SELECT * FROM platform_template_apply WHERE id = $1`, [req.params.id]);
-    if (ap.rowCount === 0) throw new AppError('NOT_FOUND', 'apply record not found', 404);
-    const row = ap.rows[0];
-    const m = await withTenantClient(row.tenant_id, async (client) =>
-      client.query(
-        `SELECT
-           count(*) FILTER (WHERE status IN ('completed','closed','evaluated'))::numeric / nullif(count(*),0) AS close_rate,
-           count(*) FILTER (WHERE status NOT IN ('completed','closed','evaluated','cancelled')
-             AND sla_due_at IS NOT NULL AND sla_due_at < now())::numeric / nullif(count(*),0) AS overdue_rate,
-           count(*) AS total
-         FROM work_orders WHERE tenant_id = $1`,
-        [row.tenant_id],
-      ).then((r) => r.rows[0]),
-    );
-    const after = { close_rate: m?.close_rate ?? null, overdue_rate: m?.overdue_rate ?? null, total: Number(m?.total ?? 0) };
-    // R7：最小样本量 ≥30 单才评 effect_rating（数据不足标 null，诚实）
-    let effect: number | null = null;
-    const before = row.before_metrics && typeof row.before_metrics === 'object' ? row.before_metrics : {};
-    if (after.total >= 30 && after.close_rate !== null && before.close_rate !== null) {
-      effect = Number((after.close_rate - Number(before.close_rate)).toFixed(4));
-    }
-    await pool.query(
-      `UPDATE platform_template_apply SET after_metrics = $1, effect_rating = $2 WHERE id = $3`,
-      [JSON.stringify(after), effect, req.params.id],
-    );
-    return res.json({ ok: true, code: 0, before, after, effect_rating: effect, note: effect === null ? '样本不足 30 单或指标缺失，暂不评分（R7 诚实）' : `闭环率变化 ${effect >= 0 ? '+' : ''}${effect}` });
+    // E2 cron：逻辑抽取到 service（refreshApplyEffect），端点与自动调度共用
+    const r = await refreshApplyEffect(req.params.id);
+    if (!r.refreshed) throw new AppError('NOT_FOUND', 'apply record not found', 404);
+    return res.json({ ok: true, code: 0, effect_rating: r.effect_rating, note: r.note });
   } catch (e) {
     next(e);
   }
