@@ -10,6 +10,7 @@ import workOrderRouter from './routes/workOrder.js';
 import webhookRouter from './webhook/routes.js';
 import authRouter from './routes/auth.js';
 import configRouter from './routes/config.js';
+import templateContributionsRouter from './routes/templateContributions.js';// UGC 模板贡献（租户侧）
 import inspectionRouter from './routes/inspection.js';
 import emergencyRouter from './routes/emergency.js';
 import transportRouter from './routes/transport.js';
@@ -117,6 +118,7 @@ app.use('/api/v1', workOrderRouter);
 app.use('/api/v1', webhookRouter);
 app.use('/api/v1', authRouter);
 app.use('/api/v1', configRouter);
+app.use('/api/v1', templateContributionsRouter); // UGC 模板贡献（租户侧，requireConfigRole）
 app.use('/api/v1/inspection', inspectionRouter);
 // P2 第二刀：应急预案库 + 预警中心 / 运送轨迹
 app.use('/api/v1/emergency', emergencyRouter);

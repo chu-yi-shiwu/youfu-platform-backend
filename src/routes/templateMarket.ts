@@ -27,21 +27,44 @@ async function audit(actor: string, action: string, resource?: string | null, ta
   }
 }
 
-// ---- 列表（分类/搜索/评分排序） ----
+// ---- 列表（分类/搜索/评分排序；默认仅 published；?status=draft 审核队列） ----
 router.get('/templates', async (req, res, next) => {
   try {
     const cat = req.query.category as string | undefined;
     const q = (req.query.q as string) || '';
-    const conds = ["status = 'published'"];
+    const status = (req.query.status as string) || 'published';
+    const conds = [`status = '${status}'`];
     const params: unknown[] = [];
     if (cat) { params.push(cat); conds.push(`category = $${params.length}`); }
     if (q) { params.push(`%${q}%`); conds.push(`(name ILIKE $${params.length} OR description ILIKE $${params.length})`); }
     const r = await pool.query(
-      `SELECT id, name, category, entity_type, description, version, rating_score, applied_count, created_at
+      `SELECT id, name, category, entity_type, description, version, rating_score, applied_count, source, contributor_tenant, created_at
        FROM platform_template WHERE ${conds.join(' AND ')} ORDER BY rating_score DESC, applied_count DESC`,
       params,
     );
     return res.json({ ok: true, code: 0, items: r.rows });
+  } catch (e) {
+    next(e);
+  }
+});
+
+// UGC 审核：通过/驳回（平台侧；通过 → published，驳回 → archived）
+router.put('/templates/:id/review', async (req, res, next) => {
+  try {
+    const b = z.object({ action: z.enum(['approve', 'reject']) }).parse(req.body);
+    const nextStatus = b.action === 'approve' ? 'published' : 'archived';
+    const r = await pool.query(
+      `UPDATE platform_template SET status = $1, updated_at = now()
+       WHERE id = $2 AND status = 'draft' AND source = 'ugc' RETURNING id, name, status, source`,
+      [nextStatus, req.params.id],
+    );
+    if (r.rowCount === 0) {
+      const ex = await pool.query(`SELECT id, status FROM platform_template WHERE id = $1`, [req.params.id]);
+      if (ex.rowCount === 0) return res.status(404).json({ ok: false, code: 'NOT_FOUND', message: 'template not found' });
+      return res.status(409).json({ ok: false, code: 'CONFLICT', message: `仅可审核 ugc draft 模板（当前 status=${ex.rows[0].status}）` });
+    }
+    await audit(res.locals.platformAdmin?.username ?? 'platform', `template.${b.action}`, r.rows[0].id, r.rows[0].contributor_tenant, { name: r.rows[0].name });
+    return res.json({ ok: true, code: 0, item: r.rows[0] });
   } catch (e) {
     next(e);
   }
