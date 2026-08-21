@@ -130,16 +130,19 @@ router.get('/public/repair-status', loginRateLimit(30), async (req, res, next) =
 });
 
 // GET /api/v1/public/fault-categories?org= —— 报修页分类下拉（免登录只读，限流）
+// 审查修复：fault_category 有 RLS（owner 已改 postgres）——pool 直连无 GUC 查不到，须 withTenantClient 设租户上下文
 router.get('/public/fault-categories', loginRateLimit(30), async (req, res, next) => {
   try {
     const org = (req.query.org as string) || '';
     if (!org) return res.json({ ok: true, code: 0, items: [] });
-    // 审查修复 P6：与 repair-report 一致——仅 active 机构可读分类（防枚举）
+    // 与 repair-report 一致——仅 active 机构可读分类（防枚举）
     const tr = await pool.query(`SELECT 1 FROM tenant_registry WHERE tenant_id = $1 AND status = 'active'`, [org]);
     if (tr.rowCount === 0) return res.json({ ok: true, code: 0, items: [] });
-    const r = await pool.query(
-      `SELECT id, name FROM fault_category WHERE tenant_id = $1 AND enabled = true ORDER BY sort, name LIMIT 200`,
-      [org],
+    const r = await withTenantClient(org, (client) =>
+      client.query(
+        `SELECT id, name FROM fault_category WHERE tenant_id = $1 AND enabled = true ORDER BY sort, name LIMIT 200`,
+        [org],
+      ),
     );
     return res.json({ ok: true, code: 0, items: r.rows });
   } catch (e) {

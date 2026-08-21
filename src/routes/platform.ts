@@ -5,7 +5,7 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import crypto from 'node:crypto';
-import pool from '../db/pool.js';
+import pool, { withTenantClient } from '../db/pool.js';
 import { signJwt, AUTH_MODE } from '../middleware/auth.js';
 import { platformAdminAuth } from '../middleware/platformAuth.js';
 import { verifyPassword, hashPassword } from '../account.js';
@@ -128,19 +128,33 @@ router.post('/tenants', async (req, res, next) => {
         [b.tenant_id, b.name, b.category, b.parent_id ?? null, JSON.stringify({ repair_daily: 500 })],
       );
       const src = INDUSTRY_TEMPLATE_SOURCE[b.category] ?? 't-verification';
-      // 行业模板：复制模板源租户的 fault_category（RLS 策略按 tenant_id 过滤，直插 new tenant）
-      const copied = await pool.query(
-        `INSERT INTO fault_category (id, tenant_id, code, name, sort, enabled)
-         SELECT gen_random_uuid(), $1, code, name, sort, enabled
-         FROM fault_category WHERE tenant_id = $2 AND enabled = true
-         ON CONFLICT (tenant_id, code) DO NOTHING`,
-        [b.tenant_id, src],
+      // 行业模板：跨租户复制 fault_category（RLS 生效后 pool 直连查不到模板源——两步法：
+      // step1 以 src 租户上下文读模板，step2 以 new 租户上下文写入；应用层传 id 防 RLS WITH CHECK 拦截）
+      const copied = await withTenantClient(src, (client) =>
+        client.query(
+          `SELECT code, name, sort, enabled FROM fault_category WHERE tenant_id = $1 AND enabled = true`,
+          [src],
+        ),
       );
+      let copiedCount = 0;
+      if (copied.rows.length > 0) {
+        await withTenantClient(b.tenant_id, async (client) => {
+          for (const row of copied.rows) {
+            const ins = await client.query(
+              `INSERT INTO fault_category (id, tenant_id, code, name, sort, enabled)
+               VALUES (gen_random_uuid(), $1, $2, $3, $4, $5)
+               ON CONFLICT (tenant_id, code) DO NOTHING`,
+              [b.tenant_id, row.code, row.name, row.sort, row.enabled],
+            );
+            copiedCount += ins.rowCount ?? 0;
+          }
+        });
+      }
       await pool.query('COMMIT');
-      await audit(admin.username, 'tenant.create', b.tenant_id, b.tenant_id, { category: b.category, categories_copied: copied.rowCount });
+      await audit(admin.username, 'tenant.create', b.tenant_id, b.tenant_id, { category: b.category, categories_copied: copiedCount });
       return res.status(201).json({
         ok: true, code: 0, item: { tenant_id: b.tenant_id, name: b.name, category: b.category, status: 'active' },
-        note: `机构已登记，按${b.category}行业模板初始化分类 ${copied.rowCount} 条`,
+        note: `机构已登记，按${b.category}行业模板初始化分类 ${copiedCount} 条`,
       });
     } catch (e) {
       await pool.query('ROLLBACK');
