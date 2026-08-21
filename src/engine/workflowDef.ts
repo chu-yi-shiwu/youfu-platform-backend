@@ -101,7 +101,7 @@ export async function getWorkflowDefVersion(
   return r.rows[0]?.version ?? 0;
 }
 
-/** 版本历史列表（倒序，含快照，供前端查看/回滚）。 */
+/** 版本历史列表（倒序，含快照，供前端查看/回滚）。def 保留原始快照（不 normalize，避免 passthrough 字段丢失）。 */
 export async function listWorkflowDefHistory(
   client: PoolClient,
   tenantId: string,
@@ -116,14 +116,14 @@ export async function listWorkflowDefHistory(
   );
   return r.rows.map((row) => ({
     version: row.version,
-    def: normalizeDef(typeof row.def === 'string' ? JSON.parse(row.def) : row.def),
+    def: (typeof row.def === 'string' ? JSON.parse(row.def) : row.def) as WorkflowDef,
     operator: row.operator,
     reason: row.reason,
     createdAt: row.created_at,
   }));
 }
 
-/** 按版本号读历史快照（回滚/查看用）；不存在返回 null。 */
+/** 按版本号读历史快照（回滚/查看用）；不存在返回 null。保留原始快照（回滚=逐字节还原，不丢字段）。 */
 export async function getWorkflowDefHistoryVersion(
   client: PoolClient,
   tenantId: string,
@@ -137,16 +137,19 @@ export async function getWorkflowDefHistoryVersion(
   );
   if (!r.rows[0]) return null;
   const raw = r.rows[0].def;
-  return normalizeDef(typeof raw === 'string' ? JSON.parse(raw) : raw);
+  return (typeof raw === 'string' ? JSON.parse(raw) : raw) as WorkflowDef;
 }
 
+// 补全式规范化：保留 def 所有原始字段（含 passthrough 额外字段），仅对缺失的
+// initial/states/transitions/config 补默认值——避免剥离字段导致「读→存」二次保存洗掉字段。
 function normalizeDef(d: any): WorkflowDef {
   return {
+    ...d,
     initial: d?.initial ?? 'draft',
     states: Array.isArray(d?.states) ? d.states : ['draft', 'assigned', 'processing', 'completed'],
     transitions: Array.isArray(d?.transitions) ? d.transitions : [],
     config: d?.config ?? {},
-  };
+  } as WorkflowDef;
 }
 
 // 深拷贝：用 JSON 往返而非 structuredClone，兼容 ECS Node16（structuredClone 为 Node17+ 全局）。

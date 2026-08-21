@@ -17,6 +17,8 @@ type TypeDef = {
   insertCols: string[];
   fields: FieldDef[];
   schema: z.ZodType<any>;
+  /** jsonb 列（CSV 导入时按 JSON 解析；导出时按 JSON 序列化） */
+  jsonCols?: string[];
 };
 
 const TYPES: Record<string, TypeDef> = {
@@ -187,6 +189,7 @@ const TYPES: Record<string, TypeDef> = {
       default_fields: z.record(z.string(), z.any()).optional(),
       enabled: z.boolean().optional(),
     }),
+    jsonCols: ['default_fields'],
   },
 };
 
@@ -231,9 +234,12 @@ router.post('/basic-data/:type', async (req, res, next) => {
     const tenantId = auth.tenantId;
     const b = def.schema.parse(req.body);
     const id = randomUUID();
-    const cols = ['id', 'tenant_id', ...def.insertCols];
+    // 只插入「请求提供了」的列：未提供的列省略，让 DB 的 DEFAULT 生效
+    //（若显式传 NULL 会覆盖 NOT NULL DEFAULT 列，如 work_order_template.entity_type → 违反约束）
+    const provided = def.insertCols.filter((c) => (b as any)[c] !== undefined);
+    const cols = ['id', 'tenant_id', ...provided];
     const ph = cols.map((_, i) => `$${i + 1}`).join(', ');
-    const vals = [id, tenantId, ...def.insertCols.map((c) => (b as any)[c] ?? null)];
+    const vals = [id, tenantId, ...provided.map((c) => (b as any)[c])];
     const item = await withTenantClient(tenantId, async (client) => {
       await requirePermission(auth, client, 'basicdata.edit');
       return client
@@ -309,7 +315,9 @@ router.get('/basic-data/:type/export', async (req, res, next) => {
     const headers = def.insertCols;
     const escape = (v: unknown) => {
       if (v === null || v === undefined) return '';
-      const s = String(v);
+      // jsonb/对象列（如 work_order_template.default_fields）须 JSON 序列化，
+      // 否则 String({}) 会变成 "[object Object]" 损坏数据。
+      const s = typeof v === 'object' ? JSON.stringify(v) : String(v);
       return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
     };
     const lines = [headers.join(',')];
@@ -384,10 +392,25 @@ router.post('/basic-data/:type/import', async (req, res, next) => {
           if (def.insertCols.includes(h)) obj[h] = r[i] ?? null;
         });
         if (!obj.name) continue; // 名称必填，跳过空行
+        // jsonb 列：CSV 单元格按 JSON 解析（非法 JSON 给友好 400，而非 500）
+        for (const jc of def.jsonCols ?? []) {
+          const raw = obj[jc];
+          if (raw === null || raw === undefined || raw === '') {
+            obj[jc] = null;
+            continue;
+          }
+          try {
+            obj[jc] = JSON.parse(String(raw));
+          } catch {
+            throw new AppError('BAD_INPUT', `${jc} 第 ${inserted + 2} 行不是合法 JSON`, 400);
+          }
+        }
+        // 只插入 CSV 提供的列（省略未提供列，让 DB DEFAULT 生效，避免 NULL 覆盖 NOT NULL DEFAULT 列）
         const id = randomUUID();
-        const cols = ['id', 'tenant_id', ...def.insertCols];
+        const provided = def.insertCols.filter((c) => obj[c] !== undefined && obj[c] !== null && obj[c] !== '');
+        const cols = ['id', 'tenant_id', ...provided];
         const ph = cols.map((_, i) => `$${i + 1}`).join(', ');
-        const vals = [id, tenantId, ...def.insertCols.map((c) => obj[c] ?? null)];
+        const vals = [id, tenantId, ...provided.map((c) => obj[c])];
         await client.query(`INSERT INTO ${def.table} (${cols.join(', ')}) VALUES (${ph})`, vals);
         inserted++;
       }
