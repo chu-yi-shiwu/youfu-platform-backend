@@ -69,6 +69,11 @@ const tplSchema = z.object({
 router.post('/templates', async (req, res, next) => {
   try {
     const b = tplSchema.parse(req.body);
+    // 收尾#2：创建时校验 playbook.workflow_def 结构（坏模板入库前拦截，而非应用时才报错）
+    const wf = b.playbook?.workflow_def as { states?: unknown[]; initial?: unknown } | undefined;
+    if (!wf || !Array.isArray(wf.states) || wf.states.length === 0 || !wf.initial) {
+      throw new AppError('BAD_DATA', 'playbook.workflow_def 必须含非空 states 与 initial', 400);
+    }
     const r = await pool.query(
       `INSERT INTO platform_template (name, category, entity_type, description, playbook, created_by)
        VALUES ($1,$2,$3,$4,$5,$6) RETURNING id, name, status`,
@@ -96,6 +101,17 @@ router.post('/templates/:id/apply', async (req, res, next) => {
       throw new AppError('BAD_DATA', 'playbook.workflow_def 缺失或无效', 400);
     }
     const entityType = tpl.entity_type ?? 'work_order';
+
+    // 收尾#2：apply 幂等——同一模板对同一租户 24h 内重复应用 → 409（防版本无限上升）
+    const recent = await pool.query(
+      `SELECT id, after_version FROM platform_template_apply
+       WHERE template_id = $1 AND tenant_id = $2 AND status = 'applied' AND applied_at > now() - interval '24 hours'
+       ORDER BY applied_at DESC LIMIT 1`,
+      [tpl.id, tenantId],
+    );
+    if (recent.rowCount !== null && recent.rowCount > 0) {
+      throw new AppError('CONFLICT', `该模板 24 小时内已应用到此租户（当前版本 v${recent.rows[0].after_version}），如需重新应用请先回滚或 24 小时后再试`, 409);
+    }
 
     // 事务化：#7 修复——saveWorkflowDef + INSERT apply + applied_count 原子（withTenantClient 自带 BEGIN/COMMIT）
     const result = await withTenantClient(tenantId, async (client) => {
