@@ -102,6 +102,33 @@ router.post('/public/repair-report', loginRateLimit(20), async (req, res, next) 
   }
 });
 
+// GET /api/v1/public/repair-status —— 免登录报修进度查询（工单号 + 手机号 + 机构，限流防枚举）
+router.get('/public/repair-status', loginRateLimit(30), async (req, res, next) => {
+  try {
+    const org = (req.query.org as string) || '';
+    const orderNo = (req.query.order_no as string) || '';
+    const phone = (req.query.phone as string) || '';
+    if (!org || !orderNo || !/^1\d{10}$/.test(phone)) {
+      return res.status(422).json({ ok: false, code: 'VALIDATION_001', message: '参数不完整或电话格式不正确' });
+    }
+    // 免登录场景：工单号 + 电话双重校验（防他人枚举查询；查库核对 contact=phone）
+    // work_orders 有 RLS——用 withTenantClient 设租户上下文（org 来自查询参数，同建单模式）
+    const r = await withTenantClient(org, (client) =>
+      client.query(
+        `SELECT order_no, status, title, location, created_at, updated_at
+         FROM work_orders WHERE tenant_id = $1 AND order_no = $2 AND contact = $3 LIMIT 1`,
+        [org, orderNo, phone],
+      ),
+    );
+    if (r.rowCount === 0) {
+      return res.status(404).json({ ok: false, code: 'NOT_FOUND', message: '未找到该报修（请核对工单号与电话）' });
+    }
+    return res.json({ ok: true, code: 0, item: r.rows[0] });
+  } catch (e) {
+    next(e);
+  }
+});
+
 // GET /api/v1/public/fault-categories?org= —— 报修页分类下拉（免登录只读，限流）
 router.get('/public/fault-categories', loginRateLimit(30), async (req, res, next) => {
   try {
