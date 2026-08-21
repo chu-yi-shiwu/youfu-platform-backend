@@ -55,7 +55,7 @@ const TYPES: Record<string, TypeDef> = {
       model: z.string().optional(),
       sn: z.string().optional(),
       location: z.string().optional(),
-      status: z.string().optional(),
+      status: z.string().optional().default('in_use'), // 与 DB NOT NULL DEFAULT 'in_use' 对齐，避免未传时显式写入 NULL 触发 23502
       purchase_date: z.string().optional(),
       price: z.union([z.number(), z.string()]).optional(),
       responsible: z.string().optional(),
@@ -107,6 +107,109 @@ function getType(t: string): TypeDef {
   if (!d) throw new AppError('BAD_TYPE', `unknown equipment type: ${t}`, 400);
   return d;
 }
+
+// ============ 设备维保（P3b）：按设备挂维保计划与记录 ============
+// 注意：维保路由必须在通用 /equipment/:type/:id 之前注册，否则 Express 会优先匹配通用路由。
+const maintenanceSchema = z.object({
+  mtype: z.enum(['maintain', 'repair', 'inspect']).default('maintain'),
+  plan_date: z.string().optional(),
+  done_date: z.string().optional(),
+  cost: z.union([z.number(), z.string()]).optional(),
+  responsible: z.string().optional(),
+  note: z.string().optional(),
+  photos: z.array(z.string()).optional(),
+});
+
+// 维保列表（按设备）
+router.get('/equipment/:eqId/maintenances', async (req, res, next) => {
+  try {
+    const tenantId = res.locals.auth.tenantId;
+    const items = await withTenantClient(tenantId, (client) =>
+      client
+        .query(
+          `SELECT * FROM equipment_maintenance WHERE equipment_id=$1 AND tenant_id=$2 ORDER BY plan_date DESC NULLS LAST, created_at DESC`,
+          [req.params.eqId, tenantId],
+        )
+        .then((r) => r.rows),
+    );
+    return res.json({ ok: true, code: 0, items });
+  } catch (e) {
+    next(e);
+  }
+});
+
+// 新建维保
+router.post('/equipment/:eqId/maintenances', async (req, res, next) => {
+  try {
+    requireConfigRole(req, res);
+    const tenantId = res.locals.auth.tenantId;
+    const b = maintenanceSchema.parse(req.body);
+    const item = await withTenantClient(tenantId, async (client) => {
+      const cur = await client.query('SELECT id FROM equipment WHERE id=$1 AND tenant_id=$2', [req.params.eqId, tenantId]);
+      if (cur.rowCount === 0) throw new AppError('NOT_FOUND', 'equipment not found', 404);
+      const r = await client.query(
+        `INSERT INTO equipment_maintenance (tenant_id, equipment_id, mtype, plan_date, done_date, cost, responsible, note, photos)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`,
+        [
+          tenantId, req.params.eqId, b.mtype, b.plan_date ?? null, b.done_date ?? null,
+          b.cost ?? 0, b.responsible ?? null, b.note ?? null, b.photos ?? null,
+        ],
+      );
+      return r.rows[0];
+    });
+    return res.status(201).json({ ok: true, code: 0, item });
+  } catch (e) {
+    next(e);
+  }
+});
+
+// 更新维保
+router.put('/equipment/maintenances/:id', async (req, res, next) => {
+  try {
+    requireConfigRole(req, res);
+    const tenantId = res.locals.auth.tenantId;
+    const b = maintenanceSchema.partial().parse(req.body);
+    const item = await withTenantClient(tenantId, async (client) => {
+      const cur = await client.query('SELECT * FROM equipment_maintenance WHERE id=$1 AND tenant_id=$2', [req.params.id, tenantId]);
+      if (cur.rowCount === 0) throw new AppError('NOT_FOUND', 'maintenance not found', 404);
+      const sets: string[] = [];
+      const params: unknown[] = [req.params.id, tenantId];
+      const set = (col: string, v: unknown) => { params.push(v); sets.push(`${col} = $${params.length}`); };
+      if (b.mtype !== undefined) set('mtype', b.mtype);
+      if (b.plan_date !== undefined) set('plan_date', b.plan_date);
+      if (b.done_date !== undefined) set('done_date', b.done_date);
+      if (b.cost !== undefined) set('cost', b.cost);
+      if (b.responsible !== undefined) set('responsible', b.responsible);
+      if (b.note !== undefined) set('note', b.note);
+      if (b.photos !== undefined) set('photos', b.photos);
+      if (sets.length === 0) return cur.rows[0];
+      sets.push('updated_at = now()');
+      const r = await client.query(
+        `UPDATE equipment_maintenance SET ${sets.join(', ')} WHERE id=$1 AND tenant_id=$2 RETURNING *`,
+        params,
+      );
+      return r.rows[0];
+    });
+    return res.json({ ok: true, code: 0, item });
+  } catch (e) {
+    next(e);
+  }
+});
+
+// 删除维保
+router.delete('/equipment/maintenances/:id', async (req, res, next) => {
+  try {
+    requireConfigRole(req, res);
+    const tenantId = res.locals.auth.tenantId;
+    const r = await withTenantClient(tenantId, (client) =>
+      client.query('DELETE FROM equipment_maintenance WHERE id=$1 AND tenant_id=$2', [req.params.id, tenantId]),
+    );
+    if (r.rowCount === 0) throw new AppError('NOT_FOUND', 'maintenance not found', 404);
+    return res.json({ ok: true, code: 0, deleted: r.rowCount });
+  } catch (e) {
+    next(e);
+  }
+});
 
 // ============ 列表（支持名称/关键字搜索）============
 router.get('/equipment/:type', async (req, res, next) => {

@@ -91,7 +91,9 @@ for (const f of readdirSync(root).filter((x) => /^\d+_.*\.sql$/.test(x))) {
     /IF NOT EXISTS/i.test(sql) ||
     /ON CONFLICT/i.test(sql) ||
     /DROP POLICY IF EXISTS/i.test(sql) ||
-    /ADD COLUMN IF NOT EXISTS/i.test(sql);
+    /ADD COLUMN IF NOT EXISTS/i.test(sql) ||
+    /CREATE OR REPLACE/i.test(sql) || // CREATE OR REPLACE FUNCTION/PROCEDURE/VIEW 本身可重跑，幂等
+    /DROP FUNCTION IF EXISTS/i.test(sql);
   if (!guarded) {
     console.error(`  非幂等迁移 ${f}（缺 IF NOT EXISTS / ON CONFLICT 等幂等保护）`);
     nonIdem++;

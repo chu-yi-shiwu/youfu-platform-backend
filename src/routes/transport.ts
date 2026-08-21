@@ -62,6 +62,7 @@ const orderSchema = z.object({
   plan_depart_at: z.string().optional(),
   item_category: z.string().optional(), // UOne A3 物品分类（标本/药品/文件/器械...）
   order_type: z.enum(['scheduled', 'free']).default('scheduled'), // scheduled 计划运送 | free 自由运送
+  work_order_id: z.string().optional(), // P2：来源工单（work_orders.id 为 text 且含 PILOT-WO-002 等非 uuid 业务单号，故用 string 不校验 uuid 形态，与 041 迁移的 text 列对齐）
 });
 
 router.get('/orders', async (req, res, next) => {
@@ -78,14 +79,26 @@ router.get('/orders', async (req, res, next) => {
     if (priority) add('priority = ?', priority);
     if (item_category) add('item_category = ?', item_category);
     if (order_type) add('order_type = ?', order_type);
-    const items = await withTenantClient(tenantId, (client) =>
-      client
+    const items = await withTenantClient(tenantId, async (client) => {
+      const rows = await client
         .query(
           `SELECT * FROM transport_order WHERE ${clauses.join(' AND ')} ORDER BY created_at DESC`,
           params,
         )
-        .then((r) => r.rows),
-    );
+        .then((r) => r.rows);
+      // P2：回显关联工单号（工单可能属于同一租户；跨租户 RLS 下查不到则为 null，安全降级）
+      for (const o of rows) {
+        if (o.work_order_id) {
+          const wo = await client
+            .query('SELECT order_no, title, status FROM work_orders WHERE id=$1 AND tenant_id=$2', [o.work_order_id, tenantId])
+            .then((r: any) => r.rows[0] ?? null);
+          o.work_order = wo ? { order_no: wo.order_no, title: wo.title, status: wo.status } : null;
+        } else {
+          o.work_order = null;
+        }
+      }
+      return rows;
+    });
     return res.json({ ok: true, code: 0, items });
   } catch (e) {
     next(e);
@@ -111,7 +124,14 @@ router.get('/orders/:id', async (req, res, next) => {
           [req.params.id, tenantId],
         )
         .then((r: any) => r.rows);
-      return { ...o, available, tracks };
+      // P2：关联工单回显（无关联或为 null 时安全降级）
+      let workOrder: any = null;
+      if (o.work_order_id) {
+        workOrder = await client
+          .query('SELECT order_no, title, status FROM work_orders WHERE id=$1 AND tenant_id=$2', [o.work_order_id, tenantId])
+          .then((r: any) => r.rows[0] ?? null);
+      }
+      return { ...o, available, tracks, work_order: workOrder ? { order_no: workOrder.order_no, title: workOrder.title, status: workOrder.status } : null };
     });
     return res.json({ ok: true, code: 0, item });
   } catch (e) {
@@ -126,8 +146,8 @@ router.post('/orders', async (req, res, next) => {
     const b = orderSchema.parse(req.body);
     const item = await withTenantClient(tenantId, async (client) => {
       const r = await client.query(
-        `INSERT INTO transport_order (tenant_id, code, item_name, from_loc, to_loc, carrier, priority, plan_depart_at, item_category, order_type, status)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'pending') RETURNING *`,
+        `INSERT INTO transport_order (tenant_id, code, item_name, from_loc, to_loc, carrier, priority, plan_depart_at, item_category, order_type, work_order_id, status)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'pending') RETURNING *`,
         [
           tenantId,
           `T${Date.now()}`,
@@ -139,6 +159,7 @@ router.post('/orders', async (req, res, next) => {
           b.plan_depart_at ?? null,
           b.item_category ?? null,
           b.order_type,
+          b.work_order_id ?? null,
         ],
       );
       const row = r.rows[0];
