@@ -10,6 +10,7 @@ import { createWithIdem, transition, list, findOne, findOneForUpdate } from '../
 import { ticketStats } from '../repo/stats.js';
 import { pickWorker, resolveDispatch, getActiveRules } from '../engine/dispatch.js';
 import { AppError } from '../middleware/error.js';
+import { requirePermission } from '../middleware/role.js';
 import { resolveScanFromDb } from '../scan.js';
 import { setSlaDueAt, slaScan, type SlaScanRow } from '../engine/sla.js';
 import { dispatchEvent } from '../webhook/dispatch.js';
@@ -33,6 +34,7 @@ const createSchema = z.object({
   title: z.string().optional(),
   description: z.string().optional(),
   contact: z.string().optional(),
+  reporter_name: z.string().optional(), // P1 收尾：申告人真实姓名（顶层列）
   assets: z.array(z.any()).optional(),
   // 派单所需技能线索（来自动态字段元数据，非写死业务值）
   skill_tags: z.array(z.string()).optional(),
@@ -81,6 +83,7 @@ router.post('/open/work_order', async (req, res, next) => {
         title: body.title,
         description: body.description,
         contact: body.contact,
+        reporterName: body.reporter_name,
         assets: body.assets,
         source: body.source,
         faultType: body.fault_type,
@@ -264,8 +267,9 @@ router.get('/open/work_orders', async (req, res, next) => {
   try {
     const tenantId = res.locals.auth.tenantId;
     const status = req.query.status as WorkOrderStatus | undefined;
-    const limit = Number(req.query.limit ?? 20);
-    const offset = Number(req.query.offset ?? 0);
+    // P-3：limit/offset 强制上限，防止调用方拉取整表（DoS 面）。
+    const limit = Math.min(Math.max(1, Math.floor(Number(req.query.limit) || 20)), 200);
+    const offset = Math.max(0, Math.min(Math.floor(Number(req.query.offset) || 0), 10000));
     const data = await withTenantClient(tenantId, (client) =>
       list(client, tenantId, { status, limit, offset }),
     );
@@ -359,6 +363,84 @@ router.get('/open/work_order/:id', async (req, res, next) => {
     });
     if (!result) return res.status(404).json({ ok: false, code: 'NOT_FOUND', message: 'work order not found' });
     return res.json({ ok: true, code: 0, ...result });
+  } catch (e) {
+    next(e);
+  }
+});
+
+// POST /api/v1/open/work_order/:id/photos —— P0 移动 H5「现场拍照真落库」
+// 把 base64 data URL 追加进 ext.photos（租户内隔离，跨 PC/H5 可见、刷新不丢）。
+// 诚实：文件本身存于 DB jsonb（pilot 规模足够）；后续接入对象存储只需改此端点落 URL。
+const photoSchema = z.object({
+  photo: z.string().min(1).max(8 * 1024 * 1024), // data URL，限 8MB 防滥用
+  caption: z.string().max(200).optional(),
+});
+router.post('/open/work_order/:id/photos', async (req, res, next) => {
+  try {
+    const tenantId = res.locals.auth.tenantId;
+    const { photo, caption } = photoSchema.parse(req.body);
+    const result = await withTenantClient(tenantId, async (client) => {
+      const row = await findOne(client, tenantId, req.params.id);
+      if (!row) return null;
+      const ext: Record<string, unknown> = row.ext && typeof row.ext === 'object' ? { ...row.ext } : {};
+      const photos = Array.isArray(ext.photos) ? (ext.photos as any[]) : [];
+      photos.push({ url: photo, caption: caption ?? null, at: new Date().toISOString() });
+      ext.photos = photos;
+      await client.query(
+        'UPDATE work_orders SET ext = $1::jsonb, updated_at = now() WHERE id = $2 AND tenant_id = $3',
+        [JSON.stringify(ext), req.params.id, tenantId],
+      );
+      return ext;
+    });
+    if (!result) return res.status(404).json({ ok: false, code: 'NOT_FOUND', message: 'work order not found' });
+    return res.json({ ok: true, code: 0, ext: result });
+  } catch (e) {
+    next(e);
+  }
+});
+
+// GET /api/v1/open/notifications?recipient=workerId —— P0 移动 H5「消息中心」
+// 读取已落库通知（in_app 落库即可达；sms/push 为 stub 未真发，诚实标注）。
+router.get('/open/notifications', async (req, res, next) => {
+  try {
+    const tenantId = res.locals.auth.tenantId;
+    const recipient = (req.query.recipient as string) || '';
+    if (!recipient) return res.json({ ok: true, code: 0, items: [] });
+    const rows = await withTenantClient(tenantId, (client) =>
+      client
+        .query(
+          `SELECT id, type, title, body, channel, delivered, read, work_order_id, payload, created_at
+           FROM notification WHERE tenant_id = $1 AND recipient = $2 ORDER BY created_at DESC LIMIT 100`,
+          [tenantId, recipient],
+        )
+        .then((r) => r.rows),
+    );
+    return res.json({ ok: true, code: 0, items: rows });
+  } catch (e) {
+    next(e);
+  }
+});
+
+// PATCH /api/v1/open/work_order/:id/ext —— P0 字段级配置：合并自定义字段值到 ext（租户隔离）
+// 用于把业务流程配置的自定义字段（config.fields）在工单/业务流表单上填写后落库。
+const extPatchSchema = z.object({ patch: z.record(z.string(), z.unknown()) });
+router.patch('/open/work_order/:id/ext', async (req, res, next) => {
+  try {
+    const tenantId = res.locals.auth.tenantId;
+    const { patch } = extPatchSchema.parse(req.body);
+    const result = await withTenantClient(tenantId, async (client) => {
+      const row = await findOne(client, tenantId, req.params.id);
+      if (!row) return null;
+      const ext: Record<string, unknown> = row.ext && typeof row.ext === 'object' ? { ...row.ext } : {};
+      Object.assign(ext, patch);
+      await client.query(
+        'UPDATE work_orders SET ext = $1::jsonb, updated_at = now() WHERE id = $2 AND tenant_id = $3',
+        [JSON.stringify(ext), req.params.id, tenantId],
+      );
+      return ext;
+    });
+    if (!result) return res.status(404).json({ ok: false, code: 'NOT_FOUND', message: 'work order not found' });
+    return res.json({ ok: true, code: 0, ext: result });
   } catch (e) {
     next(e);
   }
@@ -469,16 +551,14 @@ router.get('/open/notifications', async (req, res, next) => {
 });
 
 // POST /api/v1/open/work_order/:id/transpond —— 转台（把工单从一个服务台转移到另一个服务台）
-// 门禁同 dispatch/forward：仅 admin/dispatcher/service_desk 可操作。
+// 门禁：dispatch.override（RBAC 默认矩阵 admin/operator/dispatcher 有，worker 无）。
 router.post('/open/work_order/:id/transpond', async (req, res, next) => {
   try {
-    const tenantId = res.locals.auth.tenantId;
-    const role = res.locals.auth.role;
-    if (role && !['admin', 'dispatcher', 'service_desk'].includes(role)) {
-      throw new AppError('FORBIDDEN', `role ${role} not allowed to transpond`, 403);
-    }
+    const auth = res.locals.auth;
+    const tenantId = auth.tenantId;
     const b = z.object({ deskId: z.string().min(1), reason: z.string().optional() }).parse(req.body);
     const ticket = await withTenantClient(tenantId, async (client) => {
+      await requirePermission(auth, client, 'dispatch.override');
       const desk = await client.query('SELECT id, name FROM service_desk WHERE id=$1 AND tenant_id=$2', [b.deskId, tenantId]);
       if (desk.rowCount === 0) throw new AppError('NOT_FOUND', 'target service desk not found', 404);
       const cur = await findOneForUpdate(client, tenantId, req.params.id);
