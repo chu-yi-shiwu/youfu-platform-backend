@@ -449,23 +449,48 @@ router.post('/open/work_order/:id/voice', async (req, res, next) => {
   }
 });
 
-// GET /api/v1/open/notifications?recipient=workerId —— P0 移动 H5「消息中心」
-// 读取已落库通知（in_app 落库即可达；sms/push 为 stub 未真发，诚实标注）。
+// GET /api/v1/open/notifications —— 通知列表（?recipient= 过滤；缺省=租户全部）
+// 审查修复：合并原 454(recipient 版) 与 585(全量版) 重复注册——Express 先注册先匹配，585 版永不生效。
+// in_app 落库即可达；sms/push 为 stub 未真发，诚实标注。
 router.get('/open/notifications', async (req, res, next) => {
   try {
     const tenantId = res.locals.auth.tenantId;
     const recipient = (req.query.recipient as string) || '';
-    if (!recipient) return res.json({ ok: true, code: 0, items: [] });
+    const conds = ['tenant_id = $1'];
+    const params: unknown[] = [tenantId];
+    if (recipient) { params.push(recipient); conds.push(`recipient = $${params.length}`); }
     const rows = await withTenantClient(tenantId, (client) =>
       client
         .query(
-          `SELECT id, type, title, body, channel, delivered, read, work_order_id, payload, created_at
-           FROM notification WHERE tenant_id = $1 AND recipient = $2 ORDER BY created_at DESC LIMIT 100`,
-          [tenantId, recipient],
+          `SELECT id, recipient, recipient_kind, type, title, body, channel, delivered, read, work_order_id, payload, created_at
+           FROM notification WHERE ${conds.join(' AND ')} ORDER BY created_at DESC LIMIT 100`,
+          params,
         )
         .then((r) => r.rows),
     );
     return res.json({ ok: true, code: 0, items: rows });
+  } catch (e) {
+    next(e);
+  }
+});
+
+// POST /api/v1/open/notifications/read —— 标记已读（body { ids?: string[] }；缺省=全部已读）
+router.post('/open/notifications/read', async (req, res, next) => {
+  try {
+    const tenantId = res.locals.auth.tenantId;
+    const body = z.object({ ids: z.array(z.string()).optional() }).parse(req.body ?? {});
+    const result = await withTenantClient(tenantId, async (client) => {
+      if (body.ids && body.ids.length > 0) {
+        const r = await client.query(
+          `UPDATE notification SET read = true WHERE tenant_id = $1 AND id = ANY($2::text[]) AND read = false RETURNING id`,
+          [tenantId, body.ids],
+        );
+        return r.rowCount ?? 0;
+      }
+      const r = await client.query(`UPDATE notification SET read = true WHERE tenant_id = $1 AND read = false`, [tenantId]);
+      return r.rowCount ?? 0;
+    });
+    return res.json({ ok: true, code: 0, marked: result });
   } catch (e) {
     next(e);
   }
@@ -576,25 +601,6 @@ router.post('/sla/scan', async (req, res, next) => {
       escalated: escalations.length,
       items: escalations.map((h) => ({ work_order_id: h.workOrderId, from_status: h.fromStatus, escal_minutes: h.escalMinutes })),
     });
-  } catch (e) {
-    next(e);
-  }
-});
-
-// GET /api/v1/open/notifications —— 当前租户通知列表（按创建时间倒序，验证 A5 派单通知钩子用）
-router.get('/open/notifications', async (req, res, next) => {
-  try {
-    const tenantId = res.locals.auth.tenantId;
-    const items = await withTenantClient(tenantId, (client) =>
-      client
-        .query(
-          `SELECT id, recipient, recipient_kind, type, work_order_id, title, body, channel, delivered, read, created_at
-           FROM notification WHERE tenant_id=$1 ORDER BY created_at DESC LIMIT 100`,
-          [tenantId],
-        )
-        .then((r) => r.rows),
-    );
-    return res.json({ ok: true, code: 0, items, total: items.length });
   } catch (e) {
     next(e);
   }
