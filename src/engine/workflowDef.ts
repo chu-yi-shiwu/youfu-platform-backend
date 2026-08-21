@@ -50,13 +50,35 @@ export async function ensureWorkflowDef(
   return def;
 }
 
-/** upsert 状态图（版本自增，记录变更历史）。 */
+/** upsert 状态图（版本自增，记录变更历史）。
+ *  S2：保存前把「当前旧版」快照写入 workflow_def_history（append-only，S3 版本回滚地基）；
+ *  reason 为来源标记（手工保存/模板应用/回滚，G5：模板应用与自优化不互斥）。 */
 export async function saveWorkflowDef(
   client: PoolClient,
   tenantId: string,
   entityType: string,
   def: WorkflowDef,
+  opts?: { operator?: string; reason?: string },
 ): Promise<void> {
+  const cur = await client.query<{ version: number; def: unknown }>(
+    'SELECT version, def FROM workflow_def WHERE tenant_id = $1 AND entity_type = $2',
+    [tenantId, entityType],
+  );
+  if (cur.rows[0]) {
+    await client.query(
+      `INSERT INTO workflow_def_history (tenant_id, entity_type, version, def, operator, reason)
+       VALUES ($1,$2,$3,$4,$5,$6)
+       ON CONFLICT (tenant_id, entity_type, version) DO NOTHING`,
+      [
+        tenantId,
+        entityType,
+        cur.rows[0].version,
+        JSON.stringify(cur.rows[0].def),
+        opts?.operator ?? null,
+        opts?.reason ?? null,
+      ],
+    );
+  }
   await client.query(
     `INSERT INTO workflow_def (tenant_id, entity_type, def, version)
      VALUES ($1,$2,$3,1)
@@ -64,6 +86,58 @@ export async function saveWorkflowDef(
      DO UPDATE SET def = EXCLUDED.def, version = workflow_def.version + 1, updated_at = now()`,
     [tenantId, entityType, JSON.stringify(def)],
   );
+}
+
+/** 当前版本号（无定义返回 0）。 */
+export async function getWorkflowDefVersion(
+  client: PoolClient,
+  tenantId: string,
+  entityType: string,
+): Promise<number> {
+  const r = await client.query<{ version: number }>(
+    'SELECT version FROM workflow_def WHERE tenant_id = $1 AND entity_type = $2',
+    [tenantId, entityType],
+  );
+  return r.rows[0]?.version ?? 0;
+}
+
+/** 版本历史列表（倒序，含快照，供前端查看/回滚）。 */
+export async function listWorkflowDefHistory(
+  client: PoolClient,
+  tenantId: string,
+  entityType: string,
+): Promise<Array<{ version: number; def: WorkflowDef; operator: string | null; reason: string | null; createdAt: string }>> {
+  const r = await client.query(
+    `SELECT version, def, operator, reason, created_at
+     FROM workflow_def_history
+     WHERE tenant_id = $1 AND entity_type = $2
+     ORDER BY version DESC`,
+    [tenantId, entityType],
+  );
+  return r.rows.map((row) => ({
+    version: row.version,
+    def: normalizeDef(typeof row.def === 'string' ? JSON.parse(row.def) : row.def),
+    operator: row.operator,
+    reason: row.reason,
+    createdAt: row.created_at,
+  }));
+}
+
+/** 按版本号读历史快照（回滚/查看用）；不存在返回 null。 */
+export async function getWorkflowDefHistoryVersion(
+  client: PoolClient,
+  tenantId: string,
+  entityType: string,
+  version: number,
+): Promise<WorkflowDef | null> {
+  const r = await client.query<{ def: unknown }>(
+    `SELECT def FROM workflow_def_history
+     WHERE tenant_id = $1 AND entity_type = $2 AND version = $3`,
+    [tenantId, entityType, version],
+  );
+  if (!r.rows[0]) return null;
+  const raw = r.rows[0].def;
+  return normalizeDef(typeof raw === 'string' ? JSON.parse(raw) : raw);
 }
 
 function normalizeDef(d: any): WorkflowDef {
