@@ -162,8 +162,10 @@ function genCreds(): { key: string; secret: string } {
     secret: `sk_${crypto.randomBytes(24).toString('hex')}`,
   };
 }
+// #5 修复：salt 环境化（与 openApiAuth 一致）
+const SECRET_SALT = process.env.APP_SECRET_SALT ?? 'youfu-app-secret-salt';
 function sha256Secret(s: string): string {
-  return crypto.createHmac('sha256', 'youfu-app-secret-salt').update(s).digest('hex');
+  return crypto.createHmac('sha256', SECRET_SALT).update(s).digest('hex');
 }
 
 // GET /platform/apps —— 应用列表（secret 不返回，仅展示 key/scopes/状态）
@@ -184,10 +186,11 @@ router.post('/apps', async (req, res, next) => {
   try {
     const b = appCreateSchema.parse(req.body);
     const creds = genCreds();
+    // #4 修复：不再存明文 app_secret（只存 secret_hash；053b 已 DROP 明文列）
     const r = await pool.query(
-      `INSERT INTO open_api_app (app_name, app_key, app_secret, secret_hash, owner, scopes, quotas)
-       VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id, app_name, app_key, status`,
-      [b.name, creds.key, creds.secret, sha256Secret(creds.secret), b.owner ?? null, JSON.stringify(b.scopes), JSON.stringify(b.quotas ?? {})],
+      `INSERT INTO open_api_app (app_name, app_key, secret_hash, owner, scopes, quotas)
+       VALUES ($1,$2,$3,$4,$5,$6) RETURNING id, app_name, app_key, status`,
+      [b.name, creds.key, sha256Secret(creds.secret), b.owner ?? null, JSON.stringify(b.scopes), JSON.stringify(b.quotas ?? {})],
     );
     await audit(res.locals.platformAdmin!.username, 'app.create', r.rows[0].id, null, { name: b.name });
     // 明文 secret 仅本次返回
