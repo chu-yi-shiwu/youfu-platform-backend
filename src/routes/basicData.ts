@@ -94,6 +94,100 @@ const TYPES: Record<string, TypeDef> = {
       remark: z.string().optional(),
     }),
   },
+  // ===== 批次 B 新增（047 迁移）=====
+  equipment_type: {
+    table: 'equipment_type',
+    columns: ['id', 'tenant_id', 'name', 'code', 'remark', 'created_at', 'updated_at'],
+    insertCols: ['name', 'code', 'remark'],
+    fields: [
+      { key: 'name', label: '类型名称' },
+      { key: 'code', label: '编码' },
+      { key: 'remark', label: '备注' },
+    ],
+    schema: z.object({
+      name: z.string().min(1),
+      code: z.string().optional(),
+      remark: z.string().optional(),
+    }),
+  },
+  equipment_brand: {
+    table: 'equipment_brand',
+    columns: ['id', 'tenant_id', 'name', 'code', 'remark', 'created_at', 'updated_at'],
+    insertCols: ['name', 'code', 'remark'],
+    fields: [
+      { key: 'name', label: '厂商名称' },
+      { key: 'code', label: '编码' },
+      { key: 'remark', label: '备注' },
+    ],
+    schema: z.object({
+      name: z.string().min(1),
+      code: z.string().optional(),
+      remark: z.string().optional(),
+    }),
+  },
+  priority_dict: {
+    table: 'priority_dict',
+    columns: ['id', 'tenant_id', 'name', 'code', 'sort', 'color', 'remark', 'created_at', 'updated_at'],
+    insertCols: ['name', 'code', 'sort', 'color', 'remark'],
+    fields: [
+      { key: 'name', label: '优先级名称' },
+      { key: 'code', label: '编码' },
+      { key: 'sort', label: '排序(小在前)' },
+      { key: 'color', label: '颜色(red/orange)' },
+      { key: 'remark', label: '备注' },
+    ],
+    schema: z.object({
+      name: z.string().min(1),
+      code: z.string().optional(),
+      sort: z.number().optional(),
+      color: z.string().optional(),
+      remark: z.string().optional(),
+    }),
+  },
+  sla_policy: {
+    table: 'sla_policy',
+    columns: ['id', 'tenant_id', 'name', 'entity_type', 'priority', 'response_hours', 'complete_hours', 'enabled', 'remark', 'created_at', 'updated_at'],
+    insertCols: ['name', 'entity_type', 'priority', 'response_hours', 'complete_hours', 'enabled', 'remark'],
+    fields: [
+      { key: 'name', label: '策略名称' },
+      { key: 'entity_type', label: '适用业务类型' },
+      { key: 'priority', label: '适用优先级(空=全部)' },
+      { key: 'response_hours', label: '响应时限(小时)' },
+      { key: 'complete_hours', label: '完成时限(小时)' },
+      { key: 'enabled', label: '启用' },
+      { key: 'remark', label: '备注' },
+    ],
+    schema: z.object({
+      name: z.string().min(1),
+      entity_type: z.string().optional(),
+      priority: z.string().optional(),
+      response_hours: z.number().optional(),
+      complete_hours: z.number().optional(),
+      enabled: z.boolean().optional(),
+      remark: z.string().optional(),
+    }),
+  },
+  work_order_template: {
+    table: 'work_order_template',
+    columns: ['id', 'tenant_id', 'name', 'entity_type', 'business_type', 'description', 'default_fields', 'enabled', 'created_at', 'updated_at'],
+    insertCols: ['name', 'entity_type', 'business_type', 'description', 'default_fields', 'enabled'],
+    fields: [
+      { key: 'name', label: '模板名称' },
+      { key: 'entity_type', label: '关联业务类型' },
+      { key: 'business_type', label: '业务类型code' },
+      { key: 'description', label: '说明' },
+      { key: 'default_fields', label: '默认值(JSON)' },
+      { key: 'enabled', label: '启用' },
+    ],
+    schema: z.object({
+      name: z.string().min(1),
+      entity_type: z.string().optional(),
+      business_type: z.string().optional(),
+      description: z.string().optional(),
+      default_fields: z.record(z.string(), z.any()).optional(),
+      enabled: z.boolean().optional(),
+    }),
+  },
 };
 
 function getType(t: string): TypeDef {

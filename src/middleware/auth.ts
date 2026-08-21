@@ -17,6 +17,7 @@ export interface AuthLocals {
   requestId: string;
   idempotencyKey?: string;
   userId?: string;
+  username?: string;
   role?: string;
   authMode: 'dev' | 'prod';
 }
@@ -28,6 +29,9 @@ declare module 'express-serve-static-core' {
 }
 
 export let AUTH_MODE: 'dev' | 'prod' = 'dev';
+
+// 默认租户（与种子数据对齐）。集中一处，避免 't-verification' 字面量散落多处（C-1）。
+export const DEFAULT_TENANT_ID = 't-verification';
 
 export function refreshAuthMode(): void {
   AUTH_MODE = (process.env.AUTH_MODE ?? 'dev').toLowerCase() === 'prod' ? 'prod' : 'dev';
@@ -91,57 +95,109 @@ function str(v: unknown): string | undefined {
   return typeof v === 'string' ? v : undefined;
 }
 
-export function authMiddleware(req: Request, res: Response, next: NextFunction) {
-  // 公开路径（登录）直接放行，不进入任何鉴权分支
-  if (isPublicPath(req)) return next();
+/**
+ * C-3：统一身份解析纯函数（替代 authMiddleware 内 dev/prod 两条重复分支）。
+ * 主流程只调一次；返回成功 AuthLocals 或结构化失败（status/code/message），由调用方转 HTTP。
+ * 行为与原内联实现逐字节等价（prod：缺 bearer→401 / 缺密钥→500 / 无效令牌→401 / 缺租户→401；
+ * dev：缺 Authorization 头→401，否则落到缺省租户 + X-Role??'admin'）。
+ */
+type IdentityResult =
+  | { ok: true; auth: AuthLocals }
+  | { ok: false; status: number; code: string; message: string };
 
+export function resolveIdentity(req: Request): IdentityResult {
   const authorization = req.header('Authorization');
   const bearer = parseBearer(authorization);
+  const requestId = req.header('X-Request-Id') ?? crypto.randomUUID();
+  const idempotencyKey = req.header('Idempotency-Key') ?? undefined;
 
   if (AUTH_MODE === 'prod') {
     if (!bearer) {
-      return res.status(401).json({ ok: false, code: 'AUTH_001', message: 'missing Authorization bearer token' });
+      return { ok: false, status: 401, code: 'AUTH_001', message: 'missing Authorization bearer token' };
     }
     const secret = process.env.JWT_SECRET;
     if (!secret) {
-      return res.status(500).json({ ok: false, code: 'AUTH_CFG', message: 'JWT_SECRET not configured on server' });
+      return { ok: false, status: 500, code: 'AUTH_CFG', message: 'JWT_SECRET not configured on server' };
     }
     const payload = verifyJwt(bearer, secret);
     if (!payload) {
-      return res.status(401).json({ ok: false, code: 'AUTH_002', message: 'invalid or expired token' });
+      return { ok: false, status: 401, code: 'AUTH_002', message: 'invalid or expired token' };
     }
     const tenantId = str(payload.tid) ?? str(payload.tenantId) ?? req.header('X-Tenant-Id');
     if (!tenantId) {
-      return res.status(401).json({
-        ok: false,
-        code: 'TENANT_001',
-        message: 'missing tenant (token has no tid/tenantId and no X-Tenant-Id header)',
-      });
+      return { ok: false, status: 401, code: 'TENANT_001', message: 'missing tenant (token has no tid/tenantId and no X-Tenant-Id header)' };
     }
-    res.locals.auth = {
-      tenantId,
-      requestId: req.header('X-Request-Id') ?? crypto.randomUUID(),
-      idempotencyKey: req.header('Idempotency-Key') ?? undefined,
-      userId: str(payload.sub) ?? str(payload.uid),
-      role: str(payload.role) ?? undefined,
-      authMode: 'prod',
+    return {
+      ok: true,
+      auth: {
+        tenantId,
+        requestId,
+        idempotencyKey,
+        userId: str(payload.sub) ?? str(payload.uid),
+        username: str(payload.username) ?? undefined,
+        role: str(payload.role) ?? undefined,
+        authMode: 'prod',
+      },
     };
-    return next();
   }
 
   // dev 模式（默认）：仅校验头存在性，Bearer dev 放行（维持 M1 联调兼容）
   if (!authorization) {
-    return res.status(401).json({ ok: false, code: 'AUTH_001', message: 'missing Authorization header' });
+    return { ok: false, status: 401, code: 'AUTH_001', message: 'missing Authorization header' };
   }
   // 前端 Login 仅发 Bearer token、不发 X-Tenant-Id（见 client.ts）。
   // pilot 阶段缺省落到种子租户，避免 401；可用 DEV_DEFAULT_TENANT 环境变量覆盖。
-  const tenantId = req.header('X-Tenant-Id') ?? process.env.DEV_DEFAULT_TENANT ?? 't-verification';
-  res.locals.auth = {
-    tenantId,
-    requestId: req.header('X-Request-Id') ?? crypto.randomUUID(),
-    idempotencyKey: req.header('Idempotency-Key') ?? undefined,
-    role: req.header('X-Role') ?? 'admin',
-    authMode: 'dev',
+  const tenantId = req.header('X-Tenant-Id') ?? process.env.DEV_DEFAULT_TENANT ?? DEFAULT_TENANT_ID;
+  return {
+    ok: true,
+    auth: {
+      tenantId,
+      requestId,
+      idempotencyKey,
+      role: req.header('X-Role') ?? 'admin',
+      authMode: 'dev',
+    },
   };
-  next();
+}
+
+export function authMiddleware(req: Request, res: Response, next: NextFunction) {
+  // 公开路径（登录）直接放行，不进入任何鉴权分支
+  if (isPublicPath(req)) return next();
+
+  const result = resolveIdentity(req);
+  if (!result.ok) {
+    return res.status(result.status).json({ ok: false, code: result.code, message: result.message });
+  }
+  res.locals.auth = result.auth;
+  return next();
+}
+
+/**
+ * S-2：登录速率限制（内存滑动窗口，单进程部署足够）。
+ * 仅 prod 生效；dev 放行以免干扰本地联调与测试。
+ */
+const loginAttempts = new Map<string, number[]>();
+export function loginRateLimit(max = 10, windowMs = 60_000) {
+  return (req: Request, res: Response, next: NextFunction) => {
+    if (AUTH_MODE !== 'prod') return next();
+    const ip = (req.ip || req.socket.remoteAddress || 'unknown') as string;
+    const now = Date.now();
+    const arr = (loginAttempts.get(ip) ?? []).filter((t) => now - t < windowMs);
+    if (arr.length >= max) {
+      return res.status(429).json({ ok: false, code: 'RATE_001', message: 'too many login attempts, please slow down' });
+    }
+    arr.push(now);
+    loginAttempts.set(ip, arr);
+    next();
+  };
+}
+
+/**
+ * C-2：统一角色守卫（纯函数）。prod 下要求 auth.role ∈ roles；dev 放行。
+ * 用法：if (!requireRole(auth, 'admin')) return res.status(403)...；
+ *      取代散落的 requireAdmin / requireConfigRole 重复实现。
+ */
+export function requireRole(auth: AuthLocals, ...roles: string[]): boolean {
+  if (auth.authMode === 'dev') return true;
+  return auth.role != null && roles.includes(auth.role);
 }
