@@ -15,8 +15,11 @@ declare module 'express-serve-static-core' {
   }
 }
 
+// #5 修复：salt 环境化（APP_SECRET_SALT），默认值保持兼容；生产应配置随机值
+const SECRET_SALT = process.env.APP_SECRET_SALT ?? 'youfu-app-secret-salt';
+
 function sha256(s: string): string {
-  return crypto.createHmac('sha256', 'youfu-app-secret-salt').update(s).digest('hex');
+  return crypto.createHmac('sha256', SECRET_SALT).update(s).digest('hex');
 }
 
 /** 从请求提取凭据：X-App-Key/X-App-Secret 或 Authorization: Bearer key:secret */

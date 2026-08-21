@@ -5,7 +5,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import pool from '../db/pool.js';
 import { withTenantClient } from '../db/pool.js';
-import { saveWorkflowDef, getWorkflowDefVersion } from '../engine/workflowDef.js';
+import { saveWorkflowDef, getWorkflowDef, getWorkflowDefVersion } from '../engine/workflowDef.js';
 import { AppError } from '../middleware/error.js';
 import { platformAdminAuth } from '../middleware/platformAuth.js';
 import { refreshApplyEffect } from '../services/templateEffects.js';
@@ -97,6 +97,7 @@ router.post('/templates/:id/apply', async (req, res, next) => {
     }
     const entityType = tpl.entity_type ?? 'work_order';
 
+    // 事务化：#7 修复——saveWorkflowDef + INSERT apply + applied_count 原子（withTenantClient 自带 BEGIN/COMMIT）
     const result = await withTenantClient(tenantId, async (client) => {
       // 应用前快照：版本 + 指标（闭环率/超时率）
       const beforeVersion = await getWorkflowDefVersion(client, tenantId, entityType);
@@ -108,26 +109,39 @@ router.post('/templates/:id/apply', async (req, res, next) => {
          FROM work_orders WHERE tenant_id = $1`,
         [tenantId],
       );
-      // R4 官方严格字段校验：模板必填字段若与租户现有字段冲突（缺 key 且有存量工单）→ 拒绝并附差异
-      const tplFields: Array<{ key?: string; required?: boolean }> = tplDef.config?.fields ?? [];
       const beforeMetrics = { close_rate: m.rows[0]?.close_rate ?? null, overdue_rate: m.rows[0]?.overdue_rate ?? null };
+
+      // R4 官方严格字段校验（#1 修复：真实实现）：
+      // 模板必填字段与租户现有字段对比——若模板定义的必填字段在租户字段中缺失且有存量工单 → 拒绝并附差异。
+      const tplFields: Array<{ key?: string; required?: boolean }> = tplDef.config?.fields ?? [];
+      const tplRequiredKeys = tplFields.filter((f) => f.required).map((f) => f.key).filter(Boolean) as string[];
+      const curDef = (await getWorkflowDef(client, tenantId, entityType)) as { config?: { fields?: Array<{ key?: string }> } };
+      const tenantFieldKeys = new Set<string>((curDef?.config?.fields ?? []).map((f) => f.key).filter((k): k is string => Boolean(k)));
+      const missingRequired = tplRequiredKeys.filter((k) => !tenantFieldKeys.has(k));
+      if (missingRequired.length > 0) {
+        const woCount = await client.query(`SELECT count(*)::int AS c FROM work_orders WHERE tenant_id = $1`, [tenantId]);
+        if ((woCount.rows[0]?.c ?? 0) > 0) {
+          throw new AppError('BAD_DATA', `模板必填字段在租户现有流程中缺失：${missingRequired.join('、')}（已有 ${woCount.rows[0].c} 张存量工单，字段冲突拒绝应用）`, 400);
+        }
+      }
+
       // 应用：存为新版本（旧版自动进历史 → R5 可回滚）；来源标记 template:<id>（G5 双轮不互斥）
       await saveWorkflowDef(client, tenantId, entityType, tplDef, { operator: actor, reason: `template:${tpl.id}` });
       const afterVersion = await getWorkflowDefVersion(client, tenantId, entityType);
-      return { beforeVersion, afterVersion, beforeMetrics, tplFields };
+      // 记录 apply（移入事务：#7 原子性）
+      const ins = await client.query(
+        `INSERT INTO platform_template_apply (template_id, tenant_id, entity_type, before_version, after_version, applied_by, before_metrics)
+         VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id`,
+        [tpl.id, tenantId, entityType, beforeVersion, afterVersion, actor, JSON.stringify(beforeMetrics)],
+      );
+      await client.query(`UPDATE platform_template SET applied_count = applied_count + 1, updated_at = now() WHERE id = $1`, [tpl.id]);
+      return { applyId: ins.rows[0].id, beforeVersion, afterVersion };
     });
 
-    // 记录 apply
-    const ins = await pool.query(
-      `INSERT INTO platform_template_apply (template_id, tenant_id, entity_type, before_version, after_version, applied_by, before_metrics)
-       VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id`,
-      [tpl.id, tenantId, entityType, result.beforeVersion, result.afterVersion, actor, JSON.stringify(result.beforeMetrics)],
-    );
-    await pool.query(`UPDATE platform_template SET applied_count = applied_count + 1, updated_at = now() WHERE id = $1`, [tpl.id]);
-    await audit(actor, 'template.apply', tpl.id, tenantId, { applyId: ins.rows[0].id, beforeVersion: result.beforeVersion, afterVersion: result.afterVersion });
+    await audit(actor, 'template.apply', tpl.id, tenantId, { applyId: result.applyId, beforeVersion: result.beforeVersion, afterVersion: result.afterVersion });
     return res.status(201).json({
       ok: true, code: 0,
-      applyId: ins.rows[0].id, tenantId, entityType,
+      applyId: result.applyId, tenantId, entityType,
       beforeVersion: result.beforeVersion, afterVersion: result.afterVersion,
       note: '旧版本已进历史，可在「业务规则设置-版本记录」回滚（R5）',
     });
