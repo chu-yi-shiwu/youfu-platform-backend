@@ -4,6 +4,7 @@
 // 聚合走 SECURITY DEFINER 函数（绕过 RLS，只出聚合指标，R2 不下钻）。
 import { Router } from 'express';
 import { z } from 'zod';
+import crypto from 'node:crypto';
 import pool from '../db/pool.js';
 import { signJwt, AUTH_MODE } from '../middleware/auth.js';
 import { platformAdminAuth } from '../middleware/platformAuth.js';
@@ -140,6 +141,77 @@ router.get('/summary', async (req, res, next) => {
       };
     });
     return res.json({ ok: true, code: 0, items, baseline: BASELINE });
+  } catch (e) {
+    next(e);
+  }
+});
+
+// ============ E0_open · 开放应用管理（平台侧 CRUD） ============
+
+const appCreateSchema = z.object({
+  name: z.string().min(2).max(64),
+  owner: z.string().max(64).optional(),
+  scopes: z.array(z.string()).default(['summary:read']),
+  quotas: z.record(z.string(), z.any()).optional(),
+});
+
+// 生成 app_key（公钥标识）与 app_secret（密钥，仅创建时明文返回一次）
+function genCreds(): { key: string; secret: string } {
+  return {
+    key: `ak_${crypto.randomBytes(12).toString('hex')}`,
+    secret: `sk_${crypto.randomBytes(24).toString('hex')}`,
+  };
+}
+function sha256Secret(s: string): string {
+  return crypto.createHmac('sha256', 'youfu-app-secret-salt').update(s).digest('hex');
+}
+
+// GET /platform/apps —— 应用列表（secret 不返回，仅展示 key/scopes/状态）
+router.get('/apps', async (_req, res, next) => {
+  try {
+    const r = await pool.query(
+      `SELECT id, app_name, app_key, owner, scopes, quotas, status, created_at
+       FROM open_api_app ORDER BY created_at DESC`,
+    );
+    return res.json({ ok: true, code: 0, items: r.rows });
+  } catch (e) {
+    next(e);
+  }
+});
+
+// POST /platform/apps —— 创建应用（返回 app_key + app_secret，secret 仅此一次）
+router.post('/apps', async (req, res, next) => {
+  try {
+    const b = appCreateSchema.parse(req.body);
+    const creds = genCreds();
+    const r = await pool.query(
+      `INSERT INTO open_api_app (app_name, app_key, app_secret, secret_hash, owner, scopes, quotas)
+       VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id, app_name, app_key, status`,
+      [b.name, creds.key, creds.secret, sha256Secret(creds.secret), b.owner ?? null, JSON.stringify(b.scopes), JSON.stringify(b.quotas ?? {})],
+    );
+    await audit(res.locals.platformAdmin!.username, 'app.create', r.rows[0].id, null, { name: b.name });
+    // 明文 secret 仅本次返回
+    return res.status(201).json({ ok: true, code: 0, item: { ...r.rows[0], app_secret: creds.secret } });
+  } catch (e) {
+    next(e);
+  }
+});
+
+// PUT /platform/apps/:id/revoke —— 吊销应用（立即失效，不可逆）
+router.put('/apps/:id/revoke', async (req, res, next) => {
+  try {
+    const r = await pool.query(
+      `UPDATE open_api_app SET status='revoked', updated_at=now() WHERE id=$1 AND status='active' RETURNING id, app_name, status`,
+      [req.params.id],
+    );
+    if (r.rowCount === 0) {
+      // 不存在或已吊销
+      const ex = await pool.query(`SELECT id FROM open_api_app WHERE id=$1`, [req.params.id]);
+      if (ex.rowCount === 0) return res.status(404).json({ ok: false, code: 'NOT_FOUND', message: 'app not found' });
+      return res.json({ ok: true, code: 0, item: { id: req.params.id, status: 'revoked' } });
+    }
+    await audit(res.locals.platformAdmin!.username, 'app.revoke', r.rows[0].id, null, { name: r.rows[0].app_name });
+    return res.json({ ok: true, code: 0, item: r.rows[0] });
   } catch (e) {
     next(e);
   }
