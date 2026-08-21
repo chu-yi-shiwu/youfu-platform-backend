@@ -267,11 +267,13 @@ router.get('/open/work_orders', async (req, res, next) => {
   try {
     const tenantId = res.locals.auth.tenantId;
     const status = req.query.status as WorkOrderStatus | undefined;
+    // C-2：assignee 过滤（我的任务/某工人任务视图）；不传=全部
+    const assignee = typeof req.query.assignee === 'string' && req.query.assignee ? req.query.assignee : undefined;
     // P-3：limit/offset 强制上限，防止调用方拉取整表（DoS 面）。
     const limit = Math.min(Math.max(1, Math.floor(Number(req.query.limit) || 20)), 200);
     const offset = Math.max(0, Math.min(Math.floor(Number(req.query.offset) || 0), 10000));
     const data = await withTenantClient(tenantId, (client) =>
-      list(client, tenantId, { status, limit, offset }),
+      list(client, tenantId, { status, limit, offset, assignee }),
     );
     // A+ Phase3：随列表下发每个工单"当前状态可执行的转移"（含必填/角色门禁），供 SPA 动态渲染动作按钮。
     const def = await withTenantClient(tenantId, (client) => getWorkflowDef(client, tenantId, 'work_order'));
@@ -623,6 +625,7 @@ router.get('/open/claim-hall', async (req, res, next) => {
 
 // POST /api/v1/open/work_order/:id/claim —— 抢单（人员认领未分配工单，部门不匹配驳回）
 // 门禁同 RICH def claim 转移：worker/admin/dispatcher/service_desk 可抢。
+// C-2 身份根治：token userId 即 worker.id（id 同源），body workerId 不一致 403。
 router.post('/open/work_order/:id/claim', async (req, res, next) => {
   try {
     const tenantId = res.locals.auth.tenantId;
@@ -630,14 +633,21 @@ router.post('/open/work_order/:id/claim', async (req, res, next) => {
     if (role && !['worker', 'admin', 'dispatcher', 'service_desk', 'operator'].includes(role)) {
       throw new AppError('FORBIDDEN', `role ${role} not allowed to claim`, 403);
     }
-    const b = z.object({ workerId: z.string().min(1), department: z.string().optional() }).parse(req.body);
+    const b = z.object({ workerId: z.string().min(1).optional(), department: z.string().optional() }).parse(req.body);
+    // C-2 身份根治：token 的 userId 即 worker.id（worker 与 account_user id 同源）。
+    // 服务端只信 token 身份；body.workerId 仅兼容旧客户端——若传且与 token 身份不一致 → 403（堵伪造/替抢）。
+    const authUserId = res.locals.auth.userId;
+    if (b.workerId && authUserId && b.workerId !== authUserId) {
+      throw new AppError('FORBIDDEN', 'workerId mismatch with authenticated identity', 403);
+    }
+    const workerId = authUserId ?? b.workerId!; // 优先 token 身份；无 token 身份时回退 body（兼容）
     const ticket = await withTenantClient(tenantId, async (client) => {
       const cur = await findOneForUpdate(client, tenantId, req.params.id);
       if (!cur) throw new AppError('NOT_FOUND', 'work order not found', 404);
       if (cur.status !== 'claim_hall' && cur.status !== 'pending_dispatch') {
         throw new AppError('CONFLICT', `work order not in claim hall (status=${cur.status})`, 409);
       }
-      const worker = await client.query('SELECT id, department FROM worker WHERE id=$1 AND tenant_id=$2', [b.workerId, tenantId]);
+      const worker = await client.query('SELECT id, department FROM worker WHERE id=$1 AND tenant_id=$2', [workerId, tenantId]);
       if (worker.rowCount === 0) throw new AppError('NOT_FOUND', 'worker not found', 404);
       const wDept = worker.rows[0].department;
       const woDept = cur.department;
@@ -647,23 +657,53 @@ router.post('/open/work_order/:id/claim', async (req, res, next) => {
       }
       await client.query(
         'UPDATE work_orders SET status=$1, assignee_id=$2, auto_flow=false, updated_at=now() WHERE id=$3 AND tenant_id=$4',
-        ['assigned', b.workerId, req.params.id, tenantId],
+        ['assigned', workerId, req.params.id, tenantId],
       );
-      await client.query('UPDATE worker SET load = load + 1 WHERE id=$1', [b.workerId]);
+      await client.query('UPDATE worker SET load = load + 1 WHERE id=$1', [workerId]);
       await client.query(
         `INSERT INTO ticket_event (tenant_id, work_order_id, type, from_status, to_status, actor, payload)
          VALUES ($1,$2,'claim',$3,$4,'worker',$5)`,
-        [tenantId, req.params.id, cur.status, 'assigned', JSON.stringify({ worker_id: b.workerId })],
+        [tenantId, req.params.id, cur.status, 'assigned', JSON.stringify({ worker_id: workerId })],
       );
-      await emitDomainEvent(client, { tenantId, entityType: 'work_order', entityId: req.params.id, type: 'assigned', actor: 'worker', payload: { worker_id: b.workerId, via: 'claim' } });
+      await emitDomainEvent(client, { tenantId, entityType: 'work_order', entityId: req.params.id, type: 'assigned', actor: 'worker', payload: { worker_id: workerId, via: 'claim' } });
       await insertNotification(client, {
-        tenantId, recipient: b.workerId, type: 'claim', workOrderId: req.params.id,
+        tenantId, recipient: workerId, type: 'claim', workOrderId: req.params.id,
         title: '您已抢到工单', body: `工单 ${cur.order_no} 已由您认领`,
         payload: { order_no: cur.order_no },
       });
       return findOne(client, tenantId, req.params.id);
     });
     return res.json({ ok: true, code: 0, ticket });
+  } catch (e) {
+    next(e);
+  }
+});
+
+// GET /api/v1/open/me/summary —— 当前工人（token 身份）今日工作台统计：档案 + 我的任务统计。
+// 供 H5 工作台首屏：姓名/技能/负荷 + 进行中/今日完成/今日新增。
+router.get('/open/me/summary', async (req, res, next) => {
+  try {
+    const tenantId = res.locals.auth.tenantId;
+    const wid = res.locals.auth.userId;
+    if (!wid) throw new AppError('UNAUTHORIZED', 'missing authenticated identity', 401);
+    const s = await withTenantClient(tenantId, async (client) => {
+      const w = await client.query(
+        'SELECT id, name, skill_tags, load, active FROM worker WHERE id=$1 AND tenant_id=$2',
+        [wid, tenantId],
+      );
+      if (w.rowCount === 0) return null;
+      const stats = await client.query(
+        `SELECT
+           COUNT(*) FILTER (WHERE status NOT IN ('completed','cancelled','claim_hall')) AS active_count,
+           COUNT(*) FILTER (WHERE status IN ('completed')) AS done_count,
+           COUNT(*) FILTER (WHERE created_at::date = CURRENT_DATE) AS today_new
+         FROM work_orders WHERE tenant_id=$1 AND assignee_id=$2`,
+        [tenantId, wid],
+      );
+      return { worker: w.rows[0], stats: stats.rows[0] };
+    });
+    if (!s) throw new AppError('NOT_FOUND', 'worker profile not found', 404);
+    return res.json({ ok: true, code: 0, ...s });
   } catch (e) {
     next(e);
   }
