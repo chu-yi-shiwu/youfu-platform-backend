@@ -22,6 +22,7 @@ import type { WorkOrderStatus } from '../engine/stateMachine.js';
 import { getWorkflowDef } from '../engine/workflowDef.js';
 import { doneStates, terminalStates, availableTransitions, learningTriggerStates, autoRouteFor, shouldTriggerLearning } from '../engine/stateMachine.js';
 import { safeParseJsonb } from '../util/jsonb.js';
+import { validateIntake } from '../services/dataQuality.js';
 
 const router = Router();
 
@@ -72,6 +73,22 @@ router.post('/open/work_order', async (req, res, next) => {
     const tenantId = res.locals.auth.tenantId;
     const idem = res.locals.auth.idempotencyKey;
     const body = createSchema.parse(req.body);
+    // D3：录入端质量闸门（标题去噪/长度硬拒 + 电话/位置软提示）
+    const q = validateIntake({
+      title: body.title,
+      location: body.location,
+      reporter_phone: body.contact, // 建单电话字段为 contact
+      contact: body.contact,
+    });
+    if (!q.ok) {
+      return res.status(400).json({
+        ok: false,
+        code: 'BAD_DATA',
+        message: '工单信息质量校验未通过',
+        issues: q.issues,
+        warnings: q.warnings,
+      });
+    }
     const result = await withTenantClient(tenantId, async (client) => {
       const { row, created } = await createWithIdem(client, {
         id: body.id,
@@ -80,7 +97,7 @@ router.post('/open/work_order', async (req, res, next) => {
         catalog: body.catalog,
         priority: body.priority,
         location: body.location,
-        title: body.title,
+        title: q.normalized_title || body.title, // 用去噪后的标题
         description: body.description,
         contact: body.contact,
         reporterName: body.reporter_name,
@@ -174,9 +191,10 @@ router.post('/open/work_order', async (req, res, next) => {
     if (result.autoFlow) {
       void dispatchEvent(tenantId, { type: 'assign', workOrderId: woId, fromStatus: 'draft', toStatus: result.dispatchTarget, actor: 'auto_dispatch', payload: { worker_id: result.assignee } }).catch(() => {});
     }
-    return res.status(result.created ? 201 : 200).json(
-      toCreateRes(result.final, result.autoFlow, result.assignee, result.reason, result.dispatchTarget),
-    );
+    return res.status(result.created ? 201 : 200).json({
+      ...toCreateRes(result.final, result.autoFlow, result.assignee, result.reason, result.dispatchTarget),
+      warnings: q.warnings, // D3：软提示（位置/电话/术语建议），不阻断
+    });
   } catch (e) {
     next(e);
   }
@@ -377,6 +395,10 @@ const photoSchema = z.object({
   photo: z.string().min(1).max(8 * 1024 * 1024), // data URL，限 8MB 防滥用
   caption: z.string().max(200).optional(),
 });
+const voiceSchema = z.object({
+  url: z.string().min(1).max(500),           // /upload 返回的 URL
+  voices: z.array(z.string().max(500)).optional(),
+});
 router.post('/open/work_order/:id/photos', async (req, res, next) => {
   try {
     const tenantId = res.locals.auth.tenantId;
@@ -388,6 +410,32 @@ router.post('/open/work_order/:id/photos', async (req, res, next) => {
       const photos = Array.isArray(ext.photos) ? (ext.photos as any[]) : [];
       photos.push({ url: photo, caption: caption ?? null, at: new Date().toISOString() });
       ext.photos = photos;
+      await client.query(
+        'UPDATE work_orders SET ext = $1::jsonb, updated_at = now() WHERE id = $2 AND tenant_id = $3',
+        [JSON.stringify(ext), req.params.id, tenantId],
+      );
+      return ext;
+    });
+    if (!result) return res.status(404).json({ ok: false, code: 'NOT_FOUND', message: 'work order not found' });
+    return res.json({ ok: true, code: 0, ext: result });
+  } catch (e) {
+    next(e);
+  }
+});
+
+// D1：语音留言追加（worker 录语音 → /upload 得 URL → 追加 ext.voice 数组）
+router.post('/open/work_order/:id/voice', async (req, res, next) => {
+  try {
+    const tenantId = res.locals.auth.tenantId;
+    const { url, voices } = voiceSchema.parse(req.body);
+    const result = await withTenantClient(tenantId, async (client) => {
+      const row = await findOne(client, tenantId, req.params.id);
+      if (!row) return null;
+      const ext: Record<string, unknown> = row.ext && typeof row.ext === 'object' ? { ...row.ext } : {};
+      // 以服务端现有 voices 为基，合并客户端传入（去重）
+      const existing = Array.isArray(ext.voice) ? (ext.voice as string[]) : [];
+      const merged = Array.from(new Set([...existing, url, ...(Array.isArray(voices) ? voices : [])]));
+      ext.voice = merged;
       await client.query(
         'UPDATE work_orders SET ext = $1::jsonb, updated_at = now() WHERE id = $2 AND tenant_id = $3',
         [JSON.stringify(ext), req.params.id, tenantId],

@@ -35,7 +35,9 @@ async function transitionTask(
   if (!target) {
     throw new AppError('BAD_STATE', `illegal transition ${t.status} --${event}-->`, 422);
   }
-  const extraKeys = Object.keys(extra);
+  // 防御纵深：仅允许白名单物理列被 SET，杜绝任意列名拼入 SQL（🔴① 修复）
+  const ALLOWED_COLS = new Set(['note', 'geo_lat', 'geo_lng', 'done_at', 'photos']);
+  const extraKeys = Object.keys(extra).filter((k) => ALLOWED_COLS.has(k));
   const filteredKeys = extraKeys.filter((k) => extra[k] !== 'now()');
   const assigns = [
     'status = $3',
@@ -147,6 +149,10 @@ const itemTemplateSchema = z.object({
   standard_value: z.string().optional(),
   unit: z.string().optional(),
   category: z.string().optional(),
+  // D2：外部硬件预留（RFID/传感器，仅字段/协议预留，硬件到位即插即用）
+  device_type: z.enum(['rfid', 'sensor', 'qr', 'none']).optional(),
+  device_tag: z.string().optional(),
+  trigger_mode: z.enum(['manual', 'scan', 'auto']).optional(),
 });
 
 function seedItemsSnapshot(client: any, tenantId: string, itemIds: string[]): Promise<unknown[]> {
@@ -197,9 +203,9 @@ router.post('/items', async (req, res, next) => {
     const b = itemTemplateSchema.parse(req.body);
     const item = await withTenantClient(tenantId, async (client) => {
       const r = await client.query(
-        `INSERT INTO inspection_item (tenant_id, name, type, standard_value, unit, category)
-         VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`,
-        [tenantId, b.name, b.type, b.standard_value ?? null, b.unit ?? null, b.category ?? null],
+        `INSERT INTO inspection_item (tenant_id, name, type, standard_value, unit, category, device_type, device_tag, trigger_mode)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`,
+        [tenantId, b.name, b.type, b.standard_value ?? null, b.unit ?? null, b.category ?? null, b.device_type ?? 'none', b.device_tag ?? null, b.trigger_mode ?? 'manual'],
       );
       const row = r.rows[0];
       await emitDomainEvent(client, { tenantId, entityType: 'inspection_item', entityId: row.id, type: 'create', actor: 'config_role' });
@@ -221,8 +227,8 @@ router.put('/items/:id', async (req, res, next) => {
       if (cur.rowCount === 0) throw new AppError('NOT_FOUND', 'item not found', 404);
       const c = cur.rows[0];
       const r = await client.query(
-        `UPDATE inspection_item SET name=$3, type=$4, standard_value=$5, unit=$6, category=$7 WHERE id=$1 AND tenant_id=$2 RETURNING *`,
-        [req.params.id, tenantId, b.name ?? c.name, b.type ?? c.type, b.standard_value ?? c.standard_value, b.unit ?? c.unit, b.category ?? c.category],
+        `UPDATE inspection_item SET name=$3, type=$4, standard_value=$5, unit=$6, category=$7, device_type=$8, device_tag=$9, trigger_mode=$10 WHERE id=$1 AND tenant_id=$2 RETURNING *`,
+        [req.params.id, tenantId, b.name ?? c.name, b.type ?? c.type, b.standard_value ?? c.standard_value, b.unit ?? c.unit, b.category ?? c.category, b.device_type ?? c.device_type ?? 'none', b.device_tag ?? c.device_tag ?? null, b.trigger_mode ?? c.trigger_mode ?? 'manual'],
       );
       return r.rows[0];
     });
@@ -262,7 +268,7 @@ router.get('/tasks', async (req, res, next) => {
   try {
     const tenantId = res.locals.auth.tenantId;
     const { status, point_id, type, scheduled_from, scheduled_to, plan_id } = req.query as Record<string, string>;
-    const clauses = ['t.tenant_id = $1'];
+    const clauses = ['t.tenant_id = $1']; // 必须与下方 LEFT JOIN inspection_point p 共存：两表都有 tenant_id，未限定会触发 "column reference tenant_id is ambiguous" 500
     const params: unknown[] = [tenantId];
     const add = (sql: string, v: unknown) => {
       params.push(v);
@@ -349,15 +355,29 @@ router.post('/tasks/:id/checkin', async (req, res, next) => {
   try {
     requireConfigRole(req, res);
     const tenantId = res.locals.auth.tenantId;
-    const b = z.object({ geo_lat: z.number().optional(), geo_lng: z.number().optional(), note: z.string().optional() }).parse(req.body);
-    const item = await withTenantClient(tenantId, (client) =>
-      transitionTask(client, tenantId, req.params.id, 'checkin', {
+    // D2：scan_tag 打卡（RFID/扫码占位——硬件到位即插即用）；scan_meta 落库（tag/lat/lng/时间）
+    const b = z.object({
+      geo_lat: z.number().optional(),
+      geo_lng: z.number().optional(),
+      note: z.string().optional(),
+      scan_tag: z.string().optional(),
+    }).parse(req.body);
+    const item = await withTenantClient(tenantId, async (client) => {
+      const updated = await transitionTask(client, tenantId, req.params.id, 'checkin', {
         geo_lat: b.geo_lat ?? null,
         geo_lng: b.geo_lng ?? null,
         note: b.note ?? null,
-      }),
-    );
-    return res.json({ ok: true, code: 0, item });
+        scan_tag: b.scan_tag ?? null,
+      });
+      if (b.scan_tag) {
+        await client.query(
+          `UPDATE inspection_task SET scan_meta = scan_meta || $1::jsonb WHERE id = $2 AND tenant_id = $3`,
+          [JSON.stringify({ scan_tag: b.scan_tag, scan_at: new Date().toISOString(), lat: b.geo_lat ?? null, lng: b.geo_lng ?? null }), req.params.id, tenantId],
+        );
+      }
+      return updated;
+    });
+    return res.json({ ok: true, code: 0, item, scan_tag: b.scan_tag ?? null });
   } catch (e) {
     next(e);
   }
@@ -485,8 +505,12 @@ router.post('/tasks/:id/transition', async (req, res, next) => {
     const tenantId = res.locals.auth.tenantId;
     const { event, ...fields } = req.body as { event: string; [k: string]: unknown };
     if (!event || typeof event !== 'string') throw new AppError('BAD_REQUEST', 'event is required', 400);
+    // 入口白名单化 extra：请求体剩余键只允许已知列透传，防列名注入（🔴① 修复）
+    const ALLOWED = new Set(['note', 'geo_lat', 'geo_lng', 'done_at', 'photos']);
+    const extra: Record<string, unknown> = {};
+    for (const k of Object.keys(fields)) if (ALLOWED.has(k)) extra[k] = fields[k];
     const item = await withTenantClient(tenantId, (client) =>
-      transitionTask(client, tenantId, req.params.id, event, fields),
+      transitionTask(client, tenantId, req.params.id, event, extra),
     );
     return res.json({ ok: true, code: 0, item });
   } catch (e) {

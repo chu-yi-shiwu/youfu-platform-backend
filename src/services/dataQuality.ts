@@ -118,3 +118,73 @@ export async function qualityReport(client: PoolClient, tenantId: string): Promi
     })),
   );
 }
+
+// ============ D3 · 录入端质量闸门（S4 前置，回应⑤模数共振） ============
+// 设计原则：轻闸门——「硬拒」明显非法（防脏数据入库），「warnings」软提示不阻断（不误伤正常报修）。
+// 电话宽松匹配：11 位手机 / 7-8 位固话（含 - 与分机），不匹配仅 warning（避免误伤分机号）。
+const PHONE_RE = /^(?:1[3-9]\d{9}|0\d{2,3}-?\d{7,8}(?:-\d{1,5})?|\d{7,8})$/;
+// 标题去噪：去首尾空白/控制字符/重复空格，长度 3-120（过短无信息量、超长刷屏）
+const TITLE_MAX = 120;
+const TITLE_MIN = 3;
+// 术语联想（轻量内置映射，009_term 语义层接入留后续）：常见口语 → 规范业务词
+const TERM_MAP: Array<[RegExp, string]> = [
+  [/空调不冷|不制冷|没冷气/i, '暖通空调故障'],
+  [/灯不亮|灯泡坏|没电灯/i, '照明故障'],
+  [/电梯不动|电梯卡|困人/i, '电梯故障'],
+  [/漏水|水管爆|滴水/i, '给排水故障'],
+  [/没网|断网|连不上网/i, '网络故障'],
+];
+
+export interface IntakeInput {
+  title?: string | null;
+  location?: string | null;
+  reporter_phone?: string | null;
+  contact?: string | null;
+}
+
+export interface IntakeQuality {
+  ok: boolean;                 // false = 有硬拒问题（调用方应 400）
+  issues: QualityIssue[];      // 硬拒
+  warnings: QualityIssue[];    // 软提示
+  normalized_title: string;    // 去噪后的标题（调用方应使用）
+}
+
+/** 录入端校验（纯函数）：标题去噪/长度、电话格式、位置完整性、术语联想。 */
+export function validateIntake(input: IntakeInput): IntakeQuality {
+  const issues: QualityIssue[] = [];
+  const warnings: QualityIssue[] = [];
+
+  // 标题去噪 + 长度
+  const raw = (input.title ?? '').replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!raw) {
+    issues.push({ entity: 'work_order', field: 'title', problem: '标题不能为空' });
+  } else if (raw.length < TITLE_MIN) {
+    issues.push({ entity: 'work_order', field: 'title', problem: `标题过短（<${TITLE_MIN} 字），无信息量` });
+  } else if (raw.length > TITLE_MAX) {
+    issues.push({ entity: 'work_order', field: 'title', problem: `标题超长（>${TITLE_MAX} 字）` });
+  }
+  // 术语联想（仅 warning，不阻断；命中则建议规范标题）
+  let normalized_title = raw;
+  for (const [re, tpl] of TERM_MAP) {
+    if (re.test(raw)) {
+      warnings.push({ entity: 'work_order', field: 'title', problem: `建议规范描述：「${tpl}」` });
+      break;
+    }
+  }
+
+  // 电话格式（选填；填了但明显非法 → warning，不硬拒避免误伤分机号）
+  const phone = (input.reporter_phone ?? input.contact ?? '').trim();
+  if (phone && !PHONE_RE.test(phone.replace(/\s/g, ''))) {
+    warnings.push({ entity: 'work_order', field: 'phone', problem: '电话格式异常（应为 11 位手机或座机）' });
+  }
+
+  // 位置（选填；缺失/过短 → warning）
+  const loc = (input.location ?? '').trim();
+  if (!loc) {
+    warnings.push({ entity: 'work_order', field: 'location', problem: '建议补充位置，便于派单与到场' });
+  } else if (loc.length < 2) {
+    warnings.push({ entity: 'work_order', field: 'location', problem: '位置信息过短，建议更具体' });
+  }
+
+  return { ok: issues.length === 0, issues, warnings, normalized_title };
+}
