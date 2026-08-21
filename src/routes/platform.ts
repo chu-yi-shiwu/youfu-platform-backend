@@ -99,6 +99,58 @@ router.put('/tenants/:id/status', async (req, res, next) => {
   }
 });
 
+// ---- POST /platform/tenants —— 登记新机构（P1 续：机构入驻向导后端）+ 行业模板初始化 ----
+// 行业模板：新机构按 category 从「模板源租户」复制 fault_category（hospital→t-verification 91 分类等），
+// 机构入驻即自动拥有该行业分类体系（DMR：数据资产按行业复用）。
+const INDUSTRY_TEMPLATE_SOURCE: Record<string, string> = {
+  hospital: 't-verification', // 医院行业模板源（UOne 迁移分类）
+  property: 'demo_tenant',    // 物业行业模板源
+  school: 't-verification',   // 学校暂用医院模板（可后续单独建）
+  municipal: 't-verification',
+};
+router.post('/tenants', async (req, res, next) => {
+  try {
+    const admin = res.locals.platformAdmin!;
+    const b = z.object({
+      tenant_id: z.string().regex(/^[a-z][a-z0-9_-]{2,62}$/i, 'tenant_id 须 3-63 位字母数字下划线'),
+      name: z.string().min(2).max(64),
+      category: z.enum(['hospital', 'property', 'school', 'municipal', 'other']),
+      parent_id: z.string().optional(),
+    }).parse(req.body);
+    // 防重复
+    const dup = await pool.query(`SELECT 1 FROM tenant_registry WHERE tenant_id = $1`, [b.tenant_id]);
+    if ((dup.rowCount ?? 0) > 0) return res.status(409).json({ ok: false, code: 'TENANT_DUP', message: '该机构已存在' });
+    // 登记租户 + 行业模板初始化（复制模板源 fault_category）
+    await pool.query('BEGIN');
+    try {
+      await pool.query(
+        `INSERT INTO tenant_registry (tenant_id, name, category, parent_id, quota) VALUES ($1,$2,$3,$4,$5::jsonb)`,
+        [b.tenant_id, b.name, b.category, b.parent_id ?? null, JSON.stringify({ repair_daily: 500 })],
+      );
+      const src = INDUSTRY_TEMPLATE_SOURCE[b.category] ?? 't-verification';
+      // 行业模板：复制模板源租户的 fault_category（RLS 策略按 tenant_id 过滤，直插 new tenant）
+      const copied = await pool.query(
+        `INSERT INTO fault_category (id, tenant_id, code, name, sort, enabled)
+         SELECT gen_random_uuid(), $1, code, name, sort, enabled
+         FROM fault_category WHERE tenant_id = $2 AND enabled = true
+         ON CONFLICT (tenant_id, code) DO NOTHING`,
+        [b.tenant_id, src],
+      );
+      await pool.query('COMMIT');
+      await audit(admin.username, 'tenant.create', b.tenant_id, b.tenant_id, { category: b.category, categories_copied: copied.rowCount });
+      return res.status(201).json({
+        ok: true, code: 0, item: { tenant_id: b.tenant_id, name: b.name, category: b.category, status: 'active' },
+        note: `机构已登记，按${b.category}行业模板初始化分类 ${copied.rowCount} 条`,
+      });
+    } catch (e) {
+      await pool.query('ROLLBACK');
+      throw e;
+    }
+  } catch (e) {
+    next(e);
+  }
+});
+
 // ---- GET /platform/summary —— 跨租户聚合指标（SECURITY DEFINER，只出聚合） ----
 // E1：附带达标基线（R10 红绿灯阈值，后端常量可配）+ 效能指数（V5，来自聚合函数 eff_index）。
 export const BASELINE = {
