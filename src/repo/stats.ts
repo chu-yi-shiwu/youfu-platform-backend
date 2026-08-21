@@ -10,6 +10,25 @@ import type { PoolClient } from 'pg';
 import { getWorkflowDef } from '../engine/workflowDef.js';
 import { doneStates, terminalStates } from '../engine/stateMachine.js';
 
+// P-5：统计聚合短 TTL 缓存（单进程部署足够；对齐 DataScreen 30s 刷新，降低重复聚合压力）。
+// 按租户键隔离；仅缓存最终计算结果，不影响 RLS（结果已按租户算出）。
+const STATS_TTL_MS = 30_000;
+const statsCache = new Map<string, { at: number; value: unknown }>();
+function cachedResult<T>(key: string): T | undefined {
+  const hit = statsCache.get(key);
+  if (hit && Date.now() - hit.at < STATS_TTL_MS) return hit.value as T;
+  return undefined;
+}
+function storeResult<T>(key: string, value: T): T {
+  statsCache.set(key, { at: Date.now(), value });
+  return value;
+}
+
+/** 清空统计缓存（测试隔离 + 生产手动失效用）。 */
+export function clearStatsCache(): void {
+  statsCache.clear();
+}
+
 export interface TicketStats {
   tenant_id: string;
   total: number;
@@ -29,6 +48,9 @@ export interface TicketStats {
 }
 
 export async function ticketStats(client: PoolClient, tenantId: string): Promise<TicketStats> {
+  const cacheKey = `ticketStats:${tenantId}`;
+  const hit = cachedResult<TicketStats>(cacheKey);
+  if (hit) return hit;
   // A+ Phase1.5：完成态口径由 workflow_def 派生（DEFAULT=['completed']；RICH=['completed','closed','evaluated']），
   // 富模板下不漏计 closed/evaluated，且不把 cancelled 算完成。
   const def = await getWorkflowDef(client, tenantId, 'work_order');
@@ -89,7 +111,7 @@ export async function ticketStats(client: PoolClient, tenantId: string): Promise
   );
   const daily_trend = tr.rows.map((x) => ({ date: x.date, created: Number(x.created), completed: Number(x.completed) }));
 
-  return {
+  const result: TicketStats = {
     tenant_id: tenantId,
     total,
     completed,
@@ -106,6 +128,7 @@ export async function ticketStats(client: PoolClient, tenantId: string): Promise
     daily_trend,
     note: 'auto_close_rate 为诚实口径（auto_flow 命中且最终 completed）；非严格无人值守口径，严格口径待接 ticket_event 审计聚合；撤销率=已撤销/总数；满意度均分基于已评价单；daily_trend.completed 基于完成态工单 updated_at 近似完成日',
   };
+  return storeResult(cacheKey, result);
 }
 
 // ============ B2 过程挖掘度量层 ============
@@ -155,6 +178,9 @@ export function bucketDuration(minutesArr: number[]): { lt_1h: number; h1_4: num
 }
 
 export async function processMetrics(client: PoolClient, tenantId: string): Promise<ProcessMetrics> {
+  const cacheKey = `processMetrics:${tenantId}`;
+  const hit = cachedResult<ProcessMetrics>(cacheKey);
+  if (hit) return hit;
   // A+ Phase1.5：由 workflow_def 派生"活跃集/完成态"，富模板下不写死 4 态。
   const def = await getWorkflowDef(client, tenantId, 'work_order');
   const terminals = terminalStates(def); // 终态（含 cancelled/closed/evaluated）→ 不计入活跃堆
@@ -207,7 +233,7 @@ export async function processMetrics(client: PoolClient, tenantId: string): Prom
     .map((r) => ({ entity_type: r.entity_type, active: Number(r.active) }))
     .sort((a, b) => b.active - a.active);
 
-  return {
+  const result: ProcessMetrics = {
     tenant_id: tenantId,
     total,
     dispatch_hit_rate,
@@ -217,4 +243,5 @@ export async function processMetrics(client: PoolClient, tenantId: string): Prom
     duration_buckets,
     bottleneck: bottleneckArr,
   };
+  return storeResult(cacheKey, result);
 }
