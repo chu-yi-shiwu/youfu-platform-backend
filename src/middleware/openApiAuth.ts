@@ -35,13 +35,13 @@ function extractCreds(req: Request): { key: string; secret: string } | null {
   return null;
 }
 
-/** 开放 API 认证中间件：校验 key/secret + active + 写入调用审计。 */
+/** 开放 API 认证中间件：校验 key/secret + active + 配额(qps) + 写入调用审计。 */
 export async function openApiAuth(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const creds = extractCreds(req);
     if (!creds) throw new AppError('AUTH_001', 'missing app credentials (X-App-Key/X-App-Secret)', 401);
     const r = await pool.query(
-      `SELECT id, app_key, app_name, secret_hash, scopes, status FROM open_api_app WHERE app_key = $1`,
+      `SELECT id, app_key, app_name, secret_hash, scopes, quotas, status FROM open_api_app WHERE app_key = $1`,
       [creds.key],
     );
     if (r.rowCount === 0) throw new AppError('AUTH_002', 'unknown app_key', 401);
@@ -49,6 +49,19 @@ export async function openApiAuth(req: Request, res: Response, next: NextFunctio
     if (app.status !== 'active') throw new AppError('AUTH_003', 'app revoked or disabled', 403);
     const provided = sha256(creds.secret);
     if (provided !== app.secret_hash) throw new AppError('AUTH_004', 'invalid app_secret', 401);
+    // 收尾#1：qps 配额校验（60s 窗口调用数 > quotas.qps → 429；未配置配额=不限制）
+    const quotas = app.quotas && typeof app.quotas === 'object' ? app.quotas : {};
+    const qps = Number(quotas.qps ?? 0);
+    if (qps > 0) {
+      const cnt = await pool.query(
+        `SELECT count(*)::int AS c FROM open_api_call_log
+         WHERE app_id = $1 AND at > now() - interval '60 seconds'`,
+        [app.id],
+      );
+      if ((cnt.rows[0]?.c ?? 0) >= qps) {
+        throw new AppError('RATE_LIMIT', `qps quota exceeded (${qps}/60s)`, 429);
+      }
+    }
     res.locals.openApp = {
       id: app.id,
       app_key: app.app_key,

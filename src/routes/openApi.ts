@@ -11,8 +11,14 @@ const router = Router();
 router.use(openApiAuth);
 
 // GET /open-api/tenants/summary —— 跨租户聚合（与平台看板同源函数；只出聚合）
-router.get('/tenants/summary', requireScope('summary:read'), async (_req, res, next) => {
+// 收尾#1：支持 ?tenant_id= 过滤（app 只拉指定租户，防全量可见；缺省=全部租户聚合）
+router.get('/tenants/summary', requireScope('summary:read'), async (req, res, next) => {
   try {
+    const tid = typeof req.query.tenant_id === 'string' && req.query.tenant_id ? req.query.tenant_id : undefined;
+    if (tid) {
+      const r = await pool.query(`SELECT * FROM platform_tenant_summary() WHERE tenant_id = $1`, [tid]);
+      return res.json({ ok: true, code: 0, items: r.rows });
+    }
     const r = await pool.query(`SELECT * FROM platform_tenant_summary()`);
     return res.json({ ok: true, code: 0, items: r.rows });
   } catch (e) {
