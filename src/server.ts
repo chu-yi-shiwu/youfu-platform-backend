@@ -37,6 +37,7 @@ import platformRouter from './routes/platform.js';// 城市级平台层（E_min�
 import templateMarketRouter from './routes/templateMarket.js';// E2 模板市场（官方模板库/应用/效果）
 import openApiRouter from './routes/openApi.js';// E0_open 开放 API（app_key 认证）
 import { startInspectionScheduler } from './scheduler/inspectionScheduler.js';// G3 真 cron 调度
+import { startTemplateEffectsScheduler } from './scheduler/templateEffectScheduler.js';// E2 效果回写 cron
 
 // 试点/生产：用 ENV_FILE 指定环境文件（默认 .env，production 下默认 .env.pilot），
 // 同一份代码可同时跑 dev / pilot，无需改代码。
@@ -201,4 +202,6 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log(`youfu-backend-m1 listening on 0.0.0.0:${PORT}`);
   // G3 真 cron：后端进程内定时扫描到期巡检计划并自动生成实例（单进程部署，无重复触发）。
   startInspectionScheduler();
+  // E2 效果回写 cron：每 60s 扫描到期（≥7 天）未回写的模板应用，自动拉取 after 指标并评分。
+  startTemplateEffectsScheduler();
 });
