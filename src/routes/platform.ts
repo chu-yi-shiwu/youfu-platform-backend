@@ -99,11 +99,47 @@ router.put('/tenants/:id/status', async (req, res, next) => {
 });
 
 // ---- GET /platform/summary —— 跨租户聚合指标（SECURITY DEFINER，只出聚合） ----
+// E1：附带达标基线（R10 红绿灯阈值，后端常量可配）+ 效能指数（V5，来自聚合函数 eff_index）。
+export const BASELINE = {
+  close_rate_min: 0.8,       // 闭环率 ≥ 80%
+  overdue_rate_max: 0.1,     // 超时率 ≤ 10%
+  satisfaction_min: 4.0,     // 满意度 ≥ 4.0
+  eff_index_min: 0.7,        // 效能指数 ≥ 0.7
+};
 router.get('/summary', async (req, res, next) => {
   try {
     const r = await pool.query(`SELECT * FROM platform_tenant_summary()`);
     await audit(res.locals.platformAdmin!.username, 'tenant.summary', null, null, null);
-    return res.json({ ok: true, code: 0, items: r.rows });
+    // E1：每租户达标判定（红绿灯：green 全达标 / yellow 部分 / red 关键项不达标）
+    const items = r.rows.map((row: any) => {
+      const cr = row.close_rate === null ? null : Number(row.close_rate);
+      const or = row.overdue_rate === null ? null : Number(row.overdue_rate);
+      const sa = row.satisfaction_avg === null ? null : Number(row.satisfaction_avg);
+      const ei = row.eff_index === null ? null : Number(row.eff_index);
+      const checks = [
+        cr !== null && cr >= BASELINE.close_rate_min,
+        or !== null && or <= BASELINE.overdue_rate_max,
+        sa !== null && sa >= BASELINE.satisfaction_min,
+      ];
+      const known = checks.filter((c) => c !== null);
+      const pass = known.filter(Boolean).length;
+      let light: 'red' | 'yellow' | 'green' = 'red';
+      if (known.length === 0) light = 'yellow';
+      else if (pass === known.length) light = 'green';
+      else if (pass >= 1 && (cr === null || cr >= BASELINE.close_rate_min)) light = 'yellow';
+      return {
+        ...row,
+        close_rate: cr,
+        overdue_rate: or,
+        satisfaction_avg: sa,
+        eff_index: ei,
+        baseline: BASELINE,
+        light,
+        checked: known.length,
+        passed: pass,
+      };
+    });
+    return res.json({ ok: true, code: 0, items, baseline: BASELINE });
   } catch (e) {
     next(e);
   }
