@@ -13,13 +13,21 @@ const router = Router();
 
 const UPLOAD_ROOT = process.env.UPLOAD_DIR ?? '/opt/youfu/uploads';
 const MAX_BYTES = 5 * 1024 * 1024; // 5MB
-const EXT_WHITELIST = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'pdf'];
+// D1：加入语音（工人语音留言/报修语音说明）
+const EXT_WHITELIST = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'pdf', 'm4a', 'mp3', 'wav', 'ogg'];
 const CTYPE_EXT: Record<string, string> = {
   'image/jpeg': 'jpg',
   'image/png': 'png',
   'image/gif': 'gif',
   'image/webp': 'webp',
   'application/pdf': 'pdf',
+  'audio/mp4': 'm4a',
+  'audio/m4a': 'm4a',
+  'audio/mpeg': 'mp3',
+  'audio/mp3': 'mp3',
+  'audio/wav': 'wav',
+  'audio/x-wav': 'wav',
+  'audio/ogg': 'ogg',
 };
 
 function ensureDir(p: string) {
