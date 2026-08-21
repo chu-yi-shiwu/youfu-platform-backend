@@ -262,7 +262,7 @@ router.get('/tasks', async (req, res, next) => {
   try {
     const tenantId = res.locals.auth.tenantId;
     const { status, point_id, type, scheduled_from, scheduled_to, plan_id } = req.query as Record<string, string>;
-    const clauses = ['tenant_id = $1'];
+    const clauses = ['t.tenant_id = $1'];
     const params: unknown[] = [tenantId];
     const add = (sql: string, v: unknown) => {
       params.push(v);
