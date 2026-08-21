@@ -1,10 +1,10 @@
 // 批次 C 单测：聚焦纯函数 + 真实链路用例（防批次 A 式"假绿"）。
 // 不依赖真实 PG：纯函数直接测；ticketStats 用 mock client 走真实调用路径。
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 import { applyStockAction } from '../services/inventory.js';
 import { buildServiceDeskTicket } from '../services/serviceDeskTicket.js';
 import { summarizeLinkedOrders } from '../services/assetHistory.js';
-import { ticketStats } from '../repo/stats.js';
+import { ticketStats, clearStatsCache } from '../repo/stats.js';
 import type { PoolClient } from 'pg';
 
 describe('applyStockAction（库存动作）', () => {
@@ -85,6 +85,7 @@ describe('ticketStats（真实链路 · mock client）', () => {
   });
 
   it('总数为 0 时比率安全置 0', async () => {
+    clearStatsCache(); // 隔离：避免命中前序用例的全局 30s 统计缓存（mock client 不写缓存）
     const emptyClient = { query: async () => ({ rows: [{ total: '0', completed: '0', auto_dispatched: '0', auto_closed: '0' }] }) } as unknown as PoolClient;
     const s = await ticketStats(emptyClient, 't1');
     expect(s.auto_dispatch_rate).toBe(0);
