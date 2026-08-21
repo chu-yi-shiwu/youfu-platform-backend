@@ -28,7 +28,19 @@ router.post('/template-contributions', async (req, res, next) => {
     const actor = res.locals.auth.username ?? res.locals.auth.role;
     const b = contributeSchema.parse(req.body);
 
-    const def = await withTenantClient(tenantId, (client) => getWorkflowDef(client, tenantId, b.entity_type));
+    // 审查修复：entity_type 须为租户已显式配置的业务类型（有 workflow_def 行），
+    // 否则 getWorkflowDef 会回退默认 def → 误把默认流程当租户实践贡献。
+    // 注意：workflow_def 有 RLS，须在 withTenantClient（租户上下文）内查询。
+    const def = await withTenantClient(tenantId, async (client) => {
+      const ex = await client.query(
+        `SELECT 1 FROM workflow_def WHERE tenant_id = $1 AND entity_type = $2 LIMIT 1`,
+        [tenantId, b.entity_type],
+      );
+      if (ex.rowCount === 0) {
+        throw new AppError('BAD_DATA', `业务类型 ${b.entity_type} 未配置流程规则，请先保存配置后再贡献`, 400);
+      }
+      return getWorkflowDef(client, tenantId, b.entity_type);
+    });
     if (!def || !Array.isArray(def.states) || def.states.length === 0) {
       throw new AppError('BAD_DATA', '当前流程规则无效（states 为空），无法贡献', 400);
     }

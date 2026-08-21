@@ -28,13 +28,16 @@ async function audit(actor: string, action: string, resource?: string | null, ta
 }
 
 // ---- 列表（分类/搜索/评分排序；默认仅 published；?status=draft 审核队列） ----
+const STATUS_WHITELIST = ['published', 'draft', 'archived'] as const;
 router.get('/templates', async (req, res, next) => {
   try {
     const cat = req.query.category as string | undefined;
     const q = (req.query.q as string) || '';
-    const status = (req.query.status as string) || 'published';
-    const conds = [`status = '${status}'`];
-    const params: unknown[] = [];
+    // 审查修复：status 白名单 + 参数化（原实现用户可控直插 SQL，可绕过 published 过滤看全部草稿）
+    const rawStatus = (req.query.status as string) || 'published';
+    const status = (STATUS_WHITELIST as readonly string[]).includes(rawStatus) ? rawStatus : 'published';
+    const conds = ['status = $1'];
+    const params: unknown[] = [status];
     if (cat) { params.push(cat); conds.push(`category = $${params.length}`); }
     if (q) { params.push(`%${q}%`); conds.push(`(name ILIKE $${params.length} OR description ILIKE $${params.length})`); }
     const r = await pool.query(
