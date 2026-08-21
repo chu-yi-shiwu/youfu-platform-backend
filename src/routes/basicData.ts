@@ -6,7 +6,7 @@ import { z } from 'zod';
 import { randomUUID } from 'crypto';
 import { withTenantClient } from '../db/pool.js';
 import { AppError } from '../middleware/error.js';
-import { requireConfigRole } from '../middleware/role.js';
+import { requirePermission } from '../middleware/role.js';
 
 const router = Router();
 
@@ -20,6 +20,21 @@ type TypeDef = {
 };
 
 const TYPES: Record<string, TypeDef> = {
+  dept: {
+    table: 'dept',
+    columns: ['id', 'tenant_id', 'name', 'code', 'remark', 'created_at', 'updated_at'],
+    insertCols: ['name', 'code', 'remark'],
+    fields: [
+      { key: 'name', label: '部门名称' },
+      { key: 'code', label: '编码' },
+      { key: 'remark', label: '备注' },
+    ],
+    schema: z.object({
+      name: z.string().min(1),
+      code: z.string().optional(),
+      remark: z.string().optional(),
+    }),
+  },
   region: {
     table: 'region',
     columns: ['id', 'tenant_id', 'name', 'code', 'parent_id', 'remark', 'created_at', 'updated_at'],
@@ -117,19 +132,20 @@ router.get('/basic-data/:type', async (req, res, next) => {
 // ============ 新建 ============
 router.post('/basic-data/:type', async (req, res, next) => {
   try {
-    requireConfigRole(req, res);
+    const auth = res.locals.auth;
     const def = getType(req.params.type);
-    const tenantId = res.locals.auth.tenantId;
+    const tenantId = auth.tenantId;
     const b = def.schema.parse(req.body);
     const id = randomUUID();
     const cols = ['id', 'tenant_id', ...def.insertCols];
     const ph = cols.map((_, i) => `$${i + 1}`).join(', ');
     const vals = [id, tenantId, ...def.insertCols.map((c) => (b as any)[c] ?? null)];
-    const item = await withTenantClient(tenantId, (client) =>
-      client
+    const item = await withTenantClient(tenantId, async (client) => {
+      await requirePermission(auth, client, 'basicdata.edit');
+      return client
         .query(`INSERT INTO ${def.table} (${cols.join(', ')}) VALUES (${ph}) RETURNING *`, vals)
-        .then((r) => r.rows[0]),
-    );
+        .then((r) => r.rows[0]);
+    });
     return res.status(201).json({ ok: true, code: 0, item });
   } catch (e) {
     next(e);
@@ -139,11 +155,12 @@ router.post('/basic-data/:type', async (req, res, next) => {
 // ============ 更新 ============
 router.put('/basic-data/:type/:id', async (req, res, next) => {
   try {
-    requireConfigRole(req, res);
+    const auth = res.locals.auth;
     const def = getType(req.params.type);
-    const tenantId = res.locals.auth.tenantId;
+    const tenantId = auth.tenantId;
     const b = (def.schema as z.ZodObject<any>).partial().parse(req.body);
     const item = await withTenantClient(tenantId, async (client) => {
+      await requirePermission(auth, client, 'basicdata.edit');
       const cur = await client.query(`SELECT * FROM ${def.table} WHERE id=$1 AND tenant_id=$2`, [req.params.id, tenantId]);
       if (cur.rowCount === 0) throw new AppError('NOT_FOUND', `${def.table} not found`, 404);
       const sets: string[] = [];
@@ -173,12 +190,13 @@ router.put('/basic-data/:type/:id', async (req, res, next) => {
 // ============ 删除 ============
 router.delete('/basic-data/:type/:id', async (req, res, next) => {
   try {
-    requireConfigRole(req, res);
+    const auth = res.locals.auth;
     const def = getType(req.params.type);
-    const tenantId = res.locals.auth.tenantId;
-    const r = await withTenantClient(tenantId, (client) =>
-      client.query(`DELETE FROM ${def.table} WHERE id=$1 AND tenant_id=$2`, [req.params.id, tenantId]),
-    );
+    const tenantId = auth.tenantId;
+    const r = await withTenantClient(tenantId, async (client) => {
+      await requirePermission(auth, client, 'basicdata.edit');
+      return client.query(`DELETE FROM ${def.table} WHERE id=$1 AND tenant_id=$2`, [req.params.id, tenantId]);
+    });
     if (r.rowCount === 0) throw new AppError('NOT_FOUND', `${def.table} not found`, 404);
     return res.json({ ok: true, code: 0, deleted: r.rowCount });
   } catch (e) {
@@ -254,9 +272,9 @@ function parseCsv(text: string): string[][] {
 
 router.post('/basic-data/:type/import', async (req, res, next) => {
   try {
-    requireConfigRole(req, res);
+    const auth = res.locals.auth;
     const def = getType(req.params.type);
-    const tenantId = res.locals.auth.tenantId;
+    const tenantId = auth.tenantId;
     const text = typeof req.body === 'string' ? req.body : (req.body as any)?.csv;
     if (!text || typeof text !== 'string') throw new AppError('BAD_INPUT', 'csv text required', 400);
     const rows = parseCsv(text);
@@ -265,6 +283,7 @@ router.post('/basic-data/:type/import', async (req, res, next) => {
     const dataRows = rows.slice(1);
     let inserted = 0;
     await withTenantClient(tenantId, async (client) => {
+      await requirePermission(auth, client, 'basicdata.edit');
       for (const r of dataRows) {
         const obj: Record<string, unknown> = {};
         headers.forEach((h, i) => {

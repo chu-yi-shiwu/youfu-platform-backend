@@ -11,7 +11,7 @@ import type { PoolClient } from 'pg';
 import { signJwt } from './middleware/auth.js';
 import { withTenantClient } from './db/pool.js';
 
-export type AccountRole = 'admin' | 'operator';
+export type AccountRole = 'admin' | 'operator' | 'dispatcher' | 'worker';
 
 export interface AccountUser {
   id: string;

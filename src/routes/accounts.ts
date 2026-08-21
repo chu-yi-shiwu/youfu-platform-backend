@@ -7,7 +7,8 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { withTenantClient } from '../db/pool.js';
 import { AppError } from '../middleware/error.js';
-import { requireConfigRole } from '../middleware/role.js';
+import { requireConfigRole, ROLES, DEFAULT_PERM_MATRIX, type Role } from '../middleware/role.js';
+import { requireRole, type AuthLocals } from '../middleware/auth.js';
 import { hashPassword, toPublic } from '../account.js';
 
 const router = Router();
@@ -18,14 +19,71 @@ const accountCreateSchema = z.object({
   username: z.string().min(2),
   password: z.string().min(6),
   display_name: z.string().optional(),
-  role: z.enum(['admin', 'operator']).optional(),
+  role: z.enum(['admin', 'operator', 'dispatcher', 'worker']).optional(),
 });
 
 const accountUpdateSchema = z.object({
   display_name: z.string().optional(),
-  role: z.enum(['admin', 'operator']).optional(),
+  role: z.enum(['admin', 'operator', 'dispatcher', 'worker']).optional(),
   active: z.boolean().optional(),
   password: z.string().min(6).optional(), // 可选：重置密码
+});
+
+// ============ RBAC：租户角色权限（批次 A2） ============
+
+// GET /api/v1/accounts/roles/permissions —— admin：列出本租户 4 角色的权限（租户覆盖 ∪ 默认矩阵说明）
+router.get('/accounts/roles/permissions', async (req, res, next) => {
+  try {
+    const auth = res.locals.auth as AuthLocals;
+    if (!requireRole(auth, 'admin')) {
+      throw new AppError('FORBIDDEN', 'admin only', 403);
+    }
+    const tenantId = auth.tenantId;
+    const rows = await withTenantClient(tenantId, (client) =>
+      client.query(`SELECT role, perm FROM role_permission WHERE tenant_id=$1`, [tenantId]),
+    );
+    const overrides: Record<string, Set<string>> = {};
+    for (const r of rows.rows) {
+      (overrides[r.role] ??= new Set()).add(r.perm);
+    }
+    const items = ROLES.map((role: Role) => ({
+      role,
+      perms: [...(overrides[role] ?? DEFAULT_PERM_MATRIX[role])].sort(),
+      overridden: overrides[role] != null,
+    }));
+    return res.json({ ok: true, code: 0, items });
+  } catch (e) {
+    next(e);
+  }
+});
+
+// PUT /api/v1/accounts/roles/:role/permissions —— admin：覆盖某角色的权限点（先删后插，事务）
+router.put('/accounts/roles/:role/permissions', async (req, res, next) => {
+  try {
+    const auth = res.locals.auth as AuthLocals;
+    if (!requireRole(auth, 'admin')) {
+      throw new AppError('FORBIDDEN', 'admin only', 403);
+    }
+    const role = req.params.role as Role;
+    if (!ROLES.includes(role)) throw new AppError('BAD_PARAM', `unknown role: ${role}`, 400);
+    const body = z.object({ perms: z.array(z.string().min(1).max(64)) }).parse(req.body);
+    if (role === 'admin') {
+      throw new AppError('BAD_PARAM', 'admin 权限不可修改（恒全放行）', 400);
+    }
+    const tenantId = auth.tenantId;
+    await withTenantClient(tenantId, async (client) => {
+      await client.query(`DELETE FROM role_permission WHERE tenant_id=$1 AND role=$2`, [tenantId, role]);
+      for (const p of body.perms) {
+        await client.query(
+          `INSERT INTO role_permission (tenant_id, role, perm) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING`,
+          [tenantId, role, p],
+        );
+      }
+    });
+    return res.json({ ok: true, code: 0 });
+  } catch (e) {
+    next(e);
+  }
 });
 
 // ============ 账户列表（不外泄密码哈希） ============

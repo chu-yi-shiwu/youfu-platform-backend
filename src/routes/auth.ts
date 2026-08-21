@@ -2,7 +2,8 @@
 // 登录端点必须豁免 authMiddleware（否则拿不到令牌），详见 middleware/auth.ts 的 PUBLIC 豁免。
 import { Router } from 'express';
 import z from 'zod';
-import { AUTH_MODE, type AuthLocals } from '../middleware/auth.js';
+import { AUTH_MODE, DEFAULT_TENANT_ID, loginRateLimit, requireRole, type AuthLocals } from '../middleware/auth.js';
+import { listPerms } from '../middleware/role.js';
 import {
   createUser,
   findUserByUsername,
@@ -18,7 +19,7 @@ import {
 
 const router = Router();
 
-const DEFAULT_LOGIN_TENANT = process.env.DEFAULT_LOGIN_TENANT ?? 't-verification';
+const DEFAULT_LOGIN_TENANT = process.env.DEFAULT_LOGIN_TENANT ?? DEFAULT_TENANT_ID;
 
 // 解析 JWT 签名密钥：prod 缺失 → 返回 null（fail-closed）；dev 缺失 → 不安全默认（仅本地调试）
 function resolveSecret(): string | null {
@@ -38,7 +39,7 @@ const loginSchema = z.object({
 });
 
 // POST /api/v1/auth/login —— 公开（豁免鉴权）：校验账密并签发 JWT
-router.post('/auth/login', async (req, res, next) => {
+router.post('/auth/login', loginRateLimit(), async (req, res, next) => {
   try {
     const { username, password, tenant } = loginSchema.parse(req.body);
     const tenantId = tenant ?? req.header('X-Tenant-Id') ?? DEFAULT_LOGIN_TENANT;
@@ -53,11 +54,22 @@ router.post('/auth/login', async (req, res, next) => {
     if (!secret) {
       return res.status(500).json({ ok: false, code: 'AUTH_CFG', message: 'JWT_SECRET not configured on server' });
     }
+    // RBAC：登录即携带当前租户角色的权限点（前端菜单过滤用）
+    const permissions = await withTenantClient(tenantId, (client) =>
+      listPerms({ tenantId, requestId: '', role: user.role, authMode: 'prod' }, client),
+    );
     const token = signLoginToken(
       { sub: user.id, tid: tenantId, role: user.role as AccountRole, username: user.username },
       secret,
     );
-    return res.json({ ok: true, code: 0, token, user: toPublic(user) });
+    // A-1：种下看板鉴权 cookie（httpOnly + sameSite），供 /process-mining 等管理页同域导航自动携带。
+    res.cookie('youfu_dash', token, {
+      httpOnly: true,
+      sameSite: 'lax',
+      secure: AUTH_MODE === 'prod',
+      maxAge: 24 * 3600 * 1000,
+    });
+    return res.json({ ok: true, code: 0, token, user: toPublic(user), permissions });
   } catch (e) {
     next(e);
   }
@@ -76,18 +88,22 @@ router.get('/auth/me', async (req, res, next) => {
         user: { id: 'dev', username: 'dev', display_name: '开发模式', role: 'admin', tenant_id: auth.tenantId, active: true },
       });
     }
-    const user = await withTenantClient(auth.tenantId, (client) => findUserById(client, auth.tenantId, auth.userId!));
+    const user = await withTenantClient(auth.tenantId, async (client) => {
+      const u = await findUserById(client, auth.tenantId, auth.userId!);
+      if (!u) return null;
+      const perms = await listPerms(auth, client);
+      return { user: u, perms };
+    });
     if (!user) return res.status(404).json({ ok: false, code: 'USER_404', message: 'user not found' });
-    return res.json({ ok: true, code: 0, user: toPublic(user) });
+    return res.json({ ok: true, code: 0, user: toPublic(user.user), permissions: user.perms });
   } catch (e) {
     next(e);
   }
 });
 
-// admin 守卫：prod 需 role=admin；dev 模式放行（本地调试）
+// admin 守卫：复用统一角色守卫（C-2）
 function requireAdmin(auth: AuthLocals): boolean {
-  if (auth.authMode === 'dev') return true;
-  return auth.role === 'admin';
+  return requireRole(auth, 'admin');
 }
 
 const changePwSchema = z.object({
@@ -123,7 +139,7 @@ const createUserSchema = z.object({
   username: z.string().min(1).max(64),
   password: z.string().min(6).max(200),
   display_name: z.string().max(64).optional(),
-  role: z.enum(['admin', 'operator']).optional(),
+  role: z.enum(['admin', 'operator', 'dispatcher', 'worker']).optional(),
 });
 
 // POST /api/v1/auth/users —— admin：创建账户（同租户）
