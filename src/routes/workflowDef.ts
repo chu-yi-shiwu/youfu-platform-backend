@@ -5,7 +5,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { withTenantClient } from '../db/pool.js';
 import { AppError } from '../middleware/error.js';
-import { requireConfigRole } from '../middleware/role.js';
+import { requirePermission } from '../middleware/role.js';
 import { getWorkflowDef, saveWorkflowDef } from '../engine/workflowDef.js';
 import { THEME_TEMPLATES, themeLabel, type ThemeTemplate } from '../engine/themes.js';
 import type { WorkflowDef } from '../engine/stateMachine.js';
@@ -79,8 +79,8 @@ const defSchema = z.object({
 
 router.put('/:entityType', async (req, res, next) => {
   try {
-    requireConfigRole(req, res);
-    const tenantId = res.locals.auth.tenantId;
+    const auth = res.locals.auth;
+    const tenantId = auth.tenantId;
     const { entityType } = req.params;
     if (!/^[a-z][a-z0-9_]*$/.test(entityType)) {
       throw new AppError('BAD_PARAM', 'entityType must match ^[a-z][a-z0-9_]*$', 400);
@@ -90,7 +90,10 @@ router.put('/:entityType', async (req, res, next) => {
       ...b.def,
       config: { ...(b.def.config ?? {}), ...(b.name ? { name: b.name } : {}) },
     } as WorkflowDef;
-    await withTenantClient(tenantId, (client) => saveWorkflowDef(client, tenantId, entityType, merged));
+    await withTenantClient(tenantId, async (client) => {
+      await requirePermission(auth, client, 'workflow.edit');
+      await saveWorkflowDef(client, tenantId, entityType, merged);
+    });
     return res.json({ ok: true, code: 0, entityType, version: 'incremented' });
   } catch (e) {
     next(e);
@@ -100,13 +103,16 @@ router.put('/:entityType', async (req, res, next) => {
 // 从主题模板生成（下拉生成）：用主题 starter def upsert 到该 entity_type。
 router.post('/generate-from-theme', async (req, res, next) => {
   try {
-    requireConfigRole(req, res);
-    const tenantId = res.locals.auth.tenantId;
+    const auth = res.locals.auth;
+    const tenantId = auth.tenantId;
     const { entityType } = z.object({ entityType: z.string().min(1) }).parse(req.body);
     const tpl: ThemeTemplate | undefined = THEME_TEMPLATES.find((t) => t.entityType === entityType);
     if (!tpl) throw new AppError('NOT_FOUND', `unknown theme: ${entityType}`, 404);
     const merged: WorkflowDef = { ...tpl.def, config: { ...(tpl.def.config ?? {}), name: tpl.name } } as WorkflowDef;
-    await withTenantClient(tenantId, (client) => saveWorkflowDef(client, tenantId, entityType, merged));
+    await withTenantClient(tenantId, async (client) => {
+      await requirePermission(auth, client, 'workflow.edit');
+      await saveWorkflowDef(client, tenantId, entityType, merged);
+    });
     return res.json({ ok: true, code: 0, entityType, name: tpl.name });
   } catch (e) {
     next(e);

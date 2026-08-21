@@ -1,5 +1,6 @@
 // ④ 自动改流程开关：每租户持久化 AUTO_TUNE 状态（用户可在界面自主翻转、实时生效、落库）。
 // 默认 false（安全默认：不盲改生产流程定义）；界面一键即可开启。
+import type { PoolClient } from 'pg';
 import { withTenantClient } from '../db/pool.js';
 
 export interface AutoTuneState {
@@ -19,19 +20,26 @@ export async function getAutoTune(tenantId: string): Promise<AutoTuneState> {
   });
 }
 
-// 设置并持久化 AUTO_TUNE 开关（UPSERT）。
+// 设置并持久化 AUTO_TUNE 开关（UPSERT）—— client 版（供权限守卫同事务使用）。
+export async function setAutoTuneWithClient(
+  client: PoolClient,
+  tenantId: string,
+  enabled: boolean,
+): Promise<AutoTuneState> {
+  const r = await client.query(
+    `INSERT INTO tenant_settings (tenant_id, auto_tune, updated_at)
+     VALUES ($1, $2, now())
+     ON CONFLICT (tenant_id)
+     DO UPDATE SET auto_tune = EXCLUDED.auto_tune, updated_at = now()
+     RETURNING auto_tune, updated_at`,
+    [tenantId, enabled],
+  );
+  return { enabled: r.rows[0].auto_tune, updatedAt: r.rows[0].updated_at };
+}
+
+// 兼容入口（自动开连接）。
 export async function setAutoTune(tenantId: string, enabled: boolean): Promise<AutoTuneState> {
-  return withTenantClient(tenantId, async (client) => {
-    const r = await client.query(
-      `INSERT INTO tenant_settings (tenant_id, auto_tune, updated_at)
-       VALUES ($1, $2, now())
-       ON CONFLICT (tenant_id)
-       DO UPDATE SET auto_tune = EXCLUDED.auto_tune, updated_at = now()
-       RETURNING auto_tune, updated_at`,
-      [tenantId, enabled],
-    );
-    return { enabled: r.rows[0].auto_tune, updatedAt: r.rows[0].updated_at };
-  });
+  return withTenantClient(tenantId, (client) => setAutoTuneWithClient(client, tenantId, enabled));
 }
 
 // 计算"自动改流程"是否实际生效（实时，无需重启）：

@@ -3,7 +3,9 @@
 // 安全：环境变量 MODEL_AUTO_TUNE=false 时服务端全局熔断，界面 PUT 被拒（409），fail-safe。
 import { Router } from 'express';
 import { z } from 'zod';
-import { getAutoTune, setAutoTune } from '../repo/tenantSettings.js';
+import { getAutoTune, setAutoTuneWithClient } from '../repo/tenantSettings.js';
+import { requirePermission } from '../middleware/role.js';
+import { withTenantClient } from '../db/pool.js';
 
 const router = Router();
 
@@ -30,10 +32,11 @@ router.get('/auto-tune', async (req, res, next) => {
   }
 });
 
-// 翻转并持久化开关。
+// 翻转并持久化开关（optimize.tune：高危，仅 admin 默认可开）。
 router.put('/auto-tune', async (req, res, next) => {
   try {
-    const tenantId = res.locals.auth.tenantId;
+    const auth = res.locals.auth;
+    const tenantId = auth.tenantId;
     const { enabled } = bodySchema.parse(req.body);
     // 全局熔断保护：env=false 时禁止界面开启（避免运维紧急关停后被界面误开）。
     if (process.env.MODEL_AUTO_TUNE === 'false') {
@@ -43,7 +46,10 @@ router.put('/auto-tune', async (req, res, next) => {
         message: '服务端已全局关闭自动改流程(MODEL_AUTO_TUNE=false)，界面开关暂不可用',
       });
     }
-    const state = await setAutoTune(tenantId, enabled);
+    const state = await withTenantClient(tenantId, async (client) => {
+      await requirePermission(auth, client, 'optimize.tune');
+      return setAutoTuneWithClient(client, tenantId, enabled);
+    });
     return res.json({ ok: true, code: 0, enabled: state.enabled, updatedAt: state.updatedAt });
   } catch (e) {
     next(e);
