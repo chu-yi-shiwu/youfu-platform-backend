@@ -17,6 +17,51 @@ import { attachmentSchema, reportSchema, CTYPE_EXT, isAudioCType } from './publi
 
 const router = Router();
 
+// 合规脱敏钩子（与 #355 SMS_GATEWAY 同一诚实降级模式）：
+// 若配置了 MEDIA_MASK_URL（人脸/车牌打码服务），图片上传时 best-effort 调用打码；
+// 未配置或调用失败 → 原图直存并诚实标记 masked:false，绝不假装已脱敏。
+import https from 'node:https';
+import http from 'node:http';
+const MEDIA_MASK_URL = process.env.MEDIA_MASK_URL || '';
+function postBytes(urlStr: string, buf: Buffer, contentType: string, timeoutMs = 5000): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    let u: URL;
+    try { u = new URL(urlStr); } catch { reject(new Error('bad mask url')); return; }
+    const lib = u.protocol === 'http:' ? http : https;
+    const req = lib.request(
+      {
+        method: 'POST',
+        hostname: u.hostname,
+        port: u.port || (u.protocol === 'https:' ? 443 : 80),
+        path: u.pathname + u.search,
+        headers: { 'Content-Type': contentType, 'Content-Length': buf.length },
+      },
+      (res) => {
+        const chunks: Buffer[] = [];
+        res.on('data', (c: Buffer) => chunks.push(c));
+        res.on('end', () => {
+          const code = res.statusCode ?? 500;
+          if (code >= 200 && code < 300 && chunks.length > 0) resolve(Buffer.concat(chunks));
+          else reject(new Error('mask status ' + code));
+        });
+      },
+    );
+    req.on('error', reject);
+    req.setTimeout(timeoutMs, () => req.destroy(new Error('mask timeout')));
+    req.write(buf);
+    req.end();
+  });
+}
+async function maskImageIfConfigured(buf: Buffer, contentType: string): Promise<{ buf: Buffer; masked: boolean }> {
+  if (!MEDIA_MASK_URL || !contentType.startsWith('image/')) return { buf, masked: false };
+  try {
+    const masked = await postBytes(MEDIA_MASK_URL, buf, contentType);
+    return { buf: masked, masked: true };
+  } catch {
+    return { buf, masked: false }; // 降级：原图直存（诚实标记）
+  }
+}
+
 // 上传白名单与报修入参 schema 见 ./publicReportSchema.ts（抽到独立模块便于单测）
 
 // 关键词 → 分类 hint 及服务端补全逻辑已抽到 src/services/intakeEnrich.ts（可单测、供复用）
@@ -100,6 +145,14 @@ router.post('/public/repair-report', loginRateLimit(20), async (req, res, next) 
           attachments: b.attachments ?? [],
           images: (b.attachments ?? []).filter((a) => a.kind === 'image').map((a) => a.url), // 兼容旧逻辑
           inferred: { category: catalogName ?? null, priority, asset: asset?.name ?? null },
+          // 合规硬护栏：隐私授权与留存策略（提交即同意，落库即留痕）
+          consent: true,
+          consent_at: new Date().toISOString(),
+          retention: {
+            days: Number(process.env.REPAIR_RETENTION_DAYS || 365),
+            purge_after: new Date(Date.now() + Number(process.env.REPAIR_RETENTION_DAYS || 365) * 864e5).toISOString().slice(0, 10),
+            basis: '《隐私与录音照片留存告知》：原始记录用于分类/派单/追溯，届满统一清理',
+          },
         },
         // 幂等（前端 Idempotency-Key header，防重复提交重复建单）
         idempotencyKey: (req.header('Idempotency-Key') as string | undefined) || undefined,
@@ -178,12 +231,14 @@ router.post('/public/upload', loginRateLimit(20), async (req, res, next) => {
     const isAudio = isAudioCType(body.contentType);
     const maxBytes = isAudio ? 20 * 1024 * 1024 : 5 * 1024 * 1024;
     if (buf.length > maxBytes) return res.status(413).json({ ok: false, code: 'TOO_LARGE', message: isAudio ? '录音超过 20MB 上限' : '图片超过 5MB 上限' });
+    // 合规脱敏：图片 best-effort 打码（未配置 MEDIA_MASK_URL 或失败 → 原图直存，诚实标记 masked）
+    const { buf: outBuf, masked } = await maskImageIfConfigured(buf, body.contentType);
     const root = process.env.UPLOAD_DIR ?? '/opt/youfu/uploads';
     const dir = path.join(root, org);
     fs.mkdirSync(dir, { recursive: true });
     const name = `${crypto.randomUUID()}.${ext}`;
-    fs.writeFileSync(path.join(dir, name), buf);
-    return res.status(201).json({ ok: true, code: 0, url: `/uploads/${org}/${name}`, kind: isAudio ? 'audio' : 'image', size: buf.length });
+    fs.writeFileSync(path.join(dir, name), outBuf);
+    return res.status(201).json({ ok: true, code: 0, url: `/uploads/${org}/${name}`, kind: isAudio ? 'audio' : 'image', size: outBuf.length, masked });
   } catch (e) {
     next(e);
   }
