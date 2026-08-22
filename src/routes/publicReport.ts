@@ -13,6 +13,7 @@ import { AppError } from '../middleware/error.js';
 import { createWithIdem } from '../repo/ticket.js';
 import { loginRateLimit } from '../middleware/auth.js';
 import { matchCategoryHint, resolveFaultCategory, inferPriority, resolveAsset } from '../services/intakeEnrich.js';
+import { downloadMedia } from '../services/wechat.js'; // ③ 微信真录音：下载原始 amr 无损耗留存
 import { attachmentSchema, reportSchema, CTYPE_EXT, isAudioCType } from './publicReportSchema.js';
 
 const router = Router();
@@ -94,7 +95,7 @@ router.post('/public/repair-report', loginRateLimit(20), async (req, res, next) 
     // 质量闸门：仅拦截「完全无信息量」的空描述（其余交给模型补全，不硬拒）
     // 支持纯语音/纯图片报修：无描述时用媒体生成标题
     const desc = (b.description ?? '').trim();
-    const hasAudio = (b.attachments ?? []).some((a) => a.kind === 'audio');
+    const hasAudio = (b.attachments ?? []).some((a) => a.kind === 'audio') || (b.voice_media_ids?.length ?? 0) > 0;
     const hasImage = (b.attachments ?? []).some((a) => a.kind === 'image');
     const title = desc
       ? desc.length > 20 ? desc.slice(0, 20) + '…' : desc
@@ -103,6 +104,27 @@ router.post('/public/repair-report', loginRateLimit(20), async (req, res, next) 
       : hasImage ? '现场报修（含照片）'
       : '现场报修';
     const location = b.location?.trim() || '待核实';
+
+    // ③ 微信真录音：voice_media_ids(serverId) → 服务端经微信媒体接口下载原始 amr 无损耗留存。
+    // best-effort：下载失败不阻断建单（录音可重录），但必须留错误日志便于排查（诚实降级，绝不假装已留存）。
+    const finalAttachments: NonNullable<typeof b.attachments> = [...(b.attachments ?? [])];
+    if (b.voice_media_ids && b.voice_media_ids.length) {
+      const root = process.env.UPLOAD_DIR ?? '/opt/youfu/uploads';
+      const dir = path.join(root, tenantId);
+      fs.mkdirSync(dir, { recursive: true });
+      for (const mediaId of b.voice_media_ids) {
+        try {
+          const { buf, contentType } = await downloadMedia(mediaId);
+          const ext = CTYPE_EXT[contentType] || 'amr';
+          const name = `${crypto.randomUUID()}.${ext}`;
+          fs.writeFileSync(path.join(dir, name), buf);
+          finalAttachments.push({ kind: 'audio', url: `/uploads/${tenantId}/${name}`, name: '微信录音', size: buf.length });
+          console.log('[wechat-voice] saved mediaId=%s size=%d', mediaId, buf.length);
+        } catch (e) {
+          console.error('[wechat-voice] download failed mediaId=%s err=%s', mediaId, (e as Error).message);
+        }
+      }
+    }
 
     const result = await withTenantClient(tenantId, async (client) => {
       // 分类：前端显式指定则校验归属，否则服务端推断（无描述时返回待分类）
@@ -142,8 +164,8 @@ router.post('/public/repair-report', loginRateLimit(20), async (req, res, next) 
           source_channel: 'public_report',
           category_hint: matchCategoryHint(desc),
           // 无损耗原始媒体附件：随工单整行流转（任何读取 work_orders 的接口都带出 ext）
-          attachments: b.attachments ?? [],
-          images: (b.attachments ?? []).filter((a) => a.kind === 'image').map((a) => a.url), // 兼容旧逻辑
+          attachments: finalAttachments,
+          images: finalAttachments.filter((a) => a.kind === 'image').map((a) => a.url), // 兼容旧逻辑
           inferred: { category: catalogName ?? null, priority, asset: asset?.name ?? null },
           // 合规硬护栏：隐私授权与留存策略（提交即同意，落库即留痕）
           consent: true,
@@ -171,7 +193,7 @@ router.post('/public/repair-report', loginRateLimit(20), async (req, res, next) 
         location,
       },
       // 无损耗原始媒体附件随工单返回（前端可播放/查看）
-      attachments: b.attachments ?? [],
+      attachments: finalAttachments,
       note: '报修已提交，系统已自动补全工单信息',
     });
   } catch (e) {
