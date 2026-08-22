@@ -53,3 +53,16 @@ export async function isAutoTuneEffective(tenantId: string): Promise<boolean> {
   const { enabled } = await getAutoTune(tenantId);
   return enabled;
 }
+
+// 租户级 LLM 授权开关（管理侧控制，默认 false；settings.llm_enabled）
+// 返回 true 才允许该租户走 LLM 语义推断，否则回退本地规则引擎。
+export async function getLlmEnabled(tenantId: string): Promise<boolean> {
+  return withTenantClient(tenantId, async (client) => {
+    const r = await client.query(
+      `SELECT settings->>'llm_enabled' AS llm_enabled FROM tenant_settings WHERE tenant_id = $1`,
+      [tenantId],
+    );
+    if (r.rowCount === 0) return false;
+    return r.rows[0].llm_enabled === 'true';
+  });
+}

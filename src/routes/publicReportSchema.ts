@@ -44,6 +44,11 @@ export const reportSchema = z.object({
   attachments: z.array(attachmentSchema).max(9).optional(), // 无损耗原始媒体：图片/录音（≤9 个）
   // ③ 微信真录音：前端 wx.uploadVoice 返回的 serverId（≤3 段），由后端经微信媒体接口下载原始 amr 无损耗留存
   voice_media_ids: z.array(z.string().min(1).max(256)).max(3).optional(),
+  // 语音直译失败标记（方言/噪声/识别不清时前端置 true）：主题诚实降级，绝不硬猜语义
+  voice_unclear: z.boolean().optional(),
+  // 微信用户授权带入的报修人基本信息（被授权后自动关联，服务侧可明确服务对象；不授权则不传）
+  nickname: z.string().min(1).max(32).optional(),
+  avatar: z.string().url().max(300).optional(),
   // 合规硬护栏：提交即表示同意《隐私与录音照片留存告知》。缺省/ false 一律拒绝受理（绝不静默通过）
   consent: z.boolean().refine((v) => v === true, { message: '提交即表示同意《隐私与录音照片留存告知》' }),
 }).refine(
