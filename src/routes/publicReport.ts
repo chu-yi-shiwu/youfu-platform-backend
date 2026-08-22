@@ -81,6 +81,8 @@ router.post('/public/repair-report', loginRateLimit(20), async (req, res, next) 
       return res.status(404).json({ ok: false, code: 'ORG_404', message: '机构不存在或未启用' });
     }
     const tenantId = b.org;
+    // ④ 回收闭环：为每单生成不可枚举的公开查看凭证（view_token），用户凭其在「我的报修」查看并重纠偏
+    const viewToken = crypto.randomBytes(24).toString('hex');
 
     // org 级每日配额（防跨机构灌单）
     const dailyLimit = Number(tr.rows[0].quota?.repair_daily) || 500;
@@ -163,10 +165,13 @@ router.post('/public/repair-report', loginRateLimit(20), async (req, res, next) 
         ext: {
           source_channel: 'public_report',
           category_hint: matchCategoryHint(desc),
+          public_view_token: viewToken, // ④ 回收闭环：公开查看/纠偏凭证（capability token）
           // 无损耗原始媒体附件：随工单整行流转（任何读取 work_orders 的接口都带出 ext）
           attachments: finalAttachments,
           images: finalAttachments.filter((a) => a.kind === 'image').map((a) => a.url), // 兼容旧逻辑
           inferred: { category: catalogName ?? null, priority, asset: asset?.name ?? null },
+          // ④ 回收闭环：把模型初始补全落库为 ext.filled，使「我的报修」可读到 AI 识别结果，用户再纠偏
+          filled: { category: catalogName ?? null, priority, asset: asset?.name ?? null },
           // 合规硬护栏：隐私授权与留存策略（提交即同意，落库即留痕）
           consent: true,
           consent_at: new Date().toISOString(),
@@ -185,6 +190,7 @@ router.post('/public/repair-report', loginRateLimit(20), async (req, res, next) 
     return res.status(result.created ? 201 : 200).json({
       ok: true, code: 0,
       id: result.row.id, order_no: result.row.order_no, status: result.row.status,
+      view_token: viewToken, // ④ 回收闭环：前端存本地，凭此在「我的报修」查看与纠偏
       org_name: tr.rows[0].name,
       filled: {
         category: result.catalogName ?? null,
@@ -282,6 +288,97 @@ router.get('/public/fault-categories', loginRateLimit(30), async (req, res, next
       ),
     );
     return res.json({ ok: true, code: 0, items: r.rows });
+  } catch (e) {
+    next(e);
+  }
+});
+
+// ④ 回收闭环：GET /api/v1/public/my-reports —— 凭 view_token 列表查看本人报修（免登录，capability token）
+// 安全：org 显式指定 + 仅返回该租户下匹配 token 的工单；token 不可枚举；限流 30/min
+router.get('/public/my-reports', loginRateLimit(30), async (req, res, next) => {
+  try {
+    const org = (req.query.org as string) || '';
+    const raw = (req.query.tokens as string) || '';
+    if (!org) return res.status(422).json({ ok: false, code: 'VALIDATION_001', message: '缺少机构' });
+    const tokens = raw.split(',').map((t) => t.trim()).filter(Boolean).slice(0, 100);
+    if (tokens.length === 0) return res.status(422).json({ ok: false, code: 'VALIDATION_001', message: '缺少查询凭证' });
+    const tr = await pool.query(`SELECT 1 FROM tenant_registry WHERE tenant_id = $1 AND status = 'active'`, [org]);
+    if (tr.rowCount === 0) return res.json({ ok: true, code: 0, items: [] });
+    const r = await withTenantClient(org, (client) =>
+      client.query(
+        `SELECT order_no, status, title, description, location, created_at, ext
+         FROM work_orders WHERE tenant_id = $1 AND ext->>'public_view_token' = ANY($2::text[])
+         ORDER BY created_at DESC LIMIT 200`,
+        [org, tokens],
+      ),
+    );
+    const items = r.rows.map((row: any) => {
+      const ext = row.ext || {};
+      const filled = ext.filled || {};
+      const atts = Array.isArray(ext.attachments) ? ext.attachments : [];
+      return {
+        order_no: row.order_no,
+        status: row.status,
+        title: row.title,
+        description: row.description || '',
+        location: row.location,
+        created_at: row.created_at,
+        view_token: ext.public_view_token,
+        filled: {
+          category: filled.category ?? null,
+          priority: filled.priority ?? null,
+          asset: filled.asset ?? null,
+        },
+        attachments: atts,
+        corrections_count: Array.isArray(ext.corrections) ? ext.corrections.length : 0,
+      };
+    });
+    return res.json({ ok: true, code: 0, items });
+  } catch (e) {
+    next(e);
+  }
+});
+
+// ④ 回收闭环：PATCH /api/v1/public/report-correct —— 用户纠偏 AI 自动补全（分类/优先级/资产）+ 反馈入 ext.corrections（共振飞轮）
+// 安全：必须持有效 view_token；更新 filled 为「人工校正后真值」，并追加 corrections 记录（不删历史）
+const correctSchema = z.object({
+  org: z.string().min(2).max(40),
+  token: z.string().min(8).max(120),
+  category: z.string().max(60).optional(),
+  priority: z.enum(['urgent', 'normal', 'low']).optional(),
+  asset_name: z.string().max(120).optional(),
+  note: z.string().max(300).optional(),
+});
+router.patch('/public/report-correct', loginRateLimit(20), async (req, res, next) => {
+  try {
+    const b = correctSchema.parse(req.body);
+    const tr = await pool.query(`SELECT 1 FROM tenant_registry WHERE tenant_id = $1 AND status = 'active'`, [b.org]);
+    if (tr.rowCount === 0) return res.status(404).json({ ok: false, code: 'ORG_404', message: '机构不存在或未启用' });
+    const result = await withTenantClient(b.org, async (client) => {
+      const cur = await client.query(
+        `SELECT id, ext FROM work_orders WHERE tenant_id = $1 AND ext->>'public_view_token' = $2 LIMIT 1`,
+        [b.org, b.token],
+      );
+      if (cur.rowCount === 0) return null;
+      const ext = cur.rows[0].ext || {};
+      const filled = ext.filled || {};
+      if (b.category !== undefined) filled.category = b.category;
+      if (b.priority !== undefined) filled.priority = b.priority;
+      if (b.asset_name !== undefined) filled.asset = b.asset_name;
+      const corrections = Array.isArray(ext.corrections) ? ext.corrections : [];
+      corrections.push({
+        corrected_at: new Date().toISOString(),
+        category: b.category ?? null,
+        priority: b.priority ?? null,
+        asset_name: b.asset_name ?? null,
+        note: b.note ?? null,
+      });
+      const newExt = { ...ext, filled, corrections };
+      await client.query(`UPDATE work_orders SET ext = $1 WHERE id = $2`, [newExt, cur.rows[0].id]);
+      return { filled, corrections_count: corrections.length };
+    });
+    if (!result) return res.status(404).json({ ok: false, code: 'NOT_FOUND', message: '凭证无效或报修不存在' });
+    return res.json({ ok: true, code: 0, filled: result.filled, corrections_count: result.corrections_count });
   } catch (e) {
     next(e);
   }
