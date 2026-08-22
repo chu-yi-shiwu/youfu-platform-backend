@@ -7,6 +7,7 @@ import dotenv from 'dotenv';
 import { authMiddleware, refreshAuthMode, verifyJwt, AUTH_MODE } from './middleware/auth.js';
 import { errorMiddleware } from './middleware/error.js';
 import publicReportRouter from './routes/publicReport.js';// P1 需求侧：public 免登录报修（挂 auth 之前）
+import wechatRouter from './routes/wechat.js';// ③ 微信 JSSDK 公开签名端点（挂 auth 之前）
 import workOrderRouter from './routes/workOrder.js';
 import webhookRouter from './webhook/routes.js';
 import authRouter from './routes/auth.js';
@@ -112,6 +113,8 @@ app.use('/api/v1/open-api', openApiRouter);
 
 // P1 需求侧 public 报修（免登录，挂 auth 之前；org 显式指定机构 + 限流 + D3 硬拒）
 app.use('/api/v1', publicReportRouter);
+// ③ 微信 JSSDK 签名端点（免登录，挂 auth 之前；供 H5 在微信内录音前注入 wx.config）
+app.use('/api/v1/wechat', wechatRouter);
 
 // 认证/租户（生产化①：AUTH_MODE=dev|prod，prod 强制 JWT）：仅对 /api 生效，
 // 静态首页与 SPA 路由（试点模式公开可访问，无需鉴权）。

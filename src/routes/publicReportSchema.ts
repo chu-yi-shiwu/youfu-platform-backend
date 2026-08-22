@@ -42,9 +42,11 @@ export const reportSchema = z.object({
   description: z.string().max(500).optional(), // 「种子」之一：可空——允许纯语音/纯图片报修（最原始需求载体，无损耗随工单流转）
   catalog: z.string().uuid().optional(),  // 允许前端显式指定（一般留空，由服务端推断）
   attachments: z.array(attachmentSchema).max(9).optional(), // 无损耗原始媒体：图片/录音（≤9 个）
+  // ③ 微信真录音：前端 wx.uploadVoice 返回的 serverId（≤3 段），由后端经微信媒体接口下载原始 amr 无损耗留存
+  voice_media_ids: z.array(z.string().min(1).max(256)).max(3).optional(),
   // 合规硬护栏：提交即表示同意《隐私与录音照片留存告知》。缺省/ false 一律拒绝受理（绝不静默通过）
   consent: z.boolean().refine((v) => v === true, { message: '提交即表示同意《隐私与录音照片留存告知》' }),
 }).refine(
-  (b) => (b.description?.trim().length ?? 0) >= 4 || (b.attachments?.length ?? 0) > 0,
+  (b) => (b.description?.trim().length ?? 0) >= 4 || (b.attachments?.length ?? 0) > 0 || (b.voice_media_ids?.length ?? 0) > 0,
   { message: '请至少提供一段描述、一张照片或一段录音，我们才能受理' },
 );
