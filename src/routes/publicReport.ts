@@ -172,6 +172,8 @@ router.post('/public/repair-report', loginRateLimit(20), async (req, res, next) 
           inferred: { category: catalogName ?? null, priority, asset: asset?.name ?? null },
           // ④ 回收闭环：把模型初始补全落库为 ext.filled，使「我的报修」可读到 AI 识别结果，用户再纠偏
           filled: { category: catalogName ?? null, priority, asset: asset?.name ?? null },
+          // ⑤ 手机号身份锚点：留存报修人手机（与 contact 列一致），支持换设备凭「手机号+工单号」安全找回
+          reporter_phone: b.phone ?? null,
           // 合规硬护栏：隐私授权与留存策略（提交即同意，落库即留痕）
           consent: true,
           consent_at: new Date().toISOString(),
@@ -191,6 +193,7 @@ router.post('/public/repair-report', loginRateLimit(20), async (req, res, next) 
       ok: true, code: 0,
       id: result.row.id, order_no: result.row.order_no, status: result.row.status,
       view_token: viewToken, // ④ 回收闭环：前端存本地，凭此在「我的报修」查看与纠偏
+      reporter_phone: b.phone ?? null, // ⑤ 手机号身份锚点：返回报修人，前端脱敏展示并用作找回凭据
       org_name: tr.rows[0].name,
       filled: {
         category: result.catalogName ?? null,
@@ -293,25 +296,47 @@ router.get('/public/fault-categories', loginRateLimit(30), async (req, res, next
   }
 });
 
-// ④ 回收闭环：GET /api/v1/public/my-reports —— 凭 view_token 列表查看本人报修（免登录，capability token）
-// 安全：org 显式指定 + 仅返回该租户下匹配 token 的工单；token 不可枚举；限流 30/min
+// ④ 回收闭环 + ⑤ 手机号身份：GET /api/v1/public/my-reports —— 免登录查看本人报修
+// 两种凭证任选其一：
+//   A) tokens=view_token 列表（主链路，凭本地存储凭证，不可枚举）
+//   B) phone + order_no（换设备/清缓存后，凭手机号 + 任一工单号安全找回）
+// 安全：org 显式指定；token 不可枚举；phone 路径须先验证 (phone, order_no) 配对所有权，否则静默返回空（不暴露该手机是否有报修）；限流 30/min
 router.get('/public/my-reports', loginRateLimit(30), async (req, res, next) => {
   try {
     const org = (req.query.org as string) || '';
     const raw = (req.query.tokens as string) || '';
+    const phone = (req.query.phone as string) || '';
+    const orderNo = (req.query.order_no as string) || '';
     if (!org) return res.status(422).json({ ok: false, code: 'VALIDATION_001', message: '缺少机构' });
-    const tokens = raw.split(',').map((t) => t.trim()).filter(Boolean).slice(0, 100);
-    if (tokens.length === 0) return res.status(422).json({ ok: false, code: 'VALIDATION_001', message: '缺少查询凭证' });
     const tr = await pool.query(`SELECT 1 FROM tenant_registry WHERE tenant_id = $1 AND status = 'active'`, [org]);
     if (tr.rowCount === 0) return res.json({ ok: true, code: 0, items: [] });
-    const r = await withTenantClient(org, (client) =>
-      client.query(
-        `SELECT order_no, status, title, description, location, created_at, ext
-         FROM work_orders WHERE tenant_id = $1 AND ext->>'public_view_token' = ANY($2::text[])
-         ORDER BY created_at DESC LIMIT 200`,
-        [org, tokens],
-      ),
-    );
+
+    const tokens = raw.split(',').map((t) => t.trim()).filter(Boolean).slice(0, 100);
+    let sql: string;
+    let params: unknown[];
+    if (tokens.length > 0) {
+      sql = `SELECT order_no, status, title, description, location, created_at, ext
+             FROM work_orders WHERE tenant_id = $1 AND ext->>'public_view_token' = ANY($2::text[])
+             ORDER BY created_at DESC LIMIT 200`;
+      params = [org, tokens];
+    } else if (phone && orderNo) {
+      // ⑤ 安全找回：先验证 (phone, order_no) 配对存在（所有权证明）；不存在则静默返回空，不暴露该手机是否有报修
+      const proof = await withTenantClient(org, (client) =>
+        client.query(
+          `SELECT 1 FROM work_orders WHERE tenant_id = $1 AND order_no = $2 AND (ext->>'reporter_phone' = $3 OR contact = $3) LIMIT 1`,
+          [org, orderNo, phone],
+        ),
+      );
+      if (proof.rowCount === 0) return res.json({ ok: true, code: 0, items: [] });
+      sql = `SELECT order_no, status, title, description, location, created_at, ext
+             FROM work_orders WHERE tenant_id = $1 AND (ext->>'reporter_phone' = $2 OR contact = $2)
+             ORDER BY created_at DESC LIMIT 200`;
+      params = [org, phone];
+    } else {
+      return res.status(422).json({ ok: false, code: 'VALIDATION_001', message: '缺少查询凭证（token 或 手机号+工单号）' });
+    }
+
+    const r = await withTenantClient(org, (client) => client.query(sql, params));
     const items = r.rows.map((row: any) => {
       const ext = row.ext || {};
       const filled = ext.filled || {};
@@ -323,7 +348,8 @@ router.get('/public/my-reports', loginRateLimit(30), async (req, res, next) => {
         description: row.description || '',
         location: row.location,
         created_at: row.created_at,
-        view_token: ext.public_view_token,
+        view_token: ext.public_view_token || '',
+        reporter_phone: ext.reporter_phone || null, // ⑤ 手机号身份锚点（本人数据，脱敏展示）
         filled: {
           category: filled.category ?? null,
           priority: filled.priority ?? null,
