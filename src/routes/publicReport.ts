@@ -9,53 +9,20 @@ import fs from 'node:fs';
 import path from 'node:path';
 import pool from '../db/pool.js';
 import { withTenantClient } from '../db/pool.js';
-import { validateIntake } from '../services/dataQuality.js';
 import { AppError } from '../middleware/error.js';
 import { createWithIdem } from '../repo/ticket.js';
 import { loginRateLimit } from '../middleware/auth.js';
+import { matchCategoryHint, resolveFaultCategory, inferPriority, resolveAsset } from '../services/intakeEnrich.js';
+import { attachmentSchema, reportSchema, CTYPE_EXT, isAudioCType } from './publicReportSchema.js';
 
 const router = Router();
 
-// 上传白名单（与 B0 upload.ts 一致）
-const CTYPE_EXT: Record<string, string> = {
-  'image/jpeg': 'jpg',
-  'image/png': 'png',
-  'image/gif': 'gif',
-  'image/webp': 'webp',
-  'application/pdf': 'pdf',
-};
+// 上传白名单与报修入参 schema 见 ./publicReportSchema.ts（抽到独立模块便于单测）
 
-// 整改 v2：一键报修——校验分级（public 宽松引导，内部录入端 D3 硬拒不变）
-// 描述 ≥4 字；电话选填（填了校验格式，不填允许——进度查询凭证改单号+可选后4位）；
-// images[] 照片随工单流转；快捷标签 → 关键词智能匹配（存 ext.category_hint 供模型特征）
-const reportSchema = z.object({
-  org: z.string().min(3).max(64),          // tenant_id（扫码 URL 带）
-  name: z.string().min(1).max(32).optional(), // 报修人姓名（选填）
-  phone: z.string().regex(/^1\d{10}$/, '联系电话应为 11 位手机号').optional(), // 选填
-  location: z.string().min(1).max(128),    // 位置（必填）
-  description: z.string().min(4, '请描述一下问题（至少 4 个字）').max(500), // ≥4 字引导
-  catalog: z.string().uuid().optional(),  // 分类 id（fault_category uuid，可选）
-  images: z.array(z.string().max(200)).max(3).optional(), // 现场照片 URL（≤3 张）
-  priority: z.enum(['low', 'normal', 'urgent']).default('normal'),
-});
-
-// 快捷标签 → 关键词智能匹配（报修人无感；不落 fault_category 避免污染陪检字典）
-const KEYWORD_CATEGORY_HINTS: Array<{ kw: string[]; hint: string }> = [
-  { kw: ['空调', '制冷', '制热', '冷气', '暖气'], hint: '空调' },
-  { kw: ['水', '漏', '管道', '马桶', '龙头', '排水', '堵'], hint: '水电' },
-  { kw: ['网', 'wifi', 'WiFi', '电脑', '网络', '信号'], hint: '网络' },
-  { kw: ['门', '锁', '窗', '玻璃'], hint: '门窗' },
-  { kw: ['灯', '照明', '插座', '电', '跳闸', '断电'], hint: '照明电工' },
-  { kw: ['电梯', '监控', '设备', '机器', '故障'], hint: '设备' },
-];
-function matchCategoryHint(description: string): string | undefined {
-  for (const rule of KEYWORD_CATEGORY_HINTS) {
-    if (rule.kw.some((k) => description.includes(k))) return rule.hint;
-  }
-  return undefined;
-}
+// 关键词 → 分类 hint 及服务端补全逻辑已抽到 src/services/intakeEnrich.ts（可单测、供复用）
 
 // POST /api/v1/public/repair-report —— 免登录报修（扫码/链接直报）
+// DMR 整改 v3：极简输入（描述种子）+ 服务端模型自动补全成完整工单
 router.post('/public/repair-report', loginRateLimit(20), async (req, res, next) => {
   try {
     const b = reportSchema.parse(req.body);
@@ -69,72 +36,90 @@ router.post('/public/repair-report', loginRateLimit(20), async (req, res, next) 
     }
     const tenantId = b.org;
 
-    // 审查修复 P1：org 级每日配额（防跨机构灌单；quota 默认 500 单/日，超限 429）
+    // org 级每日配额（防跨机构灌单）
     const dailyLimit = Number(tr.rows[0].quota?.repair_daily) || 500;
     const cnt = await pool.query(
-      `SELECT count(*)::int AS c FROM work_orders WHERE tenant_id = $1 AND source = 'wechat' AND created_at > now() - interval '1 day'`,
+      `SELECT count(*)::int AS c FROM work_orders WHERE tenant_id = $1 AND source = 'public_report' AND created_at > now() - interval '1 day'`,
       [tenantId],
     );
     if (cnt.rows[0].c >= dailyLimit) {
       return res.status(429).json({ ok: false, code: 'QUOTA_001', message: '该机构今日报修量已达上限，请稍后再试' });
     }
 
-    // 整改 v2：D3 质量引导（描述 ≥4 字已在 zod；此处标题截断 + 电话/位置软校验提示，不再硬拒）
-    const title = b.description.length > 20 ? b.description.slice(0, 20) + '…' : b.description;
-    const q = validateIntake({
-      title,
-      location: b.location,
-      reporter_phone: b.phone ?? '',
-      contact: b.phone ?? '',
-    });
-    // public 报修：仅拦截「完全无信息量」的硬伤（标题为空/纯乱码），软提示不阻断提交
-    const fatal = (q.issues ?? []).filter((i: any) => i.field === 'title' && (i.problem ?? '').includes('不能为空'));
-    if (fatal.length > 0) {
-      return res.status(400).json({ ok: false, code: 'BAD_DATA', message: '报修信息质量校验未通过', issues: fatal });
-    }
-
-    // 快捷标签 → 关键词智能匹配（报修人无感，存 ext.category_hint 供派单模型特征）
-    const categoryHint = matchCategoryHint(b.description);
+    // 质量闸门：仅拦截「完全无信息量」的空描述（其余交给模型补全，不硬拒）
+    // 支持纯语音/纯图片报修：无描述时用媒体生成标题
+    const desc = (b.description ?? '').trim();
+    const hasAudio = (b.attachments ?? []).some((a) => a.kind === 'audio');
+    const hasImage = (b.attachments ?? []).some((a) => a.kind === 'image');
+    const title = desc
+      ? desc.length > 20 ? desc.slice(0, 20) + '…' : desc
+      : hasAudio && hasImage ? '现场报修（含录音与照片）'
+      : hasAudio ? '现场报修（含录音）'
+      : hasImage ? '现场报修（含照片）'
+      : '现场报修';
+    const location = b.location?.trim() || '待核实';
 
     const result = await withTenantClient(tenantId, async (client) => {
-      // 审查修复 P4：catalog 存在性 + 租户归属校验（防脏分类/跨机构分类）
+      // 分类：前端显式指定则校验归属，否则服务端推断（无描述时返回待分类）
+      let catalogId: string | undefined = b.catalog;
+      let catalogName: string | undefined;
       if (b.catalog) {
-        const cat = await client.query(
-          `SELECT 1 FROM fault_category WHERE id = $1 AND tenant_id = $2 LIMIT 1`,
+        const cat = await client.query<{ id: string; name: string }>(
+          `SELECT id, name FROM fault_category WHERE id = $1 AND tenant_id = $2 AND enabled = true LIMIT 1`,
           [b.catalog, tenantId],
         );
-        if (cat.rowCount === 0) {
-          throw new AppError('BAD_DATA', '所选问题类型无效，请刷新后重试', 400);
-        }
+        if (cat.rowCount === 0) throw new AppError('BAD_DATA', '所选问题类型无效，请刷新后重试', 400);
+        catalogName = cat.rows[0].name;
+      } else {
+        const inferred = await resolveFaultCategory(client, tenantId, desc);
+        catalogId = inferred?.id;
+        catalogName = inferred?.name;
       }
+      // 优先级推断（模型：关键词；无描述默认 normal）
+      const priority = inferPriority(desc);
+      // 关联资产推断（描述命中资产名/编号 → 绑定，工单更完整可追溯）
+      const asset = await resolveAsset(client, tenantId, desc);
+
       const { row, created } = await createWithIdem(client, {
         id: crypto.randomUUID(),
         tenantId,
         businessType: 'repair',
-        catalog: b.catalog ?? undefined,
-        priority: b.priority,
-        location: b.location,
-        title: q.normalized_title || title,
-        description: b.description,
+        catalog: catalogId,
+        priority,
+        location,
+        title,
+        description: desc || undefined,
         contact: b.phone ?? undefined,
         reporterName: b.name ?? undefined,
-        source: 'public_report', // 审查修复 P7：诚实标注来源（不预设 wechat）
+        source: 'public_report',
+        assets: asset ? [asset.id] : undefined,
         ext: {
           source_channel: 'public_report',
-          category_hint: categoryHint,       // 整改 v2：关键词智能匹配（派单模型特征）
-          images: b.images ?? [],            // 整改 v2：现场照片随工单流转
+          category_hint: matchCategoryHint(desc),
+          // 无损耗原始媒体附件：随工单整行流转（任何读取 work_orders 的接口都带出 ext）
+          attachments: b.attachments ?? [],
+          images: (b.attachments ?? []).filter((a) => a.kind === 'image').map((a) => a.url), // 兼容旧逻辑
+          inferred: { category: catalogName ?? null, priority, asset: asset?.name ?? null },
         },
-        // 审查修复 P3：幂等（前端 Idempotency-Key header，防重复提交重复建单）
+        // 幂等（前端 Idempotency-Key header，防重复提交重复建单）
         idempotencyKey: (req.header('Idempotency-Key') as string | undefined) || undefined,
       });
-      return { row, created };
+      return { row, created, catalogName, priority, assetName: asset?.name ?? null };
     });
 
     return res.status(result.created ? 201 : 200).json({
       ok: true, code: 0,
       id: result.row.id, order_no: result.row.order_no, status: result.row.status,
       org_name: tr.rows[0].name,
-      note: '报修已提交',
+      filled: {
+        category: result.catalogName ?? null,
+        priority: result.priority,
+        asset: result.assetName,
+        location,
+      },
+      // 无损耗原始媒体附件随工单返回（前端可播放/查看）
+      attachments: b.attachments ?? [],
+      note: '报修已提交，系统已自动补全工单信息',
     });
   } catch (e) {
     next(e);
@@ -175,23 +160,30 @@ router.get('/public/repair-status', loginRateLimit(30), async (req, res, next) =
   }
 });
 
-// POST /api/v1/public/upload —— 整改 v2：免登录报修照片上传（base64 JSON，限流+5MB+白名单）
+// POST /api/v1/public/upload —— 免登录报修媒体上传（图片 / 录音，base64 JSON，限流+白名单）
 // 复用 B0 上传模式（base64 → 落盘 /opt/youfu/uploads/{org}/{uuid}.{ext} → 公开 URL）
+// 无损耗：原文件直存，不转码、不压缩；图片 ≤5MB，录音 ≤20MB；返回 kind/size 供前端展示
 router.post('/public/upload', loginRateLimit(20), async (req, res, next) => {
   try {
     const org = (req.query.org as string) || '';
-    const body = z.object({ filename: z.string().max(100).optional(), contentType: z.string().max(50), base64: z.string().min(10).max(7_000_000) }).parse(req.body);
+    const body = z.object({
+      filename: z.string().max(100).optional(),
+      contentType: z.string().max(50),
+      base64: z.string().min(10).max(30_000_000), // 含音频(≤20MB)base64 余量
+    }).parse(req.body);
     if (!org) return res.status(422).json({ ok: false, code: 'VALIDATION_001', message: '缺少机构' });
     const ext = CTYPE_EXT[body.contentType];
-    if (!ext) return res.status(415).json({ ok: false, code: 'BAD_TYPE', message: '仅支持图片/音频（jpg/png/gif/webp/pdf/m4a/mp3/wav/ogg）' });
+    if (!ext) return res.status(415).json({ ok: false, code: 'BAD_TYPE', message: '仅支持图片/音频（jpg/png/gif/webp/pdf/m4a/mp3/wav/ogg/webm/amr）' });
     const buf = Buffer.from(body.base64, 'base64');
-    if (buf.length > 5 * 1024 * 1024) return res.status(413).json({ ok: false, code: 'TOO_LARGE', message: '文件超过 5MB 上限' });
+    const isAudio = isAudioCType(body.contentType);
+    const maxBytes = isAudio ? 20 * 1024 * 1024 : 5 * 1024 * 1024;
+    if (buf.length > maxBytes) return res.status(413).json({ ok: false, code: 'TOO_LARGE', message: isAudio ? '录音超过 20MB 上限' : '图片超过 5MB 上限' });
     const root = process.env.UPLOAD_DIR ?? '/opt/youfu/uploads';
     const dir = path.join(root, org);
     fs.mkdirSync(dir, { recursive: true });
     const name = `${crypto.randomUUID()}.${ext}`;
     fs.writeFileSync(path.join(dir, name), buf);
-    return res.status(201).json({ ok: true, code: 0, url: `/uploads/${org}/${name}` });
+    return res.status(201).json({ ok: true, code: 0, url: `/uploads/${org}/${name}`, kind: isAudio ? 'audio' : 'image', size: buf.length });
   } catch (e) {
     next(e);
   }
