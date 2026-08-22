@@ -12,7 +12,9 @@ import { withTenantClient } from '../db/pool.js';
 import { AppError } from '../middleware/error.js';
 import { createWithIdem } from '../repo/ticket.js';
 import { loginRateLimit } from '../middleware/auth.js';
-import { matchCategoryHint, resolveFaultCategory, inferPriority, resolveAsset } from '../services/intakeEnrich.js';
+import { matchCategoryHint, resolveFaultCategory, inferPriority, resolveAsset, generateTitle } from '../services/intakeEnrich.js';
+import { llmInferCategory } from '../services/llm.js';
+import { getLlmEnabled } from '../repo/tenantSettings.js';
 import { downloadMedia } from '../services/wechat.js'; // ③ 微信真录音：下载原始 amr 无损耗留存
 import { attachmentSchema, reportSchema, CTYPE_EXT, isAudioCType } from './publicReportSchema.js';
 
@@ -99,12 +101,8 @@ router.post('/public/repair-report', loginRateLimit(20), async (req, res, next) 
     const desc = (b.description ?? '').trim();
     const hasAudio = (b.attachments ?? []).some((a) => a.kind === 'audio') || (b.voice_media_ids?.length ?? 0) > 0;
     const hasImage = (b.attachments ?? []).some((a) => a.kind === 'image');
-    const title = desc
-      ? desc.length > 20 ? desc.slice(0, 20) + '…' : desc
-      : hasAudio && hasImage ? '现场报修（含录音与照片）'
-      : hasAudio ? '现场报修（含录音）'
-      : hasImage ? '现场报修（含照片）'
-      : '现场报修';
+    // 语音直译失败标记（方言/噪声/识别不清）：前端显式声明，用于主题诚实降级
+    const voiceUnclear = Boolean(b.voice_unclear);
     const location = b.location?.trim() || '待核实';
 
     // ③ 微信真录音：voice_media_ids(serverId) → 服务端经微信媒体接口下载原始 amr 无损耗留存。
@@ -129,7 +127,19 @@ router.post('/public/repair-report', loginRateLimit(20), async (req, res, next) 
     }
 
     const result = await withTenantClient(tenantId, async (client) => {
-      // 分类：前端显式指定则校验归属，否则服务端推断（无描述时返回待分类）
+      // LLM 语义推断（B 档）：租户已授权 + 有描述 → 调 DeepSeek；失败/未授权返回 null → 走 A 档规则
+      let llmInferred: { category: string | null; priority: string | null; asset: string | null } | null = null;
+      if (desc && (await getLlmEnabled(tenantId))) {
+        const catNames = (
+          await client.query<{ name: string }>(
+            `SELECT name FROM fault_category WHERE tenant_id = $1 AND enabled = true`,
+            [tenantId],
+          )
+        ).rows.map((r) => r.name);
+        llmInferred = await llmInferCategory(desc, catNames);
+      }
+
+      // 分类：前端显式指定则校验归属，否则 LLM → 规则引擎
       let catalogId: string | undefined = b.catalog;
       let catalogName: string | undefined;
       if (b.catalog) {
@@ -139,15 +149,45 @@ router.post('/public/repair-report', loginRateLimit(20), async (req, res, next) 
         );
         if (cat.rowCount === 0) throw new AppError('BAD_DATA', '所选问题类型无效，请刷新后重试', 400);
         catalogName = cat.rows[0].name;
+      } else if (llmInferred && llmInferred.category) {
+        // LLM 返回分类名 → 精确匹配到租户分类（匹配不到则保留名称但不绑定 id，诚实标注）
+        const m = await client.query<{ id: string; name: string }>(
+          `SELECT id, name FROM fault_category WHERE tenant_id = $1 AND enabled = true AND name = $2 LIMIT 1`,
+          [tenantId, llmInferred.category],
+        );
+        if (m.rowCount) {
+          catalogId = m.rows[0].id;
+          catalogName = m.rows[0].name;
+        } else {
+          catalogId = undefined;
+          catalogName = llmInferred.category;
+        }
       } else {
         const inferred = await resolveFaultCategory(client, tenantId, desc);
         catalogId = inferred?.id;
         catalogName = inferred?.name;
       }
-      // 优先级推断（模型：关键词；无描述默认 normal）
-      const priority = inferPriority(desc);
-      // 关联资产推断（描述命中资产名/编号 → 绑定，工单更完整可追溯）
-      const asset = await resolveAsset(client, tenantId, desc);
+      // 优先级：LLM 有结果优先，否则规则引擎
+      const llmPriority = llmInferred?.priority as 'urgent' | 'normal' | 'low' | null | undefined;
+      let priority: 'urgent' | 'normal' | 'low' =
+        llmPriority || inferPriority(desc);
+      // 关联资产：LLM 有结果优先，否则规则引擎
+      let asset: { id: string; name: string } | null = await resolveAsset(client, tenantId, desc);
+      if (llmInferred && llmInferred.asset && !asset) {
+        const m = await client.query<{ id: string; name: string }>(
+          `SELECT id, name FROM asset WHERE tenant_id = $1 AND (name = $2 OR name ILIKE $3) LIMIT 1`,
+          [tenantId, llmInferred.asset, `%${llmInferred.asset}%`],
+        );
+        if (m.rowCount) asset = { id: m.rows[0].id, name: m.rows[0].name };
+      }
+      // 主题命名（DMR：从表述提炼，分类前缀兜底，识别失败诚实标记）
+      const title = generateTitle({
+        description: desc,
+        hasAudio,
+        hasImage,
+        categoryName: catalogName,
+        voiceUnclear,
+      });
 
       const { row, created } = await createWithIdem(client, {
         id: crypto.randomUUID(),
@@ -174,6 +214,11 @@ router.post('/public/repair-report', loginRateLimit(20), async (req, res, next) 
           filled: { category: catalogName ?? null, priority, asset: asset?.name ?? null },
           // ⑤ 手机号身份锚点：留存报修人手机（与 contact 列一致），支持换设备凭「手机号+工单号」安全找回
           reporter_phone: b.phone ?? null,
+          // 微信用户授权带入的报修人信息：服务侧可明确服务对象（派单/回访）；未授权则为 null
+          reporter_nickname: b.nickname ?? null,
+          reporter_avatar: b.avatar ?? null,
+          // 语音直译诚实标记：识别失败（方言/噪声）时记录，主题不硬猜语义
+          stt: { voice_unclear: voiceUnclear, at: new Date().toISOString() },
           // 合规硬护栏：隐私授权与留存策略（提交即同意，落库即留痕）
           consent: true,
           consent_at: new Date().toISOString(),
@@ -194,6 +239,8 @@ router.post('/public/repair-report', loginRateLimit(20), async (req, res, next) 
       id: result.row.id, order_no: result.row.order_no, status: result.row.status,
       view_token: viewToken, // ④ 回收闭环：前端存本地，凭此在「我的报修」查看与纠偏
       reporter_phone: b.phone ?? null, // ⑤ 手机号身份锚点：返回报修人，前端脱敏展示并用作找回凭据
+      reporter_nickname: b.nickname ?? null, // 微信授权带入：服务侧可明确服务对象
+      reporter_avatar: b.avatar ?? null,
       org_name: tr.rows[0].name,
       filled: {
         category: result.catalogName ?? null,

@@ -9,6 +9,7 @@ import pool, { withTenantClient } from '../db/pool.js';
 import { signJwt, AUTH_MODE } from '../middleware/auth.js';
 import { platformAdminAuth } from '../middleware/platformAuth.js';
 import { verifyPassword, hashPassword } from '../account.js';
+import { llmConfigured } from '../services/llm.js';
 
 const router = Router();
 
@@ -69,8 +70,11 @@ router.use(platformAdminAuth);
 router.get('/tenants', async (req, res, next) => {
   try {
     const r = await pool.query(
-      `SELECT tenant_id, name, category, status, parent_id, quota, created_at, updated_at
-       FROM tenant_registry ORDER BY tenant_id`,
+      `SELECT tr.tenant_id, tr.name, tr.category, tr.status, tr.parent_id, tr.quota, tr.created_at, tr.updated_at,
+              COALESCE(ts.settings->>'llm_enabled', 'false') AS llm_enabled
+       FROM tenant_registry tr
+       LEFT JOIN tenant_settings ts ON ts.tenant_id = tr.tenant_id
+       ORDER BY tr.tenant_id`,
     );
     await audit(res.locals.platformAdmin!.username, 'tenant.list', null, null, null);
     return res.json({ ok: true, code: 0, items: r.rows });
@@ -353,6 +357,32 @@ router.get('/open-api-logs', async (req, res, next) => {
     );
     const cnt = await pool.query(`SELECT count(*)::int AS c FROM open_api_call_log l ${where}`, params.slice(0, params.length - 2));
     return res.json({ ok: true, code: 0, items: r.rows, total: cnt.rows[0]?.c ?? 0 });
+  } catch (e) {
+    next(e);
+  }
+});
+
+// ---- 管理侧：租户 LLM 授权/撤销（初一定调：AI 推断启用权在平台，授权后才走 LLM） ----
+const llmAuthSchema = z.object({ enabled: z.boolean() });
+router.put('/tenants/:id/llm', async (req, res, next) => {
+  try {
+    const tenantId = (req.params.id || '').trim();
+    const b = llmAuthSchema.parse(req.body);
+    if (!tenantId) return res.status(422).json({ ok: false, code: 'VALIDATION_001', message: '缺少租户标识' });
+    // 服务端未配置 DEEPSEEK_API_KEY → 拒绝授权（诚实：功能不可用时不假装已开）
+    if (b.enabled && !llmConfigured()) {
+      return res.status(409).json({ ok: false, code: 'LLM_NOT_CONFIGURED', message: '服务端未配置 DEEPSEEK_API_KEY，暂无法授权' });
+    }
+    await pool.query(`SELECT llm_authorize($1, $2)`, [tenantId, b.enabled]);
+    // 审计（append-only：actor/action/resource/target_tenant/payload）
+    await audit(
+      res.locals.platformAdmin?.username ?? 'platform-admin',
+      'tenant.llm_authorize',
+      tenantId,
+      tenantId,
+      { llm_enabled: b.enabled },
+    );
+    return res.json({ ok: true, code: 0, tenant_id: tenantId, llm_enabled: b.enabled });
   } catch (e) {
     next(e);
   }
