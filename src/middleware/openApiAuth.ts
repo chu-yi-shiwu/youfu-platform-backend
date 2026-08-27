@@ -29,7 +29,10 @@ function extractCreds(req: Request): { key: string; secret: string } | null {
   if (k && s) return { key: k, secret: s };
   const auth = req.header('Authorization');
   if (auth?.startsWith('Bearer ')) {
-    const [key, secret] = auth.slice(7).split(':');
+    const idx = auth.indexOf(':', 7);
+    const key = idx === -1 ? '' : auth.slice(7, idx);
+    const secret = idx === -1 ? '' : auth.slice(idx + 1);
+    if (key && secret) return { key, secret };
     if (key && secret) return { key, secret };
   }
   return null;

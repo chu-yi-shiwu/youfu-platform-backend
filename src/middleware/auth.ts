@@ -123,9 +123,9 @@ export function resolveIdentity(req: Request): IdentityResult {
     if (!payload) {
       return { ok: false, status: 401, code: 'AUTH_002', message: 'invalid or expired token' };
     }
-    const tenantId = str(payload.tid) ?? str(payload.tenantId) ?? req.header('X-Tenant-Id');
+    const tenantId = str(payload.tid) ?? str(payload.tenantId);
     if (!tenantId) {
-      return { ok: false, status: 401, code: 'TENANT_001', message: 'missing tenant (token has no tid/tenantId and no X-Tenant-Id header)' };
+      return { ok: false, status: 401, code: 'TENANT_001', message: 'missing tenant (token has no tid/tenantId)' };
     }
     return {
       ok: true,
