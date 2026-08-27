@@ -262,6 +262,14 @@ router.post('/public/repair-report', loginRateLimit(20), async (req, res, next) 
 router.get('/public/repair-status', loginRateLimit(30), async (req, res, next) => {
   try {
     const org = (req.query.org as string) || '';
+    // SEC-735 CRITICAL: 校验 org 必须是已激活租户，防路径穿越写任意目录
+    const { rows: orgRows } = await pool.query('SELECT 1 FROM tenant_registry WHERE tenant_id = $1 AND status = $2', [org, 'active']);
+    if (orgRows.length === 0) {
+      return res.status(404).json({ ok: false, code: 'ORG_404', message: '机构不存在或未激活' });
+    }
+    if (/[/\\]/.test(org) || org.includes('..')) {
+      return res.status(400).json({ ok: false, code: 'BAD_ORG', message: 'invalid org' });
+    }
     const orderNo = (req.query.order_no as string) || '';
     const phoneLast4 = (req.query.phone_last4 as string) || '';
     if (!org || !orderNo) {

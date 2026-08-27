@@ -40,6 +40,11 @@ router.post('/upload', (req, res, next) => {
     if (!tenantId) {
       return res.status(401).json({ ok: false, code: 'NO_TENANT', message: 'missing tenant' });
     }
+    if (/[/\\]/.test(tenantId) || tenantId.includes('..')) {
+      return res.status(400).json({ ok: false, code: 'BAD_TENANT', message: 'invalid tenant id' });
+    }
+      return res.status(401).json({ ok: false, code: 'NO_TENANT', message: 'missing tenant' });
+    }
     const body = (req.body ?? {}) as { filename?: string; contentType?: string; base64?: string };
     const { filename, contentType, base64 } = body;
     if (!base64 || typeof base64 !== 'string') {
