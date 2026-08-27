@@ -66,3 +66,32 @@ export async function getLlmEnabled(tenantId: string): Promise<boolean> {
     return r.rows[0].llm_enabled === 'true';
   });
 }
+
+// I4 灰度总开关：控制「全部新 AI 能力」（工人端建议卡 /similar + 配置向导 AI 生成 /gen-config）。
+// 默认 false（fail-safe：不显式开启则全部 AI 能力保持关闭，绝不偷偷启用新行为）。
+// settings.ai_features_enabled 缺失或 'false' 一律视为关。
+export async function getAiFeaturesEnabled(tenantId: string): Promise<boolean> {
+  return withTenantClient(tenantId, async (client) => {
+    const r = await client.query(
+      `SELECT settings->>'ai_features_enabled' AS flag FROM tenant_settings WHERE tenant_id = $1`,
+      [tenantId],
+    );
+    if (r.rowCount === 0) return false;
+    return r.rows[0].flag === 'true';
+  });
+}
+
+// 设置并持久化 I4 灰度总开关（UPSERT settings jsonb，不影响其它 settings 字段）。
+export async function setAiFeaturesEnabled(tenantId: string, enabled: boolean): Promise<boolean> {
+  await withTenantClient(tenantId, async (client) => {
+    await client.query(
+      `INSERT INTO tenant_settings (tenant_id, settings, updated_at)
+       VALUES ($1, jsonb_build_object('ai_features_enabled', $2::boolean), now())
+       ON CONFLICT (tenant_id)
+       DO UPDATE SET settings = COALESCE(tenant_settings.settings, '{}'::jsonb) || jsonb_build_object('ai_features_enabled', $2::boolean),
+                     updated_at = now()`,
+      [tenantId, enabled],
+    );
+  });
+  return enabled;
+}
