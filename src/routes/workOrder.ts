@@ -472,14 +472,17 @@ router.get('/open/notifications', async (req, res, next) => {
     const recipient = (req.query.recipient as string) || '';
     // 收件箱仅展示用户可见的站内信（in_app）。sms/push/wechat 为投递凭证（delivery receipt），
     // 已随 fan-out 在 dispatchNotification 落库，但不计入用户消息列表/未读数，避免每条派单出现重复条目。
-    const conds = ['tenant_id = $1', "channel = 'in_app'"];
+    const conds = ['n.tenant_id = $1', "n.channel = 'in_app'"];
     const params: unknown[] = [tenantId];
-    if (recipient) { params.push(recipient); conds.push(`recipient = $${params.length}`); }
+    if (recipient) { params.push(recipient); conds.push(`n.recipient = $${params.length}`); }
+    // 孤儿通知过滤（2026-08-29 bug 修复）：测试/清理路径删单不级联删通知时，
+    // 通知指向已删工单 → 小程序点击进详情 404「打不开」。列表只展示工单仍存在的通知。
+    conds.push(`EXISTS (SELECT 1 FROM work_orders wo WHERE wo.id = n.work_order_id)`);
     const rows = await withTenantClient(tenantId, (client) =>
       client
         .query(
-          `SELECT id, recipient, recipient_kind, type, title, body, channel, delivered, read, work_order_id, payload, created_at
-           FROM notification WHERE ${conds.join(' AND ')} ORDER BY created_at DESC LIMIT 100`,
+          `SELECT n.id, n.recipient, n.recipient_kind, n.type, n.title, n.body, n.channel, n.delivered, n.read, n.work_order_id, n.payload, n.created_at
+           FROM notification n WHERE ${conds.join(' AND ')} ORDER BY n.created_at DESC LIMIT 100`,
           params,
         )
         .then((r) => r.rows),
