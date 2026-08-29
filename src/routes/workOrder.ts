@@ -279,11 +279,17 @@ router.post('/open/work_order/:id/transition', async (req, res, next) => {
           [tenantId, req.params.id, to],
         );
         if (guard.rowCount === 1) {
+          // 事务语义修复（2026-08-29 主轮加深测试轮3发现）：incrementalLearn 内任何 SQL 错误会把
+          // 整个 PG 事务置为 aborted——原 try/catch 只是"记日志"，实际状态/事件全部回滚，接口却
+          // 返回锁内内存值谎报成功。SAVEPOINT 隔离：学习失败仅回滚学习段，主流转（状态+事件）保真。
+          await client.query('SAVEPOINT incremental_learn_sp');
           try {
             await incrementalLearn(client, tenantId, req.params.id, process.env.MODEL_AUTO_TUNE === 'true');
+            await client.query('RELEASE SAVEPOINT incremental_learn_sp');
           } catch (e) {
+            await client.query('ROLLBACK TO SAVEPOINT incremental_learn_sp');
             learnError = e instanceof Error ? e.message : String(e);
-            console.error('[T-A incrementalLearn] FAILED', { workOrderId: req.params.id, tenantId, err: e });
+            console.error('[T-A incrementalLearn] FAILED (rolled back to savepoint, transition preserved)', { workOrderId: req.params.id, tenantId, err: e });
           }
         } else {
           // 唯一键已存在：本次被结构性守卫拦截（重复学习），不调用、不报错（属正常幂等）。

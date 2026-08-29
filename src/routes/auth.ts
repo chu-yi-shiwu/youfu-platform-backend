@@ -97,6 +97,12 @@ router.get('/auth/me', async (req, res, next) => {
         user: { id: 'dev', username: 'dev', display_name: '开发模式', role: 'admin', tenant_id: auth.tenantId, active: true },
       });
     }
+    // 健壮性（2026-08-29 主轮加深测试轮2发现）：JWT sub 非 UUID 时 findUserById 会触发 PG 22P02
+    // 未处理异常冒成 500——合法签名但主体非法的令牌应诚实 401，而非 500。
+    const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    if (!UUID_RE.test(auth.userId!)) {
+      return res.status(401).json({ ok: false, code: 'AUTH_002', message: 'invalid token subject' });
+    }
     const user = await withTenantClient(auth.tenantId, async (client) => {
       const u = await findUserById(client, auth.tenantId, auth.userId!);
       if (!u) return null;
