@@ -5,6 +5,7 @@
 //  - POST /api/v1/scan                    (M3 真实解析：目录/资产码识别)
 import { Router } from 'express';
 import { z } from 'zod';
+import type { PoolClient } from 'pg';
 import { withTenantClient } from '../db/pool.js';
 import { createWithIdem, transition, list, findOne, findOneForUpdate } from '../repo/ticket.js';
 import { ticketStats } from '../repo/stats.js';
@@ -26,6 +27,83 @@ import { validateIntake } from '../services/dataQuality.js';
 import { buildRecommend } from '../services/dispatchRecommend.js';
 
 const router = Router();
+
+/**
+ * 建单后自动派单（2026-08-29 从 POST /open/work_order handler 抽取为共享函数）：
+ * 修复「公开报修单卡 draft、无派单、无通知、小程序通知点不开」的断链——公开报修与后台建单
+ * 同一引擎待遇：SLA 起算 → dispatch_rule 匹配（降级 least_load）→ 流转 assigned + worker load+1
+ * → 事件流 + domain_event + 派单通知 fan-out（含小程序 task-detail 深链）；无匹配落抢单大厅。
+ * 须在 createWithIdem 的同一事务 client 内调用；幂等重放（created=false）不得调用（R9-001）。
+ */
+export async function autoDispatchAfterCreate(
+  client: PoolClient,
+  tenantId: string,
+  row: { id: string; order_no: string },
+  need: { business_type: string; skill_tags?: string[] | null; priority?: string | null; catalog?: string | null },
+): Promise<{ autoFlow: boolean; assignee: string | null; reason: string; dispatchTarget: string }> {
+  // P4：建单即起算 SLA（draft 态即计时，符合"建单进入 SLA 计时"）
+  const prio = need.priority === 'urgent' || need.priority === 'normal' ? need.priority : undefined;
+  const sla = setSlaDueAt(need.catalog ?? undefined, prio);
+  await client.query('UPDATE work_orders SET sla_minutes = $1, sla_due_at = $2 WHERE id = $3', [sla.slaMinutes, sla.dueAt, row.id]);
+  // 自动派单：优先按 dispatch_rule 配置匹配；无命中降级 least_load 兜底（保持 M1-M3 已验证行为）
+  const workers = await client.query('SELECT id, skill_tags, load, active FROM worker WHERE tenant_id = $1', [tenantId]);
+  const workerRows = workers.rows.map((w: any) => ({ ...w, skill_tags: safeParseJsonb(w.skill_tags) ?? [] }));
+  const needPayload = { business_type: need.business_type, skill_tags: need.skill_tags ?? undefined, priority: prio };
+  const rules = await getActiveRules(client, tenantId);
+  // ④⑤ 模数共振：读 workflow_def.autoRoutes，决定本租户自动派发的目标态与策略（缺省保持旧行为：落 assigned、规则优先）
+  const def = await getWorkflowDef(client, tenantId, 'work_order');
+  const initial = def.initial;
+  const route = autoRouteFor(def, initial);
+  const dispatchTarget = route?.to ?? 'assigned';
+  const useLeastLoadOnly = route?.strategy === 'least_load';
+  // 派单自适应：加载租户模型（无则默认新模型），用模型评分参与候选排序
+  const modelParams = await client.query<{ params: any }>(
+    'SELECT params FROM model_state WHERE tenant_id = $1 AND model_key = $2',
+    [tenantId, 'dispatch_score'],
+  );
+  const loadedParams = safeParseJsonb(modelParams.rows[0]?.params) ?? undefined;
+  const model: ModelBackend = new StatsModelBackend(loadedParams);
+  const resolved = useLeastLoadOnly ? null : resolveDispatch(workerRows, rules, needPayload, model);
+  const picked = resolved ? resolved.worker : pickWorker(workerRows, { skillTags: need.skill_tags ?? undefined });
+  let autoFlow = false;
+  let assignee: string | null = null;
+  let reason = 'manual claim required';
+  if (picked) {
+    autoFlow = true;
+    assignee = picked.id;
+    reason = resolved ? resolved.reason : 'auto dispatched by least_load fallback';
+    await client.query(
+      'UPDATE work_orders SET status = $1, assignee_id = $2, auto_flow = true, updated_at = now() WHERE id = $3',
+      [dispatchTarget, picked.id, row.id],
+    );
+    await client.query('UPDATE worker SET load = load + 1 WHERE id = $1', [picked.id]);
+    await client.query(
+      `INSERT INTO ticket_event (tenant_id, work_order_id, type, from_status, to_status, actor, payload)
+       VALUES ($1,$2,'assign',$3,$4,'auto_dispatch', $5)`,
+      [tenantId, row.id, initial, dispatchTarget, JSON.stringify({ worker_id: picked.id })],
+    );
+    // ④ 口径对齐：domain_event.type 一律为"结果状态"（与 transition() 一致），自动派单落入 dispatchTarget。
+    await emitDomainEvent(client, { tenantId, entityType: 'work_order', entityId: row.id, type: dispatchTarget, actor: 'auto_dispatch', payload: { worker_id: picked.id } });
+    // A5 派单通知：落库通知被派单人（sms/push 为 stub，诚实未真实发送）
+    await insertNotification(client, {
+      tenantId, recipient: picked.id, type: 'dispatch', workOrderId: row.id,
+      title: '您有一条新工单', body: `工单 ${row.order_no} 已自动派给您`,
+      payload: { order_no: row.order_no, from_status: initial, to_status: dispatchTarget, page: `pages/worker/task-detail/task-detail?id=${row.id}` },
+    });
+  } else {
+    // 滴滴式未命中自动派单：归属抢单大厅（claim_hall），待人员抢单
+    await client.query(
+      'UPDATE work_orders SET status = $1, auto_flow = false, updated_at = now() WHERE id = $2',
+      ['claim_hall', row.id],
+    );
+    await client.query(
+      `INSERT INTO ticket_event (tenant_id, work_order_id, type, from_status, to_status, actor, payload)
+       VALUES ($1,$2,'enter_hall',$3,$3,'system', $4)`,
+      [tenantId, row.id, 'claim_hall', JSON.stringify({ reason: 'no worker auto-matched' })],
+    );
+  }
+  return { autoFlow, assignee, reason, dispatchTarget };
+}
 
 const createSchema = z.object({
   id: z.string().min(1),
@@ -123,81 +201,15 @@ router.post('/open/work_order', async (req, res, next) => {
             dispatchTarget: final?.status ?? 'draft',
           };
         }
-        // P4：建单即起算 SLA（draft 态即计时，符合"建单进入 SLA 计时"）
-        const sla = setSlaDueAt(body.catalog, body.priority);
-      await client.query(
-        'UPDATE work_orders SET sla_minutes = $1, sla_due_at = $2 WHERE id = $3',
-        [sla.slaMinutes, sla.dueAt, row.id],
-      );
-      // 自动派单：优先按 dispatch_rule 配置匹配；无命中降级 least_load 兜底（保持 M1-M3 已验证行为）
-      const workers = await client.query(
-        'SELECT id, skill_tags, load, active FROM worker WHERE tenant_id = $1',
-        [tenantId],
-      );
-      const workerRows = workers.rows.map((w) => ({ ...w, skill_tags: safeParseJsonb(w.skill_tags) ?? [] }));
-      const need = {
+      // 自动派单（共享函数：公开报修路径复用同一逻辑，2026-08-29 抽取）
+      const dispatch = await autoDispatchAfterCreate(client, tenantId, row, {
         business_type: body.business_type,
         skill_tags: body.skill_tags,
         priority: body.priority,
-      };
-      const rules = await getActiveRules(client, tenantId);
-      // ④⑤ 模数共振：读 workflow_def.autoRoutes，决定本租户自动派发的目标态与策略（缺省保持旧行为：落 assigned、规则优先）
-      const def = await getWorkflowDef(client, tenantId, 'work_order');
-      const initial = def.initial;
-      const route = autoRouteFor(def, initial);
-      const dispatchTarget = route?.to ?? 'assigned';
-      const useLeastLoadOnly = route?.strategy === 'least_load';
-      // 派单自适应：加载租户模型（无则默认新模型），用模型评分参与候选排序
-      const modelParams = await client.query<{ params: any }>(
-        'SELECT params FROM model_state WHERE tenant_id = $1 AND model_key = $2',
-        [tenantId, 'dispatch_score'],
-      );
-      const loadedParams = safeParseJsonb(modelParams.rows[0]?.params) ?? undefined;
-      const model: ModelBackend = new StatsModelBackend(loadedParams);
-      const resolved = useLeastLoadOnly ? null : resolveDispatch(workerRows, rules, need, model);
-      const picked = resolved ? resolved.worker : pickWorker(workerRows, { skillTags: body.skill_tags });
-      let autoFlow = false;
-      let assignee: string | null = null;
-      let reason = 'manual claim required';
-      if (picked) {
-        autoFlow = true;
-        assignee = picked.id;
-        reason = resolved ? resolved.reason : 'auto dispatched by least_load fallback';
-        await client.query(
-          'UPDATE work_orders SET status = $1, assignee_id = $2, auto_flow = true, updated_at = now() WHERE id = $3',
-          [dispatchTarget, picked.id, row.id],
-        );
-        await client.query(
-          'UPDATE worker SET load = load + 1 WHERE id = $1',
-          [picked.id],
-        );
-        await client.query(
-          `INSERT INTO ticket_event (tenant_id, work_order_id, type, from_status, to_status, actor, payload)
-           VALUES ($1,$2,'assign',$3,$4,'auto_dispatch', $5)`,
-          [tenantId, row.id, initial, dispatchTarget, JSON.stringify({ worker_id: picked.id })],
-        );
-        // ④ 口径对齐：domain_event.type 一律为"结果状态"（与 transition() 一致），自动派单落入 dispatchTarget。
-        await emitDomainEvent(client, { tenantId, entityType: 'work_order', entityId: row.id, type: dispatchTarget, actor: 'auto_dispatch', payload: { worker_id: picked.id } });
-        // A5 派单通知：落库通知被派单人（sms/push 为 stub，诚实未真实发送）
-        await insertNotification(client, {
-          tenantId, recipient: picked.id, type: 'dispatch', workOrderId: row.id,
-          title: '您有一条新工单', body: `工单 ${row.order_no} 已自动派给您`,
-          payload: { order_no: row.order_no, from_status: initial, to_status: dispatchTarget, page: `pages/worker/task-detail/task-detail?id=${row.id}` },
-        });
-      } else {
-        // 滴滴式未命中自动派单：归属抢单大厅（claim_hall），待人员抢单
-        await client.query(
-          'UPDATE work_orders SET status = $1, auto_flow = false, updated_at = now() WHERE id = $2',
-          ['claim_hall', row.id],
-        );
-        await client.query(
-          `INSERT INTO ticket_event (tenant_id, work_order_id, type, from_status, to_status, actor, payload)
-           VALUES ($1,$2,'enter_hall',$3,$3,'system', $4)`,
-          [tenantId, row.id, 'claim_hall', JSON.stringify({ reason: 'no worker auto-matched' })],
-        );
-      }
+        catalog: body.catalog,
+      });
       const final = await findOne(client, tenantId, row.id);
-      return { final, autoFlow, assignee, reason, created, dispatchTarget };
+      return { final, autoFlow: dispatch.autoFlow, assignee: dispatch.assignee, reason: dispatch.reason, created, dispatchTarget: dispatch.dispatchTarget };
     });
     // P5 Webhook：主事务提交后 fire-and-forget 投递事件（失败不阻断主流程）
     const woId = result.final!.id;
