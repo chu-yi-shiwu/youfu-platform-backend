@@ -86,7 +86,7 @@ export async function autoDispatchAfterCreate(
     await emitDomainEvent(client, { tenantId, entityType: 'work_order', entityId: row.id, type: dispatchTarget, actor: 'auto_dispatch', payload: { worker_id: picked.id } });
     // A5 派单通知：落库通知被派单人（sms/push 为 stub，诚实未真实发送）
     await insertNotification(client, {
-      tenantId, recipient: picked.id, type: 'dispatch', workOrderId: row.id,
+      tenantId, recipient: picked.id, recipientKind: 'worker', type: 'dispatch', workOrderId: row.id,
       title: '您有一条新工单', body: `工单 ${row.order_no} 已自动派给您`,
       payload: { order_no: row.order_no, from_status: initial, to_status: dispatchTarget, page: `pages/worker/task-detail/task-detail?id=${row.id}` },
     });
