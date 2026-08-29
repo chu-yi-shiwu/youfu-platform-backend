@@ -20,10 +20,12 @@ const ENTITY_DEF: Record<string, WorkflowDef> = {
 };
 const ENTITY_RE = /^[a-z][a-z0-9_]*$/;
 
+// 宽松兜底：无内置 def 时返回默认 4 态（DB 有配置则 getWorkflowDefOrDefault 优先 DB，
+// 完全无配置的 entity 也可用默认流程跑——"零配置即可建单"而非报错）。
 function fallbackFor(entityType: string): WorkflowDef {
   const d = ENTITY_DEF[entityType];
-  if (!d) throw new AppError('BAD_REQUEST', `unsupported entity_type: ${entityType}`, 400);
-  return d;
+  if (d) return d;
+  return { initial: 'draft', states: ['draft', 'assigned', 'processing', 'completed'], transitions: [], config: {} };
 }
 
 function authInfo(res: any): { actor: string } {

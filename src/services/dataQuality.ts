@@ -22,10 +22,12 @@ export interface QualityReport {
 const KNOWN_EVENT_TYPES = new Set([
   'create', 'signup', 'checkin', 'checkout', 'approve', 'complete', 'exception',
   'convert', 'submit', 'reply', 'status_change', 'alert', 'resolve', 'assign', 'sla_escalated',
+  'material_consumed', 'asset_fault', 'asset_transfer', 'miss', 'transpond', 'claim',
 ]);
 const KNOWN_ENTITY_TYPES = new Set([
   'work_order', 'volunteer_activity', 'volunteer_record', 'inspection_task',
   'inspection_point', 'feedback', 'monitor_device', 'monitor_alert',
+  'material', 'asset', 'patrol_point', 'patrol_task', 'alert',
 ]);
 
 /** 纯函数：校验单条统一事件总线的事件。 */
@@ -92,31 +94,45 @@ export function assessQuality(
   return { score, total, by_type, note };
 }
 
-/** DB 聚合：读 domain_event + work_orders 评估数据质量。 */
+// 内存保护：domain_event / work_orders 可能规模巨大，全量拉回内存逐行校验有 OOM 风险
+// （与 R18-006 CSV 导出同源）。此处硬上限抽样，超出则诚实标注"抽样估计"，绝不以全量幻觉掩盖。
+const QUALITY_MAX_ROWS = 20000;
+
+/** DB 聚合：读 domain_event + work_orders 评估数据质量。
+ *  为防大租户全表拉回内存导致 OOM，对两类表各取前 QUALITY_MAX_ROWS+1 行（多取 1 行用于判断是否截断），
+ *  超出部分诚实标注"抽样估计"，评分仅供管理端参考，不编造全量口径。 */
 export async function qualityReport(client: PoolClient, tenantId: string): Promise<QualityReport> {
   const ev = await client.query<{
     entity_type: string; entity_id: string | null; type: string;
     created_at: string; payload: unknown;
   }>(
     `SELECT entity_type, entity_id, type, created_at, payload
-     FROM domain_event WHERE tenant_id = $1`,
-    [tenantId],
+     FROM domain_event WHERE tenant_id = $1 LIMIT $2`,
+    [tenantId, QUALITY_MAX_ROWS + 1],
   );
+  const evTruncated = ev.rows.length > QUALITY_MAX_ROWS;
+  const evRows = ev.rows.slice(0, QUALITY_MAX_ROWS);
   const wo = await client.query<{
     id: string; business_type: string | null; sla_due_at: string | null; created_at: string;
   }>(
-    `SELECT id, business_type, sla_due_at, created_at FROM work_orders WHERE tenant_id = $1`,
-    [tenantId],
+    `SELECT id, business_type, sla_due_at, created_at FROM work_orders WHERE tenant_id = $1 LIMIT $2`,
+    [tenantId, QUALITY_MAX_ROWS + 1],
   );
-  return assessQuality(
-    ev.rows.map((r) => ({
+  const woTruncated = wo.rows.length > QUALITY_MAX_ROWS;
+  const woRows = wo.rows.slice(0, QUALITY_MAX_ROWS);
+  const report = assessQuality(
+    evRows.map((r) => ({
       entity_type: r.entity_type, entity_id: r.entity_id, type: r.type,
       created_at: r.created_at, payload: r.payload,
     })),
-    wo.rows.map((r) => ({
+    woRows.map((r) => ({
       id: r.id, business_type: r.business_type, sla_due_at: r.sla_due_at, created_at: r.created_at,
     })),
   );
+  if (report.total > 0 && (evTruncated || woTruncated)) {
+    report.note = `数据量较大，已对前 ${QUALITY_MAX_ROWS} 行抽样评估（事件截断=${evTruncated}，工单截断=${woTruncated}）；评分为抽样估计值，仅供参考`;
+  }
+  return report;
 }
 
 // ============ D3 · 录入端质量闸门（S4 前置，回应⑤模数共振） ============

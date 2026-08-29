@@ -5,11 +5,27 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { withTenantClient } from '../db/pool.js';
 import { AppError } from '../middleware/error.js';
-import { requireConfigRole } from '../middleware/role.js';
+import { requireConfigRole, requireAssigneeOrConfig } from '../middleware/role.js';
 import { emitDomainEvent } from '../db/eventBus.js';
 import { getWorkflowDefOrDefault } from '../engine/workflowDef.js';
 import { applyEvent, availableTransitions } from '../engine/stateMachine.js';
 import { TRANSPORT_DEF } from '../engine/themes.js';
+
+/**
+ * F-A2 纵深防御（三轮 QA 第一轮修复）：仅允许已知列名进入 UPDATE 的列名插值位，
+ * 防止任何调用方误将用户输入当作列名插值进 SQL 导致注入。
+ * parameterized：值走 $N 参数化；nowCols：写 now() 字面量（仅限白名单内的时间列）。
+ */
+export const ALLOWED_EXTRA_COLS = new Set(['depart_at', 'carrier', 'arrive_at', 'sign_at']);
+export function filterTransportExtraCols(extra: Record<string, unknown>): {
+  parameterized: string[];
+  nowCols: string[];
+} {
+  const extraKeys = Object.keys(extra).filter((k) => ALLOWED_EXTRA_COLS.has(k));
+  const parameterized = extraKeys.filter((k) => extra[k] !== 'now()');
+  const nowCols = extraKeys.filter((k) => extra[k] === 'now()');
+  return { parameterized, nowCols };
+}
 
 async function transitionOrder(
   client: any,
@@ -17,7 +33,8 @@ async function transitionOrder(
   orderId: string,
   event: string,
   extra: Record<string, unknown> = {},
-  track: { loc?: string; note?: string; lat?: number; lng?: number } = {},
+  track: { loc?: string; note?: string; lat?: number; lng?: number; photo?: string } = {},
+  actor = 'config_role',
 ): Promise<any> {
   const cur = await client.query(`SELECT * FROM transport_order WHERE id = $1 AND tenant_id = $2`, [orderId, tenantId]);
   if (cur.rowCount === 0) throw new AppError('NOT_FOUND', 'order not found', 404);
@@ -27,12 +44,11 @@ async function transitionOrder(
   if (!target) {
     throw new AppError('BAD_STATE', `illegal transition ${t.status} --${event}-->`, 422);
   }
-  const extraKeys = Object.keys(extra);
-  const filteredKeys = extraKeys.filter((k) => extra[k] !== 'now()');
+  const { parameterized: filteredKeys, nowCols } = filterTransportExtraCols(extra);
   const assigns = [
     'status = $3',
     ...filteredKeys.map((k, idx) => `${k} = $${4 + idx}`),
-    ...extraKeys.filter((k) => extra[k] === 'now()').map((k) => `${k} = now()`),
+    ...nowCols.map((k) => `${k} = now()`),
   ];
   const values = [orderId, tenantId, target, ...filteredKeys.map((k) => extra[k])];
   const r = await client.query(
@@ -40,13 +56,13 @@ async function transitionOrder(
     values,
   );
   const row = r.rows[0];
-  // 轨迹点：每次流转留痕
+  // 轨迹点：每次流转留痕（含取件/签收照片凭证）
   await client.query(
-    `INSERT INTO transport_track_point (tenant_id, order_id, event, loc, note, lat, lng)
-     VALUES ($1,$2,$3,$4,$5,$6,$7)`,
-    [tenantId, orderId, event, track.loc ?? null, track.note ?? null, track.lat ?? null, track.lng ?? null],
+    `INSERT INTO transport_track_point (tenant_id, order_id, event, loc, note, lat, lng, photo)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+    [tenantId, orderId, event, track.loc ?? null, track.note ?? null, track.lat ?? null, track.lng ?? null, track.photo ?? null],
   );
-  await emitDomainEvent(client, { tenantId, entityType: 'transport_order', entityId: orderId, type: event, actor: 'config_role' });
+  await emitDomainEvent(client, { tenantId, entityType: 'transport_order', entityId: orderId, type: event, actor });
   return row;
 }
 
@@ -68,17 +84,18 @@ const orderSchema = z.object({
 router.get('/orders', async (req, res, next) => {
   try {
     const tenantId = res.locals.auth.tenantId;
-    const { status, priority, item_category, order_type } = req.query as Record<string, string>;
+    const { status, priority, item_category, order_type, carrier } = req.query as Record<string, string>;
     const clauses = ['tenant_id = $1'];
     const params: unknown[] = [tenantId];
     const add = (sql: string, v: unknown) => {
       params.push(v);
-      clauses.push(sql.replace('?', `$${params.length}`));
+      clauses.push(sql.replace(/\?/g, `$${params.length}`));
     };
     if (status) add('status = ?', status);
     if (priority) add('priority = ?', priority);
     if (item_category) add('item_category = ?', item_category);
     if (order_type) add('order_type = ?', order_type);
+    if (carrier) add('carrier = ?', carrier); // #583：worker 工作台按归属拉自己的运送单
     const items = await withTenantClient(tenantId, async (client) => {
       const rows = await client
         .query(
@@ -150,7 +167,7 @@ router.post('/orders', async (req, res, next) => {
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'pending') RETURNING *`,
         [
           tenantId,
-          `T${Date.now()}`,
+          `T${Date.now()}${Math.random().toString(36).slice(2, 8)}`,
           b.item_name,
           b.from_loc ?? null,
           b.to_loc ?? null,
@@ -175,18 +192,19 @@ router.post('/orders', async (req, res, next) => {
 // 手动追加轨迹点（在途汇报/中转备注）
 router.post('/orders/:id/tracks', async (req, res, next) => {
   try {
-    requireConfigRole(req, res);
     const tenantId = res.locals.auth.tenantId;
-    const b = z.object({ event: z.string().min(1), loc: z.string().optional(), note: z.string().optional(), lat: z.number().optional(), lng: z.number().optional() }).parse(req.body);
+    const b = z.object({ event: z.string().min(1), loc: z.string().optional(), note: z.string().optional(), lat: z.number().optional(), lng: z.number().optional(), photo: z.string().optional() }).parse(req.body);
     const point = await withTenantClient(tenantId, async (client) => {
-      const cur = await client.query(`SELECT id FROM transport_order WHERE id=$1 AND tenant_id=$2`, [req.params.id, tenantId]);
+      const cur = await client.query(`SELECT id, carrier FROM transport_order WHERE id=$1 AND tenant_id=$2`, [req.params.id, tenantId]);
       if (cur.rowCount === 0) throw new AppError('NOT_FOUND', 'order not found', 404);
+      // #583 归属守卫：worker 仅可为自己的运送单上报轨迹
+      await requireAssigneeOrConfig(client, res.locals.auth, cur.rows[0].carrier, 'transport order');
       const r = await client.query(
-        `INSERT INTO transport_track_point (tenant_id, order_id, event, loc, note, lat, lng)
-         VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *`,
-        [tenantId, req.params.id, b.event, b.loc ?? null, b.note ?? null, b.lat ?? null, b.lng ?? null],
+        `INSERT INTO transport_track_point (tenant_id, order_id, event, loc, note, lat, lng, photo)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
+        [tenantId, req.params.id, b.event, b.loc ?? null, b.note ?? null, b.lat ?? null, b.lng ?? null, b.photo ?? null],
       );
-      await emitDomainEvent(client, { tenantId, entityType: 'transport_order', entityId: req.params.id, type: 'track', actor: 'config_role', payload: { event: b.event } });
+      await emitDomainEvent(client, { tenantId, entityType: 'transport_order', entityId: req.params.id, type: 'track', actor: res.locals.auth.userId ?? 'config_role', payload: { event: b.event } });
       return r.rows[0];
     });
     return res.status(201).json({ ok: true, code: 0, item: point });
@@ -198,16 +216,16 @@ router.post('/orders/:id/tracks', async (req, res, next) => {
 // 流转：派单/取件/送达签收/异常/取消（引擎校验 + 写库 + 轨迹点）
 router.post('/orders/:id/transition', async (req, res, next) => {
   try {
-    requireConfigRole(req, res);
     const tenantId = res.locals.auth.tenantId;
     const { event, ...fields } = req.body as { event: string; [k: string]: unknown };
     if (!event || typeof event !== 'string') throw new AppError('BAD_REQUEST', 'event is required', 400);
     const extra: Record<string, unknown> = {};
-    const track: { loc?: string; note?: string; lat?: number; lng?: number } = {};
+    const track: { loc?: string; note?: string; lat?: number; lng?: number; photo?: string } = {};
     if (fields.loc) track.loc = String(fields.loc);
     if (fields.note) track.note = String(fields.note);
     if (fields.lat != null) track.lat = Number(fields.lat);
     if (fields.lng != null) track.lng = Number(fields.lng);
+    if (fields.photo) track.photo = String(fields.photo); // 取件/签收照片凭证（防造假）
     if (event === 'dispatch') {
       extra.depart_at = 'now()';
       if (fields.carrier) extra.carrier = String(fields.carrier);
@@ -216,9 +234,13 @@ router.post('/orders/:id/transition', async (req, res, next) => {
       extra.arrive_at = 'now()';
       extra.sign_at = 'now()';
     }
-    const item = await withTenantClient(tenantId, (client) =>
-      transitionOrder(client, tenantId, req.params.id, event, extra, track),
-    );
+    const item = await withTenantClient(tenantId, async (client) => {
+      // #583 归属守卫：worker 仅可流转自己的运送单
+      const cur = await client.query(`SELECT id, carrier FROM transport_order WHERE id=$1 AND tenant_id=$2`, [req.params.id, tenantId]);
+      if (cur.rowCount === 0) throw new AppError('NOT_FOUND', 'order not found', 404);
+      await requireAssigneeOrConfig(client, res.locals.auth, cur.rows[0].carrier, 'transport order');
+      return transitionOrder(client, tenantId, req.params.id, event, extra, track, res.locals.auth.userId ?? 'config_role');
+    });
     return res.json({ ok: true, code: 0, item });
   } catch (e) {
     next(e);

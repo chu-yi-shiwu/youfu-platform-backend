@@ -29,7 +29,7 @@ router.get('/product-catalog', async (req, res, next) => {
     const params: unknown[] = [tenantId];
     const add = (sql: string, v: unknown) => {
       params.push(v);
-      clauses.push(sql.replace('?', `$${params.length}`));
+      clauses.push(sql.replace(/\?/g, `$${params.length}`));
     };
     if (code) add('code ILIKE ?', `%${code}%`);
     if (name) add('name ILIKE ?', `%${name}%`);

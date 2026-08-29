@@ -118,6 +118,9 @@ router.post('/records/:id/checkin', async (req, res, next) => {
         tenantId,
       ]);
       if (cur.rowCount === 0) throw new AppError('NOT_FOUND', 'record not found', 404);
+      if (cur.rows[0].status !== 'registered' && cur.rows[0].status !== 'serving') {
+        throw new AppError('BAD_STATE', '只能对已报名/服务中的记录签到', 409);
+      }
       const r = await client.query(
         `UPDATE volunteer_record SET status = 'checked_in', check_in_at = now() WHERE id = $1 AND tenant_id = $2 RETURNING *`,
         [req.params.id, tenantId],
@@ -144,6 +147,7 @@ router.post('/records/:id/checkout', async (req, res, next) => {
       if (cur.rowCount === 0) throw new AppError('NOT_FOUND', 'record not found', 404);
       const rec = cur.rows[0];
       if (!rec.check_in_at) throw new AppError('BAD_STATE', 'must check in before checkout', 409);
+      if (rec.status !== 'checked_in') throw new AppError('BAD_STATE', '仅 checked_in 状态可签退', 409);
       const { duration_min, points } = computeCheckout(rec.check_in_at, new Date());
       const r = await client.query(
         `UPDATE volunteer_record SET status = 'checked_out', check_out_at = now(), duration_min = $3, points = $4 WHERE id = $1 AND tenant_id = $2 RETURNING *`,

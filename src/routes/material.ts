@@ -8,6 +8,8 @@ import { withTenantClient } from '../db/pool.js';
 import { AppError } from '../middleware/error.js';
 import { requireConfigRole } from '../middleware/role.js';
 import { applyStockAction } from '../services/inventory.js';
+import { emitDomainEvent } from '../db/eventBus.js';
+import { parseCsv, csvEscape } from '../services/csvUtil.js';
 
 const router = Router();
 
@@ -31,7 +33,7 @@ router.get('/materials', async (req, res, next) => {
     const params: unknown[] = [tenantId];
     const add = (sql: string, v: unknown) => {
       params.push(v);
-      clauses.push(sql.replace('?', `$${params.length}`));
+      clauses.push(sql.replace(/\?/g, `$${params.length}`));
     };
     if (code) add('code ILIKE ?', `%${code}%`);
     if (name) add('name ILIKE ?', `%${name}%`);
@@ -116,6 +118,8 @@ const stockSchema = z.object({
   qty: z.number().int().positive(),
   ref_no: z.string().optional(),
   note: z.string().optional(),
+  // 物料×工单 关联（工单维修领料）：order_no → 服务端解析为 work_order_id（校验租户）
+  work_order_no: z.string().optional(),
 });
 
 router.get('/inventory', async (req, res, next) => {
@@ -126,7 +130,7 @@ router.get('/inventory', async (req, res, next) => {
     const params: unknown[] = [tenantId];
     const add = (sql: string, v: unknown) => {
       params.push(v);
-      clauses.push(sql.replace('?', `$${params.length}`));
+      clauses.push(sql.replace(/\?/g, `$${params.length}`));
     };
     if (material_id) add('material_id = ?', material_id);
     if (warehouse) add('warehouse = ?', warehouse);
@@ -152,25 +156,18 @@ router.post('/inventory/in', async (req, res, next) => {
       const mat = await client.query(`SELECT id FROM material WHERE id=$1 AND tenant_id=$2`, [b.material_id, tenantId]);
       if (mat.rowCount === 0) throw new AppError('NOT_FOUND', 'material not found', 404);
       const wh = b.warehouse ?? '中心库';
-      const lock = await client.query(
-        `SELECT qty FROM inventory WHERE tenant_id=$1 AND material_id=$2 AND warehouse=$3 FOR UPDATE`,
-        [tenantId, b.material_id, wh],
+      // R23-001 修复：并发首存入库竞态——SELECT ... FOR UPDATE 不会锁「不存在的行」，
+      // 两个并发首存会对同一 (tenant_id,material_id,warehouse) 各 INSERT 一条 → 重复台账行 / 库存翻倍。
+      // 改用唯一约束 + ON CONFLICT DO UPDATE 原子 upsert（依赖 061_inventory_unique.sql 的唯一约束）。
+      const ups = await client.query(
+        `INSERT INTO inventory (tenant_id, material_id, warehouse, qty, updated_at)
+         VALUES ($1,$2,$3,$4,now())
+         ON CONFLICT (tenant_id, material_id, warehouse)
+         DO UPDATE SET qty = inventory.qty + EXCLUDED.qty, updated_at = now()
+         RETURNING qty`,
+        [tenantId, b.material_id, wh, b.qty],
       );
-      let nextQty: number;
-      if (lock.rowCount === 0) {
-        nextQty = applyStockAction(0, { type: 'in', qty: b.qty }).next;
-        await client.query(
-          `INSERT INTO inventory (tenant_id, material_id, warehouse, qty, updated_at) VALUES ($1,$2,$3,$4, now())`,
-          [tenantId, b.material_id, wh, nextQty],
-        );
-      } else {
-        const calc = applyStockAction(Number(lock.rows[0].qty), { type: 'in', qty: b.qty });
-        nextQty = calc.next;
-        await client.query(
-          `UPDATE inventory SET qty=$3, updated_at=now() WHERE tenant_id=$1 AND material_id=$2 AND warehouse=$4`,
-          [tenantId, b.material_id, nextQty, wh],
-        );
-      }
+      const nextQty = Number(ups.rows[0].qty);
       await client.query(
         `INSERT INTO inventory_log (tenant_id, material_id, type, qty, ref_no, note, created_by)
          VALUES ($1,$2,'in',$3,$4,$5,$6)`,
@@ -193,6 +190,12 @@ router.post('/inventory/out', async (req, res, next) => {
     const result = await withTenantClient(tenantId, async (client) => {
       const mat = await client.query(`SELECT id FROM material WHERE id=$1 AND tenant_id=$2`, [b.material_id, tenantId]);
       if (mat.rowCount === 0) throw new AppError('NOT_FOUND', 'material not found', 404);
+      // 物料×工单 关联：order_no → work_order_id（校验租户；不存在则忽略，不阻断出库）
+      let woId: string | null = null;
+      if (b.work_order_no) {
+        const wo = await client.query('SELECT id FROM work_orders WHERE tenant_id=$1 AND order_no=$2 LIMIT 1', [tenantId, b.work_order_no.trim()]);
+        if (wo.rows.length > 0) woId = wo.rows[0].id;
+      }
       const wh = b.warehouse ?? '中心库';
       const lock = await client.query(
         `SELECT qty FROM inventory WHERE tenant_id=$1 AND material_id=$2 AND warehouse=$3 FOR UPDATE`,
@@ -206,10 +209,12 @@ router.post('/inventory/out', async (req, res, next) => {
         [tenantId, b.material_id, calc.next, wh],
       );
       await client.query(
-        `INSERT INTO inventory_log (tenant_id, material_id, type, qty, ref_no, note, created_by)
-         VALUES ($1,$2,'out',$3,$4,$5,$6)`,
-        [tenantId, b.material_id, b.qty, b.ref_no ?? null, b.note ?? null, who],
+        `INSERT INTO inventory_log (tenant_id, material_id, type, qty, ref_no, note, created_by, work_order_id)
+         VALUES ($1,$2,'out',$3,$4,$5,$6,$7)`,
+        [tenantId, b.material_id, b.qty, b.ref_no ?? null, b.note ?? null, who, woId],
       );
+      // P0 飞轮：材料领料/换件事件（挂工单 id，供工单上下文特征与归因）
+      await emitDomainEvent(client, { tenantId, entityType: 'material', entityId: b.material_id, type: 'material_consumed', actor: who, payload: { qty: b.qty, ref_no: b.ref_no ?? null, warehouse: wh, work_order_id: woId } });
       return { qty: calc.next };
     });
     return res.json({ ok: true, code: 0, result });
@@ -226,7 +231,7 @@ router.get('/inventory/logs', async (req, res, next) => {
     const params: unknown[] = [tenantId];
     const add = (sql: string, v: unknown) => {
       params.push(v);
-      clauses.push(sql.replace('?', `$${params.length}`));
+      clauses.push(sql.replace(/\?/g, `$${params.length}`));
     };
     if (material_id) add('material_id = ?', material_id);
     if (type) add('type = ?', type);
@@ -243,41 +248,14 @@ router.get('/inventory/logs', async (req, res, next) => {
 
 // ============ 耗材 CSV 导出 / 导入 ============
 const MAT_CSV_COLS = ['code', 'name', 'category', 'spec', 'unit', 'price', 'doc'];
-function parseCsv(text: string): string[][] {
-  const rows: string[][] = [];
-  let row: string[] = [];
-  let field = '';
-  let inQuotes = false;
-  for (let i = 0; i < text.length; i++) {
-    const c = text[i];
-    if (inQuotes) {
-      if (c === '"') {
-        if (text[i + 1] === '"') { field += '"'; i++; } else { inQuotes = false; }
-      } else field += c;
-    } else if (c === '"') inQuotes = true;
-    else if (c === ',') { row.push(field); field = ''; }
-    else if (c === '\n' || c === '\r') {
-      if (c === '\r' && text[i + 1] === '\n') i++;
-      row.push(field); rows.push(row); row = []; field = '';
-    } else field += c;
-  }
-  if (field.length > 0 || row.length > 0) { row.push(field); rows.push(row); }
-  return rows.filter((r) => r.length > 1 || (r.length === 1 && r[0] !== ''));
-}
-
 router.get('/materials/export', async (req, res, next) => {
   try {
     const tenantId = res.locals.auth.tenantId;
     const items = await withTenantClient(tenantId, (client) =>
       client.query(`SELECT * FROM material WHERE tenant_id=$1 ORDER BY created_at DESC`, [tenantId]).then((r) => r.rows),
     );
-    const escape = (v: unknown) => {
-      if (v === null || v === undefined) return '';
-      const s = String(v);
-      return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-    };
     const lines = [MAT_CSV_COLS.join(',')];
-    for (const row of items) lines.push(MAT_CSV_COLS.map((h) => escape(row[h])).join(','));
+    for (const row of items) lines.push(MAT_CSV_COLS.map((h) => csvEscape(row[h])).join(','));
     const csv = '﻿' + lines.join('\r\n');
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
     res.setHeader('Content-Disposition', 'attachment; filename="material.csv"');

@@ -1,0 +1,264 @@
+
+[1m[7m[36m RUN [39m[27m[22m [36mv2.1.9 [39m[90mD:/WorkBuddy/outputs/youfu_backend_dev_v2[39m
+
+ [32m✓[39m src/test/learnGuard.test.ts[2m > [22m结构性幂等守卫（ticket_learn_log）[2m > [22m首次命中触发态：INSERT rowCount=1 → 调用 incrementalLearn
+ [32m✓[39m src/test/learnGuard.test.ts[2m > [22m结构性幂等守卫（ticket_learn_log）[2m > [22m重复命中触发态：INSERT rowCount=0（唯一键冲突）→ 被拦截，不调用 incrementalLearn
+ [32m✓[39m src/test/learnGuard.test.ts[2m > [22m结构性幂等守卫（ticket_learn_log）[2m > [22mshouldTriggerLearning 判定为假时直接不学（不插入、不调用）
+ [32m✓[39m src/test/sla.test.ts[2m > [22msla.resoleSlaMinutes[2m > [22m电工紧急=30 一般=240
+ [32m✓[39m src/test/sla.test.ts[2m > [22msla.resoleSlaMinutes[2m > [22m标本紧急=15
+ [32m✓[39m src/test/sla.test.ts[2m > [22msla.resoleSlaMinutes[2m > [22m未知目录兜底一般维修 240
+ [32m✓[39m src/test/sla.test.ts[2m > [22msla.setSlaDueAt[2m > [22m截止 = now + 时限分钟
+ [32m✓[39m src/test/sla.test.ts[2m > [22msla.slaScan[2m > [22m已到期未升级且活跃 → 命中
+ [32m✓[39m src/test/sla.test.ts[2m > [22msla.slaScan[2m > [22m未到期 → 不命中
+ [32m✓[39m src/test/sla.test.ts[2m > [22msla.slaScan[2m > [22m已升级 → 不重复命中
+ [32m✓[39m src/test/sla.test.ts[2m > [22msla.slaScan[2m > [22mcompleted 态不计时 → 不命中
+ [32m✓[39m src/test/sla.test.ts[2m > [22msla.slaScan[2m > [22m无 sla_due_at（claim_hall 兜底）→ 不命中
+ [32m✓[39m src/test/intakeEnrich.test.ts[2m > [22mmatchCategoryHint[2m > [22m命中空调关键词
+ [32m✓[39m src/test/intakeEnrich.test.ts[2m > [22mmatchCategoryHint[2m > [22m命中网络关键词（大小写不敏感）
+ [32m✓[39m src/test/intakeEnrich.test.ts[2m > [22mmatchCategoryHint[2m > [22m无命中返回 undefined
+ [32m✓[39m src/test/intakeEnrich.test.ts[2m > [22minferPriority[2m > [22m漏水 → 紧急
+ [32m✓[39m src/test/intakeEnrich.test.ts[2m > [22minferPriority[2m > [22m断电 → 紧急
+ [32m✓[39m src/test/intakeEnrich.test.ts[2m > [22minferPriority[2m > [22m普通描述 → 普通
+ [32m✓[39m src/test/intakeEnrich.test.ts[2m > [22mresolveFaultCategory[2m > [22m精确匹配分类名
+ [32m✓[39m src/test/intakeEnrich.test.ts[2m > [22mresolveFaultCategory[2m > [22mtoken 语义优先：描述含分类 token（空调）→ 归该分类
+ [32m✓[39m src/test/intakeEnrich.test.ts[2m > [22mresolveFaultCategory[2m > [22m无分类 token 命中时走词表 hint 兜底
+ [32m✓[39m src/test/intakeEnrich.test.ts[2m > [22mresolveFaultCategory[2m > [22m无匹配返回 null
+ [32m✓[39m src/test/intakeEnrich.test.ts[2m > [22mresolveAsset[2m > [22m命中资产名 → 返回资产
+ [32m✓[39m src/test/intakeEnrich.test.ts[2m > [22mresolveAsset[2m > [22m无 hint 关键词 → 不查库返回 null
+ [32m✓[39m src/test/stateMachineHttp.test.ts[2m > [22m状态机合法顺序[2m > [22m相邻步骤均合法
+ [32m✓[39m src/test/stateMachineHttp.test.ts[2m > [22m状态机合法顺序[2m > [22mcompleted 无后续
+ [32m✓[39m src/test/stateMachineHttp.test.ts[2m > [22mRICH 模板复核分支（pending_review）[2m > [22mprocessing 可提交复核 submit_review → pending_review
+ [32m✓[39m src/test/stateMachineHttp.test.ts[2m > [22mRICH 模板复核分支（pending_review）[2m > [22mpending_review 可 approve → review_passed（admin/reviewer）
+ [32m✓[39m src/test/stateMachineHttp.test.ts[2m > [22mRICH 模板复核分支（pending_review）[2m > [22mpending_review 可 reject → processing（退回重做）
+ [32m✓[39m src/test/stateMachineHttp.test.ts[2m > [22mRICH 模板复核分支（pending_review）[2m > [22mreview_passed 可 complete → completed（复核通过后闭环）
+ [32m✓[39m src/test/stateMachineHttp.test.ts[2m > [22mRICH 模板复核分支（pending_review）[2m > [22mpending_review 不允许跳 completed（必须经 review_passed）
+ [32m✓[39m src/test/stateMachineHttp.test.ts[2m > [22mRICH 模板复核分支（pending_review）[2m > [22mapprove/reject 的角色门禁仅 admin+reviewer
+ [32m✓[39m src/test/stateMachineHttp.test.ts[2m > [22m非法跳步拦截（P6 红线：绝不跳步闭环）[2m > [22mdraft 不能直接到 completed
+ [32m✓[39m src/test/stateMachineHttp.test.ts[2m > [22m非法跳步拦截（P6 红线：绝不跳步闭环）[2m > [22mdraft 不能直接到 processing（必须先进 assigned）
+ [32m✓[39m src/test/stateMachineHttp.test.ts[2m > [22m非法跳步拦截（P6 红线：绝不跳步闭环）[2m > [22massigned 不能直接到 completed（必须先进 processing）
+ [32m✓[39m src/test/stateMachineHttp.test.ts[2m > [22m非法跳步拦截（P6 红线：绝不跳步闭环）[2m > [22mprocessing 才能到 completed
+ [32m✓[39m src/test/stateMachineHttp.test.ts[2m > [22m非法跳步拦截（P6 红线：绝不跳步闭环）[2m > [22mnextStates 提示下一步
+ [32m✓[39m src/test/stateMachine.test.ts[2m > [22mstateMachine (可配置引擎)[2m > [22m默认 work_order 合法跳转
+ [32m✓[39m src/test/stateMachine.test.ts[2m > [22mstateMachine (可配置引擎)[2m > [22m非法跳转被拒绝
+ [32m✓[39m src/test/stateMachine.test.ts[2m > [22mstateMachine (可配置引擎)[2m > [22mnextStates 给出下一步
+ [32m✓[39m src/test/stateMachine.test.ts[2m > [22m④⑤ per-def 模数共振（learningTriggers / autoRoutes 真正生效）[2m > [22mlearningTriggerStates：未声明时回退 doneStates（向后兼容）
+ [32m✓[39m src/test/stateMachine.test.ts[2m > [22m④⑤ per-def 模数共振（learningTriggers / autoRoutes 真正生效）[2m > [22mlearningTriggerStates：声明后按 def 控制，且过滤不在 states 的非法态
+ [32m✓[39m src/test/stateMachine.test.ts[2m > [22m④⑤ per-def 模数共振（learningTriggers / autoRoutes 真正生效）[2m > [22mRICH 模板的 learningTriggers 已真实声明（completed/review_passed）
+ [32m✓[39m src/test/stateMachine.test.ts[2m > [22m④⑤ per-def 模数共振（learningTriggers / autoRoutes 真正生效）[2m > [22mautoRouteFor：合法声明返回目标态与策略
+ [32m✓[39m src/test/stateMachine.test.ts[2m > [22m④⑤ per-def 模数共振（learningTriggers / autoRoutes 真正生效）[2m > [22mautoRouteFor：目标态不在 states 视为无效（返回 null），防止坏配置污染派发
+ [32m✓[39m src/test/stateMachine.test.ts[2m > [22m④⑤ per-def 模数共振（learningTriggers / autoRoutes 真正生效）[2m > [22mshouldTriggerLearning：首次踏入触发态触发，已在触发态则不重复触发
+ [32m✓[39m src/test/stateMachine.test.ts[2m > [22m④⑤ per-def 模数共振（learningTriggers / autoRoutes 真正生效）[2m > [22mautoRouteFor：未声明返回 null
+ [32m✓[39m src/test/stateMachine.test.ts[2m > [22m④⑤ per-def 模数共振（learningTriggers / autoRoutes 真正生效）[2m > [22mautoRouteStates：仅列出合法 autoRoute 的初态
+ [32m✓[39m src/test/stateMachine.test.ts[2m > [22m④⑤ per-def 模数共振（learningTriggers / autoRoutes 真正生效）[2m > [22mautoRoutes 缺省时 autoRouteStates 为空（创建派发保持旧行为）
+ [32m✓[39m src/test/dispatchRecommend.test.ts[2m > [22mdispatchRecommend.hasSkill（技能匹配）[2m > [22m分类名包含技能标签 → 命中
+ [32m✓[39m src/test/dispatchRecommend.test.ts[2m > [22mdispatchRecommend.hasSkill（技能匹配）[2m > [22m分类码与英文标签匹配（大小写不敏感）
+ [32m✓[39m src/test/dispatchRecommend.test.ts[2m > [22mdispatchRecommend.hasSkill（技能匹配）[2m > [22m标签过短不误匹配（<2 字符）
+ [32m✓[39m src/test/dispatchRecommend.test.ts[2m > [22mdispatchRecommend.hasSkill（技能匹配）[2m > [22m无标签 / 空分类 → 不命中
+ [32m✓[39m src/test/dispatchRecommend.test.ts[2m > [22mdispatchRecommend.buildRecommend（评分排序）[2m > [22m技能命中优先于负载（命中 60+ 分 > 未命中 40- 分）
+ [32m✓[39m src/test/dispatchRecommend.test.ts[2m > [22mdispatchRecommend.buildRecommend（评分排序）[2m > [22m未命中时负载低优先（负载 0 > 负载 2）
+ [32m✓[39m src/test/dispatchRecommend.test.ts[2m > [22mdispatchRecommend.buildRecommend（评分排序）[2m > [22mlimit 截断生效
+ [32m✓[39m src/test/dispatchRecommend.test.ts[2m > [22mdispatchRecommend.buildRecommend（评分排序）[2m > [22m空列表返回空
+ [32m✓[39m src/test/dataQuality.test.ts[2m > [22mvalidateEvent[2m > [22m干净事件无问题
+ [32m✓[39m src/test/dataQuality.test.ts[2m > [22mvalidateEvent[2m > [22m缺失 entity_id / 未知类型 / 未来时间戳 触发问题
+ [32m✓[39m src/test/dataQuality.test.ts[2m > [22mvalidateOrder[2m > [22m缺失 business_type 触发问题（模型维度缺失，正是 n3 要封死的）
+ [32m✓[39m src/test/dataQuality.test.ts[2m > [22mvalidateOrder[2m > [22mSLA 早于创建时间触发问题
+ [32m✓[39m src/test/dataQuality.test.ts[2m > [22massessQuality[2m > [22m全干净数据评分 1.0
+ [32m✓[39m src/test/dataQuality.test.ts[2m > [22massessQuality[2m > [22m无数据返回 1.0 + note 不编造
+ [32m✓[39m src/test/dataQuality.test.ts[2m > [22massessQuality[2m > [22m问题计入 by_type 且评分<1
+ [32m✓[39m src/test/dataQuality.test.ts[2m > [22massessQuality[2m > [22m单实体多问题不会让评分变负值（钳制到 [0,1]）
+ [32m✓[39m src/test/dataQuality.test.ts[2m > [22massessQuality[2m > [22m格式不可解析的日期被标记（不再静默放过）
+ [32m✓[39m src/test/dispatch.config.test.ts[2m > [22mdispatch matchRule (snake_case 契约)[2m > [22mbusiness_type 命中
+ [32m✓[39m src/test/dispatch.config.test.ts[2m > [22mdispatch matchRule (snake_case 契约)[2m > [22mbusiness_type 不命中
+ [32m✓[39m src/test/dispatch.config.test.ts[2m > [22mdispatch matchRule (snake_case 契约)[2m > [22mskill_tags 全包含才命中（AND）
+ [32m✓[39m src/test/dispatch.config.test.ts[2m > [22mdispatch matchRule (snake_case 契约)[2m > [22mpriority 维度
+ [32m✓[39m src/test/dispatch.config.test.ts[2m > [22mdispatch matchRule (snake_case 契约)[2m > [22m未填维度视为通配
+ [32m✓[39m src/test/dispatch.config.test.ts[2m > [22mdispatch resolveDispatch (snake_case)[2m > [22m按规则命中并选人，reason 含规则名
+ [32m✓[39m src/test/dispatch.config.test.ts[2m > [22mdispatch resolveDispatch (snake_case)[2m > [22m无规则命中返回 null（上层降级 pickWorker）
+ [32m✓[39m src/test/dispatch.config.test.ts[2m > [22mdispatch resolveDispatch (snake_case)[2m > [22m高优先级规则优先被尝试
+ [32m✓[39m src/test/dispatch.config.test.ts[2m > [22mdispatch resolveDispatch (snake_case)[2m > [22m规则命中但策略无可派工人时返回 null（不误派到无关工人）
+ [32m✓[39m src/test/dispatch.config.test.ts[2m > [22mgetActiveRules DB 形状 → 引擎（真实链路契约）[2m > [22m读出后 matchRule 能正确按 business_type + skill_tags 匹配
+ [32m✓[39m src/test/dispatch.config.test.ts[2m > [22mgetActiveRules DB 形状 → 引擎（真实链路契约）[2m > [22m读出后 business_type 不匹配则降级（不命中）
+[90mstdout[2m | src/services/notify.test.ts[2m > [22m[2mnotify 诚实边界 + 路由[2m > [22m[2msms 未配置网关：诚实 stub（delivered=false，note 含 STUB）
+[22m[39m[notify:sms] stub (NOT actually sent, pending gateway) { type: [32m'dispatch'[39m, recipient: [32m'worker_1'[39m, workOrderId: [32m'wo_1'[39m }
+
+ [32m✓[39m src/test/auth.test.ts[2m > [22mauthMiddleware · dev mode（默认，维持 M1 行为）[2m > [22m放行：有 Authorization + X-Tenant-Id
+ [32m✓[39m src/test/auth.test.ts[2m > [22mauthMiddleware · dev mode（默认，维持 M1 行为）[2m > [22m401 AUTH_001：缺 Authorization
+ [32m✓[39m src/test/auth.test.ts[2m > [22mauthMiddleware · dev mode（默认，维持 M1 行为）[2m > [22m放行：缺 X-Tenant-Id 时落到默认租户 t-verification
+[90mstdout[2m | src/services/notify.test.ts[2m > [22m[2mnotify 诚实边界 + 路由[2m > [22m[2mpush 未配置网关：诚实 stub（delivered=false）
+[22m[39m[notify:push] stub (NOT actually sent, pending gateway) { type: [32m'dispatch'[39m, recipient: [32m'worker_1'[39m, workOrderId: [32m'wo_1'[39m }
+
+[90mstdout[2m | src/services/notify.test.ts[2m > [22m[2mnotify 诚实边界 + 路由[2m > [22m[2mwechat 未配置模板：诚实 stub（delivered=false）
+[22m[39m[notify:wechat] stub (NOT actually sent, pending config) { type: [32m'dispatch'[39m, recipient: [32m'worker_1'[39m, workOrderId: [32m'wo_1'[39m }
+
+[90mstdout[2m | src/services/notify.test.ts[2m > [22m[2mnotify 诚实边界 + 路由[2m > [22m[2mwechat 配置齐全但接收方未绑 openid：诚实 stub（delivered=false）
+[22m[39m[notify:wechat] stub (no openid bound) { recipient: [32m'worker_1'[39m, recipientKind: [32m'worker'[39m, workOrderId: [32m'wo_1'[39m }
+
+[90mstdout[2m | src/services/notify.test.ts[2m > [22m[2mnotify 诚实边界 + 路由[2m > [22m[2msms 配置网关但无手机号：诚实 stub（绝不拿 worker.id 当手机号投递）
+[22m[39m[notify:sms] stub (no phone resolved) { recipient: [32m'worker_1'[39m, workOrderId: [32m'wo_1'[39m }
+
+[90mstdout[2m | src/services/notify.test.ts[2m > [22m[2mnotify 诚实边界 + 路由[2m > [22m[2msms 配置网关但 worker.phone 格式非法 → 诚实 stub（绝不误投网关）
+[22m[39m[notify:sms] stub (no phone resolved) { recipient: [32m'worker_1'[39m, workOrderId: [32m'wo_1'[39m }
+
+ [32m✓[39m src/test/publicReportSchema.test.ts[2m > [22m报修附件模型（DMR：图片/录音为无损耗原始载体随工单流转）[2m > [22m纯录音附件 + 无描述 + 同意告知 → 通过（允许只录音报修）
+ [32m✓[39m src/test/publicReportSchema.test.ts[2m > [22m报修附件模型（DMR：图片/录音为无损耗原始载体随工单流转）[2m > [22m纯图片附件 + 无描述 + 同意告知 → 通过（允许只拍照报修）
+ [32m✓[39m src/test/publicReportSchema.test.ts[2m > [22m报修附件模型（DMR：图片/录音为无损耗原始载体随工单流转）[2m > [22m录音 + 图片混合 + 描述 + 同意告知 → 通过
+ [32m✓[39m src/test/publicReportSchema.test.ts[2m > [22m报修附件模型（DMR：图片/录音为无损耗原始载体随工单流转）[2m > [22m空描述且无附件（已同意告知）→ 拒绝（refine 拦截受理）
+ [32m✓[39m src/test/publicReportSchema.test.ts[2m > [22m报修附件模型（DMR：图片/录音为无损耗原始载体随工单流转）[2m > [22m短描述（<4字）且无附件 → 拒绝
+ [32m✓[39m src/test/publicReportSchema.test.ts[2m > [22m报修附件模型（DMR：图片/录音为无损耗原始载体随工单流转）[2m > [22m附件超过 9 个 → 拒绝
+ [32m✓[39m src/test/publicReportSchema.test.ts[2m > [22m报修附件模型（DMR：图片/录音为无损耗原始载体随工单流转）[2m > [22mdescription 超 500 字 → 拒绝
+ [32m✓[39m src/test/publicReportSchema.test.ts[2m > [22m合规硬护栏：隐私告知同意（consent 必须为真）[2m > [22m缺省 consent → 拒绝
+ [32m✓[39m src/test/publicReportSchema.test.ts[2m > [22m合规硬护栏：隐私告知同意（consent 必须为真）[2m > [22mconsent=false → 拒绝
+ [32m✓[39m src/test/publicReportSchema.test.ts[2m > [22m合规硬护栏：隐私告知同意（consent 必须为真）[2m > [22mconsent=true（文字报修）→ 通过
+ [32m✓[39m src/test/publicReportSchema.test.ts[2m > [22m上传白名单 / 音频判定[2m > [22m音频 contentType 判定正确
+ [32m✓[39m src/test/publicReportSchema.test.ts[2m > [22m上传白名单 / 音频判定[2m > [22m音频扩展名映射齐全（无损耗直存，不转码）
+ [32m✓[39m src/test/publicReportSchema.test.ts[2m > [22m上传白名单 / 音频判定[2m > [22mattachment.kind 非法 → 拒绝
+ [32m✓[39m src/services/notify.test.ts[2m > [22mnotify 诚实边界 + 路由[2m > [22min_app：落库即可达 delivered=true
+ [32m✓[39m src/services/notify.test.ts[2m > [22mnotify 诚实边界 + 路由[2m > [22msms 未配置网关：诚实 stub（delivered=false，note 含 STUB）
+ [32m✓[39m src/services/notify.test.ts[2m > [22mnotify 诚实边界 + 路由[2m > [22mpush 未配置网关：诚实 stub（delivered=false）
+ [32m✓[39m src/services/notify.test.ts[2m > [22mnotify 诚实边界 + 路由[2m > [22mwechat 未配置模板：诚实 stub（delivered=false）
+ [32m✓[39m src/services/notify.test.ts[2m > [22mnotify 诚实边界 + 路由[2m > [22mwechat 配置齐全但接收方未绑 openid：诚实 stub（delivered=false）
+ [32m✓[39m src/services/notify.test.ts[2m > [22mnotify 诚实边界 + 路由[2m > [22m🔴B1 修复验证：wechat 配置齐全 + worker 接收方经 account_id 解析到 openid → 真发 delivered=true
+ [32m✓[39m src/services/notify.test.ts[2m > [22mnotify 诚实边界 + 路由[2m > [22mwechat 配置齐全 + account 接收方已绑 openid → 真发 delivered=true
+ [32m✓[39m src/services/notify.test.ts[2m > [22mnotify 诚实边界 + 路由[2m > [22msms 配置网关但无手机号：诚实 stub（绝不拿 worker.id 当手机号投递）
+ [32m✓[39m src/services/notify.test.ts[2m > [22mnotify 诚实边界 + 路由[2m > [22msms 配置网关且 payload.phone 已解析 → 真发 delivered=true
+ [32m✓[39m src/services/notify.test.ts[2m > [22mnotify 诚实边界 + 路由[2m > [22msms 配置网关且 worker.phone 已录入(057列) → 真发 delivered=true（验证走 DB 解析）
+ [32m✓[39m src/services/notify.test.ts[2m > [22mnotify 诚实边界 + 路由[2m > [22msms 配置网关但 worker.phone 格式非法 → 诚实 stub（绝不误投网关）
+ [32m✓[39m src/services/notify.test.ts[2m > [22mnotify 诚实边界 + 路由[2m > [22minsertNotification 为 dispatchNotification 的兼容别名（返回 void，仍落库）
+ [32m✓[39m src/test/auth.test.ts[2m > [22mauthMiddleware · dev mode（默认，维持 M1 行为）[2m > [22m放行：DEV_DEFAULT_TENANT 环境变量覆盖默认租户
+ [32m✓[39m src/test/auth.test.ts[2m > [22mauthMiddleware · prod mode（强制真实 JWT）[2m > [22m401 AUTH_001：无 bearer
+ [32m✓[39m src/test/workflowDef.test.ts[2m > [22mapplyRecommendationToDef (T-① 收口自我优化闭环)[2m > [22mrecheck_gate 注入 recheck 状态与转移，且幂等
+ [32m✓[39m src/test/workflowDef.test.ts[2m > [22mapplyRecommendationToDef (T-① 收口自我优化闭环)[2m > [22mauto_escalate 注入 escalated 终态与转移
+ [32m✓[39m src/test/workflowDef.test.ts[2m > [22mapplyRecommendationToDef (T-① 收口自我优化闭环)[2m > [22msla_tighten 在 config 收紧 SLA 目标阈值
+ [32m✓[39m src/test/workflowDef.test.ts[2m > [22mapplyRecommendationToDef (T-① 收口自我优化闭环)[2m > [22m原默认流转不被破坏
+ [32m✓[39m src/test/optimizer.test.ts[2m > [22mgenerateOptimizations - dispatch[2m > [22m把模型臂权重转为 dispatch_rule 写回决策（保持 T-A 下限 0.1）
+ [32m✓[39m src/test/optimizer.test.ts[2m > [22mgenerateOptimizations - dispatch[2m > [22m无模型参数时不产生 dispatch 决策
+ [32m✓[39m src/test/optimizer.test.ts[2m > [22mgenerateOptimizations - workflow[2m > [22m转派率>0.3 产生复核闸门建议
+ [32m✓[39m src/test/optimizer.test.ts[2m > [22mgenerateOptimizations - workflow[2m > [22mSLA 达成率<0.8 产生收紧建议
+ [32m✓[39m src/test/optimizer.test.ts[2m > [22mgenerateOptimizations - workflow[2m > [22m瓶颈模块活跃>=3 产生自动升级建议
+ [32m✓[39m src/test/optimizer.test.ts[2m > [22mgenerateOptimizations - workflow[2m > [22m健康度量不产生 workflow 建议
+ [32m✓[39m src/test/optimizer.test.ts[2m > [22mapplyDispatchOptimizations - 审计状态[2m > [22m规则存在时写回 applied 审计
+ [32m✓[39m src/test/optimizer.test.ts[2m > [22mapplyDispatchOptimizations - 审计状态[2m > [22m规则不存在（0 行受影响）时审计为 no_match，不谎报 applied
+ [32m✓[39m src/test/model.test.ts[2m > [22mStatsModelBackend（派单自适应评分）[2m > [22m新候选给基线分，被 UCB 探索优先选中
+ [32m✓[39m src/test/model.test.ts[2m > [22mStatsModelBackend（派单自适应评分）[2m > [22m正向奖励提升权重、负向降低；学好后评分优于学坏后
+ [32m✓[39m src/test/model.test.ts[2m > [22mStatsModelBackend（派单自适应评分）[2m > [22m参数可导出再导入（持久化闭环一致）
+ [32m✓[39m src/test/model.test.ts[2m > [22mcomputeRewards（数据反训奖励计算）[2m > [22m一次派单即完成 → reward +1
+ [32m✓[39m src/test/model.test.ts[2m > [22mcomputeRewards（数据反训奖励计算）[2m > [22m转派（assign>=2）→ reward -0.5
+ [32m✓[39m src/test/model.test.ts[2m > [22mcomputeRewards（数据反训奖励计算）[2m > [22m超时升级 → reward -1
+ [32m✓[39m src/test/model.test.ts[2m > [22mcomputeRewards（数据反训奖励计算）[2m > [22m无派单事件 → 空
+ [32m✓[39m src/test/model.test.ts[2m > [22mcomputeRewards（数据反训奖励计算）[2m > [22m满意度 5 分 → 最终 assign reward +1（1 + 1 = 2）
+ [32m✓[39m src/test/model.test.ts[2m > [22mcomputeRewards（数据反训奖励计算）[2m > [22m满意度 1 分 → 最终 assign reward 归零（1 - 1 = 0）
+ [32m✓[39m src/test/model.test.ts[2m > [22mcomputeRewards（数据反训奖励计算）[2m > [22m满意度只叠加到最终 assign（转派场景历史工人不受当前满意度影响）
+ [32m✓[39m src/test/model.test.ts[2m > [22mcomputeRewards（数据反训奖励计算）[2m > [22m满意度缺失（null）→ 不影响事件信号
+ [32m✓[39m src/test/processMining.test.ts[2m > [22mreplayTraces[2m > [22m按 entity_id 回放并按时间排序；跳过无 entity_id 的事件
+ [32m✓[39m src/test/processMining.test.ts[2m > [22mreplayTraces[2m > [22m多 case 各自成轨迹
+ [32m✓[39m src/test/processMining.test.ts[2m > [22maggregateVariants[2m > [22m相同序列合并计数 + 按频次降序 + 占比
+ [32m✓[39m src/test/processMining.test.ts[2m > [22mcomputeBottlenecks[2m > [22m计算直接后继边与每活动停留时长（分钟）
+ [32m✓[39m src/test/processMining.test.ts[2m > [22mcomputeBottlenecks[2m > [22m单事件实例不产生时长（无崩溃）
+ [32m✓[39m src/test/processMining.test.ts[2m > [22mcomputeThroughput[2m > [22m按天聚合事件与活跃 case；范围外忽略
+ [32m✓[39m src/test/processMining.test.ts[2m > [22mcomputeConformancePrecise (③ 状态机逐跳校验)[2m > [22m无实例返回偏离率 0 + 不编造 note
+ [32m✓[39m src/test/processMining.test.ts[2m > [22mcomputeConformancePrecise (③ 状态机逐跳校验)[2m > [22m全部遵循状态机时偏离率 0（create 引导→各状态合法跳转）
+ [32m✓[39m src/test/processMining.test.ts[2m > [22mcomputeConformancePrecise (③ 状态机逐跳校验)[2m > [22m存在非法跳转轨迹时偏离率=不合规轨迹占比（驱动优化飞轮）
+ [32m✓[39m src/test/processMining.test.ts[2m > [22mcomputeConformancePrecise (③ 状态机逐跳校验)[2m > [22m未纳入状态机的活动(如 recheck)被判为非合规 → 触发 recheck_gate 优化
+ [32m✓[39m src/test/processMining.test.ts[2m > [22mcomputeConformancePrecise (③ 状态机逐跳校验)[2m > [22m生命周期事件兼容：历史 assign→assigned 映射 + sla_escalated 标注不改状态
+ [32m✓[39m src/test/processMining.test.ts[2m > [22mcomputeConformanceApprox (降级：未配置 workflow_def)[2m > [22m主导路径近似：偏离率=1-主导占比
+ [32m✓[39m src/test/optimizerMining.test.ts[2m > [22mgenerateMiningOptimizations[2m > [22m空/健康数据：无偏离、无超慢边 → 不产生建议
+ [32m✓[39m src/test/optimizerMining.test.ts[2m > [22mgenerateMiningOptimizations[2m > [22m偏离率 > 0.3 → 产生 work_order:recheck_gate 建议
+ [32m✓[39m src/test/optimizerMining.test.ts[2m > [22mgenerateMiningOptimizations[2m > [22m最慢边 > 8h(480分) → 产生 <entity>:auto_escalate 建议
+ [32m✓[39m src/test/optimizerMining.test.ts[2m > [22mgenerateMiningOptimizations[2m > [22m两者同时触发 → 两条建议（recheck_gate + auto_escalate）
+ [32m✓[39m src/test/optimizerMining.test.ts[2m > [22mgenerateMiningOptimizations[2m > [22m边界：偏离率恰好 0.3 不触发；最慢边恰好 480 分不触发
+ [32m✓[39m src/test/assigneeGuard.test.ts[2m > [22mrequireAssigneeOrConfig · admin/operator 恒放行[2m > [22madmin 不查 worker 直接放行
+ [32m✓[39m src/test/assigneeGuard.test.ts[2m > [22mrequireAssigneeOrConfig · admin/operator 恒放行[2m > [22moperator 不查 worker 直接放行
+ [32m✓[39m src/test/assigneeGuard.test.ts[2m > [22mrequireAssigneeOrConfig · worker 归属校验[2m > [22m归属本人（assignee=w-1）→ 放行
+ [32m✓[39m src/test/assigneeGuard.test.ts[2m > [22mrequireAssigneeOrConfig · worker 归属校验[2m > [22m非本人（assignee=w-2）→ 403
+ [32m✓[39m src/test/assigneeGuard.test.ts[2m > [22mrequireAssigneeOrConfig · worker 归属校验[2m > [22m孤儿任务（assignee 为空）→ 403
+ [32m✓[39m src/test/assigneeGuard.test.ts[2m > [22mrequireAssigneeOrConfig · worker 归属校验[2m > [22mworker 无档案（account_id 查不到）→ 403
+ [32m✓[39m src/test/assigneeGuard.test.ts[2m > [22mrequireAssigneeOrConfig · worker 归属校验[2m > [22mdispatcher（非 worker 非管理）→ 403
+ [32m✓[39m src/test/assigneeGuard.test.ts[2m > [22mrequireAssigneeOrConfig · dev 模式[2m > [22mdev 模式放行（本地联调/测试兼容）
+ [32m✓[39m src/test/auth.test.ts[2m > [22mauthMiddleware · prod mode（强制真实 JWT）[2m > [22m401 AUTH_002：无效 token 结构
+ [32m✓[39m src/test/auth.test.ts[2m > [22mauthMiddleware · prod mode（强制真实 JWT）[2m > [22m401 AUTH_002：错误密钥签名
+ [32m✓[39m src/test/auth.test.ts[2m > [22mauthMiddleware · prod mode（强制真实 JWT）[2m > [22m401 AUTH_002：已过期 token
+ [32m✓[39m src/test/auth.test.ts[2m > [22mauthMiddleware · prod mode（强制真实 JWT）[2m > [22m放行：合法 token 且租户取自 payload.tid
+ [32m✓[39m src/test/asset.test.ts[2m > [22mparseScanCode（纯函数）[2m > [22mCAT- 前缀 → catalog + 大写 key
+ [32m✓[39m src/test/asset.test.ts[2m > [22mparseScanCode（纯函数）[2m > [22mAST- 前缀（小写输入）→ asset + 大写 key
+ [32m✓[39m src/test/asset.test.ts[2m > [22mparseScanCode（纯函数）[2m > [22m空串 / 空格 → null
+ [32m✓[39m src/test/asset.test.ts[2m > [22mparseScanCode（纯函数）[2m > [22m非 CAT-/AST- 前缀 → null（不臆造）
+ [32m✓[39m src/test/asset.test.ts[2m > [22mresolveScanFromDb（DB 权威）[2m > [22m目录命中 → resolved，catalog 小写、template 推导
+ [32m✓[39m src/test/asset.test.ts[2m > [22mresolveScanFromDb（DB 权威）[2m > [22m资产命中 → resolved，关联目录小写 + template
+ [32m✓[39m src/test/asset.test.ts[2m > [22mresolveScanFromDb（DB 权威）[2m > [22m目录未登记 → 诚实 unresolved（DB 权威，不回退本地）
+ [32m✓[39m src/test/asset.test.ts[2m > [22mresolveScanFromDb（DB 权威）[2m > [22m资产未登记 → 诚实 unresolved
+ [32m✓[39m src/test/asset.test.ts[2m > [22mresolveScanFromDb（DB 权威）[2m > [22m非前缀/空串 → 直接降级，不调用 DB 查询
+ [32m✓[39m src/test/webhook.test.ts[2m > [22msignWebhook（HMAC-SHA256 签名）[2m > [22m与 node crypto 直接计算一致
+ [32m✓[39m src/test/webhook.test.ts[2m > [22msignWebhook（HMAC-SHA256 签名）[2m > [22m相同输入稳定、不同密钥结果不同
+ [32m✓[39m src/test/webhook.test.ts[2m > [22mbuildWebhookBody（统一信封）[2m > [22m结构正确，默认值补齐
+ [32m✓[39m src/test/webhook.test.ts[2m > [22mbuildWebhookBody（统一信封）[2m > [22m携带 from/to/payload
+ [32m✓[39m src/test/webhook.test.ts[2m > [22mbuildWebhookHeaders[2m > [22m含事件类型/投递ID/签名前缀
+ [32m✓[39m src/test/webhook.test.ts[2m > [22mselectSubscriptions（事件类型筛选）[2m > [22m具体类型只命中订阅该类型的
+ [32m✓[39m src/test/webhook.test.ts[2m > [22mselectSubscriptions（事件类型筛选）[2m > [22m未订阅类型不命中
+ [32m✓[39m src/test/webhook.test.ts[2m > [22mselectSubscriptions（事件类型筛选）[2m > [22m空订阅返回空
+ [32m✓[39m src/test/account.test.ts[2m > [22maccount: password hashing (scrypt)[2m > [22mhashPassword 派生格式为 scrypt$<salt>$<hash>
+ [32m✓[39m src/test/account.test.ts[2m > [22maccount: password hashing (scrypt)[2m > [22mverifyPassword 对正确密码返回 true（同一密码每次盐不同但可验证）
+ [32m✓[39m src/test/account.test.ts[2m > [22maccount: password hashing (scrypt)[2m > [22mverifyPassword 对错误密码返回 false
+ [32m✓[39m src/test/account.test.ts[2m > [22maccount: password hashing (scrypt)[2m > [22mverifyPassword 对篡改/非法存储格式返回 false（不抛错）
+ [32m✓[39m src/test/account.test.ts[2m > [22maccount: login token[2m > [22msignLoginToken 产出可被 verifyJwt 校验通过的令牌，且携带 sub/tid/role/exp
+ [32m✓[39m src/test/account.test.ts[2m > [22maccount: login token[2m > [22m过期令牌（exp 在过去）被 verifyJwt 拒绝
+ [32m✓[39m src/test/account.test.ts[2m > [22maccount: login token[2m > [22m签名密钥不符被 verifyJwt 拒绝
+ [32m✓[39m src/test/account.test.ts[2m > [22maccount: toPublic 脱敏（不含 password_hash）[2m > [22m不泄露 password_hash 字段
+ [32m✓[39m src/test/batchC.test.ts[2m > [22mapplyStockAction（库存动作）[2m > [22m入库 +50
+ [32m✓[39m src/test/batchC.test.ts[2m > [22mapplyStockAction（库存动作）[2m > [22m调整置数为 99
+ [32m✓[39m src/test/batchC.test.ts[2m > [22mapplyStockAction（库存动作）[2m > [22m出库 30（库存充足）
+ [32m✓[39m src/test/batchC.test.ts[2m > [22mapplyStockAction（库存动作）[2m > [22m出库不足返回 ok:false
+ [32m✓[39m src/test/batchC.test.ts[2m > [22mbuildServiceDeskTicket（来电弹屏映射）[2m > [22mcatalog 映射为 business_type，无误则无幂等键
+ [32m✓[39m src/test/batchC.test.ts[2m > [22mbuildServiceDeskTicket（来电弹屏映射）[2m > [22msessionId 存在才生成幂等键防双击
+ [32m✓[39m src/test/batchC.test.ts[2m > [22msummarizeLinkedOrders（资产历史只读聚合）[2m > [22m空数组返回空
+ [32m✓[39m src/test/batchC.test.ts[2m > [22msummarizeLinkedOrders（资产历史只读聚合）[2m > [22m多行映射保留关键字段
+ [32m✓[39m src/test/batchC.test.ts[2m > [22mticketStats（真实链路 · mock client）[2m > [22m返回 7 字段且自动派单率计算正确
+ [32m✓[39m src/test/batchC.test.ts[2m > [22mticketStats（真实链路 · mock client）[2m > [22m总数为 0 时比率安全置 0
+ [32m✓[39m src/test/auth.test.ts[2m > [22mauthMiddleware · prod mode（强制真实 JWT）[2m > [22m500 AUTH_CFG：JWT_SECRET 缺失（fail-closed）[33m 334[2mms[22m[39m
+ [32m✓[39m src/test/auth.test.ts[2m > [22mverifyJwt / signJwt（纯函数）[2m > [22m合法 token 返回 payload
+ [32m✓[39m src/test/auth.test.ts[2m > [22mverifyJwt / signJwt（纯函数）[2m > [22m篡改 token 返回 null
+ [32m✓[39m src/test/auth.test.ts[2m > [22mverifyJwt / signJwt（纯函数）[2m > [22m错误密钥返回 null
+ [32m✓[39m src/test/auth.test.ts[2m > [22mverifyJwt / signJwt（纯函数）[2m > [22m已过期返回 null
+ [32m✓[39m src/test/aiPreview.test.ts[2m > [22maiPreview · /preview 三层分类[2m > [22mLLM 命中 → 返回分类/优先级/置信度，并写推理日志[33m 720[2mms[22m[39m
+ [32m✓[39m src/test/haversine.test.ts[2m > [22mhaversineM（巡检签到距离校验）[2m > [22m同点距离为 0
+ [32m✓[39m src/test/haversine.test.ts[2m > [22mhaversineM（巡检签到距离校验）[2m > [22m约 1 度纬度 ≈ 111km
+ [32m✓[39m src/test/haversine.test.ts[2m > [22mhaversineM（巡检签到距离校验）[2m > [22m几百米内 < 500m 阈值（不判疑似）
+ [32m✓[39m src/test/haversine.test.ts[2m > [22mhaversineM（巡检签到距离校验）[2m > [22m跨城 > 500m 阈值（判疑似）
+ [32m✓[39m src/test/aiPreview.test.ts[2m > [22maiPreview · /preview 三层分类[2m > [22mLLM 未命中 → result null + 人工选择提示
+ [32m✓[39m src/test/aiPreview.test.ts[2m > [22maiPreview · /preview 三层分类[2m > [22mdescription 超长截断（≤500 校验）
+ [32m✓[39m src/test/aiPreview.test.ts[2m > [22maiPreview · /similar 知识库检索[2m > [22mcategory 匹配 → 返回 knowledgeId + 过滤空 category
+ [32m✓[39m src/test/dispatch.test.ts[2m > [22mdispatch pickWorker[2m > [22m命中且 least_load 优先（取最低 load 的 active worker）
+ [32m✓[39m src/test/dispatch.test.ts[2m > [22mdispatch pickWorker[2m > [22m多技能命中取最低 load
+ [32m✓[39m src/test/dispatch.test.ts[2m > [22mdispatch pickWorker[2m > [22m无匹配返回 null（上层映射 claim_hall，P6 不自动完成）
+ [32m✓[39m src/test/process.test.ts[2m > [22mB2 process metrics pure functions[2m > [22mcalcRates: 空数据返回 0；正常数据计算命中率/转派率
+ [32m✓[39m src/test/process.test.ts[2m > [22mB2 process metrics pure functions[2m > [22mcalcSlaRate: 无 SLA 配置返回 0 且 note 标注不编造
+ [32m✓[39m src/test/process.test.ts[2m > [22mB2 process metrics pure functions[2m > [22mcalcSlaRate: 有 SLA 配置计算达成率
+ [32m✓[39m src/test/process.test.ts[2m > [22mB2 process metrics pure functions[2m > [22mbucketDuration: 时长分桶 [<60,60-240,240-1440,>1440] 正确
+ [32m✓[39m src/test/noAutoComplete.test.ts[2m > [22mP6 不自动闭环[2m > [22m派单命中后得到 assigned，而非 completed
+ [32m✓[39m src/test/noAutoComplete.test.ts[2m > [22mP6 不自动闭环[2m > [22m任何自动流程都不出现 draft->completed
+ [32m✓[39m src/test/aiPreview.test.ts[2m > [22maiPreview · /feedback 真实落库[2m > [22m合法 action → ok:true + INSERT ai_feedback
+ [32m✓[39m src/test/aiPreview.test.ts[2m > [22maiPreview · /feedback 真实落库[2m > [22m非法 action → 校验错误
+ [32m✓[39m src/test/scan.test.ts[2m > [22mresolveScan[2m > [22m解析目录码 CAT-electrician（大小写容错）
+ [32m✓[39m src/test/scan.test.ts[2m > [22mresolveScan[2m > [22m解析资产码 AST-3F-AIRCON-01 并关联目录
+ [32m✓[39m src/test/scan.test.ts[2m > [22mresolveScan[2m > [22m未知目录码 -> 诚实 unresolved
+ [32m✓[39m src/test/scan.test.ts[2m > [22mresolveScan[2m > [22m资产台账未登记 -> 诚实 unresolved
+ [32m✓[39m src/test/scan.test.ts[2m > [22mresolveScan[2m > [22m空格容错 + 完全无法识别 -> unresolved
+ [32m✓[39m src/test/scan.test.ts[2m > [22mresolveScan[2m > [22m空码 -> unresolved
+ [32m✓[39m src/test/scan.test.ts[2m > [22mresolveScan[2m > [22m非 CAT/AST 前缀不臆造 -> unresolved
+ [32m✓[39m src/test/stateMachineHttp.test.ts[2m > [22mDEF-3 建单响应含 id[2m > [22mtoCreateRes 返回 id 字段[33m 1043[2mms[22m[39m
+ [32m✓[39m src/test/aiPreview.test.ts[2m > [22maiPreview · /agent-stats 统计[2m > [22m返回反馈统计 + 待复核
+ [32m✓[39m src/test/aiPreview.test.ts[2m > [22maiPreview · /gen-config 配置草稿[2m > [22mLLM 生成草稿 → 返回 fields
+ [32m✓[39m src/test/aiPreview.test.ts[2m > [22maiPreview · /gen-config 配置草稿[2m > [22mrequirement 过短 → 校验错误
+ [32m✓[39m src/test/batchB.test.ts[2m > [22m志愿者积分计算（签退）[2m > [22m0 分钟 → 0 分
+ [32m✓[39m src/test/batchB.test.ts[2m > [22m志愿者积分计算（签退）[2m > [22m90 分钟 → 1 分
+ [32m✓[39m src/test/batchB.test.ts[2m > [22m志愿者积分计算（签退）[2m > [22m125 分钟向下取整 → 2 分
+ [32m✓[39m src/test/batchB.test.ts[2m > [22m志愿者积分计算（签退）[2m > [22m负时长（误签退）→ 0 分
+ [32m✓[39m src/test/batchB.test.ts[2m > [22m巡检计划生成[2m > [22m按点位数量生成 pending 任务
+ [32m✓[39m src/test/batchB.test.ts[2m > [22m巡检计划生成[2m > [22m无点位 → 空数组
+ [32m✓[39m src/test/batchB.test.ts[2m > [22m转工单幂等（防重单）[2m > [22m同一来源第二次转换不重复建单（created=false）
+ [32m✓[39m src/test/batchB.test.ts[2m > [22m转工单幂等（防重单）[2m > [22m无可用工人时不崩溃，降级 manual claim
+
+[2m Test Files [22m [1m[32m28 passed[39m[22m[90m (28)[39m
+[2m      Tests [22m [1m[32m237 passed[39m[22m[90m (237)[39m
+[2m   Start at [22m 03:21:48
+[2m   Duration [22m 2.49s[2m (transform 6.18s, setup 0ms, collect 10.98s, tests 3.26s, environment 5ms, prepare 3.81s)[22m
+

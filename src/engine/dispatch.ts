@@ -42,8 +42,8 @@ export function pickWorker(
     (w) => w.active && required.every((t) => w.skill_tags.includes(t)),
   );
   if (matched.length === 0) return null;
-  // least_load：负载最低的优先
-  return matched.sort((a, b) => a.load - b.load)[0];
+  // least_load：负载最低的优先（[...] 避免原地排序污染入参）
+  return [...matched].sort((a, b) => a.load - b.load)[0];
 }
 
 // 纯函数：规则是否命中 need（AND 语义；未填的匹配维度视为通配）
@@ -76,7 +76,7 @@ export function resolveDispatch(
     // 模型评分排序（分 = 规则权 × 模型分）；未提供模型则 least_load 兜底（向后兼容）
     const picked = model
       ? rankByModel(candidates, rule, need.business_type ?? '', model)
-      : candidates.sort((a, b) => a.load - b.load)[0];
+      : [...candidates].sort((a, b) => a.load - b.load)[0];
     if (picked) {
       return {
         worker: picked,

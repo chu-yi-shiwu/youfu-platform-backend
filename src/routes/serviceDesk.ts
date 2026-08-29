@@ -21,7 +21,7 @@ router.get('/service-desks', async (req, res, next) => {
     const tenantId = res.locals.auth.tenantId;
     const items = await withTenantClient(tenantId, (client) =>
       client
-        .query(`SELECT * FROM service_desk WHERE tenant_id=$1 ORDER BY created_at DESC`, [tenantId])
+        .query(`SELECT * FROM service_desk WHERE tenant_id=$1 ORDER BY created_at DESC LIMIT 100`, [tenantId])
         .then((r) => r.rows),
     );
     return res.json({ ok: true, code: 0, items });
@@ -75,7 +75,7 @@ router.get('/service-desks/:id/agents', async (req, res, next) => {
     const tenantId = res.locals.auth.tenantId;
     const items = await withTenantClient(tenantId, (client) =>
       client
-        .query(`SELECT * FROM service_desk_agent WHERE tenant_id=$1 AND desk_id=$2 ORDER BY created_at ASC`, [tenantId, req.params.id])
+        .query(`SELECT * FROM service_desk_agent WHERE tenant_id=$1 AND desk_id=$2 ORDER BY created_at ASC LIMIT 200`, [tenantId, req.params.id])
         .then((r) => r.rows),
     );
     return res.json({ ok: true, code: 0, items });

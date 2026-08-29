@@ -11,7 +11,7 @@ import crypto from 'node:crypto';
 
 const router = Router();
 
-const UPLOAD_ROOT = process.env.UPLOAD_DIR ?? '/opt/youfu/uploads';
+export const UPLOAD_ROOT = process.env.UPLOAD_DIR ?? '/opt/youfu/uploads';
 const MAX_BYTES = 5 * 1024 * 1024; // 5MB
 // D1：加入语音（工人语音留言/报修语音说明）
 const EXT_WHITELIST = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'pdf', 'm4a', 'mp3', 'wav', 'ogg'];
@@ -30,20 +30,27 @@ const CTYPE_EXT: Record<string, string> = {
   'audio/ogg': 'ogg',
 };
 
-function ensureDir(p: string) {
-  if (!fs.existsSync(p)) fs.mkdirSync(p, { recursive: true });
+async function ensureDir(p: string) {
+  await fs.promises.mkdir(p, { recursive: true });
 }
 
-router.post('/upload', (req, res, next) => {
+/** 审查修复 #735-MEDIUM：租户目录名白名单——禁止路径分隔符与上级引用，
+ *  确保 path.join 永不逃出 UPLOAD_ROOT（被 upload.ts 与单测共用）。 */
+export function isValidTenantDirName(id: string): boolean {
+  if (typeof id !== 'string' || id.length === 0) return false;
+  return !/[/\\]/.test(id) && !id.includes('..');
+}
+
+router.post('/upload', async (req, res, next) => {
   try {
     const tenantId = res.locals.auth?.tenantId;
     if (!tenantId) {
       return res.status(401).json({ ok: false, code: 'NO_TENANT', message: 'missing tenant' });
     }
-    if (/[/\\]/.test(tenantId) || tenantId.includes('..')) {
+    // 审查修复 #735-MEDIUM（纵深防御）：租户目录名不得含路径分隔符 / 上级引用，
+    // 即使 auth 层已收紧，此处仍兜底，确保 path.join 永不逃出 UPLOAD_ROOT。
+    if (!isValidTenantDirName(tenantId)) {
       return res.status(400).json({ ok: false, code: 'BAD_TENANT', message: 'invalid tenant id' });
-    }
-      return res.status(401).json({ ok: false, code: 'NO_TENANT', message: 'missing tenant' });
     }
     const body = (req.body ?? {}) as { filename?: string; contentType?: string; base64?: string };
     const { filename, contentType, base64 } = body;
@@ -66,9 +73,9 @@ router.post('/upload', (req, res, next) => {
       return res.status(400).json({ ok: false, code: 'BAD_EXT', message: 'unsupported file type' });
     }
     const dir = path.join(UPLOAD_ROOT, tenantId);
-    ensureDir(dir);
+    await ensureDir(dir);
     const savedName = `${crypto.randomUUID()}.${ext}`;
-    fs.writeFileSync(path.join(dir, savedName), buf);
+    await fs.promises.writeFile(path.join(dir, savedName), buf);
     const url = `/uploads/${tenantId}/${savedName}`;
     return res.json({ ok: true, code: 0, url, size: buf.length });
   } catch (e) {

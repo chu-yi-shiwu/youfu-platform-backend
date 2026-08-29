@@ -18,7 +18,9 @@ BEGIN
       AND p.next_run_at IS NOT NULL
       AND p.next_run_at <= now();
 END;
-$$ LANGUAGE plpgsql SECURITY DEFINER STABLE;
+$$ LANGUAGE plpgsql SECURITY DEFINER STABLE SET search_path = public;
 
 -- youfu_app 仅被授权 EXECUTE（只读枚举），不直接触碰表，RLS 边界不变。
+-- SET search_path = public（R25-003 硬化）：钉死函数内对象解析模式，杜绝 SECURITY DEFINER
+--   在 owner 默认 search_path 下被恶意同名对象劫持的提权面（与 046_model_train_scheduler.sql 一致）。
 GRANT EXECUTE ON FUNCTION inspection_due_plan_tenants() TO youfu_app;

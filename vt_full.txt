@@ -1,0 +1,222 @@
+
+[1m[7m[36m RUN [39m[27m[22m [36mv2.1.9 [39m[90mD:/WorkBuddy/outputs/youfu_backend_dev_v2[39m
+
+ [32m✓[39m src/test/learnGuard.test.ts [2m([22m[2m3 tests[22m[2m)[22m[90m 4[2mms[22m[39m
+ [32m✓[39m src/test/sla.test.ts [2m([22m[2m9 tests[22m[2m)[22m[90m 4[2mms[22m[39m
+ [32m✓[39m src/test/dataQuality.test.ts [2m([22m[2m9 tests[22m[2m)[22m[90m 5[2mms[22m[39m
+ [32m✓[39m src/test/stateMachine.test.ts [2m([22m[2m12 tests[22m[2m)[22m[90m 5[2mms[22m[39m
+ [32m✓[39m src/test/dispatchRecommend.test.ts [2m([22m[2m8 tests[22m[2m)[22m[90m 5[2mms[22m[39m
+ [32m✓[39m src/test/intakeEnrich.test.ts [2m([22m[2m12 tests[22m[2m)[22m[90m 6[2mms[22m[39m
+ [32m✓[39m src/test/publicReportSchema.test.ts [2m([22m[2m13 tests[22m[2m)[22m[90m 8[2mms[22m[39m
+[90mstdout[2m | src/services/notify.test.ts[2m > [22m[2mnotify 诚实边界 + 路由[2m > [22m[2msms 未配置网关：诚实 stub（delivered=false，note 含 STUB）
+[22m[39m[notify:sms] stub (NOT actually sent, pending gateway) { type: [32m'dispatch'[39m, recipient: [32m'worker_1'[39m, workOrderId: [32m'wo_1'[39m }
+
+[90mstdout[2m | src/services/notify.test.ts[2m > [22m[2mnotify 诚实边界 + 路由[2m > [22m[2mpush 未配置网关：诚实 stub（delivered=false）
+[22m[39m[notify:push] stub (NOT actually sent, pending gateway) { type: [32m'dispatch'[39m, recipient: [32m'worker_1'[39m, workOrderId: [32m'wo_1'[39m }
+
+[90mstdout[2m | src/services/notify.test.ts[2m > [22m[2mnotify 诚实边界 + 路由[2m > [22m[2mwechat 未配置模板：诚实 stub（delivered=false）
+[22m[39m[notify:wechat] stub (NOT actually sent, pending config) { type: [32m'dispatch'[39m, recipient: [32m'worker_1'[39m, workOrderId: [32m'wo_1'[39m }
+
+[90mstdout[2m | src/services/notify.test.ts[2m > [22m[2mnotify 诚实边界 + 路由[2m > [22m[2mwechat 配置齐全但接收方未绑 openid：诚实 stub（delivered=false）
+[22m[39m[notify:wechat] stub (no openid bound) { recipient: [32m'worker_1'[39m, recipientKind: [32m'worker'[39m, workOrderId: [32m'wo_1'[39m }
+
+[90mstdout[2m | src/services/notify.test.ts[2m > [22m[2mnotify 诚实边界 + 路由[2m > [22m[2msms 配置网关但无手机号：诚实 stub（绝不拿 worker.id 当手机号投递）
+[22m[39m[notify:sms] stub (no phone resolved) { recipient: [32m'worker_1'[39m, workOrderId: [32m'wo_1'[39m }
+
+[90mstdout[2m | src/services/notify.test.ts[2m > [22m[2mnotify 诚实边界 + 路由[2m > [22m[2msms 配置网关但 worker.phone 格式非法 → 诚实 stub（绝不误投网关）
+[22m[39m[notify:sms] stub (no phone resolved) { recipient: [32m'worker_1'[39m, workOrderId: [32m'wo_1'[39m }
+
+ [32m✓[39m src/test/dispatch.config.test.ts [2m([22m[2m11 tests[22m[2m)[22m[90m 4[2mms[22m[39m
+[90mstdout[2m | src/services/notify.test.ts[2m > [22m[2mnotify 诚实边界 + 路由[2m > [22m[2m默认 fan-out（无 channel）：以主通道 in_app 必达为准，返回 delivered=true 且产生 2 条落库
+[22m[39m[notify:wechat] stub (NOT actually sent, pending config) { type: [32m'dispatch'[39m, recipient: [32m'worker_1'[39m, workOrderId: [32m'wo_1'[39m }
+
+ [32m✓[39m src/services/notify.test.ts [2m([22m[2m14 tests[22m[2m)[22m[90m 23[2mms[22m[39m
+ [32m✓[39m src/test/optimizer.test.ts [2m([22m[2m8 tests[22m[2m)[22m[90m 4[2mms[22m[39m
+ [32m✓[39m src/test/workflowDef.test.ts [2m([22m[2m4 tests[22m[2m)[22m[90m 4[2mms[22m[39m
+ [32m✓[39m src/test/processMining.test.ts [2m([22m[2m12 tests[22m[2m)[22m[90m 11[2mms[22m[39m
+ [32m✓[39m src/test/optimizerMining.test.ts [2m([22m[2m5 tests[22m[2m)[22m[90m 10[2mms[22m[39m
+ [32m✓[39m src/test/assigneeGuard.test.ts [2m([22m[2m8 tests[22m[2m)[22m[90m 4[2mms[22m[39m
+ [32m✓[39m src/test/model.test.ts [2m([22m[2m11 tests[22m[2m)[22m[90m 6[2mms[22m[39m
+ [32m✓[39m src/test/asset.test.ts [2m([22m[2m9 tests[22m[2m)[22m[90m 7[2mms[22m[39m
+ [32m✓[39m src/test/webhook.test.ts [2m([22m[2m8 tests[22m[2m)[22m[90m 10[2mms[22m[39m
+ [32m✓[39m src/test/batchC.test.ts [2m([22m[2m10 tests[22m[2m)[22m[90m 7[2mms[22m[39m
+[90mstderr[2m | src/test/aiPreview.test.ts[2m > [22m[2maiPreview · /preview 三层分类[2m > [22m[2mLLM 命中 → 返回分类/优先级/置信度，并写推理日志
+[22m[39m[aiPreview] rules load failed: Error: ENOENT: no such file or directory, open 'D:\WorkBuddy\outputs\youfu_backend_dev_v2\src\data\classifier_rules.json'
+[90m    at Proxy.readFileSync (node:fs:440:20)[39m
+    at [90mD:\WorkBuddy\outputs\youfu_backend_dev_v2\[39msrc\routes\aiPreview.ts:18:15
+[90m    at processTicksAndRejections (node:internal/process/task_queues:103:5)[39m
+    at VitestExecutor.runModule [90m(file:///D:/WorkBuddy/outputs/youfu_backend_dev_v2/[39mnode_modules/[4mvite-node[24m/dist/client.mjs:399:5[90m)[39m
+    at VitestExecutor.directRequest [90m(file:///D:/WorkBuddy/outputs/youfu_backend_dev_v2/[39mnode_modules/[4mvite-node[24m/dist/client.mjs:381:5[90m)[39m
+    at VitestExecutor.cachedRequest [90m(file:///D:/WorkBuddy/outputs/youfu_backend_dev_v2/[39mnode_modules/[4mvite-node[24m/dist/client.mjs:206:14[90m)[39m
+    at VitestExecutor.dependencyRequest [90m(file:///D:/WorkBuddy/outputs/youfu_backend_dev_v2/[39mnode_modules/[4mvite-node[24m/dist/client.mjs:259:12[90m)[39m
+    at loadRouter [90m(D:\WorkBuddy\outputs\youfu_backend_dev_v2\[39msrc\test\aiPreview.test.ts:64:15[90m)[39m
+    at [90mD:\WorkBuddy\outputs\youfu_backend_dev_v2\[39msrc\test\aiPreview.test.ts:89:20
+    at [90mfile:///D:/WorkBuddy/outputs/youfu_backend_dev_v2/[39mnode_modules/[4m@vitest/runner[24m/dist/index.js:533:5 {
+  errno: [33m-4058[39m,
+  code: [32m'ENOENT'[39m,
+  syscall: [32m'open'[39m,
+  path: [32m'D:\\WorkBuddy\\outputs\\youfu_backend_dev_v2\\src\\data\\classifier_rules.json'[39m
+}
+
+ [32m✓[39m src/test/account.test.ts [2m([22m[2m8 tests[22m[2m)[22m[90m 221[2mms[22m[39m
+ [32m✓[39m src/test/auth.test.ts [2m([22m[2m14 tests[22m[2m)[22m[33m 719[2mms[22m[39m
+[90mstderr[2m | src/test/aiPreview.test.ts[2m > [22m[2maiPreview · /preview 三层分类[2m > [22m[2mLLM 未命中 → result null + 人工选择提示
+[22m[39m[aiPreview] rules load failed: Error: ENOENT: no such file or directory, open 'D:\WorkBuddy\outputs\youfu_backend_dev_v2\src\data\classifier_rules.json'
+[90m    at Proxy.readFileSync (node:fs:440:20)[39m
+    at [90mD:\WorkBuddy\outputs\youfu_backend_dev_v2\[39msrc\routes\aiPreview.ts:18:15
+[90m    at processTicksAndRejections (node:internal/process/task_queues:103:5)[39m
+    at VitestExecutor.runModule [90m(file:///D:/WorkBuddy/outputs/youfu_backend_dev_v2/[39mnode_modules/[4mvite-node[24m/dist/client.mjs:399:5[90m)[39m
+    at VitestExecutor.directRequest [90m(file:///D:/WorkBuddy/outputs/youfu_backend_dev_v2/[39mnode_modules/[4mvite-node[24m/dist/client.mjs:381:5[90m)[39m
+    at VitestExecutor.cachedRequest [90m(file:///D:/WorkBuddy/outputs/youfu_backend_dev_v2/[39mnode_modules/[4mvite-node[24m/dist/client.mjs:206:14[90m)[39m
+    at VitestExecutor.dependencyRequest [90m(file:///D:/WorkBuddy/outputs/youfu_backend_dev_v2/[39mnode_modules/[4mvite-node[24m/dist/client.mjs:259:12[90m)[39m
+    at loadRouter [90m(D:\WorkBuddy\outputs\youfu_backend_dev_v2\[39msrc\test\aiPreview.test.ts:64:15[90m)[39m
+    at [90mD:\WorkBuddy\outputs\youfu_backend_dev_v2\[39msrc\test\aiPreview.test.ts:100:20
+    at [90mfile:///D:/WorkBuddy/outputs/youfu_backend_dev_v2/[39mnode_modules/[4m@vitest/runner[24m/dist/index.js:533:5 {
+  errno: [33m-4058[39m,
+  code: [32m'ENOENT'[39m,
+  syscall: [32m'open'[39m,
+  path: [32m'D:\\WorkBuddy\\outputs\\youfu_backend_dev_v2\\src\\data\\classifier_rules.json'[39m
+}
+
+ [32m✓[39m src/test/haversine.test.ts [2m([22m[2m4 tests[22m[2m)[22m[90m 2[2mms[22m[39m
+ [32m✓[39m src/test/dispatch.test.ts [2m([22m[2m3 tests[22m[2m)[22m[90m 2[2mms[22m[39m
+[90mstderr[2m | src/test/aiPreview.test.ts[2m > [22m[2maiPreview · /preview 三层分类[2m > [22m[2mdescription 超长截断（≤500 校验）
+[22m[39m[aiPreview] rules load failed: Error: ENOENT: no such file or directory, open 'D:\WorkBuddy\outputs\youfu_backend_dev_v2\src\data\classifier_rules.json'
+[90m    at Proxy.readFileSync (node:fs:440:20)[39m
+    at [90mD:\WorkBuddy\outputs\youfu_backend_dev_v2\[39msrc\routes\aiPreview.ts:18:15
+[90m    at processTicksAndRejections (node:internal/process/task_queues:103:5)[39m
+    at VitestExecutor.runModule [90m(file:///D:/WorkBuddy/outputs/youfu_backend_dev_v2/[39mnode_modules/[4mvite-node[24m/dist/client.mjs:399:5[90m)[39m
+    at VitestExecutor.directRequest [90m(file:///D:/WorkBuddy/outputs/youfu_backend_dev_v2/[39mnode_modules/[4mvite-node[24m/dist/client.mjs:381:5[90m)[39m
+    at VitestExecutor.cachedRequest [90m(file:///D:/WorkBuddy/outputs/youfu_backend_dev_v2/[39mnode_modules/[4mvite-node[24m/dist/client.mjs:206:14[90m)[39m
+    at VitestExecutor.dependencyRequest [90m(file:///D:/WorkBuddy/outputs/youfu_backend_dev_v2/[39mnode_modules/[4mvite-node[24m/dist/client.mjs:259:12[90m)[39m
+    at loadRouter [90m(D:\WorkBuddy\outputs\youfu_backend_dev_v2\[39msrc\test\aiPreview.test.ts:64:15[90m)[39m
+    at [90mD:\WorkBuddy\outputs\youfu_backend_dev_v2\[39msrc\test\aiPreview.test.ts:109:20
+    at [90mfile:///D:/WorkBuddy/outputs/youfu_backend_dev_v2/[39mnode_modules/[4m@vitest/runner[24m/dist/index.js:533:5 {
+  errno: [33m-4058[39m,
+  code: [32m'ENOENT'[39m,
+  syscall: [32m'open'[39m,
+  path: [32m'D:\\WorkBuddy\\outputs\\youfu_backend_dev_v2\\src\\data\\classifier_rules.json'[39m
+}
+
+ [32m✓[39m src/test/process.test.ts [2m([22m[2m4 tests[22m[2m)[22m[90m 3[2mms[22m[39m
+[90mstderr[2m | src/test/aiPreview.test.ts[2m > [22m[2maiPreview · /similar 知识库检索[2m > [22m[2mcategory 匹配 → 返回 knowledgeId + 过滤空 category
+[22m[39m[aiPreview] rules load failed: Error: ENOENT: no such file or directory, open 'D:\WorkBuddy\outputs\youfu_backend_dev_v2\src\data\classifier_rules.json'
+[90m    at Proxy.readFileSync (node:fs:440:20)[39m
+    at [90mD:\WorkBuddy\outputs\youfu_backend_dev_v2\[39msrc\routes\aiPreview.ts:18:15
+[90m    at processTicksAndRejections (node:internal/process/task_queues:103:5)[39m
+    at VitestExecutor.runModule [90m(file:///D:/WorkBuddy/outputs/youfu_backend_dev_v2/[39mnode_modules/[4mvite-node[24m/dist/client.mjs:399:5[90m)[39m
+    at VitestExecutor.directRequest [90m(file:///D:/WorkBuddy/outputs/youfu_backend_dev_v2/[39mnode_modules/[4mvite-node[24m/dist/client.mjs:381:5[90m)[39m
+    at VitestExecutor.cachedRequest [90m(file:///D:/WorkBuddy/outputs/youfu_backend_dev_v2/[39mnode_modules/[4mvite-node[24m/dist/client.mjs:206:14[90m)[39m
+    at VitestExecutor.dependencyRequest [90m(file:///D:/WorkBuddy/outputs/youfu_backend_dev_v2/[39mnode_modules/[4mvite-node[24m/dist/client.mjs:259:12[90m)[39m
+    at loadRouter [90m(D:\WorkBuddy\outputs\youfu_backend_dev_v2\[39msrc\test\aiPreview.test.ts:64:15[90m)[39m
+    at [90mD:\WorkBuddy\outputs\youfu_backend_dev_v2\[39msrc\test\aiPreview.test.ts:120:20
+    at [90mfile:///D:/WorkBuddy/outputs/youfu_backend_dev_v2/[39mnode_modules/[4m@vitest/runner[24m/dist/index.js:533:5 {
+  errno: [33m-4058[39m,
+  code: [32m'ENOENT'[39m,
+  syscall: [32m'open'[39m,
+  path: [32m'D:\\WorkBuddy\\outputs\\youfu_backend_dev_v2\\src\\data\\classifier_rules.json'[39m
+}
+
+ [32m✓[39m src/test/noAutoComplete.test.ts [2m([22m[2m2 tests[22m[2m)[22m[90m 2[2mms[22m[39m
+ [32m✓[39m src/test/scan.test.ts [2m([22m[2m7 tests[22m[2m)[22m[90m 4[2mms[22m[39m
+[90mstderr[2m | src/test/aiPreview.test.ts[2m > [22m[2maiPreview · /feedback 真实落库[2m > [22m[2m合法 action → ok:true + INSERT ai_feedback
+[22m[39m[aiPreview] rules load failed: Error: ENOENT: no such file or directory, open 'D:\WorkBuddy\outputs\youfu_backend_dev_v2\src\data\classifier_rules.json'
+[90m    at Proxy.readFileSync (node:fs:440:20)[39m
+    at [90mD:\WorkBuddy\outputs\youfu_backend_dev_v2\[39msrc\routes\aiPreview.ts:18:15
+[90m    at processTicksAndRejections (node:internal/process/task_queues:103:5)[39m
+    at VitestExecutor.runModule [90m(file:///D:/WorkBuddy/outputs/youfu_backend_dev_v2/[39mnode_modules/[4mvite-node[24m/dist/client.mjs:399:5[90m)[39m
+    at VitestExecutor.directRequest [90m(file:///D:/WorkBuddy/outputs/youfu_backend_dev_v2/[39mnode_modules/[4mvite-node[24m/dist/client.mjs:381:5[90m)[39m
+    at VitestExecutor.cachedRequest [90m(file:///D:/WorkBuddy/outputs/youfu_backend_dev_v2/[39mnode_modules/[4mvite-node[24m/dist/client.mjs:206:14[90m)[39m
+    at VitestExecutor.dependencyRequest [90m(file:///D:/WorkBuddy/outputs/youfu_backend_dev_v2/[39mnode_modules/[4mvite-node[24m/dist/client.mjs:259:12[90m)[39m
+    at loadRouter [90m(D:\WorkBuddy\outputs\youfu_backend_dev_v2\[39msrc\test\aiPreview.test.ts:64:15[90m)[39m
+    at [90mD:\WorkBuddy\outputs\youfu_backend_dev_v2\[39msrc\test\aiPreview.test.ts:133:20
+    at [90mfile:///D:/WorkBuddy/outputs/youfu_backend_dev_v2/[39mnode_modules/[4m@vitest/runner[24m/dist/index.js:533:5 {
+  errno: [33m-4058[39m,
+  code: [32m'ENOENT'[39m,
+  syscall: [32m'open'[39m,
+  path: [32m'D:\\WorkBuddy\\outputs\\youfu_backend_dev_v2\\src\\data\\classifier_rules.json'[39m
+}
+
+[90mstderr[2m | src/test/aiPreview.test.ts[2m > [22m[2maiPreview · /feedback 真实落库[2m > [22m[2m非法 action → 校验错误
+[22m[39m[aiPreview] rules load failed: Error: ENOENT: no such file or directory, open 'D:\WorkBuddy\outputs\youfu_backend_dev_v2\src\data\classifier_rules.json'
+[90m    at Proxy.readFileSync (node:fs:440:20)[39m
+    at [90mD:\WorkBuddy\outputs\youfu_backend_dev_v2\[39msrc\routes\aiPreview.ts:18:15
+[90m    at processTicksAndRejections (node:internal/process/task_queues:103:5)[39m
+    at VitestExecutor.runModule [90m(file:///D:/WorkBuddy/outputs/youfu_backend_dev_v2/[39mnode_modules/[4mvite-node[24m/dist/client.mjs:399:5[90m)[39m
+    at VitestExecutor.directRequest [90m(file:///D:/WorkBuddy/outputs/youfu_backend_dev_v2/[39mnode_modules/[4mvite-node[24m/dist/client.mjs:381:5[90m)[39m
+    at VitestExecutor.cachedRequest [90m(file:///D:/WorkBuddy/outputs/youfu_backend_dev_v2/[39mnode_modules/[4mvite-node[24m/dist/client.mjs:206:14[90m)[39m
+    at VitestExecutor.dependencyRequest [90m(file:///D:/WorkBuddy/outputs/youfu_backend_dev_v2/[39mnode_modules/[4mvite-node[24m/dist/client.mjs:259:12[90m)[39m
+    at loadRouter [90m(D:\WorkBuddy\outputs\youfu_backend_dev_v2\[39msrc\test\aiPreview.test.ts:64:15[90m)[39m
+    at [90mD:\WorkBuddy\outputs\youfu_backend_dev_v2\[39msrc\test\aiPreview.test.ts:142:20
+    at [90mfile:///D:/WorkBuddy/outputs/youfu_backend_dev_v2/[39mnode_modules/[4m@vitest/runner[24m/dist/index.js:533:5 {
+  errno: [33m-4058[39m,
+  code: [32m'ENOENT'[39m,
+  syscall: [32m'open'[39m,
+  path: [32m'D:\\WorkBuddy\\outputs\\youfu_backend_dev_v2\\src\\data\\classifier_rules.json'[39m
+}
+
+[90mstderr[2m | src/test/aiPreview.test.ts[2m > [22m[2maiPreview · /agent-stats 统计[2m > [22m[2m返回反馈统计 + 待复核
+[22m[39m[aiPreview] rules load failed: Error: ENOENT: no such file or directory, open 'D:\WorkBuddy\outputs\youfu_backend_dev_v2\src\data\classifier_rules.json'
+[90m    at Proxy.readFileSync (node:fs:440:20)[39m
+    at [90mD:\WorkBuddy\outputs\youfu_backend_dev_v2\[39msrc\routes\aiPreview.ts:18:15
+[90m    at processTicksAndRejections (node:internal/process/task_queues:103:5)[39m
+    at VitestExecutor.runModule [90m(file:///D:/WorkBuddy/outputs/youfu_backend_dev_v2/[39mnode_modules/[4mvite-node[24m/dist/client.mjs:399:5[90m)[39m
+    at VitestExecutor.directRequest [90m(file:///D:/WorkBuddy/outputs/youfu_backend_dev_v2/[39mnode_modules/[4mvite-node[24m/dist/client.mjs:381:5[90m)[39m
+    at VitestExecutor.cachedRequest [90m(file:///D:/WorkBuddy/outputs/youfu_backend_dev_v2/[39mnode_modules/[4mvite-node[24m/dist/client.mjs:206:14[90m)[39m
+    at VitestExecutor.dependencyRequest [90m(file:///D:/WorkBuddy/outputs/youfu_backend_dev_v2/[39mnode_modules/[4mvite-node[24m/dist/client.mjs:259:12[90m)[39m
+    at loadRouter [90m(D:\WorkBuddy\outputs\youfu_backend_dev_v2\[39msrc\test\aiPreview.test.ts:64:15[90m)[39m
+    at [90mD:\WorkBuddy\outputs\youfu_backend_dev_v2\[39msrc\test\aiPreview.test.ts:153:20
+    at [90mfile:///D:/WorkBuddy/outputs/youfu_backend_dev_v2/[39mnode_modules/[4m@vitest/runner[24m/dist/index.js:533:5 {
+  errno: [33m-4058[39m,
+  code: [32m'ENOENT'[39m,
+  syscall: [32m'open'[39m,
+  path: [32m'D:\\WorkBuddy\\outputs\\youfu_backend_dev_v2\\src\\data\\classifier_rules.json'[39m
+}
+
+[90mstderr[2m | src/test/aiPreview.test.ts[2m > [22m[2maiPreview · /gen-config 配置草稿[2m > [22m[2mLLM 生成草稿 → 返回 fields
+[22m[39m[aiPreview] rules load failed: Error: ENOENT: no such file or directory, open 'D:\WorkBuddy\outputs\youfu_backend_dev_v2\src\data\classifier_rules.json'
+[90m    at Proxy.readFileSync (node:fs:440:20)[39m
+    at [90mD:\WorkBuddy\outputs\youfu_backend_dev_v2\[39msrc\routes\aiPreview.ts:18:15
+[90m    at processTicksAndRejections (node:internal/process/task_queues:103:5)[39m
+    at VitestExecutor.runModule [90m(file:///D:/WorkBuddy/outputs/youfu_backend_dev_v2/[39mnode_modules/[4mvite-node[24m/dist/client.mjs:399:5[90m)[39m
+    at VitestExecutor.directRequest [90m(file:///D:/WorkBuddy/outputs/youfu_backend_dev_v2/[39mnode_modules/[4mvite-node[24m/dist/client.mjs:381:5[90m)[39m
+    at VitestExecutor.cachedRequest [90m(file:///D:/WorkBuddy/outputs/youfu_backend_dev_v2/[39mnode_modules/[4mvite-node[24m/dist/client.mjs:206:14[90m)[39m
+    at VitestExecutor.dependencyRequest [90m(file:///D:/WorkBuddy/outputs/youfu_backend_dev_v2/[39mnode_modules/[4mvite-node[24m/dist/client.mjs:259:12[90m)[39m
+    at loadRouter [90m(D:\WorkBuddy\outputs\youfu_backend_dev_v2\[39msrc\test\aiPreview.test.ts:64:15[90m)[39m
+    at [90mD:\WorkBuddy\outputs\youfu_backend_dev_v2\[39msrc\test\aiPreview.test.ts:164:20
+    at [90mfile:///D:/WorkBuddy/outputs/youfu_backend_dev_v2/[39mnode_modules/[4m@vitest/runner[24m/dist/index.js:533:5 {
+  errno: [33m-4058[39m,
+  code: [32m'ENOENT'[39m,
+  syscall: [32m'open'[39m,
+  path: [32m'D:\\WorkBuddy\\outputs\\youfu_backend_dev_v2\\src\\data\\classifier_rules.json'[39m
+}
+
+[90mstderr[2m | src/test/aiPreview.test.ts[2m > [22m[2maiPreview · /gen-config 配置草稿[2m > [22m[2mrequirement 过短 → 校验错误
+[22m[39m[aiPreview] rules load failed: Error: ENOENT: no such file or directory, open 'D:\WorkBuddy\outputs\youfu_backend_dev_v2\src\data\classifier_rules.json'
+[90m    at Proxy.readFileSync (node:fs:440:20)[39m
+    at [90mD:\WorkBuddy\outputs\youfu_backend_dev_v2\[39msrc\routes\aiPreview.ts:18:15
+[90m    at processTicksAndRejections (node:internal/process/task_queues:103:5)[39m
+    at VitestExecutor.runModule [90m(file:///D:/WorkBuddy/outputs/youfu_backend_dev_v2/[39mnode_modules/[4mvite-node[24m/dist/client.mjs:399:5[90m)[39m
+    at VitestExecutor.directRequest [90m(file:///D:/WorkBuddy/outputs/youfu_backend_dev_v2/[39mnode_modules/[4mvite-node[24m/dist/client.mjs:381:5[90m)[39m
+    at VitestExecutor.cachedRequest [90m(file:///D:/WorkBuddy/outputs/youfu_backend_dev_v2/[39mnode_modules/[4mvite-node[24m/dist/client.mjs:206:14[90m)[39m
+    at VitestExecutor.dependencyRequest [90m(file:///D:/WorkBuddy/outputs/youfu_backend_dev_v2/[39mnode_modules/[4mvite-node[24m/dist/client.mjs:259:12[90m)[39m
+    at loadRouter [90m(D:\WorkBuddy\outputs\youfu_backend_dev_v2\[39msrc\test\aiPreview.test.ts:64:15[90m)[39m
+    at [90mD:\WorkBuddy\outputs\youfu_backend_dev_v2\[39msrc\test\aiPreview.test.ts:174:20
+    at [90mfile:///D:/WorkBuddy/outputs/youfu_backend_dev_v2/[39mnode_modules/[4m@vitest/runner[24m/dist/index.js:533:5 {
+  errno: [33m-4058[39m,
+  code: [32m'ENOENT'[39m,
+  syscall: [32m'open'[39m,
+  path: [32m'D:\\WorkBuddy\\outputs\\youfu_backend_dev_v2\\src\\data\\classifier_rules.json'[39m
+}
+
+ [32m✓[39m src/test/aiPreview.test.ts [2m([22m[2m9 tests[22m[2m)[22m[33m 1077[2mms[22m[39m
+   [33m[2m✓[22m[39m aiPreview · /preview 三层分类[2m > [22mLLM 命中 → 返回分类/优先级/置信度，并写推理日志 [33m573[2mms[22m[39m
+ [32m✓[39m src/test/stateMachineHttp.test.ts [2m([22m[2m14 tests[22m[2m)[22m[33m 1022[2mms[22m[39m
+   [33m[2m✓[22m[39m DEF-3 建单响应含 id[2m > [22mtoCreateRes 返回 id 字段 [33m1014[2mms[22m[39m
+ [32m✓[39m src/test/batchB.test.ts [2m([22m[2m8 tests[22m[2m)[22m[90m 5[2mms[22m[39m
+
+[2m Test Files [22m [1m[32m28 passed[39m[22m[90m (28)[39m
+[2m      Tests [22m [1m[32m239 passed[39m[22m[90m (239)[39m
+[2m   Start at [22m 03:27:43
+[2m   Duration [22m 2.31s[2m (transform 4.01s, setup 0ms, collect 8.96s, tests 3.18s, environment 6ms, prepare 4.63s)[22m
+

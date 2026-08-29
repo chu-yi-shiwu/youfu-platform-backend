@@ -33,8 +33,14 @@ describe('resolveFaultCategory', () => {
     const r = await resolveFaultCategory(client, 't1', '空调维修坏了');
     expect(r?.id).toBe('c1');
   });
-  it('关键词 hint 模糊匹配分类名', async () => {
+  it('token 语义优先：描述含分类 token（空调）→ 归该分类', async () => {
+    // v0.3 语义：先 token 匹配（'空调' 命中 c1 空调维修）再词表 hint 兜底，防止"漏水→水电"误判
     const r = await resolveFaultCategory(client, 't1', '空调漏水严重');
+    expect(r?.id).toBe('c1');
+  });
+  it('无分类 token 命中时走词表 hint 兜底', async () => {
+    // '马桶堵了' 不含 '空调'/'水电' token → hint='水' → ILIKE %水% → c2
+    const r = await resolveFaultCategory(client, 't1', '马桶堵了');
     expect(r?.id).toBe('c2');
   });
   it('无匹配返回 null', async () => {

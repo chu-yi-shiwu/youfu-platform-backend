@@ -10,6 +10,8 @@ import { AppError } from '../middleware/error.js';
 import { requireConfigRole } from '../middleware/role.js';
 import { createLinkedWorkOrder } from '../services/linkedWorkOrder.js';
 import { summarizeLinkedOrders } from '../services/assetHistory.js';
+import { emitDomainEvent } from '../db/eventBus.js';
+import { parseCsv, csvEscape } from '../services/csvUtil.js';
 
 const router = Router();
 
@@ -31,17 +33,27 @@ const assetSchema = z.object({
 router.get('/assets', async (req, res, next) => {
   try {
     const tenantId = res.locals.auth.tenantId;
-    const { name, pinyin, location, status } = req.query as Record<string, string>;
+    const { name, pinyin, location, status, code } = req.query as Record<string, string>;
     const clauses = ['tenant_id = $1'];
     const params: unknown[] = [tenantId];
     const add = (sql: string, v: unknown) => {
       params.push(v);
-      clauses.push(sql.replace('?', `$${params.length}`));
+      clauses.push(sql.replace(/\?/g, `$${params.length}`));
     };
     if (name) add('name ILIKE ?', `%${name}%`);
     if (pinyin) add('pinyin ILIKE ?', `%${pinyin}%`);
     if (location) add('location = ?', location);
     if (status) add('status = ?', status);
+    // #565 P1：扫资产码过滤（资产编号 / 二维码 / 序列号任一匹配），供小程序 worker 扫资产码看档案。
+    if (code) {
+      const c = String(code).trim();
+      if (c) {
+        params.push(`%${c}%`, c, c);
+        clauses.push(
+          `(asset_no ILIKE $${params.length - 2} OR qr_code = $${params.length - 1} OR sno = $${params.length})`,
+        );
+      }
+    }
     const items = await withTenantClient(tenantId, (client) =>
       client
         .query(`SELECT * FROM asset WHERE ${clauses.join(' AND ')} ORDER BY created_at DESC`, params)
@@ -140,7 +152,10 @@ router.post('/assets/:id/transfer', async (req, res, next) => {
         `UPDATE asset SET location=$3, updated_at=now() WHERE id=$1 AND tenant_id=$2 RETURNING *`,
         [req.params.id, tenantId, b.location],
       );
-      return r.rows[0];
+      const row = r.rows[0];
+      // P0 飞轮：资产调拨事件
+      await emitDomainEvent(client, { tenantId, entityType: 'asset', entityId: row.id, type: 'asset_transfer', actor: 'config_role', payload: { to_location: b.location } });
+      return row;
     });
     return res.json({ ok: true, code: 0, item });
   } catch (e) {
@@ -182,6 +197,8 @@ router.post('/assets/:id/fault', async (req, res, next) => {
         `UPDATE asset SET linked_order_ids=$3, status='repairing', updated_at=now() WHERE id=$1 AND tenant_id=$2`,
         [a.id, tenantId, ids],
       );
+      // P0 飞轮：资产故障事件（挂工单上下文，供分类-工人匹配特征）
+      await emitDomainEvent(client, { tenantId, entityType: 'asset', entityId: a.id, type: 'asset_fault', actor: 'config_role', payload: { work_order_id: wo.id, asset_no: a.asset_no ?? null } });
       return wo;
     });
     return res.json({ ok: true, code: 0, result });
@@ -303,41 +320,14 @@ router.delete('/assets/maintenance/:mid', async (req, res, next) => {
 
 // ============ 资产 CSV 导出 / 导入 ============
 const ASSET_CSV_COLS = ['name', 'model', 'pinyin', 'location', 'status', 'sno', 'financial_category', 'price', 'supplier', 'purchase_date'];
-function parseCsv(text: string): string[][] {
-  const rows: string[][] = [];
-  let row: string[] = [];
-  let field = '';
-  let inQuotes = false;
-  for (let i = 0; i < text.length; i++) {
-    const c = text[i];
-    if (inQuotes) {
-      if (c === '"') {
-        if (text[i + 1] === '"') { field += '"'; i++; } else { inQuotes = false; }
-      } else field += c;
-    } else if (c === '"') inQuotes = true;
-    else if (c === ',') { row.push(field); field = ''; }
-    else if (c === '\n' || c === '\r') {
-      if (c === '\r' && text[i + 1] === '\n') i++;
-      row.push(field); rows.push(row); row = []; field = '';
-    } else field += c;
-  }
-  if (field.length > 0 || row.length > 0) { row.push(field); rows.push(row); }
-  return rows.filter((r) => r.length > 1 || (r.length === 1 && r[0] !== ''));
-}
-
 router.get('/assets/export', async (req, res, next) => {
   try {
     const tenantId = res.locals.auth.tenantId;
     const items = await withTenantClient(tenantId, (client) =>
       client.query(`SELECT * FROM asset WHERE tenant_id=$1 ORDER BY created_at DESC`, [tenantId]).then((r) => r.rows),
     );
-    const escape = (v: unknown) => {
-      if (v === null || v === undefined) return '';
-      const s = String(v);
-      return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-    };
     const lines = [['asset_no', ...ASSET_CSV_COLS].join(',')];
-    for (const row of items) lines.push([row.asset_no ?? '', ...ASSET_CSV_COLS.map((h) => escape(row[h]))].join(','));
+    for (const row of items) lines.push([row.asset_no ?? '', ...ASSET_CSV_COLS.map((h) => csvEscape(row[h]))].join(','));
     const csv = '﻿' + lines.join('\r\n');
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
     res.setHeader('Content-Disposition', 'attachment; filename="asset.csv"');

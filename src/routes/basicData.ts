@@ -7,6 +7,7 @@ import { randomUUID } from 'crypto';
 import { withTenantClient } from '../db/pool.js';
 import { AppError } from '../middleware/error.js';
 import { requirePermission } from '../middleware/role.js';
+import { parseCsv, csvEscape } from '../services/csvUtil.js';
 
 const router = Router();
 
@@ -313,15 +314,8 @@ router.get('/basic-data/:type/export', async (req, res, next) => {
       client.query(`SELECT * FROM ${def.table} WHERE tenant_id=$1 ORDER BY created_at DESC`, [tenantId]).then((r) => r.rows),
     );
     const headers = def.insertCols;
-    const escape = (v: unknown) => {
-      if (v === null || v === undefined) return '';
-      // jsonb/对象列（如 work_order_template.default_fields）须 JSON 序列化，
-      // 否则 String({}) 会变成 "[object Object]" 损坏数据。
-      const s = typeof v === 'object' ? JSON.stringify(v) : String(v);
-      return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-    };
     const lines = [headers.join(',')];
-    for (const row of items) lines.push(headers.map((h) => escape(row[h])).join(','));
+    for (const row of items) lines.push(headers.map((h) => csvEscape(row[h])).join(','));
     const csv = '﻿' + lines.join('\r\n');
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
     res.setHeader('Content-Disposition', `attachment; filename="${def.table}.csv"`);
@@ -332,46 +326,6 @@ router.get('/basic-data/:type/export', async (req, res, next) => {
 });
 
 // ============ CSV 导入 ============
-function parseCsv(text: string): string[][] {
-  const rows: string[][] = [];
-  let row: string[] = [];
-  let field = '';
-  let inQuotes = false;
-  for (let i = 0; i < text.length; i++) {
-    const c = text[i];
-    if (inQuotes) {
-      if (c === '"') {
-        if (text[i + 1] === '"') {
-          field += '"';
-          i++;
-        } else {
-          inQuotes = false;
-        }
-      } else {
-        field += c;
-      }
-    } else if (c === '"') {
-      inQuotes = true;
-    } else if (c === ',') {
-      row.push(field);
-      field = '';
-    } else if (c === '\n' || c === '\r') {
-      if (c === '\r' && text[i + 1] === '\n') i++;
-      row.push(field);
-      rows.push(row);
-      row = [];
-      field = '';
-    } else {
-      field += c;
-    }
-  }
-  if (field.length > 0 || row.length > 0) {
-    row.push(field);
-    rows.push(row);
-  }
-  return rows.filter((r) => r.length > 1 || (r.length === 1 && r[0] !== ''));
-}
-
 router.post('/basic-data/:type/import', async (req, res, next) => {
   try {
     const auth = res.locals.auth;

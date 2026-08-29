@@ -22,4 +22,10 @@ describe('dispatch pickWorker', () => {
     const picked = pickWorker(workers, { skillTags: ['plumbing'] });
     expect(picked).toBeNull();
   });
+
+  it('R17-005 防御：pickWorker 不原地排序污染入参数组', () => {
+    const snapshot = workers.map((w) => ({ ...w }));
+    pickWorker(workers, { skillTags: ['repair'] });
+    expect(workers.map((w) => w.id)).toEqual(snapshot.map((w) => w.id)); // 顺序未被改动
+  });
 });

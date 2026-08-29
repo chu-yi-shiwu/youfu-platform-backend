@@ -7,7 +7,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { withTenantClient } from '../db/pool.js';
 import { AppError } from '../middleware/error.js';
-import { requireConfigRole, ROLES, DEFAULT_PERM_MATRIX, type Role } from '../middleware/role.js';
+import { requireConfigRole, ROLES, DEFAULT_PERM_MATRIX, canAssignRole, ROLE_RANK, type Role } from '../middleware/role.js';
 import { requireRole, type AuthLocals } from '../middleware/auth.js';
 import { hashPassword, toPublic } from '../account.js';
 
@@ -123,6 +123,11 @@ router.post('/accounts', async (req, res, next) => {
     requireConfigRole(req, res);
     const tenantId = res.locals.auth.tenantId;
     const b = accountCreateSchema.parse(req.body);
+    // R15-005 修复：角色分配门禁——operator 不得铸造 admin 或越级分配。
+    const callerRole = res.locals.auth.role as Role;
+    if (b.role && !canAssignRole(callerRole, b.role)) {
+      throw new AppError('FORBIDDEN', '无权分配该角色（不可越级或授予 admin）', 403);
+    }
     const item = await withTenantClient(tenantId, async (client) => {
       const dup = await client.query(
         `SELECT 1 FROM account_user WHERE tenant_id=$1 AND username=$2 LIMIT 1`,
@@ -150,6 +155,17 @@ router.put('/accounts/:id', async (req, res, next) => {
     requireConfigRole(req, res);
     const tenantId = res.locals.auth.tenantId;
     const b = accountUpdateSchema.parse(req.body);
+    // R15-005 修复：角色分配门禁——防止 operator 自提权/铸造 admin，及越级分配。
+    const callerRole = res.locals.auth.role as Role;
+    if (b.role !== undefined) {
+      const selfEdit = String(req.params.id) === String(res.locals.auth.userId);
+      if (selfEdit && ROLE_RANK[b.role] > ROLE_RANK[callerRole]) {
+        throw new AppError('FORBIDDEN', '不可自我提权', 403);
+      }
+      if (!canAssignRole(callerRole, b.role)) {
+        throw new AppError('FORBIDDEN', '无权分配该角色（不可越级或授予 admin）', 403);
+      }
+    }
     const item = await withTenantClient(tenantId, async (client) => {
       const cur = await client.query(`SELECT ${COLS} FROM account_user WHERE id=$1 AND tenant_id=$2`, [req.params.id, tenantId]);
       if (cur.rowCount === 0) throw new AppError('NOT_FOUND', 'account not found', 404);

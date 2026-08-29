@@ -58,4 +58,16 @@ describe('sla.slaScan', () => {
     const rows = [base({ sla_due_at: null })];
     expect(slaScan(rows, now)).toHaveLength(0);
   });
+
+  it('R13-005 回归：pending_dispatch 不在默认 SLA_ACTIVE → 默认不命中', () => {
+    const rows = [base({ status: 'pending_dispatch' as WorkOrderStatus, sla_due_at: new Date('2026-08-13T11:00:00Z') })];
+    expect(slaScan(rows, now)).toHaveLength(0);
+  });
+
+  it('R13-005 回归：传入 activeStates 含 pending_dispatch → 命中升级', () => {
+    const rows = [base({ status: 'pending_dispatch' as WorkOrderStatus, sla_due_at: new Date('2026-08-13T11:00:00Z') })];
+    const hits = slaScan(rows, now, ['pending_dispatch', 'assigned']);
+    expect(hits).toHaveLength(1);
+    expect(hits[0].workOrderId).toBe('wo1');
+  });
 });

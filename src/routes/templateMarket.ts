@@ -3,8 +3,7 @@
 // V6 标准载体（官方模板=行业基线）、V7 官方预置冷启动；R5 依赖批次 B 版本回滚（应用可回滚）。
 import { Router } from 'express';
 import { z } from 'zod';
-import pool from '../db/pool.js';
-import { withTenantClient } from '../db/pool.js';
+import pool, { withTenantClient } from '../db/pool.js';
 import { saveWorkflowDef, getWorkflowDef, getWorkflowDefVersion } from '../engine/workflowDef.js';
 import { AppError } from '../middleware/error.js';
 import { platformAdminAuth } from '../middleware/platformAuth.js';

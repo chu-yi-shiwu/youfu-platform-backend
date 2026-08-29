@@ -17,37 +17,41 @@ interface Cached { value: string; expireAt: number; }
 let tokenCache: Cached | null = null;
 let ticketCache: Cached | null = null;
 
+// 统一出站超时（ms）：与 wechatMp.ts 的 httpJson 对齐。微信 API 挂起时若不超时，
+// /wechat/jssdk-config 与报修语音下载(downloadMedia) 请求会无限挂起，占住连接直至客户端超时。
+const WECHAT_HTTP_TIMEOUT_MS = 8000;
+
 function httpsGetJson(url: string): Promise<any> {
   return new Promise((resolve, reject) => {
-    https
-      .get(url, (res) => {
-        const chunks: Buffer[] = [];
-        res.on('data', (c: Buffer) => chunks.push(c));
-        res.on('end', () => {
-          const body = Buffer.concat(chunks).toString('utf8');
-          try {
-            resolve(JSON.parse(body));
-          } catch {
-            reject(new Error('wechat json parse fail: ' + body.slice(0, 200)));
-          }
-        });
-      })
-      .on('error', reject);
+    const req = https.get(url, (res) => {
+      const chunks: Buffer[] = [];
+      res.on('data', (c: Buffer) => chunks.push(c));
+      res.on('end', () => {
+        const body = Buffer.concat(chunks).toString('utf8');
+        try {
+          resolve(JSON.parse(body));
+        } catch {
+          reject(new Error('wechat json parse fail: ' + body.slice(0, 200)));
+        }
+      });
+    });
+    req.setTimeout(WECHAT_HTTP_TIMEOUT_MS, () => req.destroy(new Error('wechat request timeout')));
+    req.on('error', reject);
   });
 }
 
 function httpsGetBuffer(url: string): Promise<{ buf: Buffer; contentType: string }> {
   return new Promise((resolve, reject) => {
-    https
-      .get(url, (res) => {
-        const chunks: Buffer[] = [];
-        res.on('data', (c: Buffer) => chunks.push(c));
-        res.on('end', () => {
-          const ct = (res.headers['content-type'] || 'audio/amr') as string;
-          resolve({ buf: Buffer.concat(chunks), contentType: ct });
-        });
-      })
-      .on('error', reject);
+    const req = https.get(url, (res) => {
+      const chunks: Buffer[] = [];
+      res.on('data', (c: Buffer) => chunks.push(c));
+      res.on('end', () => {
+        const ct = (res.headers['content-type'] || 'audio/amr') as string;
+        resolve({ buf: Buffer.concat(chunks), contentType: ct });
+      });
+    });
+    req.setTimeout(WECHAT_HTTP_TIMEOUT_MS, () => req.destroy(new Error('wechat request timeout')));
+    req.on('error', reject);
   });
 }
 

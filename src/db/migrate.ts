@@ -39,6 +39,22 @@ async function main() {
       .filter((f) => /^\d+_.*\.sql$/.test(f))
       .sort();
 
+    // R25-005：检测重复的数字前缀（如 037_xxx.sql 与 037_yyy.sql 同号兄弟迁移），仅作告警，
+    // 不改文件名——重命名已部署迁移会因 _migrations 按文件名追踪而重复执行，有破坏风险。
+    // 排序按全文件名进行，同号内顺序确定性 OK；此处仅防未来手误造成混淆。
+    const prefixCounts = new Map<string, number>();
+    for (const f of migrationFiles) {
+      const m = /^(\d+)_/.exec(f);
+      if (m) prefixCounts.set(m[1], (prefixCounts.get(m[1]) ?? 0) + 1);
+    }
+    for (const [prefix, count] of prefixCounts) {
+      if (count > 1) {
+        console.warn(
+          `[migrate] WARN 重复迁移序号 ${prefix}（${count} 个文件）；排序按全文件名确定性执行，请勿重命名已部署迁移`,
+        );
+      }
+    }
+
     let ran = 0;
     for (const file of migrationFiles) {
       if (applied.has(file)) {

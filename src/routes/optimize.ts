@@ -17,6 +17,7 @@ import {
 import { getWorkflowDef, saveWorkflowDef } from '../engine/workflowDef.js';
 import { isAutoTuneEffective } from '../repo/tenantSettings.js';
 import { DEFAULT_WORK_ORDER_DEF, RICH_WORK_ORDER_DEF, type WorkflowDef } from '../engine/stateMachine.js';
+import { requirePermission } from '../middleware/role.js';
 
 const router = Router();
 
@@ -156,10 +157,6 @@ const putDefSchema = z.object({
 router.put('/workflow/def', async (req, res, next) => {
   try {
     const tenantId = res.locals.auth.tenantId;
-    const role = res.locals.auth.role;
-    if (role !== 'admin') {
-      throw new AppError('FORBIDDEN', 'only admin can reconfigure workflow definition', 403);
-    }
     const { entity, def } = putDefSchema.parse(req.body);
     const entityType = entity || 'work_order';
     // 诚实校验：所有 transition 的 from/to 必须落在 states 集合内，initial 也须在 states 内（避免写坏引擎）
@@ -177,6 +174,7 @@ router.put('/workflow/def', async (req, res, next) => {
       config: def.config ?? {},
     };
     const version = await withTenantClient(tenantId, async (client) => {
+      await requirePermission(res.locals.auth, client, 'workflow.edit');
       await saveWorkflowDef(client, tenantId, entityType, cleanDef);
       const r = await client.query<{ version: number }>(
         `SELECT version FROM workflow_def WHERE tenant_id = $1 AND entity_type = $2`,
