@@ -10,6 +10,7 @@
 // 网关接入点：SMS_GATEWAY / PUSH_GATEWAY（URL 网关）→ deliverToGateway；微信订阅消息 → WechatChannel（env 门控）。
 // 所有外部资源缺失时一律 graceful 降级为 stub，delivered=false + note 诚实标注，绝不谎报"已送达"。
 import type { PoolClient } from 'pg';
+import { withTenantClient } from '../db/pool.js'; // R31-Q1：deferred wechat 补投递用独立连接
 import { mpConfigured, getMpAccessToken } from './wechatMp.js';
 import { httpsPostJson } from './httpJson.js';
 import { maskPhone } from './llm.js'; // R30-F1：网关出境正文脱敏（llm.ts 仅依赖 pool/httpJson，无循环依赖）
@@ -90,6 +91,11 @@ async function resolveOpenid(
     return rows[0]?.wx_openid || null;
   }
   // account / desk 接收方：直接查 account_user（desk 亦映射到后台账号）
+  // R31-Q1b（2026-08-29 深度轮5发现）：recipient 若为非 UUID 文本（如种子 worker id w-test-001），
+  // 直查 account_user.id(uuid 列) 会 22P02 → 诚实返回 null 走 stub，而非异常。
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(input.recipient)) {
+    return null;
+  }
   const { rows } = await client.query<{ wx_openid: string | null }>(
     `SELECT wx_openid FROM account_user WHERE tenant_id = $1 AND id = $2`,
     [input.tenantId, input.recipient],
@@ -406,7 +412,37 @@ export async function dispatchNotification(client: PoolClient, input: NotifyInpu
  * 兼容导出：保持既有调用方（routes/workOrder.ts）签名不变。
  * 落库一条通知；sms/push 经网关真实投递（若配置且能解析手机号），wechat 经订阅消息真实投递（若配置且已绑 openid），
  * 未配置分支 delivered 恒 false，诚实未发送。
+ *
+ * R31-Q1（2026-08-29 代码审查发现）：默认 fan-out（无 channel）时改为「deferred」模式——
+ * in_app 在事务内落库必达；wechat 渠道入 pending 队列，由 flushWechatDeliveries() 在响应完成
+ * （事务已提交）后用独立连接补投递。消除「事务内外部 HTTP」反模式（微信订阅消息真发最长 ~8s
+ * 会拖长事务、占用连接池）。显式指定 channel 的单通道调用行为不变。
  */
+const wechatPendingQueue: NotifyInput[] = [];
+
 export async function insertNotification(client: PoolClient, input: NotifyInput): Promise<void> {
+  if (!input.channel) {
+    // deferred fan-out：in_app 必达（事务内）；wechat 入队（提交后补投递，独立落一条 channel='wechat' 凭证，与原 fan-out 等价）
+    await CHANNELS.in_app.send(client, input);
+    wechatPendingQueue.push(input);
+    return;
+  }
   await dispatchNotification(client, input);
+}
+
+/**
+ * R31-Q1：补投递积压的 wechat 渠道通知（fire-and-forget）。应在 HTTP 响应完成（事务已提交）后调用；
+ * 每条用独立租户连接，失败仅记日志（诚实：无凭证记录=未送达，不谎报）。
+ * @param executor 可注入（测试用），默认 withTenantClient。
+ */
+export function flushWechatDeliveries(
+  executor: (tenantId: string, fn: (client: PoolClient) => Promise<unknown>) => Promise<unknown> = withTenantClient,
+): number {
+  const batch = wechatPendingQueue.splice(0, wechatPendingQueue.length);
+  for (const input of batch) {
+    void executor(input.tenantId, (client) => CHANNELS.wechat.send(client, input)).catch((e) => {
+      console.error('[notify:wechat] deferred delivery failed', { workOrderId: input.workOrderId, recipient: input.recipient, err: e });
+    });
+  }
+  return batch.length;
 }
