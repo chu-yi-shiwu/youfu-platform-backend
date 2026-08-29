@@ -16,6 +16,7 @@ import { matchCategoryHint, resolveFaultCategory, inferPriority, resolveAsset, g
 import { llmInferCategory } from '../services/llm.js';
 import { resolveScanFromDb } from '../scan.js'; // ⑤ 扫码关联：复用 DB 权威解析
 import { getLlmEnabled } from '../repo/tenantSettings.js';
+import { autoDispatchAfterCreate } from './workOrder.js'; // 2026-08-29：公开报修单复用后台建单的自动派单（修复卡 draft 无通知断链）
 import { mpConfigured, decryptPhoneCode, genMpCode } from '../services/wechatMp.js';
 import { downloadMedia } from '../services/wechat.js'; // ③ 微信真录音：下载原始 amr 无损耗留存
 import { attachmentSchema, reportSchema, CTYPE_EXT, isAudioCType } from './publicReportSchema.js';
@@ -318,7 +319,13 @@ router.post('/public/repair-report', loginRateLimit(20), async (req, res, next) 
         // 幂等（前端 Idempotency-Key header，防重复提交重复建单）
         idempotencyKey: (req.header('Idempotency-Key') as string | undefined) || undefined,
       });
-      return { row, created, catalogName, priority, assetName: asset?.name ?? null, scanResolved, location };
+      // DMR 自动派单：公开报修单与后台建单同一引擎待遇（2026-08-29 修复"卡 draft/无通知/小程序点不开"断链）。
+      // 幂等重放（created=false）不重跑派单（R9-001 同款纪律：绝不重置在途工单/虚增负载）。
+      let dispatch: Awaited<ReturnType<typeof autoDispatchAfterCreate>> | null = null;
+      if (created) {
+        dispatch = await autoDispatchAfterCreate(client, tenantId, row, { business_type: 'repair', priority, catalog: catalogId });
+      }
+      return { row, created, catalogName, priority, assetName: asset?.name ?? null, scanResolved, location, dispatch };
     });
 
     // ④ 回收闭环：幂等重复提交时 createWithIdem 返回【原工单】（created:false），须回原 view_token，
@@ -328,7 +335,11 @@ router.post('/public/repair-report', loginRateLimit(20), async (req, res, next) 
 
     return res.status(result.created ? 201 : 200).json({
       ok: true, code: 0,
-      id: result.row.id, order_no: result.row.order_no, status: result.row.status,
+      id: result.row.id, order_no: result.row.order_no,
+      // 2026-08-29：返回自动派单后的真实状态（assigned/claim_hall），前端与「我的报修」不再误显 draft
+      status: result.dispatch ? result.dispatch.dispatchTarget : result.row.status,
+      auto_flow: result.dispatch?.autoFlow ?? false,
+      assignee: result.dispatch?.assignee ?? null,
       view_token: storedToken, // ④ 回收闭环：前端存本地，凭此在「我的报修」查看与纠偏（幂等重复提交回原 token）
       reporter_phone: b.phone ?? null, // ⑤ 手机号身份锚点：返回报修人，前端脱敏展示并用作找回凭据
       reporter_nickname: b.nickname ?? null, // 微信授权带入：服务侧可明确服务对象
