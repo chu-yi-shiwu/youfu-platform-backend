@@ -7,6 +7,7 @@ import { withTenantClient } from '../db/pool.js';
 import { AppError } from '../middleware/error.js';
 import { requireConfigRole } from '../middleware/role.js';
 import { emitDomainEvent } from '../db/eventBus.js';
+import { csvEscape } from '../services/csvUtil.js';
 
 const router = Router();
 
@@ -17,6 +18,8 @@ const submitSchema = z.object({
   images: z.array(z.string()).optional(),
   audio: z.string().optional(),
   channel: z.enum(['mobile', 'desk']).default('mobile'),
+  // P1 归因桥接：可选工单号（order_no），服务端解析为 work_order_id（校验租户）
+  work_order_no: z.string().optional(),
 });
 
 router.get('/', async (req, res, next) => {
@@ -27,7 +30,7 @@ router.get('/', async (req, res, next) => {
     const params: unknown[] = [tenantId];
     const add = (sql: string, v: unknown) => {
       params.push(v);
-      clauses.push(sql.replace('?', `$${params.length}`));
+      clauses.push(sql.replace(/\?/g, `$${params.length}`));
     };
     if (type) add('type = ?', type);
     if (status) add('status = ?', status);
@@ -47,10 +50,16 @@ router.post('/', async (req, res, next) => {
     const tenantId = res.locals.auth.tenantId;
     const b = submitSchema.parse(req.body);
     const item = await withTenantClient(tenantId, async (client) => {
+      // P1 归因桥接：order_no → work_order_id（校验租户；不存在则忽略）
+      let woId: string | null = null;
+      if (b.work_order_no) {
+        const wo = await client.query('SELECT id FROM work_orders WHERE tenant_id=$1 AND order_no=$2 LIMIT 1', [tenantId, b.work_order_no.trim()]);
+        if (wo.rows.length > 0) woId = wo.rows[0].id;
+      }
       const r = await client.query(
-        `INSERT INTO feedback (tenant_id, type, content, rating, images, audio, channel, status)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,'new') RETURNING *`,
-        [tenantId, b.type, b.content, b.rating ?? null, b.images ? JSON.stringify(b.images) : '[]', b.audio ?? null, b.channel],
+        `INSERT INTO feedback (tenant_id, type, content, rating, images, audio, channel, status, work_order_id)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,'new',$8) RETURNING *`,
+        [tenantId, b.type, b.content, b.rating ?? null, b.images ? JSON.stringify(b.images) : '[]', b.audio ?? null, b.channel, woId],
       );
       const row = r.rows[0];
       await emitDomainEvent(client, {
@@ -59,7 +68,7 @@ router.post('/', async (req, res, next) => {
         entityId: row.id,
         type: 'submit',
         actor: 'user',
-        payload: { feedback_type: b.type, rating: b.rating ?? null },
+        payload: { feedback_type: b.type, rating: b.rating ?? null, work_order_id: woId },
       });
       return row;
     });
@@ -115,11 +124,6 @@ router.get('/stats', async (req, res, next) => {
 });
 
 // ============ 反馈 CSV 导出（UOne H 导出） ============
-function csvEscape(v: unknown): string {
-  if (v === null || v === undefined) return '';
-  const s = String(v);
-  return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-}
 const FEEDBACK_CSV_COLS = ['created_at', 'type', 'content', 'rating', 'status', 'channel', 'reply', 'replied_at'];
 router.get('/export', async (req, res, next) => {
   try {

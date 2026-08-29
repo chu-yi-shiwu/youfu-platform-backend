@@ -5,8 +5,8 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import crypto from 'node:crypto';
-import pool, { withTenantClient } from '../db/pool.js';
-import { signJwt, AUTH_MODE } from '../middleware/auth.js';
+import pool, { withTenantClient, assertSafeTenantId } from '../db/pool.js';
+import { signJwt, AUTH_MODE, loginRateLimit } from '../middleware/auth.js';
 import { platformAdminAuth } from '../middleware/platformAuth.js';
 import { verifyPassword, hashPassword } from '../account.js';
 import { llmConfigured } from '../services/llm.js';
@@ -32,7 +32,7 @@ async function audit(
 }
 
 // ---- POST /platform/auth/login —— 平台管理员登录（公开） ----
-router.post('/auth/login', async (req, res, next) => {
+router.post('/auth/login', loginRateLimit(), async (req, res, next) => {
   try {
     const { username, password } = z.object({ username: z.string().min(1), password: z.string().min(1) }).parse(req.body);
     const r = await pool.query(
@@ -125,24 +125,29 @@ router.post('/tenants', async (req, res, next) => {
     const dup = await pool.query(`SELECT 1 FROM tenant_registry WHERE tenant_id = $1`, [b.tenant_id]);
     if ((dup.rowCount ?? 0) > 0) return res.status(409).json({ ok: false, code: 'TENANT_DUP', message: '该机构已存在' });
     // 登记租户 + 行业模板初始化（复制模板源 fault_category）
-    await pool.query('BEGIN');
+    // R19-001 🔴 修复：原实现用 pool.query('BEGIN') 起事务却混用 withTenantClient（各自独立连接），
+    //   pg.Pool.query 不保证跨调用同一连接 → 事务根本不原子，模板复制中途失败会留下「已建租户但无分类」孤儿租户。
+    //   现改为单一 client 真事务：在同连接内切换租户上下文分别读(src)/写(new)，要么全成要么全回滚。
+    const client = await pool.connect();
     try {
-      await pool.query(
+      await client.query('BEGIN');
+      await client.query(
         `INSERT INTO tenant_registry (tenant_id, name, category, parent_id, quota) VALUES ($1,$2,$3,$4,$5::jsonb)`,
         [b.tenant_id, b.name, b.category, b.parent_id ?? null, JSON.stringify({ repair_daily: 500 })],
       );
       const src = INDUSTRY_TEMPLATE_SOURCE[b.category] ?? 't-verification';
-      // 行业模板：跨租户复制 fault_category（RLS 生效后 pool 直连查不到模板源——两步法：
-      // step1 以 src 租户上下文读模板，step2 以 new 租户上下文写入；应用层传 id 防 RLS WITH CHECK 拦截）
-      const copied = await withTenantClient(src, (client) =>
-        client.query(
+      let copiedCount = 0;
+      if (src !== b.tenant_id) {
+        // 读源租户分类（SET LOCAL app.tenant_id=src + SET ROLE youfu_app 使 RLS 生效）
+        await client.query(`SET LOCAL app.tenant_id = '${assertSafeTenantId(src).replace(/'/g, "''")}'`);
+        await client.query('SET ROLE youfu_app');
+        const copied = await client.query(
           `SELECT code, name, sort, enabled FROM fault_category WHERE tenant_id = $1 AND enabled = true`,
           [src],
-        ),
-      );
-      let copiedCount = 0;
-      if (copied.rows.length > 0) {
-        await withTenantClient(b.tenant_id, async (client) => {
+        );
+        if (copied.rows.length > 0) {
+          // 切到新租户上下文后写入（RLS WITH CHECK 保证 tenant_id=new）
+          await client.query(`SET LOCAL app.tenant_id = '${assertSafeTenantId(b.tenant_id).replace(/'/g, "''")}'`);
           for (const row of copied.rows) {
             const ins = await client.query(
               `INSERT INTO fault_category (id, tenant_id, code, name, sort, enabled)
@@ -152,17 +157,19 @@ router.post('/tenants', async (req, res, next) => {
             );
             copiedCount += ins.rowCount ?? 0;
           }
-        });
+        }
       }
-      await pool.query('COMMIT');
+      await client.query('COMMIT');
       await audit(admin.username, 'tenant.create', b.tenant_id, b.tenant_id, { category: b.category, categories_copied: copiedCount });
       return res.status(201).json({
         ok: true, code: 0, item: { tenant_id: b.tenant_id, name: b.name, category: b.category, status: 'active' },
         note: `机构已登记，按${b.category}行业模板初始化分类 ${copiedCount} 条`,
       });
     } catch (e) {
-      await pool.query('ROLLBACK');
+      await client.query('ROLLBACK').catch(() => undefined);
       throw e;
+    } finally {
+      client.release();
     }
   } catch (e) {
     next(e);
@@ -386,6 +393,76 @@ router.put('/tenants/:id/llm', async (req, res, next) => {
   } catch (e) {
     next(e);
   }
+});
+
+// ---- 位置字典 CRUD（v0.4.0：报修位置预录入，扫码自动带出） ----
+router.get('/tenants/:id/locations', async (req, res, next) => {
+  try {
+    const tenantId = (req.params.id || '').trim();
+    const r = await withTenantClient(tenantId, (client) =>
+      client.query(
+        `SELECT id, code, name, category, default_reporter_id, enabled
+         FROM location_dict WHERE tenant_id = $1 ORDER BY code LIMIT 500`,
+        [tenantId],
+      ),
+    );
+    return res.json({ ok: true, code: 0, items: r.rows });
+  } catch (e) { next(e); }
+});
+router.post('/tenants/:id/locations', async (req, res, next) => {
+  try {
+    const tenantId = (req.params.id || '').trim();
+    const b = z.object({
+      code: z.string().min(1).max(40),
+      name: z.string().min(1).max(80),
+      category: z.string().max(40).optional(),
+      default_reporter_id: z.string().uuid().optional(),
+    }).parse(req.body);
+    const r = await withTenantClient(tenantId, (client) =>
+      client.query(
+        `INSERT INTO location_dict (tenant_id, code, name, category, default_reporter_id)
+         VALUES ($1, $2, $3, $4, $5) RETURNING id, code, name, category, default_reporter_id`,
+        [tenantId, b.code, b.name, b.category ?? null, b.default_reporter_id ?? null],
+      ),
+    );
+    await audit(res.locals.platformAdmin?.username ?? 'platform-admin', 'location.create', tenantId, tenantId, r.rows[0]);
+    return res.status(201).json({ ok: true, code: 0, item: r.rows[0] });
+  } catch (e) { next(e); }
+});
+
+// ---- 报修人角色字典 CRUD（v0.4.0：姓名+手机号预录入，扫码自动带出） ----
+router.get('/tenants/:id/reporters', async (req, res, next) => {
+  try {
+    const tenantId = (req.params.id || '').trim();
+    const r = await withTenantClient(tenantId, (client) =>
+      client.query(
+        `SELECT id, code, name, phone, role, enabled
+         FROM reporter_dict WHERE tenant_id = $1 ORDER BY name LIMIT 500`,
+        [tenantId],
+      ),
+    );
+    return res.json({ ok: true, code: 0, items: r.rows });
+  } catch (e) { next(e); }
+});
+router.post('/tenants/:id/reporters', async (req, res, next) => {
+  try {
+    const tenantId = (req.params.id || '').trim();
+    const b = z.object({
+      code: z.string().min(1).max(40),
+      name: z.string().min(1).max(40),
+      phone: z.string().regex(/^1\d{10}$/, '手机号需 11 位'),
+      role: z.string().max(40).optional(),
+    }).parse(req.body);
+    const r = await withTenantClient(tenantId, (client) =>
+      client.query(
+        `INSERT INTO reporter_dict (tenant_id, code, name, phone, role)
+         VALUES ($1, $2, $3, $4, $5) RETURNING id, code, name, phone, role`,
+        [tenantId, b.code, b.name, b.phone, b.role ?? null],
+      ),
+    );
+    await audit(res.locals.platformAdmin?.username ?? 'platform-admin', 'reporter.create', tenantId, tenantId, { code: b.code, name: b.name });
+    return res.status(201).json({ ok: true, code: 0, item: r.rows[0] });
+  } catch (e) { next(e); }
 });
 
 export default router;

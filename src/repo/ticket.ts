@@ -1,10 +1,13 @@
 // 工单仓储：所有 SQL 在已注入 tenant_id 的 client 内执行（RLS 自动隔离）。
 // 双保险：每条读/写显式 WHERE tenant_id = $1（P1）。
 import type { PoolClient } from 'pg';
+import { randomBytes } from 'crypto';
 import { AppError } from '../middleware/error.js';
 import { isKnownState, type WorkOrderStatus, type WorkflowTransition } from '../engine/stateMachine.js';
 import { getWorkflowDef } from '../engine/workflowDef.js';
 import { emitDomainEvent } from '../db/eventBus.js';
+import { embedText, embeddingConfigured, embeddingModel } from '../services/llm.js';
+import { withTenantClient } from '../db/pool.js';
 
 export interface CreateDto {
   id: string;
@@ -14,6 +17,8 @@ export interface CreateDto {
   priority?: string;
   location?: string;
   title?: string;
+  // 注意：description 可能含用户主动提供的手机号等 PII。K1 推理路径经 maskPhone 脱敏（llm.ts），
+  // K2 向量嵌入路径入口 embedText 亦已补 maskPhone（R4-001）。下游落库/导出须沿用脱敏后文本。
   description?: string;
   contact?: string;
   reporterName?: string; // P1 收尾：申告人真实姓名（顶层列，独立于 ext 动态字段）
@@ -53,10 +58,11 @@ export interface WorkOrderRow {
   updated_at: string;
 }
 
-/** 生成业务工单号：WO_YYYYMMDD_随机6位（同日不保证严格唯一，由唯一约束兜底）。 */
+/** 生成业务工单号：WO_YYYYMMDD_10位强随机（crypto 32bit 熵，替代原 Math.random 6位弱随机）。
+ *  同日碰撞概率可忽略；order_no 唯一索引作为 DDL 兜底（见 #816 迁移产物，待初一授权后上线，当前未应用）。 */
 function genOrderNo(d: Date = new Date()): string {
   const ymd = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`;
-  const rand = Math.floor(100000 + Math.random() * 900000);
+  const rand = randomBytes(4).readUInt32BE(0).toString().padStart(10, '0'); // 0..4294967295，32bit 熵
   return `WO_${ymd}_${rand}`;
 }
 
@@ -66,13 +72,24 @@ export async function createWithIdem(
   dto: CreateDto,
 ): Promise<{ row: WorkOrderRow; created: boolean }> {
   if (dto.idempotencyKey) {
-    const hit = await client.query<{ work_order_id: string }>(
-      'SELECT work_order_id FROM idempotency_key WHERE key = $1 AND tenant_id = $2',
-      [dto.idempotencyKey, dto.tenantId],
+    // R1-001 零 DDL 串行化：先抢幂等键（依赖 059 后 PK=(tenant_id,key) 唯一约束），抢到者才建单；
+    // 冲突者回查并复用既有单，从根上消除 TOCTOU 并发重复建单。
+    // work_order_id 在建键时即写入 dto.id（work_orders 的 PK，调用方生成、全程一致），
+    // idempotency_key.work_order_id 为纯 text 软引用无 FK，故先插键零风险、零 schema 变更。
+    const grab = await client.query(
+      'INSERT INTO idempotency_key (key, tenant_id, work_order_id) VALUES ($1,$2,$3) ON CONFLICT (tenant_id, key) DO NOTHING',
+      [dto.idempotencyKey, dto.tenantId, dto.id],
     );
-    if (hit.rows[0]?.work_order_id) {
-      const existing = await findOne(client, dto.tenantId, hit.rows[0].work_order_id);
+    if (grab.rowCount === 0) {
+      const hit = await client.query<{ work_order_id: string }>(
+        'SELECT work_order_id FROM idempotency_key WHERE key = $1 AND tenant_id = $2',
+        [dto.idempotencyKey, dto.tenantId],
+      );
+      const existing = hit.rows[0]?.work_order_id
+        ? await findOne(client, dto.tenantId, hit.rows[0].work_order_id)
+        : null;
       if (existing) return { row: existing, created: false };
+      // 理论不可达：键存在但 work_order_id 为空（建键即带 dto.id，不应发生）→ 降级继续新建
     }
   }
   const orderNo = genOrderNo();
@@ -90,18 +107,32 @@ export async function createWithIdem(
       JSON.stringify(dto.ext ?? {}),
     ],
   );
-  if (dto.idempotencyKey) {
-    await client.query(
-      'INSERT INTO idempotency_key (key, tenant_id, work_order_id) VALUES ($1,$2,$3) ON CONFLICT (key) DO NOTHING',
-      [dto.idempotencyKey, dto.tenantId, dto.id],
-    );
-  }
+  // （幂等键已在上方抢键分支写入，无需重复插入；无 idempotencyKey 时不写键，保持原语义）
   await client.query(
     `INSERT INTO ticket_event (tenant_id, work_order_id, type, from_status, to_status, actor)
      VALUES ($1,$2,'create',NULL,'draft','system')`,
     [dto.tenantId, dto.id],
   );
   await emitDomainEvent(client, { tenantId: dto.tenantId, entityType: 'work_order', entityId: dto.id, type: 'create', actor: 'system' });
+
+  // K2（有 embedding key 时）：报修单创建即异步嵌入向量库（best-effort，不阻塞创建响应，失败仅告警）。
+  // 走到此处必为新建（幂等命中已在上方提前 return），故直接嵌入。
+  const emb = [dto.title, dto.description, dto.businessType, dto.catalog, dto.faultType, dto.location]
+    .filter(Boolean).join(' ').slice(0, 8000);
+  if (embeddingConfigured() && emb.trim()) {
+    embedText(emb, dto.tenantId)
+      .then((vec) => {
+        if (!vec) return;
+        return withTenantClient(dto.tenantId, async (client) => {
+          await client.query(
+            `SELECT upsert_case_embedding($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+            [dto.tenantId, 'work_order', String(dto.id), dto.businessType || dto.catalog || '', dto.priority ?? 'normal', emb, vec, embeddingModel(), vec.length],
+          );
+        });
+      })
+      .catch((e) => console.warn('[embed work_order] fail:', (e as Error).message));
+  }
+
   return { row: ins.rows[0], created: true };
 }
 
@@ -136,8 +167,10 @@ export async function transition(
   }
   // A+ 角色门禁：allowedRoles 为空/未定义 = 放行（向后兼容，避免门死自己）；显式配置且不在其中 → 403
   const role = opts?.role;
-  if (tdef.allowedRoles && tdef.allowedRoles.length > 0 && role && !tdef.allowedRoles.includes(role)) {
-    throw new AppError('FORBIDDEN', `role ${role} not allowed for ${cur.status}->${to}`, 403);
+  // R9-003 修复：角色门禁缺失 role（如生产 JWT 未带 role 声明）应视为"不在白名单"→ 拒。
+  // 原 `&& role &&` 会在 role 缺失时短路放行，造成越权门禁失效。
+  if (tdef.allowedRoles && tdef.allowedRoles.length > 0 && !tdef.allowedRoles.includes(role ?? '')) {
+    throw new AppError('FORBIDDEN', `role ${role ?? '(none)'} not allowed for ${cur.status}->${to}`, 403);
   }
   // A+ 必填校验：缺失任一 requiredFields → 422
   const fields = opts?.fields ?? {};

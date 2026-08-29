@@ -21,6 +21,7 @@ export interface AccountUser {
   display_name: string | null;
   role: AccountRole;
   active: boolean;
+  wx_openid?: string | null; // v5.0 P0：微信 openid（绑定后非空，toPublic 只暴露 wx_bound）
 }
 
 export interface AccountUserPublic {
@@ -30,6 +31,7 @@ export interface AccountUserPublic {
   role: AccountRole;
   tenant_id: string;
   active: boolean;
+  wx_bound: boolean; // v5.0 P0：是否已绑定微信（不暴露 openid 本身）
 }
 
 function toPublic(u: AccountUser): AccountUserPublic {
@@ -40,6 +42,7 @@ function toPublic(u: AccountUser): AccountUserPublic {
     role: u.role,
     tenant_id: u.tenant_id,
     active: u.active,
+    wx_bound: Boolean(u.wx_openid),
   };
 }
 
@@ -107,7 +110,7 @@ export async function findUserByUsername(
   username: string,
 ): Promise<AccountUser | undefined> {
   const r = await client.query<AccountUser>(
-    `SELECT id, tenant_id, username, password_hash, display_name, role, active
+    `SELECT id, tenant_id, username, password_hash, display_name, role, active, wx_openid
      FROM account_user WHERE tenant_id = $1 AND username = $2`,
     [tenantId, username],
   );
@@ -120,7 +123,7 @@ export async function findUserById(
   id: string,
 ): Promise<AccountUser | undefined> {
   const r = await client.query<AccountUser>(
-    `SELECT id, tenant_id, username, password_hash, display_name, role, active
+    `SELECT id, tenant_id, username, password_hash, display_name, role, active, wx_openid
      FROM account_user WHERE tenant_id = $1 AND id = $2`,
     [tenantId, id],
   );
@@ -143,7 +146,7 @@ export async function updateUserPassword(
 
 export async function listUsers(client: PoolClient, tenantId: string): Promise<AccountUser[]> {
   const r = await client.query<AccountUser>(
-    `SELECT id, tenant_id, username, password_hash, display_name, role, active
+    `SELECT id, tenant_id, username, password_hash, display_name, role, active, wx_openid
      FROM account_user WHERE tenant_id = $1 ORDER BY username`,
     [tenantId],
   );

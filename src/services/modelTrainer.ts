@@ -37,16 +37,22 @@ export interface RewardSignal {
 //  - 超时升级（sla_escalated）：reward = -1
 //  - 发生过转派（assign >= 2 次）：reward = -0.5（派单需优化）
 //  - 一次派单即完成：reward = +1（派对了）
-export function computeRewards(events: TicketEventRow[]): RewardSignal[] {
+//  - 满意度信号（飞轮断链 1 修复）：satisfaction_score 1-5 → sat_bonus=(score-3)/2，
+//    叠加到【最终 assign】的 reward（当前工人表现决定满意度：5 分+1 / 4 分+0.5 / 3 分 0 / 2 分-0.5 / 1 分-1）
+export function computeRewards(events: TicketEventRow[], satisfactionScore?: number | null): RewardSignal[] {
   const normalized = events.map((e) => ({ ...e, payload: safeParsePayload(e.payload) }));
   const assigns = normalized.filter((e) => e.type === 'assign' && e.payload?.worker_id);
   if (assigns.length === 0) return [];
   const escalated = normalized.some((e) => e.type === 'sla_escalated');
   const reassigned = assigns.length >= 2;
-  return assigns.map((a) => ({
+  const satBonus =
+    typeof satisfactionScore === 'number' && satisfactionScore >= 1 && satisfactionScore <= 5
+      ? (satisfactionScore - 3) / 2
+      : 0;
+  return assigns.map((a, i) => ({
     category: '', // 由调用方补全
     workerId: String(a.payload.worker_id),
-    reward: escalated ? -1 : reassigned ? -0.5 : 1,
+    reward: (escalated ? -1 : reassigned ? -0.5 : 1) + (i === assigns.length - 1 ? satBonus : 0),
   }));
 }
 
@@ -59,8 +65,8 @@ export async function incrementalLearn(
   autoTune = false,
   modelKey = 'dispatch_score',
 ): Promise<void> {
-  const o = await client.query<{ business_type: string }>(
-    'SELECT business_type FROM work_orders WHERE tenant_id = $1 AND id = $2',
+  const o = await client.query<{ business_type: string; satisfaction_score: number | null }>(
+    'SELECT business_type, satisfaction_score FROM work_orders WHERE tenant_id = $1 AND id = $2',
     [tenantId, workOrderId],
   );
   const ev = await client.query<TicketEventRow>(
@@ -70,7 +76,7 @@ export async function incrementalLearn(
   );
   // C2 数据质量 gate（n3 封死）：无 business_type 无法归因 → 不喂模型，避免污染模型臂
   if (!o.rows[0]?.business_type) return;
-  const rewards = computeRewards(ev.rows).map((r) => ({
+  const rewards = computeRewards(ev.rows, o.rows[0]?.satisfaction_score).map((r) => ({
     ...r,
     category: o.rows[0]?.business_type ?? '',
   }));
@@ -124,8 +130,8 @@ export async function trainFromDb(
   // 富模板下不漏训 closed/evaluated，且不把 cancelled 当完成样本喂模型。
   const def = await getWorkflowDef(client, tenantId, 'work_order');
   const done = doneStates(def);
-  const orders = await client.query<{ id: string; business_type: string }>(
-    `SELECT id, business_type FROM work_orders
+  const orders = await client.query<{ id: string; business_type: string; satisfaction_score: number | null }>(
+    `SELECT id, business_type, satisfaction_score FROM work_orders
      WHERE tenant_id = $1 AND status = ANY($2::text[])
      ORDER BY updated_at DESC LIMIT 200`,
     [tenantId, done],
@@ -137,7 +143,7 @@ export async function trainFromDb(
        FROM ticket_event WHERE tenant_id = $1 AND work_order_id = $2 ORDER BY created_at ASC`,
       [tenantId, o.id],
     );
-    const rewards = computeRewards(ev.rows).map((r) => ({ ...r, category: o.business_type }));
+    const rewards = computeRewards(ev.rows, o.satisfaction_score).map((r) => ({ ...r, category: o.business_type }));
     for (const r of rewards) model.learn(r.category, r.workerId, r.reward);
   }
 

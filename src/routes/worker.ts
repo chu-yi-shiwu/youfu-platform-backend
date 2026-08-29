@@ -28,7 +28,7 @@ router.get('/workers', async (req, res, next) => {
     const params: unknown[] = [tenantId];
     const add = (sql: string, v: unknown) => {
       params.push(v);
-      clauses.push(sql.replace('?', `$${params.length}`));
+      clauses.push(sql.replace(/\?/g, `$${params.length}`));
     };
     if (name) add('name ILIKE ?', `%${name}%`);
     if (skill) add('? = ANY(skill_tags)', skill);

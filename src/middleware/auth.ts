@@ -28,7 +28,7 @@ declare module 'express-serve-static-core' {
   }
 }
 
-export let AUTH_MODE: 'dev' | 'prod' = 'dev';
+export let AUTH_MODE: 'dev' | 'prod' = 'prod';
 
 // 默认租户（与种子数据对齐）。集中一处，避免 't-verification' 字面量散落多处（C-1）。
 export const DEFAULT_TENANT_ID = 't-verification';
@@ -42,9 +42,10 @@ refreshAuthMode();
 
 // 公开路径豁免（登录端点必须公开，否则永远拿不到令牌）。
 // 中间件挂在 /api 下，req.path 为挂载后相对路径（如 /v1/auth/login）。
-const PUBLIC_POST_PATHS = new Set(['/v1/auth/login']);
+// v5.0 P0：+ /v1/auth/wx-login（微信 openid 免密登录，免登录）
+const PUBLIC_POST_PATHS = new Set(['/v1/auth/login', '/v1/auth/wx-login']);
 function isPublicPath(req: Request): boolean {
-  return req.method === 'POST' && (PUBLIC_POST_PATHS.has(req.path) || (req.originalUrl ?? '').endsWith('/auth/login'));
+  return req.method === 'POST' && (PUBLIC_POST_PATHS.has(req.path) || (req.originalUrl ?? '').endsWith('/auth/login') || (req.originalUrl ?? '').endsWith('/auth/wx-login'));
 }
 
 function parseBearer(auth: string | undefined): string | null {
@@ -123,6 +124,8 @@ export function resolveIdentity(req: Request): IdentityResult {
     if (!payload) {
       return { ok: false, status: 401, code: 'AUTH_002', message: 'invalid or expired token' };
     }
+    // 审查修复 #735-MEDIUM（根因）：prod 下租户只取自签名 JWT（tid/tenantId），
+    // 不接受客户端可伪造的 X-Tenant-Id 头兜底，防越权 / 路径穿越写任意租户目录。
     const tenantId = str(payload.tid) ?? str(payload.tenantId);
     if (!tenantId) {
       return { ok: false, status: 401, code: 'TENANT_001', message: 'missing tenant (token has no tid/tenantId)' };
@@ -176,7 +179,17 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction) 
  * S-2：登录速率限制（内存滑动窗口，单进程部署足够）。
  * 仅 prod 生效；dev 放行以免干扰本地联调与测试。
  */
-const loginAttempts = new Map<string, number[]>();
+// 登录限流计数（内存）。上限保护防长期运行内存无限增长（🔴 审查修复 F-D2）。
+export const loginAttempts = new Map<string, number[]>();
+let MAX_LOGIN_IP_ENTRIES = 100_000;
+// 仅供测试注入极小上限以锁定驱逐逻辑；生产默认值不变
+export function __setLoginIpCapForTest(n: number): void {
+  MAX_LOGIN_IP_ENTRIES = n;
+}
+// 仅供测试切换认证模式以锁定限流/鉴权分支（不用于生产）。
+export function __setAuthModeForTest(mode: 'dev' | 'prod'): void {
+  AUTH_MODE = mode;
+}
 export function loginRateLimit(max = 10, windowMs = 60_000) {
   return (req: Request, res: Response, next: NextFunction) => {
     if (AUTH_MODE !== 'prod') return next();
@@ -188,6 +201,17 @@ export function loginRateLimit(max = 10, windowMs = 60_000) {
     }
     arr.push(now);
     loginAttempts.set(ip, arr);
+    // 内存上限保护：超限时先清理窗口外过期项；仍超则减半（避免 Map 随独立 IP 数无限增长）
+    if (loginAttempts.size > MAX_LOGIN_IP_ENTRIES) {
+      const cutoff = now - windowMs;
+      for (const [k, v] of loginAttempts) {
+        if (v.length === 0 || v[v.length - 1] < cutoff) loginAttempts.delete(k);
+      }
+      if (loginAttempts.size > MAX_LOGIN_IP_ENTRIES) {
+        const keys = [...loginAttempts.keys()];
+        for (const k of keys.slice(0, keys.length >> 1)) loginAttempts.delete(k);
+      }
+    }
     next();
   };
 }

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { canTransition, nextStates, DEFAULT_WORK_ORDER_DEF, type WorkOrderStatus } from '../engine/stateMachine.js';
+import { canTransition, nextStates, DEFAULT_WORK_ORDER_DEF, RICH_WORK_ORDER_DEF, type WorkOrderStatus } from '../engine/stateMachine.js';
 
 const def = DEFAULT_WORK_ORDER_DEF;
 
@@ -13,6 +13,32 @@ describe('状态机合法顺序', () => {
   it('completed 无后续', () => {
     expect(canTransition(def, 'completed', 'completed')).toBe(false);
     expect(nextStates(def, 'completed')).toEqual([]);
+  });
+});
+
+// RICH 13 态复核分支（admin 复核页的契约基石）：submit_review → approve/reject
+describe('RICH 模板复核分支（pending_review）', () => {
+  const rich = RICH_WORK_ORDER_DEF;
+  it('processing 可提交复核 submit_review → pending_review', () => {
+    expect(canTransition(rich, 'processing', 'pending_review')).toBe(true);
+  });
+  it('pending_review 可 approve → review_passed（admin/reviewer）', () => {
+    expect(canTransition(rich, 'pending_review', 'review_passed')).toBe(true);
+  });
+  it('pending_review 可 reject → processing（退回重做）', () => {
+    expect(canTransition(rich, 'pending_review', 'processing')).toBe(true);
+  });
+  it('review_passed 可 complete → completed（复核通过后闭环）', () => {
+    expect(canTransition(rich, 'review_passed', 'completed')).toBe(true);
+  });
+  it('pending_review 不允许跳 completed（必须经 review_passed）', () => {
+    expect(canTransition(rich, 'pending_review', 'completed')).toBe(false);
+  });
+  it('approve/reject 的角色门禁仅 admin+reviewer', () => {
+    const approve = rich.transitions.find((t) => t.from === 'pending_review' && t.to === 'review_passed');
+    const reject = rich.transitions.find((t) => t.from === 'pending_review' && t.to === 'processing');
+    expect(approve?.allowedRoles).toEqual(['admin', 'reviewer']);
+    expect(reject?.allowedRoles).toEqual(['admin', 'reviewer']);
   });
 });
 

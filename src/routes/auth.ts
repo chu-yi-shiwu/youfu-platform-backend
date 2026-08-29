@@ -4,6 +4,7 @@ import { Router } from 'express';
 import z from 'zod';
 import { AUTH_MODE, DEFAULT_TENANT_ID, loginRateLimit, requireRole, type AuthLocals } from '../middleware/auth.js';
 import { listPerms } from '../middleware/role.js';
+import { code2Session } from '../services/wechatMp.js';
 import {
   createUser,
   findUserByUsername,
@@ -176,6 +177,60 @@ router.get('/auth/users', async (req, res, next) => {
     if (!requireAdmin(auth)) return res.status(403).json({ ok: false, code: 'FORBID_001', message: 'admin only' });
     const users = await withTenantClient(auth.tenantId, (client) => listUsers(client, auth.tenantId));
     return res.json({ ok: true, code: 0, users: users.map(toPublic) });
+  } catch (e) {
+    next(e);
+  }
+});
+
+// ============ v5.0 P0：微信 openid 绑定/免密登录 ============
+// POST /api/v1/auth/wx-bind —— 需登录态：wx.login code → openid → 绑定当前账号（一次绑定终身免密）
+router.post('/auth/wx-bind', loginRateLimit(), async (req, res, next) => {
+  try {
+    const auth = res.locals.auth as AuthLocals;
+    if (!auth || !auth.userId) return res.status(401).json({ ok: false, code: 'AUTH_001', message: 'missing auth' });
+    const { code } = z.object({ code: z.string().min(1).max(200) }).parse(req.body);
+    const sess = await code2Session(code);
+    if (!sess?.openid) return res.status(502).json({ ok: false, code: 'WX_002', message: 'wx code2session fail' });
+    const tenantId = auth.tenantId;
+    // 幂等：同 openid 已被绑定 → 拒绝（防一 openid 绑多账号）
+    const dup = await withTenantClient(tenantId, (client) =>
+      client.query(`SELECT id FROM account_user WHERE wx_openid = $1 AND id <> $2 LIMIT 1`, [sess.openid, auth.userId]),
+    );
+    if ((dup.rowCount ?? 0) > 0) return res.status(409).json({ ok: false, code: 'WX_ALREADY_BOUND', message: 'openid already bound to another account' });
+    await withTenantClient(tenantId, (client) =>
+      client.query(`UPDATE account_user SET wx_openid = $1, updated_at = now() WHERE id = $2 AND tenant_id = $3`, [sess.openid, auth.userId, tenantId]),
+    );
+    return res.json({ ok: true, code: 0, bound: true });
+  } catch (e) {
+    next(e);
+  }
+});
+
+// POST /api/v1/auth/wx-login —— 免登录：openid 直接换 JWT（未绑定返回提示）
+router.post('/auth/wx-login', loginRateLimit(), async (req, res, next) => {
+  try {
+    const { code, tenant } = z.object({ code: z.string().min(1).max(200), tenant: z.string().max(64).optional() }).parse(req.body);
+    const tenantId = tenant ?? req.header('X-Tenant-Id') ?? DEFAULT_LOGIN_TENANT;
+    const sess = await code2Session(code);
+    if (!sess?.openid) return res.status(502).json({ ok: false, code: 'WX_002', message: 'wx code2session fail' });
+    const user = await withTenantClient(tenantId, (client) =>
+      client.query(`SELECT * FROM account_user WHERE wx_openid = $1 AND tenant_id = $2 AND active = true LIMIT 1`, [sess.openid, tenantId]),
+    );
+    if (user.rowCount === 0) {
+      // 未绑定：返回需绑定提示（不暴露是否存在）
+      return res.status(409).json({ ok: false, code: 'WX_NOT_BOUND', message: '微信未绑定账号，请先用账号密码登录并绑定' });
+    }
+    const row = user.rows[0];
+    const secret = resolveSecret();
+    if (!secret) return res.status(500).json({ ok: false, code: 'AUTH_CFG', message: 'JWT_SECRET not configured' });
+    const token = signLoginToken(
+      { sub: row.id, tid: tenantId, role: row.role as AccountRole, username: row.username },
+      secret,
+    );
+    const permissions = await withTenantClient(tenantId, (client) =>
+      listPerms({ tenantId, requestId: '', role: row.role, authMode: 'prod' }, client),
+    );
+    return res.json({ ok: true, code: 0, token, user: toPublic(row), permissions, via: 'wx' });
   } catch (e) {
     next(e);
   }

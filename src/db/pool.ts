@@ -21,7 +21,7 @@ const pool = new Pool({
 // tenant_id 来自请求头，不可信。仅允许安全标识符，防止 SET 语句注入。
 // SET LOCAL 不支持预处理参数 $1，必须拼字符串，故此处严格白名单校验。
 const TENANT_ID_RE = /^[A-Za-z0-9_.\-]{1,64}$/;
-function assertSafeTenantId(tenantId: string): string {
+export function assertSafeTenantId(tenantId: string): string {
   if (!tenantId || !TENANT_ID_RE.test(tenantId)) {
     throw new Error('INVALID_TENANT_ID');
   }

@@ -8,6 +8,7 @@ import { randomUUID } from 'crypto';
 import { withTenantClient } from '../db/pool.js';
 import { AppError } from '../middleware/error.js';
 import { requireConfigRole } from '../middleware/role.js';
+import { parseCsv, csvEscape } from '../services/csvUtil.js';
 
 const router = Router();
 
@@ -106,6 +107,16 @@ function getType(t: string): TypeDef {
   const d = TYPES[t];
   if (!d) throw new AppError('BAD_TYPE', `unknown equipment type: ${t}`, 400);
   return d;
+}
+
+/**
+ * 计算应插入的列：仅保留「已提供且非空」的列，省略未提供/空值列，
+ * 让 DB 的 DEFAULT / NOT NULL DEFAULT（如 equipment.status 默认 'in_use'）生效。
+ * 避免对 NOT NULL 列强行写 NULL 触发 23502，也与 basicData.ts 导入逻辑保持一致。
+ * POST 单条创建与 CSV 批量导入共用此函数（单一真相源）。
+ */
+export function resolveInsertColumns(def: TypeDef, src: Record<string, unknown>): string[] {
+  return def.insertCols.filter((c) => src[c] !== undefined && src[c] !== null && src[c] !== '');
 }
 
 // ============ 设备维保（P3b）：按设备挂维保计划与记录 ============
@@ -245,9 +256,12 @@ router.post('/equipment/:type', async (req, res, next) => {
     const tenantId = res.locals.auth.tenantId;
     const b = def.schema.parse(req.body);
     const id = randomUUID();
-    const cols = ['id', 'tenant_id', ...def.insertCols];
+    // 仅插入「请求提供了」的列：未提供的列省略，让 DB 的 DEFAULT 生效
+    //（若显式传 NULL 会覆盖 NOT NULL DEFAULT 列，如 equipment.status → 违反约束）
+    const provided = resolveInsertColumns(def, b as any);
+    const cols = ['id', 'tenant_id', ...provided];
     const ph = cols.map((_, i) => `$${i + 1}`).join(', ');
-    const vals = [id, tenantId, ...def.insertCols.map((c) => (b as any)[c] ?? null)];
+    const vals = [id, tenantId, ...provided.map((c) => (b as any)[c])];
     const item = await withTenantClient(tenantId, (client) =>
       client
         .query(`INSERT INTO ${def.table} (${cols.join(', ')}) VALUES (${ph}) RETURNING *`, vals)
@@ -318,13 +332,8 @@ router.get('/equipment/:type/export', async (req, res, next) => {
       client.query(`SELECT * FROM ${def.table} WHERE tenant_id=$1 ORDER BY created_at DESC`, [tenantId]).then((r) => r.rows),
     );
     const headers = def.insertCols;
-    const escape = (v: unknown) => {
-      if (v === null || v === undefined) return '';
-      const s = String(v);
-      return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-    };
     const lines = [headers.join(',')];
-    for (const row of items) lines.push(headers.map((h) => escape(row[h])).join(','));
+    for (const row of items) lines.push(headers.map((h) => csvEscape(row[h])).join(','));
     const csv = '﻿' + lines.join('\r\n');
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
     res.setHeader('Content-Disposition', `attachment; filename="${def.table}.csv"`);
@@ -335,46 +344,6 @@ router.get('/equipment/:type/export', async (req, res, next) => {
 });
 
 // ============ CSV 导入 ============
-function parseCsv(text: string): string[][] {
-  const rows: string[][] = [];
-  let row: string[] = [];
-  let field = '';
-  let inQuotes = false;
-  for (let i = 0; i < text.length; i++) {
-    const c = text[i];
-    if (inQuotes) {
-      if (c === '"') {
-        if (text[i + 1] === '"') {
-          field += '"';
-          i++;
-        } else {
-          inQuotes = false;
-        }
-      } else {
-        field += c;
-      }
-    } else if (c === '"') {
-      inQuotes = true;
-    } else if (c === ',') {
-      row.push(field);
-      field = '';
-    } else if (c === '\n' || c === '\r') {
-      if (c === '\r' && text[i + 1] === '\n') i++;
-      row.push(field);
-      rows.push(row);
-      row = [];
-      field = '';
-    } else {
-      field += c;
-    }
-  }
-  if (field.length > 0 || row.length > 0) {
-    row.push(field);
-    rows.push(row);
-  }
-  return rows.filter((r) => r.length > 1 || (r.length === 1 && r[0] !== ''));
-}
-
 router.post('/equipment/:type/import', async (req, res, next) => {
   try {
     requireConfigRole(req, res);
@@ -395,9 +364,12 @@ router.post('/equipment/:type/import', async (req, res, next) => {
         });
         if (!obj.name) continue; // 名称必填，跳过空行
         const id = randomUUID();
-        const cols = ['id', 'tenant_id', ...def.insertCols];
+        // 仅插入 CSV 实际提供的列（省略未提供/空列，让 DB 的 DEFAULT/NOT NULL DEFAULT 生效，
+        // 避免对 status 等 NOT NULL 列强行写 NULL 触发 23502）。与 basicData 导入逻辑一致。
+        const provided = resolveInsertColumns(def, obj);
+        const cols = ['id', 'tenant_id', ...provided];
         const ph = cols.map((_, i) => `$${i + 1}`).join(', ');
-        const vals = [id, tenantId, ...def.insertCols.map((c) => obj[c] ?? null)];
+        const vals = [id, tenantId, ...provided.map((c) => obj[c])];
         await client.query(`INSERT INTO ${def.table} (${cols.join(', ')}) VALUES (${ph})`, vals);
         inserted++;
       }

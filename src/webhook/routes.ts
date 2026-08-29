@@ -4,7 +4,8 @@ import { Router } from 'express';
 import crypto from 'node:crypto';
 import { z } from 'zod';
 import { withTenantClient } from '../db/pool.js';
-import { probeWebhook } from './dispatch.js';
+import { probeWebhook, assertSafeOutboundUrl } from './dispatch.js';
+import { requireConfigRole } from '../middleware/role.js';
 
 const router = Router();
 
@@ -17,8 +18,19 @@ const subscribeSchema = z.object({
 // POST /api/v1/webhooks/subscriptions —— 注册订阅（secret 缺省自动生成，仅创建时返回一次）
 router.post('/webhooks/subscriptions', async (req, res, next) => {
   try {
+    requireConfigRole(req, res);
     const tenantId = res.locals.auth.tenantId;
     const body = subscribeSchema.parse(req.body);
+    // SSRF 前置闸（F-E2）：注册即拒绝私网/环回/链路本地（含云元数据）地址，提早反馈
+    try {
+      await assertSafeOutboundUrl(body.url);
+    } catch (e) {
+      return res.status(400).json({
+        ok: false,
+        code: 1,
+        message: 'webhook url blocked (private/loopback/metadata): ' + (e instanceof Error ? e.message : String(e)),
+      });
+    }
     const secret = body.secret ?? crypto.randomBytes(24).toString('hex');
     const events = body.events && body.events.length ? body.events : ['*'];
     const row = await withTenantClient(tenantId, async (client) => {

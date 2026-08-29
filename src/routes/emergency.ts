@@ -3,10 +3,12 @@
 // 预警深化：巡检异常（inspection.ts 调用 createAlert）等业务异常统一落入 alert，前端预警中心统一处理。
 import { Router } from 'express';
 import { z } from 'zod';
+import { randomUUID } from 'crypto';
 import { withTenantClient } from '../db/pool.js';
 import { AppError } from '../middleware/error.js';
 import { requireConfigRole } from '../middleware/role.js';
 import { emitDomainEvent } from '../db/eventBus.js';
+import { createLinkedWorkOrder } from '../services/linkedWorkOrder.js';
 
 const router = Router();
 
@@ -240,7 +242,7 @@ router.get('/alerts', async (req, res, next) => {
     const params: unknown[] = [tenantId];
     const add = (sql: string, v: unknown) => {
       params.push(v);
-      clauses.push(sql.replace('?', `$${params.length}`));
+      clauses.push(sql.replace(/\?/g, `$${params.length}`));
     };
     if (status) add('status = ?', status);
     if (level) add('level = ?', level);
@@ -333,6 +335,41 @@ router.post('/alerts/:id/link-plan', async (req, res, next) => {
       return r.rows[0];
     });
     return res.json({ ok: true, code: 0, item });
+  } catch (e) {
+    next(e);
+  }
+});
+
+// 预警转工单（应急触达）：复用共享服务，L1 提级 urgent；已关联预案则带进工单描述（worker 打开即见处置指引）
+// 颗粒度对齐 monitor convert：business_type=emergency_alert、sourceType=emergency_alert（幂等键 linked:emergency_alert:<alertId>）
+router.post('/alerts/:id/convert', async (req, res, next) => {
+  try {
+    requireConfigRole(req, res);
+    const tenantId = res.locals.auth.tenantId;
+    const result = await withTenantClient(tenantId, async (client) => {
+      const cur = await client.query(
+        `SELECT a.*, p.title AS plan_title FROM alert a LEFT JOIN emergency_plan p ON p.id = a.related_plan_id
+         WHERE a.id = $1 AND a.tenant_id = $2`,
+        [req.params.id, tenantId],
+      );
+      if (cur.rowCount === 0) throw new AppError('NOT_FOUND', 'alert not found', 404);
+      const a = cur.rows[0];
+      const wo = await createLinkedWorkOrder(client, {
+        id: randomUUID(),
+        tenantId,
+        businessType: 'emergency_alert',
+        catalog: 'emergency_alert',
+        priority: a.level === 'L1' ? 'urgent' : 'normal',
+        title: `应急预警${a.level || 'L2'}：${a.title || '未命名预警'}`,
+        description: [a.message, a.plan_title ? `关联预案：${a.plan_title}` : ''].filter(Boolean).join('\n'),
+        location: undefined,
+        sourceType: 'emergency_alert',
+        sourceId: a.id,
+      });
+      await emitDomainEvent(client, { tenantId, entityType: 'alert', entityId: a.id, type: 'convert', actor: 'config_role', payload: { work_order_id: wo.id } });
+      return wo;
+    });
+    return res.json({ ok: true, code: 0, result });
   } catch (e) {
     next(e);
   }

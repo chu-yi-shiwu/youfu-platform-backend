@@ -3,8 +3,7 @@
 // 挂载 /api/v1/template-contributions，走租户 JWT + requireConfigRole（仅 admin/operator 可贡献）。
 import { Router } from 'express';
 import { z } from 'zod';
-import pool from '../db/pool.js';
-import { withTenantClient } from '../db/pool.js';
+import pool, { withTenantClient } from '../db/pool.js';
 import { getWorkflowDef } from '../engine/workflowDef.js';
 import { AppError } from '../middleware/error.js';
 import { requireConfigRole } from '../middleware/role.js';

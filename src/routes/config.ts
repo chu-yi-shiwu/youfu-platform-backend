@@ -8,7 +8,7 @@ import { AppError } from '../middleware/error.js';
 
 const router = Router();
 
-function requireConfigRole(_req: unknown, res: any): void {
+export function requireConfigRole(_req: unknown, res: any): void {
   const role = res.locals.auth.role;
   if (role !== 'admin' && role !== 'operator') {
     throw new AppError('FORBIDDEN', 'only admin/operator can manage config', 403);

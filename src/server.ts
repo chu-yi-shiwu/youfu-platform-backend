@@ -14,6 +14,7 @@ import authRouter from './routes/auth.js';
 import configRouter from './routes/config.js';
 import templateContributionsRouter from './routes/templateContributions.js';// UGC 模板贡献（租户侧）
 import inspectionRouter from './routes/inspection.js';
+import patrolRouter from './routes/patrol.js';
 import emergencyRouter from './routes/emergency.js';
 import transportRouter from './routes/transport.js';
 import volunteerRouter from './routes/volunteer.js';
@@ -33,14 +34,18 @@ import accountsRouter from './routes/accounts.js';
 import tenantInfoRouter from './routes/tenantInfo.js';
 import workflowDefRouter from './routes/workflowDef.js';
 import businessFlowRouter from './routes/businessFlow.js';
+import aiPreviewRouter from './routes/aiPreview.js';
 import basicDataRouter from './routes/basicData.js';
+import llmUsageRouter from './routes/llmUsage.js';
 import equipmentRouter from './routes/equipment.js';
 import uploadRouter from './routes/upload.js';// B0 文件上传（H5 拍照落库）
+import uploadsRouter from './routes/uploads.js';// R19-005 鉴权上传文件路由（替代零鉴权静态托管）
 import platformRouter from './routes/platform.js';// 城市级平台层（E_min）
 import templateMarketRouter from './routes/templateMarket.js';// E2 模板市场（官方模板库/应用/效果）
 import openApiRouter from './routes/openApi.js';// E0_open 开放 API（app_key 认证）
 import { startInspectionScheduler } from './scheduler/inspectionScheduler.js';// G3 真 cron 调度
 import { startTemplateEffectsScheduler } from './scheduler/templateEffectScheduler.js';// E2 效果回写 cron
+import { startModelTrainScheduler } from './scheduler/modelTrainScheduler.js';// 数据飞轮：每日 03:00 全量重训
 
 // 试点/生产：用 ENV_FILE 指定环境文件（默认 .env，production 下默认 .env.pilot），
 // 同一份代码可同时跑 dev / pilot，无需改代码。
@@ -52,6 +57,14 @@ refreshAuthMode();
 // S-1 启动期断言：prod 模式必须配置 JWT_SECRET，否则拒绝启动（避免以不安全默认密钥跑生产）。
 if (AUTH_MODE === 'prod' && !process.env.JWT_SECRET) {
   console.error('[fatal] AUTH_MODE=prod 但 JWT_SECRET 未配置，拒绝启动（生产中缺失密钥将导致全量 500/fail-closed）。');
+  process.exit(1);
+}
+
+// S-1b 启动期断言：生产环境（NODE_ENV=production）严禁以 dev 鉴权模式启动。
+// dev 模式 X-Tenant-Id / X-Role 头由客户端任意指定且 role 默认 admin——一旦误留 dev，任意人可越权任意租户。
+// 与 S-1 互补：S-1 防"prod 无密钥"，本行防"生产却跑 dev"（代码默认 AUTH_MODE='dev'）。
+if (process.env.NODE_ENV === 'production' && AUTH_MODE !== 'prod') {
+  console.error('[fatal] NODE_ENV=production 但 AUTH_MODE!==prod，拒绝启动（dev 模式公开可越权，禁止用于生产）。');
   process.exit(1);
 }
 
@@ -127,6 +140,7 @@ app.use('/api/v1', authRouter);
 app.use('/api/v1', configRouter);
 app.use('/api/v1', templateContributionsRouter); // UGC 模板贡献（租户侧，requireConfigRole）
 app.use('/api/v1/inspection', inspectionRouter);
+app.use('/api/v1/patrol', patrolRouter);
 // P2 第二刀：应急预案库 + 预警中心 / 运送轨迹
 app.use('/api/v1/emergency', emergencyRouter);
 app.use('/api/v1/transport', transportRouter);
@@ -150,14 +164,14 @@ app.use('/api/v1/workflow-defs', workflowDefRouter);
 app.use('/api/v1', basicDataRouter);
 app.use('/api/v1', equipmentRouter);// P4 设备管理（设备 / 设备类型 / 设备厂商，主数据 CRUD，对齐 UOne C 族）
 app.use('/api/v1/flow', businessFlowRouter);
+app.use('/api/v1/ai', aiPreviewRouter);
+app.use('/api/v1/llm', llmUsageRouter);
 // B0 文件上传（H5 拍照落库）：挂在 /api/v1，自动过 authMiddleware 获得租户隔离。
 app.use('/api/v1', uploadRouter);
-// 城市级平台层：/api/v1/platform（登录公开，其余 platformAdminAuth 保护，独立于租户 auth）
-app.use('/api/v1/platform', platformRouter);
 
-// B0 静态服务上传文件（须注册在 SPA 兜底正则之前，否则 /uploads/* 会被 index.html 吞掉）。
-const UPLOAD_ROOT = process.env.UPLOAD_DIR ?? '/opt/youfu/uploads';
-app.use('/uploads', express.static(UPLOAD_ROOT));
+// R19-005：以鉴权路由取代零鉴权 express.static（详见 routes/uploads.ts）。
+// 须注册在 SPA 兜底正则之前，否则 /uploads/* 会被 index.html 兜底吞掉；URL 形态保持不变。
+app.use('/uploads', uploadsRouter);
 
 // ⑦P0 过程挖掘看板：顶层公开托管单文件 HTML（pilot 同 SPA 策略；prod 上线前应在反向代理层加鉴权）。
 // 必须注册在 SERVE_STATIC 的 SPA 兜底正则之前，否则会被 index.html 兜底拦截。
@@ -213,4 +227,6 @@ app.listen(PORT, '0.0.0.0', () => {
   startInspectionScheduler();
   // E2 效果回写 cron：每 60s 扫描到期（≥7 天）未回写的模板应用，自动拉取 after 指标并评分。
   startTemplateEffectsScheduler();
+  // 数据飞轮：每日 03:00 低峰全量重训（model_state 持续更新，AUTO_TUNE 受控不写回）。
+  startModelTrainScheduler();
 });

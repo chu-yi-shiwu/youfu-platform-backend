@@ -1,0 +1,17 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "outDir": "D:/WorkBuddy/outputs/.be_compiled_tmp",
+    "module": "commonjs",
+    "moduleResolution": "node",
+    "rootDir": "src",
+    "declaration": false,
+    "sourceMap": false
+  },
+  "include": [
+    "src/services/intakeEnrich.ts",
+    "src/services/llm.ts",
+    "src/routes/publicReportSchema.ts"
+  ]
+}

@@ -31,6 +31,32 @@ export interface TransitionEntityOpts {
  * 读取实体当前 status → 用引擎校验 event 合法性 → 写入目标态，并把 extra 合并进 data。
  * 返回更新后的整行。非法流转抛 BAD_STATE(422)。
  */
+/**
+ * 构造 data(jsonb) 合并的 SET 子句。
+ * 安全铁律：jsonb 路径键 k 直接来自用户 data（businessFlow 的 b.data 为 z.record(z.any())），
+ * 必须以 text[] 参数化注入（ARRAY[$n]::text[]），严禁字符串插值进 '{${k}}'，否则单引号即 SQL 注入。
+ * 等效 F-A2 纵深防御，但此处 key 完全用户可控，危害更高。
+ */
+export function buildDataSetClauses(extra: Record<string, unknown>, values: unknown[]): string[] {
+  const extraKeys = Object.keys(extra);
+  const nowKeys = extraKeys.filter((k) => extra[k] === 'now()');
+  const dataKeys = extraKeys.filter((k) => extra[k] !== 'now()');
+  const setClauses = ['status = $3', 'updated_at = now()'];
+  if (dataKeys.length > 0) {
+    const jsonObj: Record<string, unknown> = {};
+    dataKeys.forEach((k) => {
+      jsonObj[k] = extra[k];
+    });
+    values.push(JSON.stringify(jsonObj));
+    setClauses.push(`data = data || $${values.length}::jsonb`);
+  }
+  nowKeys.forEach((k) => {
+    values.push(k);
+    setClauses.push(`data = jsonb_set(data, ARRAY[$${values.length}]::text[], to_json(now()), true)`);
+  });
+  return setClauses;
+}
+
 export async function transitionEntity(
   client: any,
   tenantId: string,
@@ -54,24 +80,8 @@ export async function transitionEntity(
   }
 
   const extra = opts.extra ?? {};
-  const extraKeys = Object.keys(extra);
-  const nowKeys = extraKeys.filter((k) => extra[k] === 'now()');
-  const dataKeys = extraKeys.filter((k) => extra[k] !== 'now()');
-
-  const setClauses = ['status = $3', 'updated_at = now()'];
   const values: unknown[] = [opts.id, tenantId, target];
-
-  if (dataKeys.length > 0) {
-    const jsonObj: Record<string, unknown> = {};
-    dataKeys.forEach((k) => {
-      jsonObj[k] = extra[k];
-    });
-    values.push(JSON.stringify(jsonObj));
-    setClauses.push(`data = data || $${values.length}::jsonb`);
-  }
-  nowKeys.forEach((k) => {
-    setClauses.push(`data = jsonb_set(data, '{${k}}', to_json(now()), true)`);
-  });
+  const setClauses = buildDataSetClauses(extra, values);
 
   const r = await client.query(
     `UPDATE ${opts.table} SET ${setClauses.join(', ')} WHERE ${idCol} = $1 AND tenant_id = $2 RETURNING *`,

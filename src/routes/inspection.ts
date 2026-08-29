@@ -7,12 +7,13 @@ import { z } from 'zod';
 import { randomUUID } from 'crypto';
 import { withTenantClient } from '../db/pool.js';
 import { AppError } from '../middleware/error.js';
-import { requireConfigRole } from '../middleware/role.js';
+import { requireConfigRole, requireAssigneeOrConfig } from '../middleware/role.js';
 import { createLinkedWorkOrder } from '../services/linkedWorkOrder.js';
 import { emitDomainEvent } from '../db/eventBus.js';
 import { getWorkflowDefOrDefault } from '../engine/workflowDef.js';
 import { applyEvent, availableTransitions } from '../engine/stateMachine.js';
 import { INSPECTION_DEF } from '../engine/themes.js';
+import { csvEscape } from '../services/csvUtil.js'; // R30-F7：统一 CSV 转义（含 R5-001 公式注入防护），删除本地重复 esc
 import { createAlert } from './emergency.js';
 
 /**
@@ -26,6 +27,7 @@ async function transitionTask(
   taskId: string,
   event: string,
   extra: Record<string, unknown> = {},
+  actor = 'config_role',
 ): Promise<any> {
   const cur = await client.query(`SELECT * FROM inspection_task WHERE id = $1 AND tenant_id = $2`, [taskId, tenantId]);
   if (cur.rowCount === 0) throw new AppError('NOT_FOUND', 'task not found', 404);
@@ -49,11 +51,23 @@ async function transitionTask(
     `UPDATE inspection_task SET ${assigns.join(', ')}, updated_at = now() WHERE id = $1 AND tenant_id = $2 RETURNING *`,
     values,
   );
-  await emitDomainEvent(client, { tenantId, entityType: 'inspection_task', entityId: taskId, type: event, actor: 'config_role' });
+  await emitDomainEvent(client, { tenantId, entityType: 'inspection_task', entityId: taskId, type: event, actor });
   return r.rows[0];
 }
 
 const router = Router();
+
+// 防伪 L1：haversine 球面距离（米）—— 签到坐标与点位基准坐标校验用
+function haversineM(lat1: number, lng1: number, lat2: number, lng2: number): number {
+  const R = 6371000;
+  const toRad = (d: number) => (d * Math.PI) / 180;
+  const dLat = toRad(lat2 - lat1);
+  const dLng = toRad(lng2 - lng1);
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(a));
+}
 
 // ============ 点位 ============
 const pointSchema = z.object({
@@ -267,17 +281,18 @@ const taskSchema = z.object({
 router.get('/tasks', async (req, res, next) => {
   try {
     const tenantId = res.locals.auth.tenantId;
-    const { status, point_id, type, scheduled_from, scheduled_to, plan_id } = req.query as Record<string, string>;
+    const { status, point_id, type, scheduled_from, scheduled_to, plan_id, assignee } = req.query as Record<string, string>;
     const clauses = ['t.tenant_id = $1']; // 必须与下方 LEFT JOIN inspection_point p 共存：两表都有 tenant_id，未限定会触发 "column reference tenant_id is ambiguous" 500
     const params: unknown[] = [tenantId];
     const add = (sql: string, v: unknown) => {
       params.push(v);
-      clauses.push(sql.replace('?', `$${params.length}`));
+      clauses.push(sql.replace(/\?/g, `$${params.length}`));
     };
     if (status) add('status = ?', status);
     if (point_id) add('point_id = ?', point_id);
     if (type) add('type = ?', type);
     if (plan_id) add('plan_id = ?', plan_id);
+    if (assignee) add('assignee = ?', assignee); // #583：worker 工作台按归属拉自己的巡检任务
     if (scheduled_from) add('scheduled_at >= ?', scheduled_from);
     if (scheduled_to) add('scheduled_at <= ?', scheduled_to);
       const items = await withTenantClient(tenantId, (client) =>
@@ -353,7 +368,6 @@ router.post('/tasks', async (req, res, next) => {
 
 router.post('/tasks/:id/checkin', async (req, res, next) => {
   try {
-    requireConfigRole(req, res);
     const tenantId = res.locals.auth.tenantId;
     // D2：scan_tag 打卡（RFID/扫码占位——硬件到位即插即用）；scan_meta 落库（tag/lat/lng/时间）
     const b = z.object({
@@ -363,16 +377,43 @@ router.post('/tasks/:id/checkin', async (req, res, next) => {
       scan_tag: z.string().optional(),
     }).parse(req.body);
     const item = await withTenantClient(tenantId, async (client) => {
+      // #583 归属守卫：worker 仅可签到被指派给自己的巡检任务
+      const cur = await client.query(`SELECT assignee, point_id FROM inspection_task WHERE id=$1 AND tenant_id=$2`, [req.params.id, tenantId]);
+      if (cur.rowCount === 0) throw new AppError('NOT_FOUND', 'task not found', 404);
+      await requireAssigneeOrConfig(client, res.locals.auth, cur.rows[0].assignee, 'inspection task');
+      // 防伪 L1：签到坐标与点位基准坐标距离校验（haversine），>500m 标记疑似
+      // 点位无坐标或未绑点位 → 不判（诚实：无法校验就不硬造异常）
+      let geoSuspect = false;
+      let geoDistanceM: number | null = null;
+      if (b.geo_lat != null && b.geo_lng != null && cur.rows[0].point_id) {
+        const pt = await client.query(
+          `SELECT lat, lng FROM inspection_point WHERE id=$1 AND tenant_id=$2`,
+          [cur.rows[0].point_id, tenantId],
+        );
+        const p = pt.rows[0];
+        if (p && p.lat != null && p.lng != null) {
+          const d = haversineM(p.lat, p.lng, b.geo_lat, b.geo_lng);
+          geoDistanceM = Math.round(d);
+          geoSuspect = d > 500; // 500m 阈值（可后续租户化配置）
+        }
+      }
       const updated = await transitionTask(client, tenantId, req.params.id, 'checkin', {
         geo_lat: b.geo_lat ?? null,
         geo_lng: b.geo_lng ?? null,
         note: b.note ?? null,
         scan_tag: b.scan_tag ?? null,
-      });
-      if (b.scan_tag) {
+      }, res.locals.auth.userId ?? 'config_role');
+      if (b.scan_tag || geoSuspect) {
         await client.query(
           `UPDATE inspection_task SET scan_meta = scan_meta || $1::jsonb WHERE id = $2 AND tenant_id = $3`,
-          [JSON.stringify({ scan_tag: b.scan_tag, scan_at: new Date().toISOString(), lat: b.geo_lat ?? null, lng: b.geo_lng ?? null }), req.params.id, tenantId],
+          [JSON.stringify({
+            scan_tag: b.scan_tag ?? null,
+            scan_at: new Date().toISOString(),
+            lat: b.geo_lat ?? null,
+            lng: b.geo_lng ?? null,
+            geo_suspect: geoSuspect,
+            geo_distance_m: geoDistanceM,
+          }), req.params.id, tenantId],
         );
       }
       return updated;
@@ -385,7 +426,6 @@ router.post('/tasks/:id/checkin', async (req, res, next) => {
 
 router.post('/tasks/:id/complete', async (req, res, next) => {
   try {
-    requireConfigRole(req, res);
     const tenantId = res.locals.auth.tenantId;
     const b = z.object({
       note: z.string().optional(),
@@ -405,7 +445,11 @@ router.post('/tasks/:id/complete', async (req, res, next) => {
     const extra: Record<string, unknown> = { done_at: 'now()', note: b.note ?? null };
     if (b.photos) extra.photos = JSON.stringify(b.photos); // photos 为 NOT NULL，仅在提供时写入，避免置空破坏约束
     const item = await withTenantClient(tenantId, async (client) => {
-      const task = await transitionTask(client, tenantId, req.params.id, 'complete', extra);
+      // #583 归属守卫
+      const cur = await client.query(`SELECT assignee FROM inspection_task WHERE id=$1 AND tenant_id=$2`, [req.params.id, tenantId]);
+      if (cur.rowCount === 0) throw new AppError('NOT_FOUND', 'task not found', 404);
+      await requireAssigneeOrConfig(client, res.locals.auth, cur.rows[0].assignee, 'inspection task');
+      const task = await transitionTask(client, tenantId, req.params.id, 'complete', extra, res.locals.auth.userId ?? 'config_role');
       if (b.records && b.records.length) {
         await upsertRecords(client, tenantId, req.params.id, b.records);
       }
@@ -444,7 +488,6 @@ async function upsertRecords(client: any, tenantId: string, taskId: string, reco
 // 单独写入/修改实测记录（未点完成时也可逐项暂存）。
 router.post('/tasks/:id/records', async (req, res, next) => {
   try {
-    requireConfigRole(req, res);
     const tenantId = res.locals.auth.tenantId;
     const b = z
       .object({
@@ -460,8 +503,10 @@ router.post('/tasks/:id/records', async (req, res, next) => {
       })
       .parse(req.body);
     const out = await withTenantClient(tenantId, async (client) => {
-      const cur = await client.query(`SELECT id FROM inspection_task WHERE id=$1 AND tenant_id=$2`, [req.params.id, tenantId]);
+      const cur = await client.query(`SELECT id, assignee FROM inspection_task WHERE id=$1 AND tenant_id=$2`, [req.params.id, tenantId]);
       if (cur.rowCount === 0) throw new AppError('NOT_FOUND', 'task not found', 404);
+      // #583 归属守卫
+      await requireAssigneeOrConfig(client, res.locals.auth, cur.rows[0].assignee, 'inspection task');
       await upsertRecords(client, tenantId, req.params.id, b.records);
       const rec = await client
         .query(`SELECT * FROM inspection_record WHERE tenant_id=$1 AND task_id=$2 ORDER BY created_at ASC`, [tenantId, req.params.id])
@@ -476,11 +521,14 @@ router.post('/tasks/:id/records', async (req, res, next) => {
 
 router.post('/tasks/:id/exception', async (req, res, next) => {
   try {
-    requireConfigRole(req, res);
     const tenantId = res.locals.auth.tenantId;
     const b = z.object({ note: z.string().min(1) }).parse(req.body);
     const item = await withTenantClient(tenantId, async (client) => {
-      const row = await transitionTask(client, tenantId, req.params.id, 'exception', { note: b.note });
+      // #583 归属守卫
+      const cur = await client.query(`SELECT assignee FROM inspection_task WHERE id=$1 AND tenant_id=$2`, [req.params.id, tenantId]);
+      if (cur.rowCount === 0) throw new AppError('NOT_FOUND', 'task not found', 404);
+      await requireAssigneeOrConfig(client, res.locals.auth, cur.rows[0].assignee, 'inspection task');
+      const row = await transitionTask(client, tenantId, req.params.id, 'exception', { note: b.note }, res.locals.auth.userId ?? 'config_role');
       // 预警深化：巡检异常自动生成 L1 预警，落入预警中心统一处理
       await createAlert(client, tenantId, {
         source_type: 'inspection',
@@ -501,7 +549,6 @@ router.post('/tasks/:id/exception', async (req, res, next) => {
 // 前端按 available 的 event 统一调用，避免为每事件单独硬编码端点（覆盖 cancel 等）。
 router.post('/tasks/:id/transition', async (req, res, next) => {
   try {
-    requireConfigRole(req, res);
     const tenantId = res.locals.auth.tenantId;
     const { event, ...fields } = req.body as { event: string; [k: string]: unknown };
     if (!event || typeof event !== 'string') throw new AppError('BAD_REQUEST', 'event is required', 400);
@@ -509,9 +556,13 @@ router.post('/tasks/:id/transition', async (req, res, next) => {
     const ALLOWED = new Set(['note', 'geo_lat', 'geo_lng', 'done_at', 'photos']);
     const extra: Record<string, unknown> = {};
     for (const k of Object.keys(fields)) if (ALLOWED.has(k)) extra[k] = fields[k];
-    const item = await withTenantClient(tenantId, (client) =>
-      transitionTask(client, tenantId, req.params.id, event, extra),
-    );
+    const item = await withTenantClient(tenantId, async (client) => {
+      // #583 归属守卫
+      const cur = await client.query(`SELECT assignee FROM inspection_task WHERE id=$1 AND tenant_id=$2`, [req.params.id, tenantId]);
+      if (cur.rowCount === 0) throw new AppError('NOT_FOUND', 'task not found', 404);
+      await requireAssigneeOrConfig(client, res.locals.auth, cur.rows[0].assignee, 'inspection task');
+      return transitionTask(client, tenantId, req.params.id, event, extra, res.locals.auth.userId ?? 'config_role');
+    });
     return res.json({ ok: true, code: 0, item });
   } catch (e) {
     next(e);
@@ -872,10 +923,8 @@ router.get('/export', async (req, res, next) => {
         )
         .then((r) => r.rows),
     );
-    const esc = (v: unknown) => {
-      const s = v == null ? '' : String(v);
-      return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-    };
+    // R30-F7：删除本地 esc（缺 R5-001 公式注入防护），统一走 csvUtil.csvEscape；
+    // Date 列由 GMT 字符串变为 ISO 格式（csvEscape 对对象 JSON.stringify），机器可读性更好。
     const header = ['工单ID', '标题', '类型', '状态', '负责人', '点位', '计划时间', '完成时间', '创建时间', '检查项数量', '合格项数', '不合格项数'];
     const lines = rows.map((r: any) => {
       const items: any[] = Array.isArray(r.items_json) ? r.items_json : [];
@@ -895,7 +944,7 @@ router.get('/export', async (req, res, next) => {
         passed,
         failed,
       ]
-        .map(esc)
+        .map(csvEscape)
         .join(',');
     });
     const csv = '﻿' + [header.join(','), ...lines].join('\r\n');

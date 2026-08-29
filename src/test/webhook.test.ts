@@ -2,11 +2,16 @@
 // 覆盖签名正确性、事件选择、信封体结构、请求头结构——均为安全/契约关键路径。
 import { describe, it, expect } from 'vitest';
 import crypto from 'node:crypto';
+import http from 'node:http';
 import {
   signWebhook,
   buildWebhookBody,
   buildWebhookHeaders,
   selectSubscriptions,
+  classifyHostIp,
+  assertSafeOutboundUrl,
+  resolveSafeOutboundUrl,
+  defaultWebhookFetch,
   type SubscriptionRow,
 } from '../webhook/dispatch.js';
 
@@ -77,5 +82,96 @@ describe('selectSubscriptions（事件类型筛选）', () => {
   });
   it('空订阅返回空', () => {
     expect(selectSubscriptions([], 'create')).toEqual([]);
+  });
+});
+
+describe('classifyHostIp（SSRF 私网判定，F-E2）', () => {
+  it('公网 IPv4 判定为 public', () => {
+    expect(classifyHostIp('8.8.8.8')).toBe('public');
+    expect(classifyHostIp('1.1.1.1')).toBe('public');
+  });
+  it('环回/私网/链路本地(含云元数据)/CGNAT IPv4 判为 blocked', () => {
+    expect(classifyHostIp('127.0.0.1')).toBe('blocked');
+    expect(classifyHostIp('10.0.0.5')).toBe('blocked');
+    expect(classifyHostIp('172.16.0.1')).toBe('blocked');
+    expect(classifyHostIp('172.31.255.255')).toBe('blocked');
+    expect(classifyHostIp('192.168.1.1')).toBe('blocked');
+    expect(classifyHostIp('169.254.169.254')).toBe('blocked'); // 云元数据
+    expect(classifyHostIp('100.64.0.1')).toBe('blocked'); // CGNAT
+    expect(classifyHostIp('0.0.0.0')).toBe('blocked');
+  });
+  it('环回/链路本地/唯一本地 IPv6 判为 blocked；公网 IPv6 public', () => {
+    expect(classifyHostIp('::1')).toBe('blocked');
+    expect(classifyHostIp('fe80::1')).toBe('blocked');
+    expect(classifyHostIp('fc00::1')).toBe('blocked');
+    expect(classifyHostIp('fd12:3456::1')).toBe('blocked');
+    expect(classifyHostIp('2606:4700:4700::1111')).toBe('public');
+  });
+  it('IPv4 映射 IPv6 透传底层 v4 判定', () => {
+    expect(classifyHostIp('::ffff:127.0.0.1')).toBe('blocked');
+    expect(classifyHostIp('::ffff:8.8.8.8')).toBe('public');
+  });
+});
+
+describe('assertSafeOutboundUrl（SSRF 出站闸，F-E2）', () => {
+  it('拒绝非 http/https 协议', async () => {
+    await expect(assertSafeOutboundUrl('file:///etc/passwd')).rejects.toThrow();
+    await expect(assertSafeOutboundUrl('gopher://127.0.0.1:6379')).rejects.toThrow();
+  });
+  it('拒绝环回/私网 IP 字面量', async () => {
+    await expect(assertSafeOutboundUrl('http://127.0.0.1:8080/hook')).rejects.toThrow('BLOCKED_PRIVATE_OR_LOOPBACK_ADDRESS');
+    await expect(assertSafeOutboundUrl('https://192.168.0.1/x')).rejects.toThrow('BLOCKED_PRIVATE_OR_LOOPBACK_ADDRESS');
+    await expect(assertSafeOutboundUrl('http://169.254.169.254/latest/meta-data')).rejects.toThrow('BLOCKED_PRIVATE_OR_LOOPBACK_ADDRESS');
+  });
+  it('允许公网地址（IP 字面量，无网络依赖）', async () => {
+    await expect(assertSafeOutboundUrl('https://8.8.8.8/webhook')).resolves.toBeUndefined();
+    await expect(assertSafeOutboundUrl('http://1.1.1.1:9000/h')).resolves.toBeUndefined();
+  });
+});
+
+describe('resolveSafeOutboundUrl（R12-001：解析+固定 IP，防 DNS rebinding）', () => {
+  it('IP 字面量返回 pin 结果且不含 DNS 依赖', async () => {
+    const r = await resolveSafeOutboundUrl('https://8.8.8.8:8443/hook?a=1');
+    expect(r.protocol).toBe('https:');
+    expect(r.host).toBe('8.8.8.8');
+    expect(r.ip).toBe('8.8.8.8');
+    expect(r.port).toBe(8443);
+    expect(r.pathname).toBe('/hook');
+    expect(r.search).toBe('?a=1');
+  });
+  it('拒绝非 http/https 与私网地址（与闸一致）', async () => {
+    await expect(resolveSafeOutboundUrl('ftp://example.com/x')).rejects.toThrow('ONLY_HTTP_HTTPS_ALLOWED');
+    await expect(resolveSafeOutboundUrl('http://10.0.0.5/x')).rejects.toThrow('BLOCKED_PRIVATE_OR_LOOPBACK_ADDRESS');
+  });
+  it('HTTP 默认端口省略时 port 为 undefined', async () => {
+    const r = await resolveSafeOutboundUrl('http://1.1.1.1/path');
+    expect(r.port).toBeUndefined();
+  });
+});
+
+describe('defaultWebhookFetch（F-E1：Node16 无全局 fetch，须走 https 模块）', () => {
+  it('实际发出 POST 并返回 status + text（不依赖 globalThis.fetch）', async () => {
+    const server = http.createServer((req, res) => {
+      let buf = '';
+      req.on('data', (c: Buffer) => (buf += c.toString('utf8')));
+      req.on('end', () => {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ received: buf }));
+      });
+    });
+    await new Promise<void>((r) => server.listen(0, r));
+    const port = (server.address() as { port: number }).port;
+    try {
+      const resp = await defaultWebhookFetch(`http://127.0.0.1:${port}/x`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{"hello":"world"}',
+      });
+      expect(resp.status).toBe(200);
+      const txt = await resp.text();
+      expect(JSON.parse(txt).received).toBe('{"hello":"world"}');
+    } finally {
+      server.close();
+    }
   });
 });

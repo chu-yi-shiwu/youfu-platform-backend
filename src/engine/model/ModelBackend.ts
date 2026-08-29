@@ -33,6 +33,7 @@ const BASELINE = 0.5;
 const armKey = (category: string, workerId: string) => `${category}::${workerId}`;
 
 export class StatsModelBackend implements ModelBackend {
+  private static readonly MAX_ARMS = 5000; // 防御 arms 字典随运行无限膨胀（实际业务类型×工人远小于此）
   private arms: Record<string, { weight: number; pulls: number }>;
   private alpha: number;
   private ucbC: number;
@@ -63,6 +64,18 @@ export class StatsModelBackend implements ModelBackend {
     a.pulls += 1;
     this.arms[key] = a;
     this.totalPulls += 1;
+    this.evictIfNeeded();
+  }
+
+  /** 超出臂上限时丢弃 pulls 最小的臂（并列取最先插入），防止长期运行内存泄漏。 */
+  private evictIfNeeded(): void {
+    const keys = Object.keys(this.arms);
+    if (keys.length <= StatsModelBackend.MAX_ARMS) return;
+    let victim = keys[0];
+    for (const k of keys) {
+      if (this.arms[k].pulls < this.arms[victim].pulls) victim = k;
+    }
+    delete this.arms[victim];
   }
 
   toParams(): ModelParams {

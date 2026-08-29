@@ -130,7 +130,7 @@ router.get('/alerts', async (req, res, next) => {
     const params: unknown[] = [tenantId];
     const add = (sql: string, v: unknown) => {
       params.push(v);
-      clauses.push(sql.replace('?', `$${params.length}`));
+      clauses.push(sql.replace(/\?/g, `$${params.length}`));
     };
     if (status) add('status = ?', status);
     if (device_id) add('device_id = ?', device_id);

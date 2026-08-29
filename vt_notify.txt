@@ -1,0 +1,44 @@
+
+[1m[7m[36m RUN [39m[27m[22m [36mv2.1.9 [39m[90mD:/WorkBuddy/outputs/youfu_backend_dev_v2[39m
+
+[90mstdout[2m | src/services/notify.test.ts[2m > [22m[2mnotify 诚实边界 + 路由[2m > [22m[2msms 未配置网关：诚实 stub（delivered=false，note 含 STUB）
+[22m[39m[notify:sms] stub (NOT actually sent, pending gateway) { type: [32m'dispatch'[39m, recipient: [32m'worker_1'[39m, workOrderId: [32m'wo_1'[39m }
+
+[90mstdout[2m | src/services/notify.test.ts[2m > [22m[2mnotify 诚实边界 + 路由[2m > [22m[2mpush 未配置网关：诚实 stub（delivered=false）
+[22m[39m[notify:push] stub (NOT actually sent, pending gateway) { type: [32m'dispatch'[39m, recipient: [32m'worker_1'[39m, workOrderId: [32m'wo_1'[39m }
+
+[90mstdout[2m | src/services/notify.test.ts[2m > [22m[2mnotify 诚实边界 + 路由[2m > [22m[2mwechat 未配置模板：诚实 stub（delivered=false）
+[22m[39m[notify:wechat] stub (NOT actually sent, pending config) { type: [32m'dispatch'[39m, recipient: [32m'worker_1'[39m, workOrderId: [32m'wo_1'[39m }
+
+[90mstdout[2m | src/services/notify.test.ts[2m > [22m[2mnotify 诚实边界 + 路由[2m > [22m[2mwechat 配置齐全但接收方未绑 openid：诚实 stub（delivered=false）
+[22m[39m[notify:wechat] stub (no openid bound) { recipient: [32m'worker_1'[39m, recipientKind: [32m'worker'[39m, workOrderId: [32m'wo_1'[39m }
+
+[90mstdout[2m | src/services/notify.test.ts[2m > [22m[2mnotify 诚实边界 + 路由[2m > [22m[2msms 配置网关但无手机号：诚实 stub（绝不拿 worker.id 当手机号投递）
+[22m[39m[notify:sms] stub (no phone resolved) { recipient: [32m'worker_1'[39m, workOrderId: [32m'wo_1'[39m }
+
+[90mstdout[2m | src/services/notify.test.ts[2m > [22m[2mnotify 诚实边界 + 路由[2m > [22m[2msms 配置网关但 worker.phone 格式非法 → 诚实 stub（绝不误投网关）
+[22m[39m[notify:sms] stub (no phone resolved) { recipient: [32m'worker_1'[39m, workOrderId: [32m'wo_1'[39m }
+
+[90mstdout[2m | src/services/notify.test.ts[2m > [22m[2mnotify 诚实边界 + 路由[2m > [22m[2m默认 fan-out（无 channel）：以主通道 in_app 必达为准，返回 delivered=true 且产生 2 条落库
+[22m[39m[notify:wechat] stub (NOT actually sent, pending config) { type: [32m'dispatch'[39m, recipient: [32m'worker_1'[39m, workOrderId: [32m'wo_1'[39m }
+
+ [32m✓[39m src/services/notify.test.ts[2m > [22mnotify 诚实边界 + 路由[2m > [22min_app：落库即可达 delivered=true
+ [32m✓[39m src/services/notify.test.ts[2m > [22mnotify 诚实边界 + 路由[2m > [22msms 未配置网关：诚实 stub（delivered=false，note 含 STUB）
+ [32m✓[39m src/services/notify.test.ts[2m > [22mnotify 诚实边界 + 路由[2m > [22mpush 未配置网关：诚实 stub（delivered=false）
+ [32m✓[39m src/services/notify.test.ts[2m > [22mnotify 诚实边界 + 路由[2m > [22mwechat 未配置模板：诚实 stub（delivered=false）
+ [32m✓[39m src/services/notify.test.ts[2m > [22mnotify 诚实边界 + 路由[2m > [22mwechat 配置齐全但接收方未绑 openid：诚实 stub（delivered=false）
+ [32m✓[39m src/services/notify.test.ts[2m > [22mnotify 诚实边界 + 路由[2m > [22m🔴B1 修复验证：wechat 配置齐全 + worker 接收方经 account_id 解析到 openid → 真发 delivered=true
+ [32m✓[39m src/services/notify.test.ts[2m > [22mnotify 诚实边界 + 路由[2m > [22mwechat 配置齐全 + account 接收方已绑 openid → 真发 delivered=true
+ [32m✓[39m src/services/notify.test.ts[2m > [22mnotify 诚实边界 + 路由[2m > [22msms 配置网关但无手机号：诚实 stub（绝不拿 worker.id 当手机号投递）
+ [32m✓[39m src/services/notify.test.ts[2m > [22mnotify 诚实边界 + 路由[2m > [22msms 配置网关且 payload.phone 已解析 → 真发 delivered=true
+ [32m✓[39m src/services/notify.test.ts[2m > [22mnotify 诚实边界 + 路由[2m > [22msms 配置网关且 worker.phone 已录入(057列) → 真发 delivered=true（验证走 DB 解析）
+ [32m✓[39m src/services/notify.test.ts[2m > [22mnotify 诚实边界 + 路由[2m > [22msms 配置网关但 worker.phone 格式非法 → 诚实 stub（绝不误投网关）
+ [32m✓[39m src/services/notify.test.ts[2m > [22mnotify 诚实边界 + 路由[2m > [22minsertNotification 为 dispatchNotification 的兼容别名（返回 void，仍落库）
+ [32m✓[39m src/services/notify.test.ts[2m > [22mnotify 诚实边界 + 路由[2m > [22m默认 fan-out（无 channel）：以主通道 in_app 必达为准，返回 delivered=true 且产生 2 条落库
+ [32m✓[39m src/services/notify.test.ts[2m > [22mnotify 诚实边界 + 路由[2m > [22mpayload.wxData 结构非法（缺 value）→ 回退默认 thing1~thing4 拼装，不抛错
+
+[2m Test Files [22m [1m[32m1 passed[39m[22m[90m (1)[39m
+[2m      Tests [22m [1m[32m14 passed[39m[22m[90m (14)[39m
+[2m   Start at [22m 03:25:21
+[2m   Duration [22m 1.18s[2m (transform 225ms, setup 0ms, collect 230ms, tests 9ms, environment 0ms, prepare 96ms)[22m
+

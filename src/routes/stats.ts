@@ -5,6 +5,8 @@ import { Router } from 'express';
 import { withTenantClient } from '../db/pool.js';
 import { ticketStats, processMetrics } from '../repo/stats.js';
 import { qualityReport } from '../services/dataQuality.js';
+import { getWorkflowDef } from '../engine/workflowDef.js';
+import { doneStates } from '../engine/stateMachine.js';
 
 const router = Router();
 
@@ -52,6 +54,45 @@ router.get('/stats/data-quality', async (req, res, next) => {
     const tenantId = res.locals.auth.tenantId;
     const report = await withTenantClient(tenantId, (client) => qualityReport(client, tenantId));
     return res.json({ ok: true, code: 0, quality: report });
+  } catch (e) {
+    next(e);
+  }
+});
+
+// §12.4 超时预警（管理端红色卡）：sla_due_at 已过期且未进入完成态的工单，
+// 按 catalog 排行 + 最早超时。诚实口径：无 SLA 的工单不计入（sla_due_at IS NULL 过滤）。
+router.get('/stats/overdue', async (req, res, next) => {
+  try {
+    const tenantId = res.locals.auth.tenantId;
+    const out = await withTenantClient(tenantId, async (client) => {
+      const def = await getWorkflowDef(client, tenantId, 'work_order');
+      const done = doneStates(def);
+      const r = await client.query(
+        `SELECT
+           COUNT(*)::int AS overdue_total,
+           COALESCE(MAX(sla_due_at), NULL)::text AS earliest_due,
+           COALESCE(AVG(EXTRACT(EPOCH FROM (now() - sla_due_at)) / 60)::int, 0) AS avg_overdue_min
+         FROM work_orders
+         WHERE tenant_id = $1 AND sla_due_at IS NOT NULL AND sla_due_at < now() AND NOT (status = ANY($2::text[]))`,
+        [tenantId, done],
+      );
+      const row = r.rows[0];
+      const byCatalog = await client.query(
+        `SELECT COALESCE(NULLIF(fc.name, ''), NULLIF(t.catalog, ''), '未分类') AS catalog, COUNT(*)::int AS count
+         FROM work_orders t
+         LEFT JOIN fault_category fc ON fc.tenant_id = t.tenant_id AND (fc.code = t.catalog OR fc.id::text = t.catalog)
+         WHERE t.tenant_id = $1 AND t.sla_due_at IS NOT NULL AND t.sla_due_at < now() AND NOT (t.status = ANY($2::text[]))
+         GROUP BY 1 ORDER BY count DESC, 1 LIMIT 5`,
+        [tenantId, done],
+      );
+      return {
+        overdue_total: row ? Number(row.overdue_total) : 0,
+        earliest_due: row ? row.earliest_due : null,
+        avg_overdue_min: row ? Number(row.avg_overdue_min) : 0,
+        by_catalog: byCatalog.rows.map((x) => ({ catalog: x.catalog, count: Number(x.count) })),
+      };
+    });
+    return res.json({ ok: true, code: 0, overdue: out });
   } catch (e) {
     next(e);
   }

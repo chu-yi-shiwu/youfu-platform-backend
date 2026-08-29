@@ -11,6 +11,7 @@ import { pickWorker, resolveDispatch, getActiveRules } from '../engine/dispatch.
 import { autoRouteFor } from '../engine/stateMachine.js';
 import { getWorkflowDef } from '../engine/workflowDef.js';
 import { setSlaDueAt } from '../engine/sla.js';
+import { emitDomainEvent } from '../db/eventBus.js';
 
 export interface LinkedWoPayload {
   id: string;
@@ -108,6 +109,11 @@ export async function createLinkedWorkOrder(
        VALUES ($1,$2,'assign',$3,$4,'auto_dispatch',$5)`,
       [p.tenantId, row.id, initial, dispatchTarget, JSON.stringify({ worker_id: picked.id })],
     );
+    // ④ 口径对齐 workOrder.ts:180：自动派单补写 domain_event，闭环过程挖掘数据源（R25-004）。
+    // 注：本函数已用 autoRouteFor(def, initial) 走 workflow_def 状态机决定 dispatchTarget，
+    // 故不强行套用 transitionEntity（其 ALLOWED_TABLES 仅含 business_flow_tasks/inspection_task，
+    // 不含 work_orders，硬塞会直接抛 BAD_REQUEST）；缺的是 domain_event 这一条，此处补齐。
+    await emitDomainEvent(client, { tenantId: p.tenantId, entityType: 'work_order', entityId: row.id, type: dispatchTarget, actor: 'auto_dispatch', payload: { worker_id: picked.id } });
   }
   return { id: row.id, orderNo: row.order_no, autoFlow, assignee, reason, created: true };
 }
