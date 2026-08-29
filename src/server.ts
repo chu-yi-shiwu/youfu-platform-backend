@@ -14,6 +14,7 @@ import authRouter from './routes/auth.js';
 import configRouter from './routes/config.js';
 import templateContributionsRouter from './routes/templateContributions.js';// UGC 模板贡献（租户侧）
 import inspectionRouter from './routes/inspection.js';
+import { flushWechatDeliveries } from './services/notify.js'; // R31-Q1：响应后补投递 deferred wechat
 import patrolRouter from './routes/patrol.js';
 import emergencyRouter from './routes/emergency.js';
 import transportRouter from './routes/transport.js';
@@ -113,6 +114,15 @@ function requireDashboardAuth(req: import('express').Request, res: import('expre
 // 健康检查（不含 DB，永远 200）
 app.get('/health', (_req, res) => {
   res.json({ ok: true, status: 'up' });
+});
+
+// R31-Q1：响应完成后补投递 deferred wechat 通知（insertNotification fan-out 入队的）。
+// 此刻事务已提交，外部 HTTP 不再占用事务/连接；失败仅记日志，绝不阻塞响应。
+app.use((req, res, next) => {
+  res.on('finish', () => {
+    try { flushWechatDeliveries(); } catch { /* 永不阻塞响应链 */ }
+  });
+  next();
 });
 
 // 城市级平台层（E_min）：挂在租户 authMiddleware 之前（G1 平台上下文独立，
