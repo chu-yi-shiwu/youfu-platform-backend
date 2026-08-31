@@ -5,11 +5,12 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import crypto from 'node:crypto';
-import pool, { withTenantClient, assertSafeTenantId } from '../db/pool.js';
+import pool, { withTenantClient } from '../db/pool.js';
 import { signJwt, AUTH_MODE, loginRateLimit } from '../middleware/auth.js';
 import { platformAdminAuth } from '../middleware/platformAuth.js';
 import { verifyPassword, hashPassword } from '../account.js';
 import { llmConfigured } from '../services/llm.js';
+import { provisionNewTenantContent } from '../repo/tenantProvision.js';
 
 const router = Router();
 
@@ -103,9 +104,11 @@ router.put('/tenants/:id/status', async (req, res, next) => {
   }
 });
 
-// ---- POST /platform/tenants —— 登记新机构（P1 续：机构入驻向导后端）+ 行业模板初始化 ----
-// 行业模板：新机构按 category 从「模板源租户」复制 fault_category（hospital→t-verification 91 分类等），
-// 机构入驻即自动拥有该行业分类体系（DMR：数据资产按行业复用）。
+// ---- POST /platform/tenants —— 登记新机构（P1 续：机构入驻向导后端）+ 行业模板初始化 + 开通补全 ----
+// 行业模板：新机构按 category 从「模板源租户」复制 fault_category（hospital→t-verification 91 分类等）。
+// SaaS 前置（2026-09-01）：开通即建齐最小可运行租户——业务流状态图（复制模板源 work_order def，
+//   无则引擎默认 4 态）+ 机构管理员账号（缺省自动生成，明文仅本次响应返回一次）。
+// 诚实边界：reporter_dict / location_dict 属机构私有数据（含 PII），绝不跨租户复制。
 const INDUSTRY_TEMPLATE_SOURCE: Record<string, string> = {
   hospital: 't-verification', // 医院行业模板源（UOne 迁移分类）
   property: 'demo_tenant',    // 物业行业模板源
@@ -120,11 +123,13 @@ router.post('/tenants', async (req, res, next) => {
       name: z.string().min(2).max(64),
       category: z.enum(['hospital', 'property', 'school', 'municipal', 'other']),
       parent_id: z.string().optional(),
+      admin_username: z.string().regex(/^[a-z0-9_-]{3,32}$/i, '管理员用户名 3-32 位字母数字下划线').optional(),
+      admin_password: z.string().min(8, '管理员密码至少 8 位').max(64).optional(),
     }).parse(req.body);
     // 防重复
     const dup = await pool.query(`SELECT 1 FROM tenant_registry WHERE tenant_id = $1`, [b.tenant_id]);
     if ((dup.rowCount ?? 0) > 0) return res.status(409).json({ ok: false, code: 'TENANT_DUP', message: '该机构已存在' });
-    // 登记租户 + 行业模板初始化（复制模板源 fault_category）
+    // 登记租户 + 开通补全（分类复制 / 流程图 / 管理员账号）
     // R19-001 🔴 修复：原实现用 pool.query('BEGIN') 起事务却混用 withTenantClient（各自独立连接），
     //   pg.Pool.query 不保证跨调用同一连接 → 事务根本不原子，模板复制中途失败会留下「已建租户但无分类」孤儿租户。
     //   现改为单一 client 真事务：在同连接内切换租户上下文分别读(src)/写(new)，要么全成要么全回滚。
@@ -136,34 +141,28 @@ router.post('/tenants', async (req, res, next) => {
         [b.tenant_id, b.name, b.category, b.parent_id ?? null, JSON.stringify({ repair_daily: 500 })],
       );
       const src = INDUSTRY_TEMPLATE_SOURCE[b.category] ?? 't-verification';
-      let copiedCount = 0;
-      if (src !== b.tenant_id) {
-        // 读源租户分类（SET LOCAL app.tenant_id=src + SET ROLE youfu_app 使 RLS 生效）
-        await client.query(`SET LOCAL app.tenant_id = '${assertSafeTenantId(src).replace(/'/g, "''")}'`);
-        await client.query('SET ROLE youfu_app');
-        const copied = await client.query(
-          `SELECT code, name, sort, enabled FROM fault_category WHERE tenant_id = $1 AND enabled = true`,
-          [src],
-        );
-        if (copied.rows.length > 0) {
-          // 切到新租户上下文后写入（RLS WITH CHECK 保证 tenant_id=new）
-          await client.query(`SET LOCAL app.tenant_id = '${assertSafeTenantId(b.tenant_id).replace(/'/g, "''")}'`);
-          for (const row of copied.rows) {
-            const ins = await client.query(
-              `INSERT INTO fault_category (id, tenant_id, code, name, sort, enabled)
-               VALUES (gen_random_uuid(), $1, $2, $3, $4, $5)
-               ON CONFLICT (tenant_id, code) DO NOTHING`,
-              [b.tenant_id, row.code, row.name, row.sort, row.enabled],
-            );
-            copiedCount += ins.rowCount ?? 0;
-          }
-        }
-      }
+      const provision = await provisionNewTenantContent(client, {
+        tenantId: b.tenant_id,
+        name: b.name,
+        sourceTenantId: src,
+        adminUsername: b.admin_username,
+        adminPassword: b.admin_password,
+      });
       await client.query('COMMIT');
-      await audit(admin.username, 'tenant.create', b.tenant_id, b.tenant_id, { category: b.category, categories_copied: copiedCount });
+      await audit(admin.username, 'tenant.create', b.tenant_id, b.tenant_id, {
+        category: b.category,
+        categories_copied: provision.categoriesCopied,
+        workflow_def_source: provision.workflowDefSource,
+        admin_username: provision.adminUsername,
+      });
       return res.status(201).json({
         ok: true, code: 0, item: { tenant_id: b.tenant_id, name: b.name, category: b.category, status: 'active' },
-        note: `机构已登记，按${b.category}行业模板初始化分类 ${copiedCount} 条`,
+        admin: {
+          username: provision.adminUsername,
+          // 自动生成时明文仅本次返回；调用方自带密码则不回显
+          ...(b.admin_password ? {} : { password: provision.adminPassword }),
+        },
+        note: `机构已登记：按${b.category}行业模板初始化分类 ${provision.categoriesCopied} 条、业务流状态图 1 套（${provision.workflowDefSource === 'template' ? '行业模板' : '默认 4 态'}）、管理员账号 1 个`,
       });
     } catch (e) {
       await client.query('ROLLBACK').catch(() => undefined);
