@@ -59,7 +59,9 @@ export interface WorkOrderRow {
 }
 
 /** 生成业务工单号：WO_YYYYMMDD_10位强随机（crypto 32bit 熵，替代原 Math.random 6位弱随机）。
- *  同日碰撞概率可忽略；order_no 唯一索引作为 DDL 兜底（见 #816 迁移产物，待初一授权后上线，当前未应用）。 */
+ *  同日碰撞概率可忽略；order_no 唯一索引 DDL 兜底（062，索引 uq_work_orders_tenant_order_no）
+ *  已于 2026-08-29 在线上由 postgres 身份应用并入 _migrations 账本（#822 收口记录）。
+ *  （2026-08-31 审查修正：本注释曾写"待授权后上线，当前未应用"，与线上事实不符，已更正。） */
 function genOrderNo(d: Date = new Date()): string {
   const ymd = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`;
   const rand = randomBytes(4).readUInt32BE(0).toString().padStart(10, '0'); // 0..4294967295，32bit 熵

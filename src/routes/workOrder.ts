@@ -105,6 +105,56 @@ export async function autoDispatchAfterCreate(
   return { autoFlow, assignee, reason, dispatchTarget };
 }
 
+/**
+ * 完成态触发增量学习（④⑤ 数→模闭环）——2026-08-31 全维度审查 F2：从 transition handler
+ * 抽取为可单测单元（原内联逻辑无法测试，SAVEPOINT 修复零回归护栏）。行为与抽取前逐行等价：
+ *  - 仅"首次踏入学习触发态"才学（锁内 from 判定 + ticket_learn_log 唯一键结构性幂等双保险）；
+ *  - SAVEPOINT 隔离学习段：incrementalLearn 内任何 SQL 错误仅回滚学习段，主流转（状态+事件）
+ *    保真，learn_error 诚实回传（T-A 缺陷1修复，2026-08-29）。
+ */
+export async function runIncrementalLearnStep(
+  client: PoolClient,
+  tenantId: string,
+  workOrderId: string,
+  to: string,
+  fromStatus: string | null | undefined,
+): Promise<{ triggered: boolean; learnError: string | null }> {
+  const def = await getWorkflowDef(client, tenantId, 'work_order');
+  // ⑤ 模数共振：学习触发态优先读 def.config.learningTriggers（per-def 控制），缺省回退 doneStates（向后兼容）
+  const learnOn = learningTriggerStates(def);
+  if (!shouldTriggerLearning(to, String(fromStatus ?? ''), learnOn)) {
+    return { triggered: false, learnError: null };
+  }
+  // 结构性幂等守卫（支柱④⑤ 兜底）：唯一键 (tenant_id, work_order_id, trigger_state) 保证
+  // 即便过程式判定被绕过（如未来事件驱动 at-least-once 重放），同一"工单+触发态"也仅学一次。
+  // INSERT ... ON CONFLICT DO NOTHING：rowCount===1 表示本次是首条，才真正调用增量学习。
+  const guard = await client.query(
+    `INSERT INTO ticket_learn_log (tenant_id, work_order_id, trigger_state, model_version)
+     VALUES ($1,$2,$3,(SELECT version FROM model_state WHERE tenant_id=$1 AND model_key='dispatch_score'))
+     ON CONFLICT (tenant_id, work_order_id, trigger_state) DO NOTHING`,
+    [tenantId, workOrderId, to],
+  );
+  if (guard.rowCount !== 1) {
+    // 唯一键已存在：本次被结构性守卫拦截（重复学习），不调用、不报错（属正常幂等）。
+    console.info('[T-A incrementalLearn] SKIPPED by idempotency guard', { workOrderId, tenantId, triggerState: to });
+    return { triggered: true, learnError: null };
+  }
+  // 事务语义修复（2026-08-29 主轮加深测试轮3发现）：incrementalLearn 内任何 SQL 错误会把
+  // 整个 PG 事务置为 aborted——原 try/catch 只是"记日志"，实际状态/事件全部回滚，接口却
+  // 返回锁内内存值谎报成功。SAVEPOINT 隔离：学习失败仅回滚学习段，主流转（状态+事件）保真。
+  await client.query('SAVEPOINT incremental_learn_sp');
+  try {
+    await incrementalLearn(client, tenantId, workOrderId, process.env.MODEL_AUTO_TUNE === 'true');
+    await client.query('RELEASE SAVEPOINT incremental_learn_sp');
+    return { triggered: true, learnError: null };
+  } catch (e) {
+    await client.query('ROLLBACK TO SAVEPOINT incremental_learn_sp');
+    const learnError = e instanceof Error ? e.message : String(e);
+    console.error('[T-A incrementalLearn] FAILED (rolled back to savepoint, transition preserved)', { workOrderId, tenantId, err: e });
+    return { triggered: true, learnError };
+  }
+}
+
 const createSchema = z.object({
   id: z.string().min(1),
   business_type: z.string().min(1),
@@ -261,41 +311,10 @@ router.post('/open/work_order/:id/transition', async (req, res, next) => {
           });
         }
       }
-      // 工单进入"完成态"（def 派生：DEFAULT=completed；RICH=completed/closed/evaluated）即增量学习（数→模闭环）；
-      // 仅在"首次踏入完成态"触发（避免 completed→closed→evaluated 间重复学习）；受 MODEL_AUTO_TUNE 控制是否写回。
-      // 不静默吞错：失败记日志并回传 learn_error，便于试点验证定位根因（T-A 缺陷1修复）
-      const def = await getWorkflowDef(client, tenantId, 'work_order');
-      // ⑤ 模数共振：学习触发态优先读 def.config.learningTriggers（per-def 控制），缺省回退 doneStates（向后兼容）
-      const learnOn = learningTriggerStates(def);
-      // 用 transition() 锁内返回的 r.from（已加行锁，并发串行化）判定"首次进入"，杜绝事务外快照并发双触发。
-      if (shouldTriggerLearning(to, r.from, learnOn)) {
-        // 结构性幂等守卫（支柱④⑤ 兜底）：唯一键 (tenant_id, work_order_id, trigger_state) 保证
-        // 即便过程式判定被绕过（如未来事件驱动 at-least-once 重放），同一"工单+触发态"也仅学一次。
-        // INSERT ... ON CONFLICT DO NOTHING：rowCount===1 表示本次是首条，才真正调用增量学习。
-        const guard = await client.query(
-          `INSERT INTO ticket_learn_log (tenant_id, work_order_id, trigger_state, model_version)
-           VALUES ($1,$2,$3,(SELECT version FROM model_state WHERE tenant_id=$1 AND model_key='dispatch_score'))
-           ON CONFLICT (tenant_id, work_order_id, trigger_state) DO NOTHING`,
-          [tenantId, req.params.id, to],
-        );
-        if (guard.rowCount === 1) {
-          // 事务语义修复（2026-08-29 主轮加深测试轮3发现）：incrementalLearn 内任何 SQL 错误会把
-          // 整个 PG 事务置为 aborted——原 try/catch 只是"记日志"，实际状态/事件全部回滚，接口却
-          // 返回锁内内存值谎报成功。SAVEPOINT 隔离：学习失败仅回滚学习段，主流转（状态+事件）保真。
-          await client.query('SAVEPOINT incremental_learn_sp');
-          try {
-            await incrementalLearn(client, tenantId, req.params.id, process.env.MODEL_AUTO_TUNE === 'true');
-            await client.query('RELEASE SAVEPOINT incremental_learn_sp');
-          } catch (e) {
-            await client.query('ROLLBACK TO SAVEPOINT incremental_learn_sp');
-            learnError = e instanceof Error ? e.message : String(e);
-            console.error('[T-A incrementalLearn] FAILED (rolled back to savepoint, transition preserved)', { workOrderId: req.params.id, tenantId, err: e });
-          }
-        } else {
-          // 唯一键已存在：本次被结构性守卫拦截（重复学习），不调用、不报错（属正常幂等）。
-          console.info('[T-A incrementalLearn] SKIPPED by idempotency guard', { workOrderId: req.params.id, tenantId, triggerState: to });
-        }
-      }
+      // 完成态触发增量学习——抽取为 runIncrementalLearnStep（2026-08-31 审查 F2：原内联逻辑
+      // 无法单测，SAVEPOINT 修复零回归护栏）。行为与抽取前逐行等价，learn_error 语义不变。
+      const learnStep = await runIncrementalLearnStep(client, tenantId, req.params.id, to, r.from);
+      learnError = learnStep.learnError;
       // 评价完成回写满意度评分（UOne 满意度颗粒度）
       if (to === 'evaluated' && typeof score === 'number') {
         await client.query(

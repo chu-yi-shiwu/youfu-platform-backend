@@ -24,7 +24,8 @@ describe('localDateStr（R17-001 时区口径修复）', () => {
 
 describe('调度器跨进程锁（R25-001）', () => {
   it('无可用 PG（单测环境）时优雅降级：tryAcquire 返回 true、release 不抛', async () => {
-    // 单测无真实 PG，pool.query 会失败；锁模块必须放行而非阻断，保证单进程语义不变。
+    // 单测无真实 PG，pool.connect 会失败；锁模块必须放行而非阻断，保证单进程语义不变。
+    // （R31-F4 修复后：取锁走专用连接 pool.connect，取/放严格同连接。）
     const acquired = await tryAcquireSchedulerLock('inspection');
     expect(acquired).toBe(true);
     await expect(releaseSchedulerLock('inspection')).resolves.toBeUndefined();

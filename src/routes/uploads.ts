@@ -103,7 +103,7 @@ async function matchViewToken(tenant: string, file: string, token: string): Prom
   }
 }
 
-router.get('/:tenant/:file', async (req: Request, res: Response) => {
+async function serveUpload(req: Request, res: Response): Promise<Response | void> {
   const tenant = req.params.tenant;
   const file = req.params.file;
 
@@ -150,6 +150,18 @@ router.get('/:tenant/:file', async (req: Request, res: Response) => {
     else res.end();
   });
   stream.pipe(res);
+}
+
+// R31-QC（2026-08-31 审查）：原 handler 是全库唯一无 try/catch 的 async 路由——Express 4 下
+// 未捕获异常会挂起请求而非统一 500。主体提取为 serveUpload，此处补防御兜底（fail-closed）。
+router.get('/:tenant/:file', async (req: Request, res: Response) => {
+  try {
+    await serveUpload(req, res);
+  } catch (e) {
+    console.error('[uploads] handler error', e);
+    if (!res.headersSent) res.status(500).json({ ok: false, code: 'INTERNAL', message: 'internal error' });
+    else res.end();
+  }
 });
 
 void AUTH_MODE; // 保留引用（未来如需按模式放宽可在路由内使用；当前 fail-closed，不依赖模式）

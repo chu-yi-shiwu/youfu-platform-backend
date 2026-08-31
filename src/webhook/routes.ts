@@ -25,10 +25,13 @@ router.post('/webhooks/subscriptions', async (req, res, next) => {
     try {
       await assertSafeOutboundUrl(body.url);
     } catch (e) {
+      // R31-QC（2026-08-31 审查）：不把 SSRF guard 内部细节（e.message）回给客户端——
+      // 已登录用户可借此探测内网校验逻辑；细节仅进服务端日志。
+      console.warn('[webhook subscribe] url blocked by SSRF guard', { url: body.url, err: e });
       return res.status(400).json({
         ok: false,
         code: 1,
-        message: 'webhook url blocked (private/loopback/metadata): ' + (e instanceof Error ? e.message : String(e)),
+        message: 'webhook url blocked (private/loopback/metadata)',
       });
     }
     const secret = body.secret ?? crypto.randomBytes(24).toString('hex');
