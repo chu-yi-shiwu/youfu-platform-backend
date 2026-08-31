@@ -14,6 +14,7 @@ import { AppError } from '../middleware/error.js';
 import { requirePermission } from '../middleware/role.js';
 import { resolveScanFromDb } from '../scan.js';
 import { setSlaDueAt, slaScan, type SlaScanRow } from '../engine/sla.js';
+import { runSlaScanForTenant } from '../scheduler/slaScheduler.js';
 import { dispatchEvent } from '../webhook/dispatch.js';
 import { StatsModelBackend, type ModelBackend } from '../engine/model/ModelBackend.js';
 import { incrementalLearn } from '../services/modelTrainer.js';
@@ -642,65 +643,17 @@ router.post('/scan', async (req, res, next) => {
 });
 
 // POST /api/v1/sla/scan —— P4 SLA 守护：扫本租户超时单，标记升级并 emit sla_escalated 事件
-// 真实落库（与契约 §3.4 wo.sla_escalated 对齐）；纯扫描逻辑在 src/engine/sla.ts，便于单测。
+// 拆雷三件套②（2026-08-31）：扫描实现抽到 src/scheduler/slaScheduler.ts 的 runSlaScanForTenant，
+// 本端点与进程内 cron 共用同一实现；命中同时落通知（在身 assignee + 租户管理员），契约不变。
 router.post('/sla/scan', async (req, res, next) => {
   try {
     const tenantId = res.locals.auth.tenantId;
-      const escalations = await withTenantClient(tenantId, async (client) => {
-      // A+ Phase1.5：SLA 活跃集由 workflow_def 派生（排除完成态 ∪ 终态），
-      // 与富模板对齐且不写死 4 态；DEFAULT 退化为排除 completed（同旧行为）。
-      // R13-005 修复：slaScan 原本硬编码 SLA_ACTIVE=['draft','assigned','processing']，
-      //   会静默丢弃富模板的 pending_accept/pending_dispatch/claim_hall/pending_review 等活跃态，
-      //   致其永不被 SLA 升级。此处显式把"全态 − done − terminal − 挂起态"传给 slaScan，
-      //   让活跃态真正受 SLA 约束（挂起态 freeze 时钟，按 sideEffect pause_sla 语义排除）。
-      const def = await getWorkflowDef(client, tenantId, 'work_order');
-      const slaExclude = Array.from(new Set([...doneStates(def), ...terminalStates(def)]));
-      const activeStates = def.states.filter(
-        (s) => !slaExclude.includes(s) && s !== 'paused' && s !== 'suspended',
-      );
-      const active = await client.query<SlaScanRow>(
-        `SELECT id, status, sla_due_at, escalated_at FROM work_orders
-         WHERE tenant_id = $1 AND status <> ALL($2::text[])`,
-        [tenantId, slaExclude],
-      );
-      const hits = slaScan(
-        active.rows.map((r) => ({
-          id: r.id,
-          status: r.status as WorkOrderStatus,
-          sla_due_at: r.sla_due_at,
-          escalated_at: r.escalated_at,
-        })),
-        new Date(),
-        activeStates,
-      );
-      for (const h of hits) {
-        await client.query(
-          'UPDATE work_orders SET escalated_at = now() WHERE id = $1',
-          [h.workOrderId],
-        );
-        await client.query(
-          `INSERT INTO ticket_event (tenant_id, work_order_id, type, from_status, to_status, actor, payload)
-           VALUES ($1,$2,'sla_escalated',$3,$3,'system',$4)`,
-          [tenantId, h.workOrderId, h.fromStatus, JSON.stringify({ escal_minutes: h.escalMinutes, due_at: h.dueAt })],
-        );
-        await emitDomainEvent(client, { tenantId, entityType: 'work_order', entityId: h.workOrderId, type: 'sla_escalated', actor: 'system', payload: { escal_minutes: h.escalMinutes, due_at: h.dueAt } });
-        // P5 Webhook：SLA 升级事件也对外投递
-        void dispatchEvent(tenantId, {
-          type: 'sla_escalated',
-          workOrderId: h.workOrderId,
-          fromStatus: h.fromStatus,
-          toStatus: h.fromStatus,
-          actor: 'system',
-          payload: { escal_minutes: h.escalMinutes, due_at: h.dueAt },
-        }).catch(() => {});
-      }
-      return hits;
-    });
+    const hits = await runSlaScanForTenant(tenantId);
     return res.json({
       ok: true,
       code: 0,
-      escalated: escalations.length,
-      items: escalations.map((h) => ({ work_order_id: h.workOrderId, from_status: h.fromStatus, escal_minutes: h.escalMinutes })),
+      escalated: hits.length,
+      items: hits.map((h) => ({ work_order_id: h.workOrderId, from_status: h.fromStatus, escal_minutes: h.escalMinutes })),
     });
   } catch (e) {
     next(e);

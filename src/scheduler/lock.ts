@@ -16,6 +16,7 @@ const LOCK_KEYS: Record<string, number> = {
   inspection: 1,
   'template-effects': 2,
   'model-train': 3,
+  sla: 4, // 拆雷三件套②：SLA 定时扫描（2026-08-31）
 };
 
 /** 已取得锁的专用连接（name → client）。锁生命周期 = 连接驻留期，保证取/放同连接。 */

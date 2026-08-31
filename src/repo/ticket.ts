@@ -3,7 +3,7 @@
 import type { PoolClient } from 'pg';
 import { randomBytes } from 'crypto';
 import { AppError } from '../middleware/error.js';
-import { isKnownState, type WorkOrderStatus, type WorkflowTransition } from '../engine/stateMachine.js';
+import { isKnownState, doneStates, terminalStates, type WorkOrderStatus, type WorkflowTransition } from '../engine/stateMachine.js';
 import { getWorkflowDef } from '../engine/workflowDef.js';
 import { emitDomainEvent } from '../db/eventBus.js';
 import { embedText, embeddingConfigured, embeddingModel } from '../services/llm.js';
@@ -190,6 +190,28 @@ export async function transition(
     `UPDATE work_orders SET status = $1, updated_at = now()${assignee ? ', assignee_id = $4' : ''} WHERE id = $2 AND tenant_id = $3 RETURNING *`,
     assignee ? [to, id, tenantId, assignee] : [to, id, tenantId],
   );
+  // R32 load 对称回收（2026-08-31 拆雷三件套①）：transition 是工单流转唯一写路径，
+  // 在此做 worker.load 的净变化结算，修复「load 只增不减」断链（评估报告三条业务断链之一）。
+  // 口径：load = 该 worker 当前在身工单数。活跃态 = 全态 − done − terminal − 挂起（与 SLA 扫描同源派生）。
+  // 净变化：before = 流转前「活跃且有 assignee」的贡献者；after = 流转后同口径贡献者。
+  //   - before 且 before≠after → 旧 assignee -1（完成/取消/挂起/改派旧离场）
+  //   - after  且 after≠before → 新 assignee +1（人工派单/恢复/改派新入场）
+  // 注意：自动派单 / 抢单 / 联动单三处直接 UPDATE 不走 transition（workOrder.ts:79/:824、
+  //   linkedWorkOrder.ts:106），各自手工 +1 的既有行为保持不变，此处不会与之叠加。
+  const se0 = def.states.filter(
+    (s) => !doneStates(def).includes(s) && !terminalStates(def).includes(s) && s !== 'paused' && s !== 'suspended',
+  );
+  const fromActive = se0.includes(cur.status);
+  const toActive = se0.includes(to);
+  const nextAssignee = assignee ?? cur.assignee_id ?? null;
+  const beforeContrib = fromActive && cur.assignee_id ? cur.assignee_id : null;
+  const afterContrib = toActive && nextAssignee ? nextAssignee : null;
+  if (beforeContrib && beforeContrib !== afterContrib) {
+    await client.query('UPDATE worker SET load = GREATEST(load - 1, 0) WHERE id = $1 AND tenant_id = $2', [beforeContrib, tenantId]);
+  }
+  if (afterContrib && afterContrib !== beforeContrib) {
+    await client.query('UPDATE worker SET load = load + 1 WHERE id = $1 AND tenant_id = $2', [afterContrib, tenantId]);
+  }
   await client.query(
     `INSERT INTO ticket_event (tenant_id, work_order_id, type, from_status, to_status, actor, payload)
      VALUES ($1,$2,'transition',$3,$4,$5,$6)`,

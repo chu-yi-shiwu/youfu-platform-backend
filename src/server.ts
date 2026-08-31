@@ -45,6 +45,7 @@ import platformRouter from './routes/platform.js';// 城市级平台层（E_min�
 import templateMarketRouter from './routes/templateMarket.js';// E2 模板市场（官方模板库/应用/效果）
 import openApiRouter from './routes/openApi.js';// E0_open 开放 API（app_key 认证）
 import { startInspectionScheduler } from './scheduler/inspectionScheduler.js';// G3 真 cron 调度
+import { startSlaScheduler } from './scheduler/slaScheduler.js';// 拆雷三件套②：SLA 定时扫描+升级通知
 import { startTemplateEffectsScheduler } from './scheduler/templateEffectScheduler.js';// E2 效果回写 cron
 import { startModelTrainScheduler } from './scheduler/modelTrainScheduler.js';// 数据飞轮：每日 03:00 全量重训
 
@@ -235,6 +236,8 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log(`youfu-backend-m1 listening on 0.0.0.0:${PORT}`);
   // G3 真 cron：后端进程内定时扫描到期巡检计划并自动生成实例（单进程部署，无重复触发）。
   startInspectionScheduler();
+  // 拆雷三件套②（2026-08-31）：SLA 每 60s 扫描超时工单 → 升级 + 通知（与 /sla/scan 同一实现）。
+  startSlaScheduler();
   // E2 效果回写 cron：每 60s 扫描到期（≥7 天）未回写的模板应用，自动拉取 after 指标并评分。
   startTemplateEffectsScheduler();
   // 数据飞轮：每日 03:00 低峰全量重训（model_state 持续更新，AUTO_TUNE 受控不写回）。
