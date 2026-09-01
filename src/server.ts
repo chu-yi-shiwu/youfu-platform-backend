@@ -7,6 +7,7 @@ import dotenv from 'dotenv';
 import { authMiddleware, refreshAuthMode, verifyJwt, AUTH_MODE } from './middleware/auth.js';
 import { errorMiddleware } from './middleware/error.js';
 import publicReportRouter from './routes/publicReport.js';// P1 需求侧：public 免登录报修（挂 auth 之前）
+import publicAiChatRouter from './routes/publicAiChat.js';// L3 对话管家：public 免登录 AI 对话（挂 auth 之前，R36）
 import wechatRouter from './routes/wechat.js';// ③ 微信 JSSDK 公开签名端点（挂 auth 之前）
 import workOrderRouter from './routes/workOrder.js';
 import webhookRouter from './webhook/routes.js';
@@ -137,6 +138,8 @@ app.use('/api/v1/open-api', openApiRouter);
 
 // P1 需求侧 public 报修（免登录，挂 auth 之前；org 显式指定机构 + 限流 + D3 硬拒）
 app.use('/api/v1', publicReportRouter);
+// L3 对话管家（免登录，挂 auth 之前；org 白名单 + 限流 + I4/LLM 双开关 + consent 硬拒）
+app.use('/api/v1', publicAiChatRouter);
 // ③ 微信 JSSDK 签名端点（免登录，挂 auth 之前；供 H5 在微信内录音前注入 wx.config）
 app.use('/api/v1/wechat', wechatRouter);
 
