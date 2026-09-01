@@ -11,6 +11,7 @@
 // 诚实降级：LLM 未配置/未授权 → 不跑 agent，路由层直接返回结构化错误（不假装对话）。
 // ───────────────────────────────────────────────────────────────────────────
 import { withTenantClient } from '../db/pool.js';
+import type { PoolClient } from 'pg';
 import { chatCompletion, llmInferCategory, embeddingConfigured, embedText, cosineSimilarity, type ChatMsg } from './llm.js';
 import { getLlmEnabled, getAiFeaturesEnabled } from '../repo/tenantSettings.js';
 import { createWithIdem } from '../repo/ticket.js';
@@ -134,10 +135,11 @@ export async function toolCreateTicket(
   if (consent !== true) {
     return { ok: false, summary: '用户尚未同意 AI 代建工单（consent 硬拒），请先征得用户明确同意' };
   }
+  // R38-R2 修复（F4）：模型参数无界 → 截断后再入库（desc≤500/contact≤20/location≤100）
   const desc = (args.description || '').trim().slice(0, 500);
   if (!desc) return { ok: false, summary: '缺少报修描述，无法建单' };
-  const contact = (args.contact || '').trim() || undefined;
-  const location = (args.location || '').trim() || '待核实';
+  const contact = (args.contact || '').trim().slice(0, 20) || undefined;
+  const location = (args.location || '').trim().slice(0, 100) || '待核实';
   const llmOn = await getLlmEnabled(tenantId);
   const llm = llmOn ? await llmInferCategory(desc, []) : null;
   const catName = llm?.category || matchCategoryHint(desc) || undefined;
@@ -209,74 +211,79 @@ export async function runAgentTurn(opts: RunTurnOpts): Promise<RunTurnResult> {
   const { tenantId, tenantName, conversationId, userText, consent } = opts;
   const toolTrace: RunTurnResult['toolTrace'] = [];
 
-  return withTenantClient(tenantId, async (client) => {
-    // 1) 用户话轮落库
-    await appendTurn(client, tenantId, conversationId, { role: 'user', content: userText.slice(0, 1000) });
-    // 2) 取历史（含 tool 结果）构造上下文
-    const history: TurnRow[] = await listTurns(client, tenantId, conversationId);
-    const messages: ChatMsg[] = [
-      { role: 'system', content: buildSystemPrompt(tenantName) },
-      ...history.slice(-20).map((t) => ({
-        role: t.role === 'tool' ? ('user' as const) : (t.role as 'user' | 'assistant'),
-        content: t.role === 'tool'
-          ? `[工具 ${t.tool_name} 返回] ${t.content}`
-          : t.content,
-      })),
-    ];
+  // R38-R2 修复（F3）：不再用单个 withTenantClient 事务包住整个 LLM 工具循环——
+  //   最多 5 轮 LLM 调用（每轮可达数秒）会把池连接（max=10）占满，并发时饿死其他端点。
+  //   改为每个 DB 操作独立短事务（话轮插入相互独立，无需跨调用原子性）；
+  //   LLM 网络调用期间不占用任何池连接。
+  const db = <T>(fn: (client: PoolClient) => Promise<T>) => withTenantClient(tenantId, fn);
 
-    // 3) 工具循环（最多 MAX_TOOL_ROUNDS）
-    for (let i = 0; i <= MAX_TOOL_ROUNDS; i++) {
-      const result = await chatCompletion({
-        messages,
-        task: 'ai_conversation',
-        tenantId,
-        response_format: { type: 'json_object' },
-        max_tokens: 500,
-      });
-      const action = parseAgentAction(result.content);
-      if (!action) {
-        // 模型输出不合规 → 诚实降级为固定话术（不编造）
-        const fallback = '抱歉，我暂时没理解您的意思，您可以换个说法，或直接告诉我工单号。';
-        await appendTurn(client, tenantId, conversationId, { role: 'assistant', content: fallback });
-        return { assistantText: fallback, toolTrace };
-      }
-      if (action.action === 'reply') {
-        await appendTurn(client, tenantId, conversationId, { role: 'assistant', content: action.content! });
-        return { assistantText: action.content!, toolTrace };
-      }
-      // action === 'tool'
-      const tool = action.tool as ToolName;
-      let tr: ToolResult;
-      if (tool === 'search_history') {
-        tr = await toolSearchHistory(tenantId, String(action.args?.description ?? ''));
-      } else if (tool === 'check_status') {
-        tr = await toolCheckStatus(tenantId, String(action.args?.order_no ?? ''), action.args?.phone_last4 ? String(action.args.phone_last4) : undefined);
-      } else {
-        tr = await toolCreateTicket(
-          tenantId,
-          {
-            description: action.args?.description ? String(action.args.description) : undefined,
-            contact: action.args?.contact ? String(action.args.contact) : undefined,
-            location: action.args?.location ? String(action.args.location) : undefined,
-          },
-          consent,
-        );
-      }
-      toolTrace.push({ tool, args: action.args ?? {}, summary: tr.summary, ok: tr.ok });
-      // 工具结果落库（审计 + 回灌上下文）
-      await appendTurn(client, tenantId, conversationId, {
-        role: 'tool',
-        content: JSON.stringify({ ok: tr.ok, summary: tr.summary, data: tr.data ?? null }),
-        toolName: tool,
-        toolCalls: action.args ?? {},
-      });
-      messages.push({ role: 'user', content: `[工具 ${tool} 返回] ${JSON.stringify({ ok: tr.ok, summary: tr.summary, data: tr.data ?? null })}` });
+  // 1) 用户话轮落库
+  await db((client) => appendTurn(client, tenantId, conversationId, { role: 'user', content: userText.slice(0, 1000) }));
+  // 2) 取历史（含 tool 结果）构造上下文
+  const history: TurnRow[] = await db((client) => listTurns(client, tenantId, conversationId));
+  const messages: ChatMsg[] = [
+    { role: 'system', content: buildSystemPrompt(tenantName) },
+    ...history.slice(-20).map((t) => ({
+      role: t.role === 'tool' ? ('user' as const) : (t.role as 'user' | 'assistant'),
+      content: t.role === 'tool'
+        ? `[工具 ${t.tool_name} 返回] ${t.content}`
+        : t.content,
+    })),
+  ];
+
+  // 3) 工具循环（最多 MAX_TOOL_ROUNDS）
+  for (let i = 0; i <= MAX_TOOL_ROUNDS; i++) {
+    const result = await chatCompletion({
+      messages,
+      task: 'ai_conversation',
+      tenantId,
+      response_format: { type: 'json_object' },
+      max_tokens: 500,
+    });
+    const action = parseAgentAction(result.content);
+    if (!action) {
+      // 模型输出不合规 → 诚实降级为固定话术（不编造）
+      const fallback = '抱歉，我暂时没理解您的意思，您可以换个说法，或直接告诉我工单号。';
+      await db((client) => appendTurn(client, tenantId, conversationId, { role: 'assistant', content: fallback }));
+      return { assistantText: fallback, toolTrace };
     }
-    // 超轮次 → 诚实兜底
-    const fallback = '这个问题我需要转人工处理，请拨打服务热线或稍后再试。';
-    await appendTurn(client, tenantId, conversationId, { role: 'assistant', content: fallback });
-    return { assistantText: fallback, toolTrace };
-  });
+    if (action.action === 'reply') {
+      await db((client) => appendTurn(client, tenantId, conversationId, { role: 'assistant', content: action.content! }));
+      return { assistantText: action.content!, toolTrace };
+    }
+    // action === 'tool'
+    const tool = action.tool as ToolName;
+    let tr: ToolResult;
+    if (tool === 'search_history') {
+      tr = await toolSearchHistory(tenantId, String(action.args?.description ?? ''));
+    } else if (tool === 'check_status') {
+      tr = await toolCheckStatus(tenantId, String(action.args?.order_no ?? ''), action.args?.phone_last4 ? String(action.args.phone_last4) : undefined);
+    } else {
+      tr = await toolCreateTicket(
+        tenantId,
+        {
+          description: action.args?.description ? String(action.args.description) : undefined,
+          contact: action.args?.contact ? String(action.args.contact) : undefined,
+          location: action.args?.location ? String(action.args.location) : undefined,
+        },
+        consent,
+      );
+    }
+    toolTrace.push({ tool, args: action.args ?? {}, summary: tr.summary, ok: tr.ok });
+    // 工具结果落库（审计 + 回灌上下文）
+    const turnPayload = {
+      role: 'tool' as const,
+      content: JSON.stringify({ ok: tr.ok, summary: tr.summary, data: tr.data ?? null }),
+      toolName: tool,
+      toolCalls: action.args ?? {},
+    };
+    await db((client) => appendTurn(client, tenantId, conversationId, turnPayload));
+    messages.push({ role: 'user', content: `[工具 ${tool} 返回] ${turnPayload.content}` });
+  }
+  // 超轮次 → 诚实兜底
+  const fallback = '这个问题我需要转人工处理，请拨打服务热线或稍后再试。';
+  await db((client) => appendTurn(client, tenantId, conversationId, { role: 'assistant', content: fallback }));
+  return { assistantText: fallback, toolTrace };
 }
 
 // I4 灰度开关统一出口：AI 未开/LLM 未配 → 路由层诚实 403/503，不假装对话

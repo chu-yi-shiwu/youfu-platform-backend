@@ -247,6 +247,12 @@ const systemItemSchema = z.object({
 
 router.get('/config/system', async (req, res, next) => {
   try {
+    // R38-R3-F1 修复：系统配置（key/value）此前 GET 无守卫，operator/reporter 均可读。
+    // 前端零调用此端点，收紧为 admin-only；写入侧本就有 requireConfigRole。
+    const role = res.locals.auth.role;
+    if (role !== 'admin') {
+      throw new AppError('FORBIDDEN', 'admin only', 403);
+    }
     const tenantId = res.locals.auth.tenantId;
     const items = await withTenantClient(tenantId, (client) =>
       client

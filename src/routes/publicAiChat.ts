@@ -15,6 +15,9 @@ import { runAgentTurn, conversationAvailable } from '../services/conversationAge
 
 const router = Router();
 
+// 会话 id 合法性（R38-R2 F1：非 UUID 直落 PG 会 22P02 → 500，先校验诚实 404）
+export const CONVERSATION_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 const chatSchema = z.object({
   org: z.string().min(1).max(64),
   message: z.string().min(1).max(1000),
@@ -77,13 +80,26 @@ router.post('/public/ai-chat', loginRateLimit(30), async (req, res, next) => {
   }
 });
 
+// GET /public/ai-chat/:id —— 话轮拉取（刷新 UI / 续聊恢复）
+// R38-R2 修复：
+//   F1 id 先过 UUID 校验（原实现非 UUID 直落 PG uuid 比较 → 22P02 → 500；与 auth/me 同口径）；
+//   F2 防御纵深：会话绑定了 reporter_anon 时，请求携带 anon 且不匹配 → 403
+//      （不携带则维持原行为，兼容已部署 H5/MP 旧版；两端新版本 GET 均随带 anon）。
 router.get('/public/ai-chat/:id', loginRateLimit(30), async (req, res, next) => {
   try {
     const org = (req.query.org as string) || '';
     if (!org) return res.status(422).json({ ok: false, code: 'VALIDATION_001', message: '缺少机构' });
+    const UUID_RE = CONVERSATION_UUID_RE;
+    if (!UUID_RE.test(req.params.id)) {
+      return res.status(404).json({ ok: false, code: 'NOT_FOUND', message: '会话不存在' });
+    }
     const tenantId = org;
     const conv = await withTenantClient(tenantId, (client) => getConversation(client, tenantId, req.params.id));
     if (!conv) return res.status(404).json({ ok: false, code: 'NOT_FOUND', message: '会话不存在' });
+    const anon = (req.query.anon as string) || '';
+    if (conv.reporter_anon && anon && conv.reporter_anon !== anon) {
+      return res.status(403).json({ ok: false, code: 'FORBIDDEN', message: '会话归属校验失败' });
+    }
     const turns = await withTenantClient(tenantId, (client) => listTurns(client, tenantId, req.params.id));
     return res.json({ ok: true, code: 0, conversation_id: conv.id, status: conv.status, items: turns });
   } catch (e) { next(e); }
