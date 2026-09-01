@@ -158,6 +158,24 @@ router.post('/public/repair-report', loginRateLimit(20), async (req, res, next) 
 
     // LLM 抽取结果（含 location）提升到外层作用域，供 location 兜底使用
     let llmInferred: { category: string | null; priority: string | null; asset: string | null; location: string | null } | null = null;
+    // R5-BUG-001 修复：LLM 推断整体移出事务。原实现 getLlmEnabled 在外层事务内嵌套再取一个池连接
+    // （withTenantClient 套 withTenantClient），并发时外层各持 1 连接等内层 → 循环等待耗尽池（max=10）；
+    // 且 LLM 网络调用在事务内挂起（DNS/建连阶段不受 socket timeout 保护）会无限期占死连接。
+    // 现改为：先短连接读开关+分类词表并立即归还，再无连接调 LLM，最后开事务只做纯 DB 操作。
+    if (desc && (await getLlmEnabled(tenantId))) {
+      const catNames = (
+        await withTenantClient(tenantId, (client) =>
+          client.query<{ name: string }>(
+            `SELECT name FROM fault_category WHERE tenant_id = $1 AND enabled = true`,
+            [tenantId],
+          ),
+        )
+      ).rows.map((r) => r.name);
+      llmInferred = await llmInferCategory(desc, catNames);
+    }
+    // location：前端透传优先（报修端已把用户语音/扫码位置带来）；前端未给则取服务端 LLM 抽取
+    // （DMR 服务端自动补全，不依赖前端）；两者皆无则诚实置「待核实」，不臆造。
+    const location = (b.location?.trim()) || llmInferred?.location || '待核实';
     const result = await withTenantClient(tenantId, async (client) => {
       // ⑤ 扫码关联（DMR 补充录入通道）：先解析报修人透传的 asset_code / catalog_code（DB 权威）
       let scannedAssetId: string | undefined;
@@ -183,21 +201,7 @@ router.post('/public/repair-report', loginRateLimit(20), async (req, res, next) 
         }
       }
 
-      // LLM 语义推断（B 档）：租户已授权 + 有描述 → 调 DeepSeek；失败/未授权返回 null → 走 A 档规则
-      llmInferred = null;
-      if (desc && (await getLlmEnabled(tenantId))) {
-        const catNames = (
-          await client.query<{ name: string }>(
-            `SELECT name FROM fault_category WHERE tenant_id = $1 AND enabled = true`,
-            [tenantId],
-          )
-        ).rows.map((r) => r.name);
-        llmInferred = await llmInferCategory(desc, catNames);
-      }
-      // location：前端透传优先（报修端已把用户语音/扫码位置带来）；前端未给则取服务端 LLM 抽取
-      // （DMR 服务端自动补全，不依赖前端）；两者皆无则诚实置「待核实」，不臆造。
-      const location = (b.location?.trim()) || llmInferred?.location || '待核实';
-
+      // LLM 语义推断（B 档）：已移到事务外执行（R5-BUG-001 修复），此处只消费 llmInferred
       // 分类：前端显式指定则校验归属，否则扫描码 → LLM → 规则引擎
       let catalogId: string | undefined = b.catalog;
       let catalogName: string | undefined;
@@ -495,6 +499,20 @@ router.post('/public/infer', loginRateLimit(30), async (req, res, next) => {
     const tr = await pool.query(`SELECT 1 FROM tenant_registry WHERE tenant_id = $1 AND status = 'active'`, [org]);
     if (tr.rowCount === 0) return res.status(404).json({ ok: false, code: 'TENANT_404', message: '机构不存在或未启用' });
 
+    // R5-BUG-001 修复：LLM 推断移出事务（同 createWithIdem）——避免嵌套取池 + 事务内网络调用耗尽连接池
+    let llm: Awaited<ReturnType<typeof llmInferCategory>> = null;
+    if (await getLlmEnabled(org)) {
+      const catNames = (
+        await withTenantClient(org, (client) =>
+          client.query<{ name: string }>(
+            `SELECT name FROM fault_category WHERE tenant_id = $1 AND enabled = true`,
+            [org],
+          ),
+        )
+      ).rows.map((r) => r.name);
+      llm = await llmInferCategory(desc, catNames);
+    }
+
     const result = await withTenantClient(org, async (client) => {
       // LLM 优先（租户已授权 + 有 KEY），失败回退规则引擎
       let source: 'llm' | 'rule' = 'rule';
@@ -502,21 +520,12 @@ router.post('/public/infer', loginRateLimit(30), async (req, res, next) => {
       let priority: 'urgent' | 'normal' | 'low' | null = null;
       let assetName: string | null = null;
       let location: string | null = null;
-      if (await getLlmEnabled(org)) {
-        const catNames = (
-          await client.query<{ name: string }>(
-            `SELECT name FROM fault_category WHERE tenant_id = $1 AND enabled = true`,
-            [org],
-          )
-        ).rows.map((r) => r.name);
-        const llm = await llmInferCategory(desc, catNames);
-        if (llm) {
-          source = 'llm';
-          categoryName = llm.category;
-          priority = llm.priority;
-          assetName = llm.asset;
-          location = llm.location ?? null;
-        }
+      if (llm) {
+        source = 'llm';
+        categoryName = llm.category;
+        priority = llm.priority;
+        assetName = llm.asset;
+        location = llm.location ?? null;
       }
       // LLM 未命中/未授权 → 规则引擎（规则引擎不抽 location，交由前端引导/扫码带位置）
       if (source === 'rule') {

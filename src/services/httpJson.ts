@@ -13,9 +13,27 @@ function transportFor(url: string): Transport {
 /** 上游响应体硬上限（1MB）。防恶意/异常上游无限流式撑爆内存。 */
 export const MAX_RESPONSE_BYTES = 1_048_576;
 
+/**
+ * R5-BUG-001 修复：整体硬死线。
+ * https.request 的 timeout 选项只覆盖 socket 建立**之后**的不活跃；
+ * DNS 解析/建连阶段挂起（解析器卡死等）不会触发 socket timeout → Promise 无限挂起。
+ * 此包装保证无论哪个阶段卡死，deadline 到点必然 reject（由调用方诚实降级）。
+ */
+function withDeadline<T>(p: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  return Promise.race([
+    p,
+    new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error(`${label} hard deadline ${timeoutMs}ms exceeded`)), timeoutMs).unref?.()),
+  ]);
+}
+
 /** HTTPS POST（JSON）并解析响应体。5xx 视为网关故障主动 reject（由调用方落入 delivered=false）。
  * @param extraHeaders 额外请求头（如 Authorization: Bearer <key>）；与内置 Content-Type/Content-Length 合并，不覆盖。 */
 export function httpsPostJson(url: string, bodyObj: unknown, timeoutMs = 8000, extraHeaders: Record<string, string> = {}): Promise<any> {
+  return withDeadline(httpsPostJsonRaw(url, bodyObj, timeoutMs, extraHeaders), timeoutMs + 2000, 'httpsPostJson');
+}
+
+function httpsPostJsonRaw(url: string, bodyObj: unknown, timeoutMs = 8000, extraHeaders: Record<string, string> = {}): Promise<any> {
   return new Promise((resolve, reject) => {
     const u = new URL(url);
     const body = JSON.stringify(bodyObj);
@@ -62,6 +80,10 @@ export function httpsPostJson(url: string, bodyObj: unknown, timeoutMs = 8000, e
 
 /** HTTPS GET（JSON）并解析响应体。 */
 export function httpsGetJson(url: string, timeoutMs = 8000): Promise<any> {
+  return withDeadline(httpsGetJsonRaw(url, timeoutMs), timeoutMs + 2000, 'httpsGetJson');
+}
+
+function httpsGetJsonRaw(url: string, timeoutMs = 8000): Promise<any> {
   return new Promise((resolve, reject) => {
     const u = new URL(url);
     const req = transportFor(url).request(
