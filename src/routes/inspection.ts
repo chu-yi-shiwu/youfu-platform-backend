@@ -7,7 +7,7 @@ import { z } from 'zod';
 import { randomUUID } from 'crypto';
 import { withTenantClient } from '../db/pool.js';
 import { AppError } from '../middleware/error.js';
-import { requireConfigRole, requireAssigneeOrConfig } from '../middleware/role.js';
+import { requireConfigRole, requireAssigneeOrConfig, requirePermission } from '../middleware/role.js';
 import { createLinkedWorkOrder } from '../services/linkedWorkOrder.js';
 import { emitDomainEvent } from '../db/eventBus.js';
 import { getWorkflowDefOrDefault } from '../engine/workflowDef.js';
@@ -380,6 +380,9 @@ router.post('/tasks/:id/checkin', async (req, res, next) => {
       // #583 归属守卫：worker 仅可签到被指派给自己的巡检任务
       const cur = await client.query(`SELECT assignee, point_id FROM inspection_task WHERE id=$1 AND tenant_id=$2`, [req.params.id, tenantId]);
       if (cur.rowCount === 0) throw new AppError('NOT_FOUND', 'task not found', 404);
+      // R35 接线：巡检执行纳入 inspect.execute 权限点（租户级 role_permission 覆盖自此生效；
+      // 默认矩阵四角色均含此点 → 存量行为零变化；admin 恒放行）
+      await requirePermission(res.locals.auth, client, 'inspect.execute');
       await requireAssigneeOrConfig(client, res.locals.auth, cur.rows[0].assignee, 'inspection task');
       // 防伪 L1：签到坐标与点位基准坐标距离校验（haversine），>500m 标记疑似
       // 点位无坐标或未绑点位 → 不判（诚实：无法校验就不硬造异常）
@@ -448,6 +451,9 @@ router.post('/tasks/:id/complete', async (req, res, next) => {
       // #583 归属守卫
       const cur = await client.query(`SELECT assignee FROM inspection_task WHERE id=$1 AND tenant_id=$2`, [req.params.id, tenantId]);
       if (cur.rowCount === 0) throw new AppError('NOT_FOUND', 'task not found', 404);
+      // R35 接线：巡检执行纳入 inspect.execute 权限点（租户级 role_permission 覆盖自此生效；
+      // 默认矩阵四角色均含此点 → 存量行为零变化；admin 恒放行）
+      await requirePermission(res.locals.auth, client, 'inspect.execute');
       await requireAssigneeOrConfig(client, res.locals.auth, cur.rows[0].assignee, 'inspection task');
       const task = await transitionTask(client, tenantId, req.params.id, 'complete', extra, res.locals.auth.userId ?? 'config_role');
       if (b.records && b.records.length) {
@@ -506,6 +512,9 @@ router.post('/tasks/:id/records', async (req, res, next) => {
       const cur = await client.query(`SELECT id, assignee FROM inspection_task WHERE id=$1 AND tenant_id=$2`, [req.params.id, tenantId]);
       if (cur.rowCount === 0) throw new AppError('NOT_FOUND', 'task not found', 404);
       // #583 归属守卫
+      // R35 接线：巡检执行纳入 inspect.execute 权限点（租户级 role_permission 覆盖自此生效；
+      // 默认矩阵四角色均含此点 → 存量行为零变化；admin 恒放行）
+      await requirePermission(res.locals.auth, client, 'inspect.execute');
       await requireAssigneeOrConfig(client, res.locals.auth, cur.rows[0].assignee, 'inspection task');
       await upsertRecords(client, tenantId, req.params.id, b.records);
       const rec = await client
@@ -527,6 +536,9 @@ router.post('/tasks/:id/exception', async (req, res, next) => {
       // #583 归属守卫
       const cur = await client.query(`SELECT assignee FROM inspection_task WHERE id=$1 AND tenant_id=$2`, [req.params.id, tenantId]);
       if (cur.rowCount === 0) throw new AppError('NOT_FOUND', 'task not found', 404);
+      // R35 接线：巡检执行纳入 inspect.execute 权限点（租户级 role_permission 覆盖自此生效；
+      // 默认矩阵四角色均含此点 → 存量行为零变化；admin 恒放行）
+      await requirePermission(res.locals.auth, client, 'inspect.execute');
       await requireAssigneeOrConfig(client, res.locals.auth, cur.rows[0].assignee, 'inspection task');
       const row = await transitionTask(client, tenantId, req.params.id, 'exception', { note: b.note }, res.locals.auth.userId ?? 'config_role');
       // 预警深化：巡检异常自动生成 L1 预警，落入预警中心统一处理
@@ -560,6 +572,9 @@ router.post('/tasks/:id/transition', async (req, res, next) => {
       // #583 归属守卫
       const cur = await client.query(`SELECT assignee FROM inspection_task WHERE id=$1 AND tenant_id=$2`, [req.params.id, tenantId]);
       if (cur.rowCount === 0) throw new AppError('NOT_FOUND', 'task not found', 404);
+      // R35 接线：巡检执行纳入 inspect.execute 权限点（租户级 role_permission 覆盖自此生效；
+      // 默认矩阵四角色均含此点 → 存量行为零变化；admin 恒放行）
+      await requirePermission(res.locals.auth, client, 'inspect.execute');
       await requireAssigneeOrConfig(client, res.locals.auth, cur.rows[0].assignee, 'inspection task');
       return transitionTask(client, tenantId, req.params.id, event, extra, res.locals.auth.userId ?? 'config_role');
     });

@@ -5,7 +5,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { withTenantClient } from '../db/pool.js';
 import { AppError } from '../middleware/error.js';
-import { requireConfigRole } from '../middleware/role.js';
+import { requireConfigRole, requirePermission } from '../middleware/role.js';
 import { createWithIdem } from '../repo/ticket.js';
 import { buildServiceDeskTicket } from '../services/serviceDeskTicket.js';
 
@@ -145,6 +145,8 @@ router.post('/tickets', async (req, res, next) => {
       sessionId: b.sessionId,
     });
     const item = await withTenantClient(tenantId, async (client) => {
+      // R35 接线：登录态建单纳入 intake.create 权限点（公开报修 /public/* 不受影响，走独立匿名链路）
+      await requirePermission(res.locals.auth, client, 'intake.create');
       const desk = await client.query(`SELECT id FROM service_desk WHERE id=$1 AND tenant_id=$2`, [b.deskId, tenantId]);
       if (desk.rowCount === 0) throw new AppError('NOT_FOUND', 'service desk not found', 404);
       const r = await createWithIdem(client, dto);

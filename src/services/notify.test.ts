@@ -22,7 +22,7 @@ vi.mock('./wechatMp.js', () => ({
 }));
 
 // 动态 import 必须在 mock 之后
-const { dispatchNotification, insertNotification } = await import('./notify.js');
+const { dispatchNotification, insertNotification, flushWechatDeliveries } = await import('./notify.js');
 
 // ---- 伪造 PoolClient ----
 type QueryFn = (text: string, params?: any[]) => Promise<{ rows: any[] }>;
@@ -139,7 +139,7 @@ describe('notify 诚实边界 + 路由', () => {
     process.env.WX_MP_TEMPLATE_ID = 'tpl_1';
     const client = makeClient(defaultHandler({ accountOpenid: 'OPENID_ACCOUNT' }));
     const r = await dispatchNotification(client, {
-      ...baseInput, channel: 'wechat', recipientKind: 'account', recipient: 'acct_1',
+      ...baseInput, channel: 'wechat', recipientKind: 'account', recipient: '00000000-0000-4000-8000-00000000000a',
     });
     expect(r.delivered).toBe(true);
     const resolveCall = (client.query as any).mock.calls.find((c: any[]) => c[0].includes('FROM account_user WHERE'));
@@ -194,6 +194,20 @@ describe('notify 诚实边界 + 路由', () => {
     expect(r.delivered).toBe(true); // 不被 wechat 常态 43101 覆盖而误报失败
     const inserts = (client.query as any).mock.calls.filter((c: any[]) => c[0].includes('INSERT INTO notification'));
     expect(inserts.length).toBe(2); // in_app(真) + wechat(stub)
+  });
+
+  it('R31-Q1：insertNotification 默认 fan-out 延迟 wechat——事务内仅 in_app 落库，flush 后补投递', async () => {
+    const client = makeClient(defaultHandler({})); // wechat 无模板 → stub；in_app → 真
+    await insertNotification(client, { ...baseInput }); // 无 channel → deferred fan-out
+    let inserts = (client.query as any).mock.calls.filter((c: any[]) => c[0].includes('INSERT INTO notification'));
+    expect(inserts.length).toBe(1); // 事务内仅 in_app 必达；wechat 已入队不在事务内
+    const flushed = flushWechatDeliveries(async (_tid: string, fn: (c: any) => Promise<unknown>) => fn(client));
+    expect(flushed).toBe(1); // 队列中 1 条 wechat 待投递
+    await new Promise((r) => setTimeout(r, 0)); // fire-and-forget 微任务排空
+    inserts = (client.query as any).mock.calls.filter((c: any[]) => c[0].includes('INSERT INTO notification'));
+    expect(inserts.length).toBe(2); // flush 后 wechat 凭证记录补落库（与原 fan-out 等价）
+    // 队列清空：再次 flush 应为 0
+    expect(flushWechatDeliveries(async (_tid: string, fn: (c: any) => Promise<unknown>) => fn(client))).toBe(0);
   });
 
   it('payload.wxData 结构非法（缺 value）→ 回退默认 thing1~thing4 拼装，不抛错', async () => {

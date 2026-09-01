@@ -7,6 +7,7 @@ import { isKnownState, doneStates, terminalStates, type WorkOrderStatus, type Wo
 import { getWorkflowDef } from '../engine/workflowDef.js';
 import { emitDomainEvent } from '../db/eventBus.js';
 import { embedText, embeddingConfigured, embeddingModel } from '../services/llm.js';
+import { recordShadowSuggestions, resolveDispatchShadow } from '../services/k2Shadow.js';
 import { withTenantClient } from '../db/pool.js';
 
 export interface CreateDto {
@@ -130,6 +131,9 @@ export async function createWithIdem(
             `SELECT upsert_case_embedding($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
             [dto.tenantId, 'work_order', String(dto.id), dto.businessType || dto.catalog || '', dto.priority ?? 'normal', emb, vec, embeddingModel(), vec.length],
           );
+          // K2 影子模式（R34）：同一向量只读建议——category/dispatch 影子行，绝不参与业务决策。
+          // best-effort：失败走外层 catch 仅告警。
+          await recordShadowSuggestions(client, dto.tenantId, String(dto.id), vec, dto.businessType || dto.catalog || '');
         });
       })
       .catch((e) => console.warn('[embed work_order] fail:', (e as Error).message));
@@ -211,6 +215,8 @@ export async function transition(
   }
   if (afterContrib && afterContrib !== beforeContrib) {
     await client.query('UPDATE worker SET load = load + 1 WHERE id = $1 AND tenant_id = $2', [afterContrib, tenantId]);
+    // K2 影子回填（R34）：派单/改派发生 → 回填 dispatch 影子 actual（旁路 best-effort，内部吞错不影响主链路）
+    await resolveDispatchShadow(client, tenantId, id, afterContrib);
   }
   await client.query(
     `INSERT INTO ticket_event (tenant_id, work_order_id, type, from_status, to_status, actor, payload)

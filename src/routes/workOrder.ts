@@ -634,7 +634,11 @@ router.post('/scan', async (req, res, next) => {
     const tenantId = res.locals.auth.tenantId;
     const schema = z.object({ raw: z.string().min(1) });
     const { raw } = schema.parse(req.body);
-    const result = await resolveScanFromDb(tenantId, raw);
+    const result = await withTenantClient(tenantId, async (client) => {
+      // R35 接线：扫码查询纳入 asset.scan 权限点（租户级覆盖自此生效；默认矩阵零变化）
+      await requirePermission(res.locals.auth, client, 'asset.scan');
+      return resolveScanFromDb(tenantId, raw);
+    });
     // code 仅作成功标记（0），解析结构统一经 asset 字段透出（与前端 ScanButton 对齐）
     return res.json({ ok: true, code: 0, asset: result.asset });
   } catch (e) {
