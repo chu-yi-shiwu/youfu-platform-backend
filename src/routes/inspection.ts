@@ -924,6 +924,7 @@ router.get('/stats', async (req, res, next) => {
 // 巡检月报 CSV 导出（含点位名、完成时间）。text/csv + BOM，前端直接下载。
 router.get('/export', async (req, res, next) => {
   try {
+    requireConfigRole(req, res); // R9-F1：导出属管理面，仅 admin/operator
     const tenantId = res.locals.auth.tenantId;
     const { month } = req.query as Record<string, string>;
     const rows = await withTenantClient(tenantId, (client) =>

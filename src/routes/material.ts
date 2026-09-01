@@ -250,6 +250,7 @@ router.get('/inventory/logs', async (req, res, next) => {
 const MAT_CSV_COLS = ['code', 'name', 'category', 'spec', 'unit', 'price', 'doc'];
 router.get('/materials/export', async (req, res, next) => {
   try {
+    requireConfigRole(req, res); // R9-F1：导出属管理面，仅 admin/operator
     const tenantId = res.locals.auth.tenantId;
     const items = await withTenantClient(tenantId, (client) =>
       client.query(`SELECT * FROM material WHERE tenant_id=$1 ORDER BY created_at DESC`, [tenantId]).then((r) => r.rows),

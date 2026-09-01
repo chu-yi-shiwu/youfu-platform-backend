@@ -12,6 +12,9 @@ import { autoRouteFor } from '../engine/stateMachine.js';
 import { getWorkflowDef } from '../engine/workflowDef.js';
 import { setSlaDueAt } from '../engine/sla.js';
 import { emitDomainEvent } from '../db/eventBus.js';
+// R12-F1（十轮审查）：K2 dispatch 影子回填——自动派单也是"人工实际"信号源（模型建议 vs 实际派单），
+// 此前仅 transition() 人工派单回填，导致 dispatch 影子 actual 永远空置（R12 live 查证 7/7 NULL）。
+import { resolveDispatchShadow } from './k2Shadow.js';
 
 export interface LinkedWoPayload {
   id: string;
@@ -114,6 +117,8 @@ export async function createLinkedWorkOrder(
     // 故不强行套用 transitionEntity（其 ALLOWED_TABLES 仅含 business_flow_tasks/inspection_task，
     // 不含 work_orders，硬塞会直接抛 BAD_REQUEST）；缺的是 domain_event 这一条，此处补齐。
     await emitDomainEvent(client, { tenantId: p.tenantId, entityType: 'work_order', entityId: row.id, type: dispatchTarget, actor: 'auto_dispatch', payload: { worker_id: picked.id } });
+    // R12-F1：自动派单回填 dispatch 影子 actual（best-effort，内部吞错不影响主链路）
+    await resolveDispatchShadow(client, p.tenantId, String(row.id), String(picked.id));
   }
   return { id: row.id, orderNo: row.order_no, autoFlow, assignee, reason, created: true };
 }

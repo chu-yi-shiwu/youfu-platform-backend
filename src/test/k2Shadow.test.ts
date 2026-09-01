@@ -44,22 +44,26 @@ describe('majorityVote', () => {
 });
 
 describe('recordShadowSuggestions', () => {
+  // R15 适配：候选查询已改 LEFT JOIN work_orders（R12-F1 数据稀疏修正），
+  // 候选行直接携带 assignee_id；dispatch 投票只在有派单记录的候选内进行。
   const candidates = {
     rows: [
-      { ref_id: 'w1', category: '水电维修', embedding: [1, 0] },
-      { ref_id: 'w2', category: '水电维修', embedding: [0.9, 0.1] },
-      { ref_id: 'w3', category: '空调维修', embedding: [-1, 0] },
+      { ref_id: 'w1', category: '水电维修', embedding: [1, 0], assignee_id: 'wk-a' },
+      { ref_id: 'w2', category: '水电维修', embedding: [0.9, 0.1], assignee_id: 'wk-a' },
+      { ref_id: 'w3', category: '空调维修', embedding: [-1, 0], assignee_id: null },
     ],
   };
-  const assignees = { rows: [{ ref_id: 'w1', assignee_id: 'wk-a' }, { ref_id: 'w2', assignee_id: 'wk-a' }] };
+  // 自愈回填块查询工单当前 assignee（'SELECT assignee_id FROM work_orders'）的响应
+  const currentAssignee = { rows: [{ assignee_id: 'wk-a' }] };
 
   it('相似单多数票落 category + dispatch 两条影子，category 当场判 matched', async () => {
     const client = makeFakeClient({
       'FROM ai_case_embeddings': () => candidates,
-      'FROM work_orders': () => assignees,
+      'FROM work_orders': () => currentAssignee,
     });
     await recordShadowSuggestions(client, 't-verification', 'wo-1', [1, 0], '水电维修');
-    const inserts = (client as never as { calls: RecordedCall[] }).calls.filter((c) => c.sql.includes('INSERT INTO ai_shadow_suggestions'));
+    const calls = (client as never as { calls: RecordedCall[] }).calls;
+    const inserts = calls.filter((c) => c.sql.includes('INSERT INTO ai_shadow_suggestions'));
     expect(inserts.length).toBe(2);
     // category INSERT 参数序：[tenant, wo, suggested, actual, matched, detail]；kind 写死在 SQL
     const cat = inserts.find((c) => c.sql.includes("'category'"))!;
@@ -69,6 +73,28 @@ describe('recordShadowSuggestions', () => {
     // dispatch INSERT 参数序：[tenant, wo, suggested, detail]
     const dis = inserts.find((c) => c.sql.includes("'dispatch'"))!;
     expect(dis.params[2]).toBe('wk-a'); // suggested=相似单 assignee 多数票
+    // R12-F1 自愈回填：影子落库后立即查当前 assignee 并回填 actual（消时序竞态）
+    const backfill = calls.find((c) => c.sql.includes("kind = 'dispatch'") && c.sql.includes('UPDATE'));
+    expect(backfill).toBeDefined();
+    expect(backfill!.params).toEqual(['t-verification', 'wo-1', 'wk-a']);
+  });
+
+  it('候选全无 assignee → 只落 category 行（dispatch 投票稀疏修正）', async () => {
+    const client = makeFakeClient({
+      'FROM ai_case_embeddings': () => ({
+        rows: [
+          { ref_id: 'w1', category: '水电维修', embedding: [1, 0], assignee_id: null },
+          { ref_id: 'w2', category: '水电维修', embedding: [0.9, 0.1], assignee_id: null },
+        ],
+      }),
+    });
+    await recordShadowSuggestions(client, 't-verification', 'wo-1', [1, 0], '水电维修');
+    const calls = (client as never as { calls: RecordedCall[] }).calls;
+    const inserts = calls.filter((c) => c.sql.includes('INSERT INTO ai_shadow_suggestions'));
+    expect(inserts.length).toBe(1);
+    expect(inserts[0].sql).toContain("'category'");
+    // 无 dispatch 行 → 也不应触发自愈回填查询
+    expect(calls.some((c) => c.sql.includes("kind = 'dispatch'"))).toBe(false);
   });
 
   it('无相似候选 → 零影子行', async () => {

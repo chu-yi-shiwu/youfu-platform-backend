@@ -322,6 +322,7 @@ router.delete('/assets/maintenance/:mid', async (req, res, next) => {
 const ASSET_CSV_COLS = ['name', 'model', 'pinyin', 'location', 'status', 'sno', 'financial_category', 'price', 'supplier', 'purchase_date'];
 router.get('/assets/export', async (req, res, next) => {
   try {
+    requireConfigRole(req, res); // R9-F1：导出属管理面，仅 admin/operator
     const tenantId = res.locals.auth.tenantId;
     const items = await withTenantClient(tenantId, (client) =>
       client.query(`SELECT * FROM asset WHERE tenant_id=$1 ORDER BY created_at DESC`, [tenantId]).then((r) => r.rows),

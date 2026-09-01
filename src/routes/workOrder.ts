@@ -19,6 +19,7 @@ import { dispatchEvent } from '../webhook/dispatch.js';
 import { StatsModelBackend, type ModelBackend } from '../engine/model/ModelBackend.js';
 import { incrementalLearn } from '../services/modelTrainer.js';
 import { emitDomainEvent } from '../db/eventBus.js';
+import { resolveDispatchShadow } from '../services/k2Shadow.js'; // R12-F1：自动派单/抢单也回填 dispatch 影子
 import { insertNotification, wechatSelfTest } from '../services/notify.js';
 import type { WorkOrderStatus } from '../engine/stateMachine.js';
 import { getWorkflowDef } from '../engine/workflowDef.js';
@@ -85,6 +86,8 @@ export async function autoDispatchAfterCreate(
     );
     // ④ 口径对齐：domain_event.type 一律为"结果状态"（与 transition() 一致），自动派单落入 dispatchTarget。
     await emitDomainEvent(client, { tenantId, entityType: 'work_order', entityId: row.id, type: dispatchTarget, actor: 'auto_dispatch', payload: { worker_id: picked.id } });
+    // R12-F1：自动派单回填 dispatch 影子 actual（best-effort，内部吞错不影响主链路）
+    await resolveDispatchShadow(client, tenantId, String(row.id), String(picked.id));
     // A5 派单通知：落库通知被派单人（sms/push 为 stub，诚实未真实发送）
     await insertNotification(client, {
       tenantId, recipient: picked.id, recipientKind: 'worker', type: 'dispatch', workOrderId: row.id,
@@ -785,6 +788,8 @@ router.post('/open/work_order/:id/claim', async (req, res, next) => {
         [tenantId, req.params.id, cur.status, 'assigned', JSON.stringify({ worker_id: realWorkerId })],
       );
       await emitDomainEvent(client, { tenantId, entityType: 'work_order', entityId: req.params.id, type: 'assigned', actor: 'worker', payload: { worker_id: realWorkerId, via: 'claim' } });
+      // R12-F1：抢单也是"人工实际"派单信号 → 回填 dispatch 影子 actual
+      await resolveDispatchShadow(client, tenantId, String(req.params.id), String(realWorkerId));
       await insertNotification(client, {
         tenantId, recipient: realWorkerId, type: 'claim', workOrderId: req.params.id,
         title: '您已抢到工单', body: `工单 ${cur.order_no} 已由您认领`,

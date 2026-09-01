@@ -66,21 +66,25 @@ export async function recordShadowSuggestions(
   vec: number[],
   finalCategory: string,
 ): Promise<void> {
-  const cand = await client.query<{ ref_id: string; category: string; embedding: number[] }>(
-    `SELECT ref_id, category, embedding FROM ai_case_embeddings
-     WHERE tenant_id = $1 AND ref_type = 'work_order' AND ref_id <> $2
+  // R12-F1 数据稀疏修正：LEFT JOIN work_orders 带出 assignee_id——
+  // dispatch 投票只在「有派单记录」的候选内进行（R15 live 诊断：全量候选中大量
+  // draft/无 assignee 单稀释 TOP-K 投票，导致 dispatch 影子行几乎不落）。
+  const cand = await client.query<{ ref_id: string; category: string; embedding: number[]; assignee_id: string | null }>(
+    `SELECT e.ref_id, e.category, e.embedding, w.assignee_id
+     FROM ai_case_embeddings e
+     LEFT JOIN work_orders w ON w.tenant_id = e.tenant_id AND w.id::text = e.ref_id
+     WHERE e.tenant_id = $1 AND e.ref_type = 'work_order' AND e.ref_id <> $2
      LIMIT ${CANDIDATE_LIMIT}`,
     [tenantId, String(workOrderId)],
   );
-  const scored: ShadowCandidate[] = cand.rows
-    .map((r) => ({ refId: String(r.ref_id), category: r.category || '', sim: cosineSim(vec, r.embedding) }))
+  const scored: (ShadowCandidate & { assigneeId: string | null })[] = cand.rows
+    .map((r) => ({ refId: String(r.ref_id), category: r.category || '', sim: cosineSim(vec, r.embedding), assigneeId: r.assignee_id }))
     .filter((r) => Number.isFinite(r.sim) && r.sim > 0)
-    .sort((a, b) => b.sim - a.sim)
-    .slice(0, TOP_K);
+    .sort((a, b) => b.sim - a.sim);
   if (scored.length === 0) return;
 
   // ① category 影子：相似单多数票 vs 工单最终分类（当场可判）
-  const catVote = majorityVote(scored.map((s) => s.category));
+  const catVote = majorityVote(scored.slice(0, TOP_K).map((s) => s.category));
   if (catVote) {
     await client.query(
       `INSERT INTO ai_shadow_suggestions (tenant_id, work_order_id, kind, suggested, actual, matched, detail)
@@ -91,25 +95,36 @@ export async function recordShadowSuggestions(
         catVote,
         finalCategory || null,
         finalCategory ? catVote === finalCategory : null,
-        JSON.stringify({ top_k: scored, vec_dims: vec.length }),
+        JSON.stringify({ top_k: scored.slice(0, TOP_K).map(({ assigneeId: _a, ...rest }) => rest), vec_dims: vec.length }),
       ],
     );
   }
 
-  // ② dispatch 影子：相似单 assignee 多数票（actual 留空，派单时回填）
-  const ids = scored.map((s) => s.refId);
-  const aw = await client.query<{ ref_id: string; assignee_id: string | null }>(
-    `SELECT id::text AS ref_id, assignee_id FROM work_orders
-     WHERE tenant_id = $1 AND id::text = ANY($2) AND assignee_id IS NOT NULL`,
-    [tenantId, ids],
-  );
-  const workerVote = majorityVote(aw.rows.map((r) => r.assignee_id || ''));
+  // ② dispatch 影子：在有 assignee 的候选中取相似度 TOP_K 多数票（actual 留空，派单时回填）
+  const withAsg = scored.filter((s) => s.assigneeId).slice(0, TOP_K);
+  const workerVote = majorityVote(withAsg.map((s) => s.assigneeId || ''));
   if (workerVote) {
     await client.query(
       `INSERT INTO ai_shadow_suggestions (tenant_id, work_order_id, kind, suggested, detail)
        VALUES ($1, $2, 'dispatch', $3, $4)`,
-      [tenantId, String(workOrderId), workerVote, JSON.stringify({ top_k: scored })],
+      [tenantId, String(workOrderId), workerVote, JSON.stringify({ top_k: withAsg.map(({ assigneeId, ...rest }) => ({ ...rest, has_assignee: !!assigneeId })) })],
     );
+  }
+
+  // R12-F1 补强（自愈回填）：建单自动派单（同步）先于本函数（嵌入异步后）执行，
+  // 派单路径的 resolveDispatchShadow 会扑空于「影子行尚未 INSERT」的时序竞态。
+  // 故此处补查工单当前 assignee：已有则立即回填 actual，确定性消除竞态。
+  if (workerVote) {
+    try {
+      const cur = await client.query<{ assignee_id: string | null }>(
+        'SELECT assignee_id FROM work_orders WHERE tenant_id = $1 AND id = $2',
+        [tenantId, String(workOrderId)],
+      );
+      const actual = cur.rows[0]?.assignee_id;
+      if (actual) await resolveDispatchShadow(client, tenantId, String(workOrderId), actual);
+    } catch (e) {
+      console.warn('[shadow self-heal] fail:', (e as Error).message);
+    }
   }
 }
 

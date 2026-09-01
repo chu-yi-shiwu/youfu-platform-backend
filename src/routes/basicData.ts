@@ -6,7 +6,7 @@ import { z } from 'zod';
 import { randomUUID } from 'crypto';
 import { withTenantClient } from '../db/pool.js';
 import { AppError } from '../middleware/error.js';
-import { requirePermission } from '../middleware/role.js';
+import { requirePermission, requireConfigRole } from '../middleware/role.js';
 import { parseCsv, csvEscape } from '../services/csvUtil.js';
 
 const router = Router();
@@ -308,6 +308,7 @@ router.delete('/basic-data/:type/:id', async (req, res, next) => {
 // ============ CSV 导出 ============
 router.get('/basic-data/:type/export', async (req, res, next) => {
   try {
+    requireConfigRole(req, res); // R9-F1：导出属管理面，仅 admin/operator
     const def = getType(req.params.type);
     const tenantId = res.locals.auth.tenantId;
     const items = await withTenantClient(tenantId, (client) =>

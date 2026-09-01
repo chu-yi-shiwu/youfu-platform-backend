@@ -326,6 +326,7 @@ router.delete('/equipment/:type/:id', async (req, res, next) => {
 // ============ CSV 导出 ============
 router.get('/equipment/:type/export', async (req, res, next) => {
   try {
+    requireConfigRole(req, res); // R9-F1：导出属管理面，仅 admin/operator
     const def = getType(req.params.type);
     const tenantId = res.locals.auth.tenantId;
     const items = await withTenantClient(tenantId, (client) =>
