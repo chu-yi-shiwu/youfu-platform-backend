@@ -17,6 +17,29 @@ function safeParsePayload(p: any): any {
   return p;
 }
 
+// ============ A1 派单止血（2026-09-03） ============
+// 诊断实证（派单模型选型报告 20260903）：历史种子数据引入 SYN-W-01..08 合成工人，
+// 8 类别×8 幽灵臂=64 臂 / 328 pulls ÷ 总 350（93.7% 训练数据为合成污染），worker 表无此 ID。
+// 三连修复：①合成工人不产生奖励信号（computeRewards 单点封口）；
+// ②trainFromDb 从零初始化（累积式重训把 26 条真实样本重复学约 13 次，EMA 饱和）；
+// ③模型参数持久化前剥离幽灵臂（旧 model_state 里已存在的 64 个假臂不再向后延续）。
+
+/** 合成工人 ID 识别（SYN-W-01 .. SYN-W-NNN，与种子脚本口径一致）。 */
+const SYNTHETIC_WORKER_RE = /^SYN-W-\d{1,4}$/;
+export function isSyntheticWorker(workerId: string): boolean {
+  return SYNTHETIC_WORKER_RE.test(workerId);
+}
+
+/** 剥离 params 中 workerId 为合成工人的臂（止血3：幽灵臂不落库）。 */
+export function stripSyntheticArms(params: ModelParams): ModelParams {
+  const arms: ModelParams['arms'] = {};
+  for (const [k, v] of Object.entries(params.arms)) {
+    const workerId = k.split('::')[1] ?? '';
+    if (!isSyntheticWorker(workerId)) arms[k] = v;
+  }
+  return { ...params, arms };
+}
+
 export interface TicketEventRow {
   type: string;
   to_status: string | null;
@@ -41,7 +64,12 @@ export interface RewardSignal {
 //    叠加到【最终 assign】的 reward（当前工人表现决定满意度：5 分+1 / 4 分+0.5 / 3 分 0 / 2 分-0.5 / 1 分-1）
 export function computeRewards(events: TicketEventRow[], satisfactionScore?: number | null): RewardSignal[] {
   const normalized = events.map((e) => ({ ...e, payload: safeParsePayload(e.payload) }));
-  const assigns = normalized.filter((e) => e.type === 'assign' && e.payload?.worker_id);
+  const assigns = normalized.filter(
+    (e) =>
+      e.type === 'assign' &&
+      e.payload?.worker_id &&
+      !isSyntheticWorker(String(e.payload.worker_id)), // A1 止血1：合成工人不喂模型
+  );
   if (assigns.length === 0) return [];
   const escalated = normalized.some((e) => e.type === 'sla_escalated');
   const reassigned = assigns.length >= 2;
@@ -88,9 +116,10 @@ export async function incrementalLearn(
   );
   const raw = cur.rows[0]?.params;
   const loaded = typeof raw === 'string' ? safeParsePayload(raw) : raw;
-  const model = new StatsModelBackend(loaded ?? undefined);
+  // A1 止血3：载入旧参先剥离幽灵臂，防止存量假臂向后延续
+  const model = new StatsModelBackend(loaded ? stripSyntheticArms(loaded) : undefined);
   for (const r of rewards) model.learn(r.category, r.workerId, r.reward);
-  const params: ModelParams = model.toParams();
+  const params: ModelParams = stripSyntheticArms(model.toParams());
 
   await client.query(
     `INSERT INTO model_state (tenant_id, model_key, version, params, trained_at, updated_at)
@@ -124,8 +153,9 @@ export async function trainFromDb(
   );
   const raw = cur.rows[0]?.params;
   const loaded = typeof raw === 'string' ? safeParsePayload(raw) : raw;
-  const model = new StatsModelBackend(loaded ?? undefined);
-
+  // A1 止血2：从零初始化重训。旧"载旧参再全量重学"会把同一批样本重复学（实测 26 条真实样本
+  // 被重学约 13 次 → EMA 饱和）；全量扫描本就覆盖全部完成态工单，旧参数仅用于延续版本号。
+  const model = new StatsModelBackend({ version: loaded?.version ?? 1 });
   // A+ Phase1.5：训练样本取"完成态"工单（def 派生：DEFAULT=completed；RICH=completed/closed/evaluated），
   // 富模板下不漏训 closed/evaluated，且不把 cancelled 当完成样本喂模型。
   const def = await getWorkflowDef(client, tenantId, 'work_order');
@@ -147,7 +177,7 @@ export async function trainFromDb(
     for (const r of rewards) model.learn(r.category, r.workerId, r.reward);
   }
 
-  const params: ModelParams = model.toParams();
+  const params: ModelParams = stripSyntheticArms(model.toParams()); // A1 止血3：幽灵臂不落库
   await client.query(
     `INSERT INTO model_state (tenant_id, model_key, version, params, trained_at, updated_at)
      VALUES ($1,$2,$3,$4,now(),now())
