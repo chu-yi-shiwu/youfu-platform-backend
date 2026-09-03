@@ -12,8 +12,12 @@ describe('localDateStr（R17-001 时区口径修复）', () => {
     const localExpected = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
     expect(got).toBe(localExpected);
     expect(got).toBe('2026-08-29');
-    // 关键不变量：绝不返回 UTC 切片（东八区该时刻 UTC 是 2026-08-28）
-    expect(got).not.toBe(d.toISOString().slice(0, 10));
+    // 关键不变量：绝不返回 UTC 切片（东八区该时刻 UTC 是 2026-08-28）。
+    // 该断言仅在 runner 时区 ≠ UTC 时可检验：UTC runner 上本地=UTC，got 与切片恒等。
+    // CI（ubuntu-latest 为 UTC）自动跳过；东八区本地开发全量验证（CI 红 ×2 根因，#365）。
+    if (d.getTimezoneOffset() !== 0) {
+      expect(got).not.toBe(d.toISOString().slice(0, 10));
+    }
   });
 
   it('普通时刻口径与本地 getFullYear/Month/Date 一致', () => {
