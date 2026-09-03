@@ -3,22 +3,16 @@
 // 诚实口径：满意度数据后端暂无，大屏不显示或标注"待满意度模块接入"，禁止编造（见 repo/stats.ts）。
 import { Router } from 'express';
 import { withTenantClient } from '../db/pool.js';
-import { ticketStats, processMetrics } from '../repo/stats.js';
+import { processMetrics } from '../repo/stats.js';
 import { qualityReport } from '../services/dataQuality.js';
 import { getWorkflowDef } from '../engine/workflowDef.js';
 import { doneStates } from '../engine/stateMachine.js';
 
 const router = Router();
 
-router.get('/stats', async (req, res, next) => {
-  try {
-    const tenantId = res.locals.auth.tenantId;
-    const stats = await withTenantClient(tenantId, (client) => ticketStats(client, tenantId));
-    return res.json({ ok: true, code: 0, stats });
-  } catch (e) {
-    next(e);
-  }
-});
+// GET /stats 死路由已删除（P1-4）：与 workOrder.ts 的 GET /stats 双注册，
+// 按挂载序（server.ts:152 workOrderRouter 先于 :168 statsRouter）workOrder 版生效，此处原为永久死代码。
+// 本文件的 /stats/by-catalog、/stats/process、/stats/data-quality、/stats/overdue 为独有端点，保持不变。
 
 router.get('/stats/by-catalog', async (req, res, next) => {
   try {
