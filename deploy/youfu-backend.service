@@ -1,0 +1,26 @@
+# /etc/systemd/system/youfu-backend.service
+# 【M0 后部署固化 2026-09-03】初一已授权 5 项 ECS 写操作之④：
+# - NODE_ENV: development → production（S-1b 断言要求生产必须 AUTH_MODE=prod）
+# - ENV_FILE 显式指定 .env：代码 server.ts:56 在 NODE_ENV=production 且未设 ENV_FILE 时
+#   会静默加载 .env.pilot（本机不存在该文件 → dotenv no-op → 密钥全缺 → 服务挂）。
+#   显式指定消除全部歧义。
+# - AUTH_MODE=prod：与 .env 内值一致，双保险（env 注入优先级高于 dotenv，防 .env 被误改）。
+# 修改前原 unit 备份于 /etc/systemd/system/youfu-backend.service.bak.20260903
+[Unit]
+Description=youfu Backend（优服家后端）
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/youfu/backend
+Environment="PATH=/opt/node16/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin"
+Environment="NODE_ENV=production"
+Environment="ENV_FILE=/opt/youfu/backend/.env"
+Environment="AUTH_MODE=prod"
+ExecStart=/opt/node16/bin/node dist/server.js
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

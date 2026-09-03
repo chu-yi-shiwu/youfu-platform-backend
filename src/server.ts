@@ -72,10 +72,11 @@ if (process.env.NODE_ENV === 'production' && AUTH_MODE !== 'prod') {
 }
 
 const app = express();
-// 生产环境经 CLB/Nginx 反向代理，启用 trust proxy 以正确识别客户端 IP
-if (process.env.TRUST_PROXY === '1') {
-  app.set('trust proxy', true);
-}
+// 【M0-3 修复】生产经 Nginx 反向代理，trust proxy 固定只信最近 1 跳。
+// 原 TRUST_PROXY==='1' 时设 true（信任全部跳），XFF 最左侧 IP 可被客户端伪造，
+// 导致限流/审计按伪造 IP 维度失效（R1-004 观察项的根因之一）。固定 1 跳 = 仅采信
+// Nginx 追加的那一跳，客户端自带的 XFF 伪造段被忽略。恒定生效，去掉环境开关以防误配漏开。
+app.set('trust proxy', 1);
 // B0：放宽 JSON body 上限到 10MB（base64 上传图片可能较大）；其余路由均为小 JSON，无影响。
 app.use(express.json({ limit: '10mb' }));
 

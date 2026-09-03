@@ -22,7 +22,8 @@ type TypeDef = {
   jsonCols?: string[];
 };
 
-const TYPES: Record<string, TypeDef> = {
+// export 供测试/静态门禁断言「声明列必存在于迁移 DDL」不变式（M0-1 C 件配套），无运行时行为变更。
+export const TYPES: Record<string, TypeDef> = {
   dept: {
     table: 'dept',
     columns: ['id', 'tenant_id', 'name', 'code', 'remark', 'created_at', 'updated_at'],
@@ -164,8 +165,10 @@ const TYPES: Record<string, TypeDef> = {
       name: z.string().min(1),
       entity_type: z.string().optional(),
       priority: z.string().optional(),
-      response_hours: z.number().optional(),
-      complete_hours: z.number().optional(),
+      // D11 修复（M0-2）：SLA 时限单位=小时，必须有界。0 会触发全量瞬时 SLA 升级+通知风暴
+      //（slaScheduler 扫 sla_due_at=now），上限取 1 年（8760h）防误录。违反走统一 ZodError→422 details[].path。
+      response_hours: z.number().gt(0).lte(8760).optional(),
+      complete_hours: z.number().gt(0).lte(8760).optional(),
       enabled: z.boolean().optional(),
       remark: z.string().optional(),
     }),
@@ -275,7 +278,10 @@ router.put('/basic-data/:type/:id', async (req, res, next) => {
         if (v !== undefined) set(c, v);
       }
       if (sets.length === 0) return cur.rows[0];
-      sets.push('updated_at = now()');
+      // D1 修复（M0-1）：updated_at 列非全表标配（047 建的 equipment_brand/priority_dict/sla_policy/
+      // work_order_template 四表历史缺列），无条件 SET 会对缺列表生成非法 SQL → 42703 全量更新失败。
+      // 迁移 068 补列后此处守卫仍保留（纵深防御：列声明与 DDL 漂移时降级为不更新时间戳而非报错）。
+      if (def.columns.includes('updated_at')) sets.push('updated_at = now()');
       const r = await client.query(
         `UPDATE ${def.table} SET ${sets.join(', ')} WHERE id=$1 AND tenant_id=$2 RETURNING *`,
         params,
