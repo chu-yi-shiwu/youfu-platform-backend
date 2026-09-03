@@ -22,6 +22,13 @@ const router = Router();
 
 const DEFAULT_LOGIN_TENANT = process.env.DEFAULT_LOGIN_TENANT ?? DEFAULT_TENANT_ID;
 
+// 空串/纯空白租户归一化为 undefined（走 header/默认租户兜底），
+// 避免 '' 直落 assertSafeTenantId 炸成 500 internal error（09-04 真机走查实案）。
+function normalizeTenant(t: string | undefined): string | undefined {
+  const s = t?.trim();
+  return s ? s : undefined;
+}
+
 // 解析 JWT 签名密钥：prod 缺失 → 返回 null（fail-closed）；dev 缺失 → 不安全默认（仅本地调试）
 function resolveSecret(): string | null {
   const s = process.env.JWT_SECRET;
@@ -43,7 +50,7 @@ const loginSchema = z.object({
 router.post('/auth/login', loginRateLimit(), async (req, res, next) => {
   try {
     const { username, password, tenant } = loginSchema.parse(req.body);
-    const tenantId = tenant ?? req.header('X-Tenant-Id') ?? DEFAULT_LOGIN_TENANT;
+    const tenantId = normalizeTenant(tenant) ?? req.header('X-Tenant-Id') ?? DEFAULT_LOGIN_TENANT;
 
     // 平台层停用租户禁止登录（E_min：tenant_registry.status=suspended）
     const reg = await withTenantClient(tenantId, (client) =>
@@ -216,7 +223,7 @@ router.post('/auth/wx-bind', loginRateLimit(), async (req, res, next) => {
 router.post('/auth/wx-login', loginRateLimit(), async (req, res, next) => {
   try {
     const { code, tenant } = z.object({ code: z.string().min(1).max(200), tenant: z.string().max(64).optional() }).parse(req.body);
-    const tenantId = tenant ?? req.header('X-Tenant-Id') ?? DEFAULT_LOGIN_TENANT;
+    const tenantId = normalizeTenant(tenant) ?? req.header('X-Tenant-Id') ?? DEFAULT_LOGIN_TENANT;
     const sess = await code2Session(code);
     if (!sess?.openid) return res.status(502).json({ ok: false, code: 'WX_002', message: 'wx code2session fail' });
     const user = await withTenantClient(tenantId, (client) =>
