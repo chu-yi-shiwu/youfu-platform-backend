@@ -35,6 +35,31 @@ function authInfo(res: any): { actor: string } {
 
 const router = Router();
 
+// A3 入口接线：实体类型清单（内置主题 ∪ 租户 workflow_def 已配置的 entity_type）。
+// 数据源：mp entity-hub 宫格 + admin 配置中心「进入业务流」入口。label 走 themeLabel，不硬编码中文。
+export async function listEntityTypes(client: any, tenantId: string) {
+  const r = await client.query(
+    `SELECT DISTINCT entity_type FROM workflow_def WHERE tenant_id = $1 ORDER BY entity_type`,
+    [tenantId],
+  );
+  const configured = r.rows.map((row: any) => String(row.entity_type));
+  const builtins = Object.keys(ENTITY_DEF);
+  const all = Array.from(new Set([...builtins, ...configured]));
+  return all.map((t) => ({ entityType: t, label: themeLabel(t), builtin: builtins.includes(t) }));
+}
+
+// 实体类型清单：GET /flow/entities → { ok, code, entities:[{entityType,label,builtin}] }
+// 注意：必须注册在 /:entityType 之前，否则 'entities' 会被当成 entity_type 参数吞掉。
+router.get('/entities', async (req, res, next) => {
+  try {
+    const tenantId = res.locals.auth.tenantId;
+    const entities = await withTenantClient(tenantId, (client) => listEntityTypes(client, tenantId));
+    return res.json({ ok: true, code: 0, entities });
+  } catch (e) {
+    next(e);
+  }
+});
+
 // 列表（含每行的 available 动态动作）
 router.get('/:entityType', async (req, res, next) => {
   try {
