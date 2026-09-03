@@ -54,7 +54,8 @@ vi.mock('../routes/workOrder.js', () => ({
   autoDispatchAfterCreate: vi.fn(async () => ({ autoFlow: true, assignee: 'w1', reason: 'test', dispatchTarget: 'worker' })),
 }));
 
-import { parseAgentAction, buildSystemPrompt, runAgentTurn, conversationAvailable, TOOL_NAMES } from '../services/conversationAgent.js';
+import { parseAgentAction, buildSystemPrompt, runAgentTurn, conversationAvailable, TOOL_NAMES, toolCreateTicket } from '../services/conversationAgent.js';
+import { CONVERSATION_UUID_RE } from '../routes/publicAiChat.js';
 
 describe('parseAgentAction（JSON 动作协议）', () => {
   it('解析 reply 动作', () => {
@@ -138,5 +139,37 @@ describe('conversationAvailable（双开关诚实降级）', () => {
   it('AI 开 + LLM 未授权 → LLM_NOT_AUTHORIZED', async () => {
     const r = await conversationAvailable('t1');
     expect(r).toEqual({ ok: false, reason: 'LLM_NOT_AUTHORIZED' });
+  });
+});
+
+// R38-R2 新增：F1 UUID 校验 / F4 模型参数截断
+describe('R38-R2 修复回归', () => {
+  it('F1 CONVERSATION_UUID_RE：合法 UUID 通过，非法形态全部拒绝', () => {
+    expect(CONVERSATION_UUID_RE.test('89e859b5-c822-4207-8fc9-27624bc0fd6c')).toBe(true);
+    expect(CONVERSATION_UUID_RE.test('89E859B5-C822-4207-8FC9-27624BC0FD6C')).toBe(true); // 大写兼容
+    expect(CONVERSATION_UUID_RE.test('not-a-uuid')).toBe(false);
+    expect(CONVERSATION_UUID_RE.test("1' OR '1'='1")).toBe(false);
+    expect(CONVERSATION_UUID_RE.test('../etc/passwd')).toBe(false);
+    expect(CONVERSATION_UUID_RE.test('')).toBe(false);
+  });
+
+  it('F4 toolCreateTicket：contact/location 超长被截断（20/100）', async () => {
+    llmState.chatResults = []; // 不走 agent 循环，直接调工具
+    dbCalls.length = 0;
+    dbRows['FROM fault_category'] = [];
+    let captured: any = null;
+    const { createWithIdem } = await import('../repo/ticket.js');
+    (createWithIdem as any).mockImplementationOnce(async (_c: any, dto: any) => {
+      captured = dto;
+      return { row: { id: dto.id, order_no: 'WO_TEST_002', title: dto.title, status: 'draft' }, created: true };
+    });
+    const r = await toolCreateTicket(
+      't1',
+      { description: '空调坏了', contact: '1390000111122223333444455556666', location: 'X'.repeat(300) },
+      true,
+    );
+    expect(r.ok).toBe(true);
+    expect(captured.contact).toHaveLength(20);
+    expect(captured.location).toHaveLength(100);
   });
 });

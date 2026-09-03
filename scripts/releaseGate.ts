@@ -59,17 +59,25 @@ console.log('[2/4] SQL 注入静态扫描');
 let hits = 0;
 const SAFE_EXPR = /\.(join|replace|slice|toUpperCase|toFixed)\(|^((limit|offset|where|clauses|sets|safeTenant|col|status|category|name|pinyin|low|id|params|code|key|norm|parsed|asset_no|cur|to|length))$|\./i;
 const RISK_EXPR = /req\s*\.?/i;
+// 正确提取模板串：用 [^`\\] 在首个「未转义反引号」处闭合，避免跨模板错并（N6 修复：
+//   旧正则 query\(\s*`...`\s*\) 会把 query( 与数百行后通知 page:`?id=${req.params.id}` 的
+//   URL 模板误并成一个超长「SQL 模板」，从而把 URL 串里的 ${req.params.id} 当 SQL 注入误报）。
+//   仅扫描「直接作为 query(...) 参数」的模板（通知 page/body 等 URL 字符串不算 SQL）。
+const TMPL_RE = /`(?:\\.|[^`\\])*`/g;
 for (const f of walk(join(root, 'src'))) {
   const src = readFileSync(f, 'utf8');
-  const re = /query\(\s*`([\s\S]*?)`\s*\)/g; // 仅捕获模板字面量 SQL 参数
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(src))) {
-    const sql = m[1];
-    if (/SET LOCAL|SET ROLE/i.test(sql)) continue; // admin 命令已转义/白名单，非注入点
-    const exprs = sql.match(/\$\{([^}]+)\}/g) ?? [];
+  let tm: RegExpExecArray | null;
+  while ((tm = TMPL_RE.exec(src))) {
+    const before = src.slice(0, tm.index).replace(/\s+$/, '');
+    if (!/query\($/.test(before)) continue; // 仅 query( 的 SQL 模板参数
+    const body = tm[0].slice(1, -1);
+    const baseLine = src.substring(0, tm.index).split('\n').length;
+    if (/SET LOCAL|SET ROLE/i.test(body)) continue; // admin 命令已转义/白名单，非注入点
+    const exprs = body.match(/\$\{([^}]+)\}/g) ?? [];
     for (const e of exprs) {
       const expr = e.slice(2, -1).trim();
-      const line = src.substring(0, m.index).split('\n').length;
+      const off = body.indexOf(e);
+      const line = baseLine + body.substring(0, off).split('\n').length - 1; // 行号按 ${} 实际出现行计（N6 修复）
       if (RISK_EXPR.test(expr)) {
         console.error(`  注入风险 ${f.replace(root, '')}:${line} → ${e}（疑似请求对象直插 SQL）`);
         hits++;
@@ -91,6 +99,7 @@ for (const f of readdirSync(root).filter((x) => /^\d+_.*\.sql$/.test(x))) {
     /IF NOT EXISTS/i.test(sql) ||
     /ON CONFLICT/i.test(sql) ||
     /DROP POLICY IF EXISTS/i.test(sql) ||
+    /DROP CONSTRAINT IF EXISTS/i.test(sql) || // ALTER TABLE x DROP CONSTRAINT IF EXISTS（062/063 幂等写法）
     /ADD COLUMN IF NOT EXISTS/i.test(sql) ||
     /CREATE OR REPLACE/i.test(sql) || // CREATE OR REPLACE FUNCTION/PROCEDURE/VIEW 本身可重跑，幂等
     /DROP FUNCTION IF EXISTS/i.test(sql);
@@ -133,6 +142,14 @@ function createTableBodies(sql: string): { name: string; body: string }[] {
 const tenantTables = new Set<string>(); // 含 tenant_id 的租户表
 const rlsEnabled = new Set<string>(); // ALTER TABLE x ENABLE/FORCE ROW LEVEL SECURITY
 const rlsPolicyTables = new Set<string>(); // CREATE POLICY ... ON x（且含 tenant_id 隔离）
+// 平台层表白名单：含 tenant_id 但按项目设计刻意不挂租户 RLS（非业务会话隔离对象）。
+//   这些表仅供平台 admin / SECURITY DEFINER 上下文访问，从不进入租户 GUC 会话，
+//   与 platform_template / platform_audit 同口径（§10.4 G1）。新增须在此显式登记并注释理由。
+//   注意：白名单只豁免「缺 RLS 红区」，绝不意味着可以裸写——写入仍须带 tenant_id 或走平台上下文。
+const rlsWhitelist = new Set<string>([
+  'tenant_registry',         // 050：平台层租户注册表，tenant_id 即主键，非业务 RLS 隔离对象（"不经 RLS"）
+  'platform_template_apply', // 053：平台层模板应用记录，平台 admin 上下文访问，非空会话租户隔离
+]);
 for (const f of readdirSync(root).filter((x) => /^\d+_.*\.sql$/.test(x))) {
   const sql = readFileSync(join(root, f), 'utf8');
   for (const { name, body } of createTableBodies(sql)) {
@@ -149,6 +166,7 @@ for (const f of readdirSync(root).filter((x) => /^\d+_.*\.sql$/.test(x))) {
 }
 let rlsMiss = 0;
 for (const t of [...tenantTables].sort()) {
+  if (rlsWhitelist.has(t)) continue; // 平台层表刻意免租户 RLS，跳过红区（G1 白名单）
   const hasRls = rlsEnabled.has(t);
   const hasPolicy = rlsPolicyTables.has(t);
   if (!hasRls || !hasPolicy) {

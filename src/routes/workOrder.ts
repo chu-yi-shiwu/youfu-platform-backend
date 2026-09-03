@@ -23,7 +23,7 @@ import { resolveDispatchShadow } from '../services/k2Shadow.js'; // R12-F1：自
 import { insertNotification, wechatSelfTest } from '../services/notify.js';
 import type { WorkOrderStatus } from '../engine/stateMachine.js';
 import { getWorkflowDef } from '../engine/workflowDef.js';
-import { doneStates, terminalStates, availableTransitions, learningTriggerStates, autoRouteFor, shouldTriggerLearning } from '../engine/stateMachine.js';
+import { availableTransitions, learningTriggerStates, autoRouteFor, shouldTriggerLearning } from '../engine/stateMachine.js';
 import { safeParseJsonb } from '../util/jsonb.js';
 import { validateIntake } from '../services/dataQuality.js';
 import { buildRecommend } from '../services/dispatchRecommend.js';
@@ -296,7 +296,6 @@ router.post('/open/work_order/:id/transition', async (req, res, next) => {
         role,
         fields,
       });
-      const woRow = r.row;
       // A5 手动派单/改派通知（forward/dispatched 经通用 transition 触发）
       if (r.transition?.event === 'forward' || r.transition?.event === 'dispatch') {
         const newAssignee =
