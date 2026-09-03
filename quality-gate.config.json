@@ -1,0 +1,7 @@
+{
+  "name": "优服家后端（DoD 第7项安全扫描专用最小配置）",
+  "sast": {
+    "scanDirs": ["src", "scripts"],
+    "exclude": ["node_modules", ".git", "dist"]
+  }
+}
