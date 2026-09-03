@@ -45,8 +45,10 @@ async function main() {
   });
   await client.connect();
 
+  const TENANT_RE = /^[a-z0-9][a-z0-9_-]*$/;
   for (const tenant of TENANTS) {
-    await client.query(`SET app.tenant_id = '${tenant}'`);
+    if (!TENANT_RE.test(tenant)) throw new Error(`非法 tenant 标识（仅允许小写字母/数字/-/_）: ${tenant}`);
+    await client.query(`SET app.tenant_id = '${tenant.replace(/'/g, "''")}'`);
     const r = await client.query(`SELECT id, name, account_id FROM worker WHERE tenant_id = $1 ORDER BY id`, [tenant]);
     const workers = r.rows;
     console.log(`\n[migrate] tenant=${tenant} workers=${workers.length}`);
