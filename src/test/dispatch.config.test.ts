@@ -121,3 +121,52 @@ describe('getActiveRules DB 形状 → 引擎（真实链路契约）', () => {
     expect(res).toBeNull();
   });
 });
+
+// AL-004 修复回归（2026-09-04）：rankByModel 评分必须含负载因子 1/(1+load)。
+// 此前评分 = 规则权 × 模型分，load 完全不参与 → load_balance 语义在有模型时失效。
+describe('resolveDispatch with model（AL-004 负载因子）', () => {
+  const rule = dbRule({ id: 'lb', name: 'load_balance rule', priority: 100, match: {}, strategy: { type: 'load_balance' } });
+  const need: Need = { business_type: 'repair' };
+  // 假模型：按 workerId 查表返回模型分（仅实现 score 的 MockBackend）
+  function fakeModel(scores: Record<string, number>): any {
+    return { score: ({ workerId }: { workerId: string }) => scores[workerId] ?? 0 };
+  }
+
+  it('模型分相同 → 低负载工人胜出（因子生效）', () => {
+    const ws: WorkerRow[] = [
+      { id: 'busy', skill_tags: ['repair'], load: 9, active: true },
+      { id: 'free', skill_tags: ['repair'], load: 0, active: true },
+    ];
+    const res = resolveDispatch(ws, [rule], need, fakeModel({ busy: 0.8, free: 0.8 }));
+    expect(res!.worker.id).toBe('free');
+  });
+
+  it('高分但高负载被低分低负载翻转（AL-004 实案复现：load=9 胜过 load=8 的正主）', () => {
+    const ws: WorkerRow[] = [
+      { id: 'w-load9', skill_tags: ['repair'], load: 9, active: true },
+      { id: 'w-load8', skill_tags: ['repair'], load: 8, active: true },
+    ];
+    // 无负载因子时 0.85 > 0.84 → w-load9 胜；加因子后 0.85/10=0.0850 vs 0.84/9≈0.0933 → 低负载翻转
+    const res = resolveDispatch(ws, [rule], need, fakeModel({ 'w-load9': 0.85, 'w-load8': 0.84 }));
+    expect(res!.worker.id).toBe('w-load8');
+  });
+
+  it('负载相同 → 高模型分胜出（因子不破坏质量序）', () => {
+    const ws: WorkerRow[] = [
+      { id: 'mediocre', skill_tags: ['repair'], load: 3, active: true },
+      { id: 'expert', skill_tags: ['repair'], load: 3, active: true },
+    ];
+    const res = resolveDispatch(ws, [rule], need, fakeModel({ mediocre: 0.2, expert: 0.9 }));
+    expect(res!.worker.id).toBe('expert');
+  });
+
+  it('无模型仍走 least_load 兜底（向后兼容不回归）', () => {
+    const ws: WorkerRow[] = [
+      { id: 'busy', skill_tags: ['repair'], load: 5, active: true },
+      { id: 'free', skill_tags: ['repair'], load: 1, active: true },
+    ];
+    const res = resolveDispatch(ws, [rule], need);
+    expect(res!.worker.id).toBe('free');
+    expect(res!.reason).not.toContain('model-scored');
+  });
+});
