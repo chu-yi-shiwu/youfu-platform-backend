@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { assertSafeTenantId } from '../db/pool.js';
+import { AppError } from '../middleware/error.js';
 
 // R8 收口（2026-08-27 补遗）：assertSafeTenantId 是多租户隔离的「第一道闸」——
 // SET LOCAL app.tenant_id 必须拼字符串（不支持 $1 参数化），故严格白名单 + 二次转义是防 SET 注入的唯一防线。
@@ -47,6 +48,19 @@ describe('assertSafeTenantId · 多租户隔离守卫（R8 收口，原缺专职
     // 与 /public/upload 历史守卫一致：含 / \\ 或 .. 的 org 一律不可作为租户标识流入 path.join
     for (const bad of ['../', '..\\', '/etc', 'c:/windows']) {
       expect(() => assertSafeTenantId(bad)).toThrow();
+    }
+  });
+
+  it('OBS-1（#922）：拒绝时抛 AppError(400) 而非裸 Error——走 errorMiddleware 正常 4xx 路径，不再误入 [unhandled]/500 通道', () => {
+    try {
+      assertSafeTenantId('bad id!');
+      expect.unreachable('should have thrown');
+    } catch (e) {
+      expect(e).toBeInstanceOf(AppError);
+      const appErr = e as AppError;
+      expect(appErr.code).toBe('INVALID_TENANT_ID');
+      expect(appErr.status).toBe(400);
+      expect(appErr.message).toContain('INVALID_TENANT_ID'); // toThrow 子串断言兼容性锚点
     }
   });
 });

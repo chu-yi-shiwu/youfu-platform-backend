@@ -5,6 +5,7 @@
 //  - SET ROLE youfu_app 切换为受限角色，使 RLS policy(TO youfu_app) 生效。
 import { Pool } from 'pg';
 import 'dotenv/config';
+import { AppError } from '../middleware/error.js';
 
 const pool = new Pool({
   host: process.env.PGHOST ?? '127.0.0.1',
@@ -23,7 +24,10 @@ const pool = new Pool({
 const TENANT_ID_RE = /^[A-Za-z0-9_.\-]{1,64}$/;
 export function assertSafeTenantId(tenantId: string): string {
   if (!tenantId || !TENANT_ID_RE.test(tenantId)) {
-    throw new Error('INVALID_TENANT_ID');
+    // OBS-1（#922）：改抛 AppError(400) 走 errorMiddleware 正常 4xx 路径——
+    // 原裸 Error 会被归类 [unhandled] 并返回 500，误导排障（fail-closed 语义不变，仅错误分类更准确）。
+    // message 前缀保留 INVALID_TENANT_ID 文案，pool.test.ts 的 toThrow 子串断言保持兼容。
+    throw new AppError('INVALID_TENANT_ID', `INVALID_TENANT_ID: tenant id must match ${TENANT_ID_RE.source}`, 400);
   }
   return tenantId;
 }
