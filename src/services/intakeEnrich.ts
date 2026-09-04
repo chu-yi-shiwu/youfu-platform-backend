@@ -34,6 +34,38 @@ export function matchCategoryHint(description: string): string | undefined {
   return undefined;
 }
 
+// ── AL-003 修复（2026-09-04 对齐审查）：中文分类/描述 → 派单引擎 business_type ──
+// 背景：C 端报修此前硬编码 business_type='repair'，dispatch_rule 的 8 条技能规则
+//（match_json.business_type=hvac/water/elevator/...）对真实流量永不命中，全量落
+//「综合报修-负载均衡」——技能派单对 C 端零生效（实证：空调单派给电工）。
+// 本词表与 a1_dispatch_rules.sql 录入的 business_type 枚举同源；顺序敏感：
+// 具体类目在前（elevator/hvac...），宽泛单字（electric 的「电」）最后兜底。
+// 匹配两轮：先分类名（权威，如"空调维修"直接命中 hvac，不被描述里的"水"带偏），
+// 未中再匹配描述原文；全不中 → 'repair'（负载均衡兜底池，保持旧行为）。
+export const BUSINESS_TYPE_KEYWORDS: Array<{ type: string; kw: string[] }> = [
+  { type: 'elevator', kw: ['电梯', '扶梯', '困人', '卡梯'] },
+  { type: 'hvac', kw: ['空调', '暖通', '制冷', '制热', '暖气', '冷气', '风口', '供暖', '中央空调', 'hvac', '风机盘管', '新风机'] },
+  { type: 'plumbing', kw: ['排水', '疏通', '堵塞', '下水', '地漏', '管道', '马桶', '蹲便', '坐便', '化粪池'] },
+  { type: 'water', kw: ['给水', '供水', '水管', '漏水', '水龙头', '阀门', '水压', '热水器', '饮水机'] },
+  { type: 'security', kw: ['安防', '监控', '门禁', '摄像', '道闸', '报警器'] },
+  { type: 'network', kw: ['网络', '断网', '宽带', '路由器', 'wifi', 'WiFi', '网线', '打印机', '电脑', '服务器', '投影仪'] },
+  { type: 'lighting', kw: ['照明', '灯管', '灯泡', '灯具', '应急灯', '灯'] },
+  { type: 'electric', kw: ['电路', '电气', '插座', '配电', '跳闸', '断电', '停电', '漏电', '开关', '电'] },
+];
+
+function hitBusinessType(text: string): string | undefined {
+  if (!text) return undefined;
+  for (const { type, kw } of BUSINESS_TYPE_KEYWORDS) {
+    if (kw.some((k) => text.includes(k))) return type;
+  }
+  return undefined;
+}
+
+/** 推断派单 business_type：先分类名（权威）后描述；全不中回落 'repair'（纯函数可单测）。 */
+export function businessTypeForCategory(categoryName?: string | null, description?: string | null): string {
+  return hitBusinessType(categoryName ?? '') ?? hitBusinessType(description ?? '') ?? 'repair';
+}
+
 // 分类 token 提取：把"暖通空调类"→["暖通","空调"]；"电脑维修"→["电脑","维修"]
 // 用于描述与分类名的语义关联（动态适配任意租户的分类体系）
 export function categoryTokens(name: string): string[] {
