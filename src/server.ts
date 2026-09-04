@@ -5,6 +5,7 @@ import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import dotenv from 'dotenv';
 import { authMiddleware, refreshAuthMode, verifyJwt, AUTH_MODE } from './middleware/auth.js';
+import { apiGuardMiddleware } from './middleware/apiGuard.js';// RV-001：未知 /api 路径先 404 再鉴权
 import { errorMiddleware } from './middleware/error.js';
 import publicReportRouter from './routes/publicReport.js';// P1 需求侧：public 免登录报修（挂 auth 之前）
 import publicAiChatRouter from './routes/publicAiChat.js';// L3 对话管家：public 免登录 AI 对话（挂 auth 之前，R36）
@@ -146,6 +147,9 @@ app.use('/api/v1/wechat', wechatRouter);
 
 // 认证/租户（生产化①：AUTH_MODE=dev|prod，prod 强制 JWT）：仅对 /api 生效，
 // 静态首页与 SPA 路由（试点模式公开可访问，无需鉴权）。
+// RV-001 修复：apiGuard 先于鉴权——未知 API 路径直接 JSON 404（语义正确），
+// 已知路径才进入鉴权（fail-closed 401 语义只留给真实存在的受保护路径）。
+app.use('/api', apiGuardMiddleware);
 app.use('/api', authMiddleware);
 
 // 业务路由（前缀 /api/v1，与前端/契约一致）
@@ -210,6 +214,13 @@ app.get('/workflow-admin', requireDashboardAuth, (_req, res) => {
   const file = path.resolve(fileURLToPath(import.meta.url), '../../public/workflow-admin.html');
   if (fs.existsSync(file)) res.sendFile(file);
   else res.status(404).json({ ok: false, code: 'NO_PAGE', message: 'workflow-admin html not found' });
+});
+
+// RV-001 配套：/api 终端兜底——已知区域内但未命中任何路由（如带合法 token 深路径打错）
+// 统一 JSON 404，取代 Express 默认 HTML 404，保持全 API 错误形态一致。
+// 位置：所有 /api 路由之后、errorMiddleware 之前；仅匹配 /api/*，不影响 SPA/静态托管。
+app.use('/api', (_req, res) => {
+  res.status(404).json({ ok: false, code: 'NOT_FOUND', message: 'not found' });
 });
 
 // 统一错误兜底
