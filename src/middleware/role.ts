@@ -6,7 +6,12 @@ import { AppError } from './error.js';
 import type { PoolClient } from 'pg';
 import type { AuthLocals } from './auth.js';
 
-export const ROLES = ['admin', 'operator', 'dispatcher', 'worker'] as const;
+// AL-002 修复（2026-09-04）：补 reviewer / service_desk 两角色。
+// 背景：workflow_def allowedRoles 与 stateMachine 转移（accept/dispatch/forward/claim 用
+// service_desk；approve/reject 用 reviewer）早已引用这两角色，workOrder 抢单门禁也含
+// service_desk，但账号层（z.enum / AccountRole / DB CHECK）建不出 → 审核支线实际仅 admin
+// 可做。此处 ROLES 为角色单一事实源，account.ts/accounts.ts/auth.ts 均派生自本清单。
+export const ROLES = ['admin', 'operator', 'dispatcher', 'worker', 'reviewer', 'service_desk'] as const;
 export type Role = (typeof ROLES)[number];
 
 export const PERMS = [
@@ -23,18 +28,25 @@ export const PERMS = [
 ] as const;
 export type Perm = (typeof PERMS)[number];
 
-// 默认权限矩阵（内置；租户可经 role_permission 表覆盖）
+// 默认权限矩阵（内置；租户可经 role_permission 表覆盖）。
+// 新角色按最小权限给默认：reviewer 审核工单（看板+工单）；service_desk 接线派单（+派单覆盖）。
 export const DEFAULT_PERM_MATRIX: Record<Role, readonly Perm[]> = {
   admin: [...PERMS],
   operator: ['dashboard.view', 'intake.create', 'ticket.manage', 'basicdata.edit', 'dispatch.override', 'inspect.execute', 'asset.scan'],
   dispatcher: ['dashboard.view', 'ticket.manage', 'dispatch.override', 'inspect.execute', 'asset.scan'],
   worker: ['inspect.execute', 'asset.scan'],
+  reviewer: ['dashboard.view', 'ticket.manage'],
+  service_desk: ['dashboard.view', 'ticket.manage', 'dispatch.override'],
 };
 
 // 角色层级（数值越大权限越高）；用于账户写接口的"不可越级/不可提权"门禁。
+// service_desk 与 dispatcher 同层（2）：接线派单属执行管理层；reviewer 与 operator 同层（3）：
+// 质量审核属管理动作。同层仅影响 canAssignRole 的 <= 比较，不破坏 worker<dispatcher<operator<admin 严格序。
 export const ROLE_RANK: Record<Role, number> = {
   worker: 1,
+  service_desk: 2,
   dispatcher: 2,
+  reviewer: 3,
   operator: 3,
   admin: 4,
 };
