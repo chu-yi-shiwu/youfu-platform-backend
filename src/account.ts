@@ -9,9 +9,12 @@
 import crypto from 'node:crypto';
 import type { PoolClient } from 'pg';
 import { signJwt } from './middleware/auth.js';
+import { ROLES } from './middleware/role.js';
 import { withTenantClient } from './db/pool.js';
 
-export type AccountRole = 'admin' | 'operator' | 'dispatcher' | 'worker';
+// 账户角色派生自 middleware/role.ts 的 ROLES 单一事实源（AL-002：含 reviewer/service_desk，
+// 与 stateMachine allowedRoles / workflow_def 对齐；DB 侧 CHECK 由 069 迁移同步放宽）。
+export type AccountRole = (typeof ROLES)[number];
 
 export interface AccountUser {
   id: string;
