@@ -17,6 +17,10 @@ const workerSchema = z.object({
   skill_tags: z.array(z.string()).optional(),
   load: z.number().int().nonnegative().optional(),
   active: z.boolean().optional(),
+  // AL-001 修复（2026-09-04 对齐审查）：046 已建 worker.account_id 列+唯一索引，me/summary 按
+  // 它反查工人（读路径在用），但本 schema 此前未暴露该字段——新建 worker 账号后无 API 关联
+  // 档案，工作台 me/summary 404，只能 DB 手工 UPDATE。补齐读写透传（uuid，可选）。
+  account_id: z.string().uuid().optional(),
 });
 
 // ============ 人员列表 ============
@@ -69,9 +73,9 @@ router.post('/workers', async (req, res, next) => {
     const item = await withTenantClient(tenantId, (client) =>
       client
         .query(
-          `INSERT INTO worker (id, tenant_id, name, skill_tags, load, active)
-           VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`,
-          [b.id, tenantId, b.name, b.skill_tags ?? [], b.load ?? 0, b.active ?? true],
+          `INSERT INTO worker (id, tenant_id, name, skill_tags, load, active, account_id)
+           VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *`,
+          [b.id, tenantId, b.name, b.skill_tags ?? [], b.load ?? 0, b.active ?? true, b.account_id ?? null],
         )
         .then((r) => r.rows[0]),
     );
@@ -100,6 +104,7 @@ router.put('/workers/:id', async (req, res, next) => {
       if (b.skill_tags !== undefined) set('skill_tags', b.skill_tags);
       if (b.load !== undefined) set('load', b.load);
       if (b.active !== undefined) set('active', b.active);
+      if (b.account_id !== undefined) set('account_id', b.account_id); // AL-001：档案↔账号关联可 API 维护
       if (sets.length === 0) return cur.rows[0];
       const r = await client.query(
         `UPDATE worker SET ${sets.join(', ')} WHERE id=$1 AND tenant_id=$2 RETURNING *`,
