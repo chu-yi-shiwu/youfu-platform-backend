@@ -88,7 +88,11 @@ export function resolveDispatch(
   return null;
 }
 
-// 纯函数：按 规则权 × 模型分 降序返回最优候选（上下文 bandit 选臂）
+// 纯函数：按 规则权 × 模型分 × 负载因子 降序返回最优候选（上下文 bandit 选臂）。
+// AL-004 修复（2026-09-04）：此前评分只有 规则权 × 模型分，worker.load 完全不参与——
+// load_balance 类规则在有模型时退化为纯 bandit 排序（load=9 可胜过 load=8 的正主）。
+// 负载因子 1/(1+load)：load=0 → 因子 1.0（空闲工人最大倾斜），负载越高折损越大；
+// 模型分在同负载带内决定质量序，负载差决定公平序。Math.max(0,·) 防脏数据负负载。
 function rankByModel(
   candidates: WorkerRow[],
   rule: DispatchRule,
@@ -96,7 +100,10 @@ function rankByModel(
   model: ModelBackend,
 ): WorkerRow {
   return candidates
-    .map((w) => ({ w, s: (rule.weight ?? 1) * model.score({ category, workerId: w.id }) }))
+    .map((w) => ({
+      w,
+      s: ((rule.weight ?? 1) * model.score({ category, workerId: w.id })) / (1 + Math.max(0, w.load)),
+    }))
     .sort((a, b) => b.s - a.s)[0].w;
 }
 
