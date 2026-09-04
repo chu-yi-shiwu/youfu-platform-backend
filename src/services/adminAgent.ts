@@ -134,6 +134,26 @@ export function buildConfirmCard(args: Record<string, unknown>): ConfirmCard | n
   return null;
 }
 
+// ---------- 对话式新手引导（注册制批次二 · P1） ----------
+// 命中"怎么开通/新手/第一步/怎么配置"类引导意图 → 纯回复固定四步文案（无卡、不调 LLM，
+// 确定性短路：引导文案是平台事实，不交给模型自由发挥）。
+export const ONBOARDING_INTENT_RE =
+  /(怎么开通|如何开通|新手|第一步|第1步|怎么配置|如何配置|怎么开始|从哪开始|怎么上手|引导|四步)/;
+
+export const ONBOARDING_GUIDE_TEXT = [
+  '新手四步引导：',
+  '① 管理员登录：用机构管理员账号登录机构后台；',
+  '② 基础数据：录入位置、报修人通讯录（页面右下角 AI 助理支持对话式录入，直接告诉我即可）；',
+  '③ 人员开通：人员页「一键开通」员工账号，开通成功展示一次性登录密码；',
+  '④ 服务目录：录入服务价目（商品目录），建单派单即可正常流转。',
+  '要录入具体对象时直接说，例如「新增位置 3F-A01 三楼会议室」或「开通员工张三，手机号 13800001234」。',
+].join('\n');
+
+/** 纯函数：是否命中新手引导意图（可单测） */
+export function matchOnboardingIntent(message: string): boolean {
+  return ONBOARDING_INTENT_RE.test(message);
+}
+
 // ---------- agent 主流程（单次 LLM 调用，无工具循环，无任何写库） ----------
 export interface AdminTurnResult {
   reply: string;
@@ -141,6 +161,10 @@ export interface AdminTurnResult {
 }
 
 export async function runAdminTurn(tenantId: string, message: string): Promise<AdminTurnResult> {
+  // 新手引导意图 → 确定性短路返回固定四步文案（纯回复，无卡，不消耗 LLM 调用）
+  if (matchOnboardingIntent(message)) {
+    return { reply: ONBOARDING_GUIDE_TEXT };
+  }
   const messages: ChatMsg[] = [
     { role: 'system', content: buildAdminSystemPrompt() },
     { role: 'user', content: message.slice(0, 1000) },

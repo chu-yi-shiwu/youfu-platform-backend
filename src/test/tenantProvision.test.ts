@@ -4,7 +4,7 @@
 // ③admin 账号（scrypt 哈希）。本文件验证四条主链路 + 上下文收口 + PII 不复制边界（注释锚定）。
 import { describe, it, expect } from 'vitest';
 
-const { provisionNewTenantContent } = await import('../repo/tenantProvision.js');
+const { provisionNewTenantContent, INDUSTRY_PERM_PRESETS } = await import('../repo/tenantProvision.js');
 
 type QueryFn = (text: string, params?: any[]) => Promise<{ rows: any[]; rowCount?: number }>;
 
@@ -109,5 +109,94 @@ describe('provisionNewTenantContent（SaaS 前置开通补全护栏）', () => {
     expect(calls.find((c) => c.text.includes('FROM fault_category'))).toBeUndefined(); // 不跨租户读
     expect(r.workflowDefSource).toBe('default');
     expect(calls.find((c) => c.text.includes('INSERT INTO account_user'))).toBeDefined();
+  });
+});
+
+describe('provisionNewTenantContent 第④步：行业权限基线（注册制批次二 · 混合式）', () => {
+  it('preset 缺失（第一版全行业未配置）→ 0 行 role_permission 落库，permBaseline=inherited', async () => {
+    expect(Object.keys(INDUSTRY_PERM_PRESETS).length).toBe(0); // 机制就位、行为=继承默认的定案口径
+    const { client, calls } = makeClient({ srcCategories: [] });
+    const r = await provisionNewTenantContent(client, {
+      tenantId: NEW_T, name: '测试医院', sourceTenantId: SRC_T, category: 'hospital',
+    });
+    expect(r.permBaseline).toBe('inherited');
+    expect(r.permRolesSnapshotted).toEqual([]);
+    expect(calls.find((c) => c.text.includes('INSERT INTO role_permission'))).toBeUndefined();
+  });
+
+  it('preset ≠ 默认矩阵 → 该角色全量行落库 + permBaseline=snapshot', async () => {
+    // worker 默认 = [inspect.execute, asset.scan]；登记为不同集合 → 落库定格
+    INDUSTRY_PERM_PRESETS.hospital = { worker: ['inspect.execute'] };
+    try {
+      const { client, calls } = makeClient({ srcCategories: [] });
+      const r = await provisionNewTenantContent(client, {
+        tenantId: NEW_T, name: '测试医院', sourceTenantId: SRC_T, category: 'hospital',
+      });
+      expect(r.permBaseline).toBe('snapshot');
+      expect(r.permRolesSnapshotted).toEqual(['worker']);
+      const ins = calls.filter((c) => c.text.includes('INSERT INTO role_permission'));
+      expect(ins.length).toBe(1);
+      expect(ins[0].params).toEqual([NEW_T, 'worker', 'inspect.execute']);
+    } finally {
+      delete INDUSTRY_PERM_PRESETS.hospital; // 还原全局，避免污染其他用例
+    }
+  });
+
+  it('preset = 默认矩阵（集合相等、无序）→ 0 行落库（继承基线，不无谓定格）', async () => {
+    INDUSTRY_PERM_PRESETS.hospital = { worker: ['asset.scan', 'inspect.execute'] }; // 与默认同集合，顺序不同
+    try {
+      const { client, calls } = makeClient({ srcCategories: [] });
+      const r = await provisionNewTenantContent(client, {
+        tenantId: NEW_T, name: '测试医院', sourceTenantId: SRC_T, category: 'hospital',
+      });
+      expect(r.permBaseline).toBe('inherited');
+      expect(r.permRolesSnapshotted).toEqual([]);
+      expect(calls.find((c) => c.text.includes('INSERT INTO role_permission'))).toBeUndefined();
+    } finally {
+      delete INDUSTRY_PERM_PRESETS.hospital;
+    }
+  });
+
+  it('admin 恒不参与基线：即使 preset 登记了 admin 也跳过（admin 恒全放行）', async () => {
+    INDUSTRY_PERM_PRESETS.hospital = { admin: ['dashboard.view'] };
+    try {
+      const { client, calls } = makeClient({ srcCategories: [] });
+      const r = await provisionNewTenantContent(client, {
+        tenantId: NEW_T, name: '测试医院', sourceTenantId: SRC_T, category: 'hospital',
+      });
+      expect(r.permBaseline).toBe('inherited');
+      expect(calls.find((c) => c.text.includes('INSERT INTO role_permission'))).toBeUndefined();
+    } finally {
+      delete INDUSTRY_PERM_PRESETS.hospital;
+    }
+  });
+
+  it('自指路径：SET LOCAL / SET ROLE 补在②之前，②③④写入全部有新租户写上下文（QA 修正回归）', async () => {
+    INDUSTRY_PERM_PRESETS.hospital = { worker: ['inspect.execute'] };
+    try {
+      const { client, calls } = makeClient({ srcCategories: [] });
+      await provisionNewTenantContent(client, {
+        tenantId: SRC_T, name: '自指', sourceTenantId: SRC_T, category: 'hospital',
+      });
+      const idx = (pred: (c: { text: string }) => boolean) => calls.findIndex(pred);
+      const firstSetLocal = idx((c) => c.text.startsWith('SET LOCAL app.tenant_id'));
+      const firstSetRole = idx((c) => c.text === 'SET ROLE youfu_app');
+      const wfIns = idx((c) => c.text.includes('INSERT INTO workflow_def'));       // ②
+      const accIns = idx((c) => c.text.includes('INSERT INTO account_user'));      // ③
+      const permIns = idx((c) => c.text.includes('INSERT INTO role_permission'));  // ④
+      expect(firstSetLocal).toBeGreaterThanOrEqual(0);
+      expect(firstSetRole).toBeGreaterThan(firstSetLocal);
+      // QA 修正点：上下文切换必须发生在②之前（否则自指路径下②③写库 42501）
+      expect(firstSetLocal).toBeLessThan(wfIns);
+      expect(firstSetRole).toBeLessThan(wfIns);
+      expect(accIns).toBeGreaterThan(firstSetRole);
+      expect(permIns).toBeGreaterThan(firstSetRole);
+      // 最终写上下文收口在新租户，且全程只有一次 SET LOCAL（无源租户来回切换）
+      const setLocals = calls.filter((c) => c.text.startsWith('SET LOCAL app.tenant_id'));
+      expect(setLocals.length).toBe(1);
+      expect(setLocals[0].text).toContain(SRC_T);
+    } finally {
+      delete INDUSTRY_PERM_PRESETS.hospital;
+    }
   });
 });

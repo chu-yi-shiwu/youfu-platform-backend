@@ -108,6 +108,7 @@ router.put('/tenants/:id/status', async (req, res, next) => {
 // 行业模板：新机构按 category 从「模板源租户」复制 fault_category（hospital→t-verification 91 分类等）。
 // SaaS 前置（2026-09-01）：开通即建齐最小可运行租户——业务流状态图（复制模板源 work_order def，
 //   无则引擎默认 4 态）+ 机构管理员账号（缺省自动生成，明文仅本次响应返回一次）。
+// 注册制批次二（2026-09-05）：+ 第④步行业权限基线（preset ≠ 默认矩阵才落库定格，否则继承官方推荐基线）。
 // 诚实边界：reporter_dict / location_dict 属机构私有数据（含 PII），绝不跨租户复制。
 const INDUSTRY_TEMPLATE_SOURCE: Record<string, string> = {
   hospital: 't-verification', // 医院行业模板源（UOne 迁移分类）
@@ -145,15 +146,22 @@ router.post('/tenants', async (req, res, next) => {
         tenantId: b.tenant_id,
         name: b.name,
         sourceTenantId: src,
+        category: b.category, // ④ 行业权限基线：preset ≠ 默认矩阵才落库定格，否则继承官方推荐基线
         adminUsername: b.admin_username,
         adminPassword: b.admin_password,
       });
       await client.query('COMMIT');
+      // ④ 权限基线回执口径：inherited=继承官方推荐基线（随平台升级自动更新）；snapshot=行业基线已定格
+      const permNote = provision.permBaseline === 'snapshot'
+        ? `权限=行业基线（已定格 ${provision.permRolesSnapshotted.length} 个角色：${provision.permRolesSnapshotted.join('、')}）`
+        : '权限=官方推荐基线（继承，随平台升级自动更新）';
       await audit(admin.username, 'tenant.create', b.tenant_id, b.tenant_id, {
         category: b.category,
         categories_copied: provision.categoriesCopied,
         workflow_def_source: provision.workflowDefSource,
         admin_username: provision.adminUsername,
+        perm_baseline: provision.permBaseline,
+        perm_roles_snapshotted: provision.permRolesSnapshotted,
       });
       return res.status(201).json({
         ok: true, code: 0, item: { tenant_id: b.tenant_id, name: b.name, category: b.category, status: 'active' },
@@ -162,7 +170,7 @@ router.post('/tenants', async (req, res, next) => {
           // 自动生成时明文仅本次返回；调用方自带密码则不回显
           ...(b.admin_password ? {} : { password: provision.adminPassword }),
         },
-        note: `机构已登记：按${b.category}行业模板初始化分类 ${provision.categoriesCopied} 条、业务流状态图 1 套（${provision.workflowDefSource === 'template' ? '行业模板' : '默认 4 态'}）、管理员账号 1 个`,
+        note: `机构已登记：按${b.category}行业模板初始化分类 ${provision.categoriesCopied} 条、业务流状态图 1 套（${provision.workflowDefSource === 'template' ? '行业模板' : '默认 4 态'}）、管理员账号 1 个；${permNote}`,
       });
     } catch (e) {
       await client.query('ROLLBACK').catch(() => undefined);

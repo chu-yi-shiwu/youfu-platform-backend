@@ -32,7 +32,9 @@ const accountUpdateSchema = z.object({
 
 // ============ RBAC：租户角色权限（批次 A2） ============
 
-// GET /api/v1/accounts/roles/permissions —— admin：列出本租户 4 角色的权限（租户覆盖 ∪ 默认矩阵说明）
+// GET /api/v1/accounts/roles/permissions —— admin：列出本租户全部 6 角色的权限。
+// 语义（修正 2026-09-05）：role_permission 表有该租户该角色的行 → **覆盖替换**（只用覆盖集合，非并集）；
+// 无覆盖行 → 回退官方推荐默认矩阵（overridden:false，随平台升级自动更新）。
 router.get('/accounts/roles/permissions', async (req, res, next) => {
   try {
     const auth = res.locals.auth as AuthLocals;

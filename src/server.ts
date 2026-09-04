@@ -51,6 +51,7 @@ import { startInspectionScheduler } from './scheduler/inspectionScheduler.js';//
 import { startSlaScheduler } from './scheduler/slaScheduler.js';// 拆雷三件套②：SLA 定时扫描+升级通知
 import { startTemplateEffectsScheduler } from './scheduler/templateEffectScheduler.js';// E2 效果回写 cron
 import { startModelTrainScheduler } from './scheduler/modelTrainScheduler.js';// 数据飞轮：每日 03:00 全量重训
+import { verifyRoleWhitelist } from './services/roleWhitelist.js';// 070 角色白名单启动自检（架构评审 R1）
 
 // 试点/生产：用 ENV_FILE 指定环境文件（默认 .env，production 下默认 .env.pilot），
 // 同一份代码可同时跑 dev / pilot，无需改代码。
@@ -249,8 +250,18 @@ if (process.env.SERVE_STATIC === '1') {
 
 const PORT = Number(process.env.PORT ?? 4001);
 // 容器环境必须监听 0.0.0.0，否则 CloudRun 无法路由进来
-app.listen(PORT, '0.0.0.0', () => {
+app.listen(PORT, '0.0.0.0', async () => {
   console.log(`youfu-backend-m1 listening on 0.0.0.0:${PORT}`);
+  // 070 角色白名单启动自检（架构评审 R1）：role_permission CHECK 未放行全部 6 角色 →
+  // 拒绝启动（否则新租户开通第④步写权限行必 23514 → 开通事务整体回滚）。
+  // DB 不可达时不在此处炸（沿用既有行为）；自检自身异常也只记明确日志不阻断启动。
+  try {
+    await verifyRoleWhitelist();
+  } catch (e) {
+    console.error(
+      `[startup] 角色白名单自检异常（不阻断启动，首个 DB 请求将自然暴露问题）：${(e as Error).stack ?? e}`,
+    );
+  }
   // G3 真 cron：后端进程内定时扫描到期巡检计划并自动生成实例（单进程部署，无重复触发）。
   startInspectionScheduler();
   // 拆雷三件套②（2026-08-31）：SLA 每 60s 扫描超时工单 → 升级 + 通知（与 /sla/scan 同一实现）。

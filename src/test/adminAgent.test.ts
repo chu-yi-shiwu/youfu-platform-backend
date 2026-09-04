@@ -18,6 +18,7 @@ import {
   buildAdminSystemPrompt,
   buildConfirmCard,
   runAdminTurn,
+  matchOnboardingIntent,
   ADMIN_TOOL_NAMES,
 } from '../services/adminAgent.js';
 
@@ -119,5 +120,29 @@ describe('runAdminTurn（单次 LLM 调用，无工具循环）', () => {
     const r = await runAdminTurn('t1', '随便建一个');
     expect(r.reply).toContain('拿不准');
     expect(r.confirm_card).toBeUndefined();
+  });
+});
+
+describe('新手四步引导（注册制批次二 P1：引导意图确定性短路，纯回复无卡）', () => {
+  it('命中「新手/怎么开通」类意图 → 返回固定四步文案，不调 LLM、不产卡', async () => {
+    llmState.chatResults = []; // 若短路失效会因无脚本结果而抛错
+    for (const msg of ['怎么开通新机构？', '新手第一步做什么', '系统要怎么配置？']) {
+      const r = await runAdminTurn('t1', msg);
+      expect(r.reply).toContain('新手四步引导');
+      expect(r.reply).toContain('基础数据');
+      expect(r.confirm_card).toBeUndefined();
+    }
+  });
+
+  it('未命中意图 → 正常走 LLM 链路（不受引导短路影响）', async () => {
+    llmState.chatResults = ['{"action":"reply","content":"您想新增位置还是开通员工？"}'];
+    const r = await runAdminTurn('t1', '帮我把张三加进去');
+    expect(r.reply).toContain('位置');
+  });
+
+  it('matchOnboardingIntent 纯函数边界', () => {
+    expect(matchOnboardingIntent('第一步该干嘛')).toBe(true);
+    expect(matchOnboardingIntent('从哪开始录入')).toBe(true);
+    expect(matchOnboardingIntent('开通员工张三')).toBe(false); // 明确建卡意图不抢引导
   });
 });
