@@ -39,6 +39,7 @@ import workflowDefRouter from './routes/workflowDef.js';
 import businessFlowRouter from './routes/businessFlow.js';
 import aiPreviewRouter from './routes/aiPreview.js';
 import basicDataRouter from './routes/basicData.js';
+import adminAiChatRouter from './routes/adminAiChat.js';// 注册制批次一 卡3：管理对话（authed，admin/operator）
 import llmUsageRouter from './routes/llmUsage.js';
 import equipmentRouter from './routes/equipment.js';
 import uploadRouter from './routes/upload.js';// B0 文件上传（H5 拍照落库）
@@ -181,6 +182,7 @@ app.use('/api/v1', accountsRouter);
 app.use('/api/v1', tenantInfoRouter);
 app.use('/api/v1/workflow-defs', workflowDefRouter);
 app.use('/api/v1', basicDataRouter);
+app.use('/api/v1', adminAiChatRouter);// 管理对话：POST /admin/ai-chat（Bearer JWT + admin/operator）
 app.use('/api/v1', equipmentRouter);// P4 设备管理（设备 / 设备类型 / 设备厂商，主数据 CRUD，对齐 UOne C 族）
 app.use('/api/v1/flow', businessFlowRouter);
 app.use('/api/v1/ai', aiPreviewRouter);

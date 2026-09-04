@@ -20,6 +20,19 @@ type TypeDef = {
   schema: z.ZodType<any>;
   /** jsonb 列（CSV 导入时按 JSON 解析；导出时按 JSON 序列化） */
   jsonCols?: string[];
+  /**
+   * 可搜索的文本列（注册制批次一 P0-2 引擎修复①）：
+   * GET 列表模糊搜索只对声明列做 ILIKE。未声明时回退为「schema 中 z.string() 类型的 fields key」，
+   * 避免 uuid 列（如 location_dict.default_reporter_id）/numeric 列（如 priority_dict.sort）
+   * 被 ILIKE → 42883/500。
+   */
+  searchCols?: string[];
+  /**
+   * code 列租户内唯一（有 DB 唯一索引背书）。POST 建档前先预检查重 → 409（P0-2 引擎修复②）。
+   * 只对确有唯一索引的字典开启（location_dict/reporter_dict，055 迁移 ux_*_tenant_code）；
+   * 既有 9 类字典的 code 无唯一索引（001 系列迁移实查），不开此开关以保持既有行为（红线）。
+   */
+  uniqueCode?: boolean;
 };
 
 // export 供测试/静态门禁断言「声明列必存在于迁移 DDL」不变式（M0-1 C 件配套），无运行时行为变更。
@@ -133,6 +146,8 @@ export const TYPES: Record<string, TypeDef> = {
     table: 'priority_dict',
     columns: ['id', 'tenant_id', 'name', 'code', 'sort', 'color', 'remark', 'created_at', 'updated_at'],
     insertCols: ['name', 'code', 'sort', 'color', 'remark'],
+    // numeric 列 sort 不可 ILIKE（P0-2 引擎修复①配套声明；回退逻辑也会排除 z.number()，双保险）
+    searchCols: ['name', 'code', 'color', 'remark'],
     fields: [
       { key: 'name', label: '优先级名称' },
       { key: 'code', label: '编码' },
@@ -195,12 +210,70 @@ export const TYPES: Record<string, TypeDef> = {
     }),
     jsonCols: ['default_fields'],
   },
+  // ===== 注册制批次一（055 迁移）：位置 / 报修人字典（卡1）=====
+  location: {
+    table: 'location_dict',
+    columns: ['id', 'tenant_id', 'code', 'name', 'category', 'default_reporter_id', 'enabled', 'created_at', 'updated_at'],
+    insertCols: ['code', 'name', 'category', 'default_reporter_id'],
+    searchCols: ['code', 'name', 'category'],
+    uniqueCode: true,
+    fields: [
+      { key: 'code', label: '编号' },
+      { key: 'name', label: '名称' },
+      { key: 'category', label: '类别' },
+      { key: 'default_reporter_id', label: '默认报修人ID' },
+    ],
+    schema: z.object({
+      code: z.string().min(1),
+      name: z.string().min(1),
+      category: z.string().optional(),
+      default_reporter_id: z.string().uuid().optional(),
+      // enabled 有 DB DEFAULT true（055）；schema 仅放行取值，不在 insertCols（未提供列让 DB DEFAULT 生效）
+      enabled: z.boolean().optional(),
+    }),
+  },
+  reporter: {
+    table: 'reporter_dict',
+    columns: ['id', 'tenant_id', 'code', 'name', 'phone', 'role', 'enabled', 'created_at', 'updated_at'],
+    insertCols: ['code', 'name', 'phone', 'role'],
+    searchCols: ['code', 'name', 'phone', 'role'],
+    uniqueCode: true,
+    fields: [
+      { key: 'code', label: '编号' },
+      { key: 'name', label: '姓名' },
+      { key: 'phone', label: '手机号' },
+      { key: 'role', label: '角色说明' },
+    ],
+    schema: z.object({
+      code: z.string().min(1),
+      name: z.string().min(1),
+      phone: z.string().regex(/^1\d{10}$/),
+      role: z.string().optional(),
+      enabled: z.boolean().optional(),
+    }),
+  },
 };
 
 function getType(t: string): TypeDef {
   const d = TYPES[t];
   if (!d) throw new AppError('BAD_TYPE', `unknown basic-data type: ${t}`, 400);
   return d;
+}
+
+// 可搜索列解析（P0-2 引擎修复①）：显式 searchCols 优先；
+// 未声明时回退为「fields 中 schema 形状为 z.string() 的 key」——
+// 排除 z.number()（priority_dict.sort）与 z.string().uuid()（uuid 列 ILIKE 会 42883/500）。
+function searchColsOf(def: TypeDef): string[] {
+  if (def.searchCols && def.searchCols.length > 0) return def.searchCols;
+  const shape = (def.schema as z.ZodObject<any>)?.shape ?? {};
+  return def.fields
+    .filter((f) => {
+      const s = shape[f.key];
+      if (!(s instanceof z.ZodString)) return false;
+      const checks = (s as unknown as { _def?: { checks?: { kind?: string }[] } })._def?.checks ?? [];
+      return !checks.some((c) => c.kind === 'uuid');
+    })
+    .map((f) => f.key);
 }
 
 // ============ 列表（支持名称/关键字搜索）============
@@ -213,8 +286,8 @@ router.get('/basic-data/:type', async (req, res, next) => {
     const params: unknown[] = [tenantId];
     if (q) {
       const like = `%${q}%`;
-      // 在可搜索字段上做 ILIKE
-      const searchCols = def.fields.map((f) => f.key);
+      // 在可搜索字段上做 ILIKE（searchCols 声明优先，回退 z.string() 字段，杜绝 uuid/numeric 列 500）
+      const searchCols = searchColsOf(def);
       const ors = searchCols.map((c) => `${c} ILIKE $${params.length + 1}`).join(' OR ');
       params.push(like);
       clauses.push(`(${ors})`);
@@ -246,6 +319,16 @@ router.post('/basic-data/:type', async (req, res, next) => {
     const vals = [id, tenantId, ...provided.map((c) => (b as any)[c])];
     const item = await withTenantClient(tenantId, async (client) => {
       await requirePermission(auth, client, 'basicdata.edit');
+      // 撞码预检（P0-2 引擎修复②）：仅对声明 uniqueCode（有 DB 唯一索引背书）的类型启用。
+      // 命中给 409 语义化冲突，而非落到 DB 唯一索引的 23505。
+      const code = (b as { code?: unknown }).code;
+      if (def.uniqueCode && typeof code === 'string' && code !== '') {
+        const dup = await client.query(
+          `SELECT 1 FROM ${def.table} WHERE tenant_id=$1 AND code=$2 LIMIT 1`,
+          [tenantId, code],
+        );
+        if (dup.rowCount && dup.rowCount > 0) throw new AppError('CONFLICT', '该编号已存在', 409);
+      }
       return client
         .query(`INSERT INTO ${def.table} (${cols.join(', ')}) VALUES (${ph}) RETURNING *`, vals)
         .then((r) => r.rows[0]);
@@ -300,12 +383,22 @@ router.delete('/basic-data/:type/:id', async (req, res, next) => {
     const auth = res.locals.auth;
     const def = getType(req.params.type);
     const tenantId = auth.tenantId;
-    const r = await withTenantClient(tenantId, async (client) => {
+    // P0-2 引擎修复③（删除联动）：删除报修人成功后，同事务把 location_dict.default_reporter_id
+    // 引用置空，避免悬空 uuid 引用（055 外键语义由应用层维护，未建 FK 约束）。
+    const rowCount = await withTenantClient(tenantId, async (client) => {
       await requirePermission(auth, client, 'basicdata.edit');
-      return client.query(`DELETE FROM ${def.table} WHERE id=$1 AND tenant_id=$2`, [req.params.id, tenantId]);
+      const r = await client.query(`DELETE FROM ${def.table} WHERE id=$1 AND tenant_id=$2`, [req.params.id, tenantId]);
+      if (!r.rowCount || r.rowCount === 0) return 0;
+      if (def.table === 'reporter_dict') {
+        await client.query(
+          `UPDATE location_dict SET default_reporter_id = NULL WHERE tenant_id=$1 AND default_reporter_id=$2`,
+          [tenantId, req.params.id],
+        );
+      }
+      return r.rowCount;
     });
-    if (r.rowCount === 0) throw new AppError('NOT_FOUND', `${def.table} not found`, 404);
-    return res.json({ ok: true, code: 0, deleted: r.rowCount });
+    if (rowCount === 0) throw new AppError('NOT_FOUND', `${def.table} not found`, 404);
+    return res.json({ ok: true, code: 0, deleted: rowCount });
   } catch (e) {
     next(e);
   }

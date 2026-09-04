@@ -32,7 +32,7 @@ export const KNOWN_API_PREFIXES: readonly string[] = [
 // 其余 router 全部挂在 /api/v1 下：此处为各 router 内部路由的首段去重清单
 // （含 businessFlow/workflowDef 等挂在前缀下的段名冗余项——白名单宁多勿误杀）。
 export const KNOWN_V1_SEGMENTS: ReadonlySet<string> = new Set([
-  'accounts', 'activities', 'agent-stats', 'alerts', 'applies', 'apps', 'assets',
+  'accounts', 'activities', 'admin', 'agent-stats', 'alerts', 'applies', 'apps', 'assets',
   'audit-logs', 'auth', 'auto-tune', 'basic-data', 'config', 'devices', 'entities',
   'equipment', 'export', 'fault-categories', 'features', 'feedback', 'gen-config',
   'generate', 'generate-from-theme', 'health', 'inventory', 'items', 'jssdk-config',
