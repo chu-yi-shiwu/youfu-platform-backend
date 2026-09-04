@@ -12,7 +12,7 @@ import { withTenantClient } from '../db/pool.js';
 import { AppError } from '../middleware/error.js';
 import { createWithIdem } from '../repo/ticket.js';
 import { loginRateLimit } from '../middleware/auth.js';
-import { matchCategoryHint, resolveFaultCategory, inferPriority, resolveAsset, generateTitle } from '../services/intakeEnrich.js';
+import { matchCategoryHint, resolveFaultCategory, inferPriority, resolveAsset, generateTitle, businessTypeForCategory } from '../services/intakeEnrich.js';
 import { llmInferCategory } from '../services/llm.js';
 import { resolveScanFromDb } from '../scan.js'; // ⑤ 扫码关联：复用 DB 权威解析
 import { getLlmEnabled } from '../repo/tenantSettings.js';
@@ -327,7 +327,12 @@ router.post('/public/repair-report', loginRateLimit(20), async (req, res, next) 
       // 幂等重放（created=false）不重跑派单（R9-001 同款纪律：绝不重置在途工单/虚增负载）。
       let dispatch: Awaited<ReturnType<typeof autoDispatchAfterCreate>> | null = null;
       if (created) {
-        dispatch = await autoDispatchAfterCreate(client, tenantId, row, { business_type: 'repair', priority, catalog: catalogId });
+        // AL-003 修复（2026-09-04 对齐审查）：此前硬编码 'repair'，8 条技能派单规则对 C 端永不命中
+        //（实证：空调单派给电工）。改为按分类名/描述推断 business_type（空调维修→hvac 等），
+        // 使 dispatch_rule 的 skill_match 规则真正接上真实流量；全不中回落 'repair' 保持旧行为。
+        // 注：work_orders.business_type 落库域保持 'repair'（报修业务归属不变），仅派单入参细化。
+        const dispatchBusinessType = businessTypeForCategory(catalogName, desc);
+        dispatch = await autoDispatchAfterCreate(client, tenantId, row, { business_type: dispatchBusinessType, priority, catalog: catalogId });
       }
       return { row, created, catalogName, priority, assetName: asset?.name ?? null, scanResolved, location, dispatch };
     });
