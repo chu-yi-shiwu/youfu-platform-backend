@@ -19,12 +19,13 @@ const accountCreateSchema = z.object({
   username: z.string().min(2),
   password: z.string().min(6),
   display_name: z.string().optional(),
-  role: z.enum(['admin', 'operator', 'dispatcher', 'worker']).optional(),
+  // AL-002：枚举改引 ROLES 单一事实源（含 reviewer/service_desk，与 stateMachine 对齐）
+  role: z.enum(ROLES).optional(),
 });
 
 const accountUpdateSchema = z.object({
   display_name: z.string().optional(),
-  role: z.enum(['admin', 'operator', 'dispatcher', 'worker']).optional(),
+  role: z.enum(ROLES).optional(),
   active: z.boolean().optional(),
   password: z.string().min(6).optional(), // 可选：重置密码
 });
