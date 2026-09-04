@@ -8,3 +8,20 @@ coverage/
 .wing/
 quality-gate-report.md
 .workbuddy/
+
+# --- scratch / dev-tool / audit artifacts (do not commit; 9-04 每日审查补) ---
+.npm-cache-tmp/
+*.audit.txt
+sast_audit_*.txt
+vitest_full_*.txt
+cov_ver.txt
+gate_log_ci.txt
+audit_json.txt
+push_verify.txt
+put_auth.json
+mk_auth_payload.js
+backfill_shadow.mjs
+retrain_now.mjs
+a1_dispatch_rules.sql
+tools/coverageAudit.mjs
+tools/routeContract.mjs
