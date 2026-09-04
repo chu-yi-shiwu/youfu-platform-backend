@@ -155,7 +155,10 @@ export async function transition(
   tenantId: string,
   id: string,
   to: WorkOrderStatus,
-  opts?: { actor?: string; role?: string; fields?: Record<string, unknown> },
+  // 批次三纯加法：eventOverride（可选）——按 from+event 精确钉死事件解析转移（缺省不传 = 原 from+to 行为不变）。
+  // 场景：同一 from→to 存在多条边（如 completed→closed 同时有 close / acceptance_pass）时，
+  // 专用验收端点用 eventOverride='acceptance_pass' 钉死走验收边，通用路径仍按 from+to 解析。
+  opts?: { actor?: string; role?: string; fields?: Record<string, unknown>; eventOverride?: string },
 ): Promise<TransitionResult> {
   // 行锁：并发流转同一工单时串行化（A 提交释放锁后 B 才拿到锁，此时 cur.status 为最新），
   // 同时让下方"首次进入触发态"判定基于锁内权威快照，杜绝 READ COMMITTED 下双触发增量学习。
@@ -166,10 +169,23 @@ export async function transition(
   if (!isKnownState(def, cur.status) || !isKnownState(def, to)) {
     throw new AppError('CONFLICT', `unknown state: from=${cur.status} to=${to}`, 422);
   }
-  // 匹配具体 transition（含规则），拓扑非法直接 422
-  const tdef = def.transitions.find((t) => t.from === cur.status && t.to === to) ?? null;
+  // 匹配具体 transition（含规则），拓扑非法直接 422。
+  // 批次三纯加法：eventOverride 显式给定时按 from+event 解析（并校验其目标态与 to 一致，防重定向）；
+  // 未给定时保持原 from+to 解析行为逐行不变。
+  const tdef = opts?.eventOverride
+    ? def.transitions.find((t) => t.from === cur.status && t.event === opts.eventOverride) ?? null
+    : def.transitions.find((t) => t.from === cur.status && t.to === to) ?? null;
   if (!tdef) {
-    throw new AppError('CONFLICT', `illegal transition ${cur.status} -> ${to}`, 422);
+    throw new AppError(
+      'CONFLICT',
+      opts?.eventOverride
+        ? `illegal transition ${cur.status} --${opts.eventOverride}--> (event not found)`
+        : `illegal transition ${cur.status} -> ${to}`,
+      422,
+    );
+  }
+  if (opts?.eventOverride && tdef.to !== to) {
+    throw new AppError('CONFLICT', `event ${opts.eventOverride} leads to ${tdef.to}, not ${to}`, 422);
   }
   // A+ 角色门禁：allowedRoles 为空/未定义 = 放行（向后兼容，避免门死自己）；显式配置且不在其中 → 403
   const role = opts?.role;
@@ -276,17 +292,25 @@ export async function findOneForUpdate(
 export async function list(
   client: PoolClient,
   tenantId: string,
-  filter: { status?: WorkOrderStatus; assignee?: string; limit?: number; offset?: number },
+  // 批次三纯加法：unsettledOnly（可选）——过滤"未被任何结算单占用"的工单（结算页建单数据源）。
+  filter: { status?: WorkOrderStatus; assignee?: string; limit?: number; offset?: number; unsettledOnly?: boolean },
 ): Promise<{ items: WorkOrderRow[]; total: number }> {
   const conds = ['tenant_id = $1'];
   const params: unknown[] = [tenantId];
   if (filter.status) {
-    params.push(filter.status);
-    conds.push(`status = $${params.length}`);
+    // 批次三④：支持逗号分隔多态过滤（如 'completed,closed,evaluated'，结算向导数据源）；
+    // 单值时 = ANY(['x']) 与原 status = $n 语义等价，既有调用方零影响。
+    const statuses = filter.status.split(',').map((s) => s.trim()).filter(Boolean);
+    params.push(statuses);
+    conds.push(`status = ANY($${params.length}::text[])`);
   }
   if (filter.assignee) {
     params.push(filter.assignee);
     conds.push(`assignee_id = $${params.length}`);
+  }
+  // 一单终身一结算：settlement_item 以 UNIQUE(work_order_id) 占用，NOT EXISTS 即"未结算"
+  if (filter.unsettledOnly) {
+    conds.push('NOT EXISTS (SELECT 1 FROM settlement_item si WHERE si.work_order_id = work_orders.id)');
   }
   const where = conds.join(' AND ');
   const totalR = await client.query<{ c: string }>(

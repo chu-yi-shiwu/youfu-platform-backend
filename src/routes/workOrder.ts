@@ -27,6 +27,7 @@ import { availableTransitions, learningTriggerStates, autoRouteFor, shouldTrigge
 import { safeParseJsonb } from '../util/jsonb.js';
 import { validateIntake } from '../services/dataQuality.js';
 import { buildRecommend } from '../services/dispatchRecommend.js';
+import { assertAcceptanceBackdoorGuard } from '../services/acceptance.js'; // 批次三 Y3 防后门守卫
 
 const router = Router();
 
@@ -184,6 +185,9 @@ const createSchema = z.object({
 // 这样 C1 优化建议注入的 recheck / escalated 等新状态也能正常流转，无需改前端契约。
 // score 为可选满意度评分（评价完成时回写 satisfaction_score）。
 // .passthrough()：允许流转必填字段（return_reason/suspend_reason/close_reason/cancel_reason/assignee 等）透传校验。
+// 批次三（QA 修复②）：schema 不收 via——客户端自证 via='acceptance' 不可信（可绕过验收联动），
+// 通用端点对 acceptance_* 事件一律 403（守卫无条件，见下方 handler）；
+// 专用验收端点走 service 层（applyAcceptance）直调 transition()，不经本路由守卫，无功能损失。
 const transitionSchema = z.object({
   to: z.string().min(1),
   score: z.number().int().min(0).max(5).optional(),
@@ -284,7 +288,9 @@ router.post('/open/work_order', async (req, res, next) => {
 router.post('/open/work_order/:id/transition', async (req, res, next) => {
   try {
     const tenantId = res.locals.auth.tenantId;
-    const { to, score, ...rest } = transitionSchema.parse(req.body);
+    // 批次三（QA 修复②）：via 已从 schema 移除；显式丢弃 body 里的 via（防 passthrough 污染 fields/payload）
+    const { to, score, via: _ignoredVia, ...rest } = transitionSchema.parse(req.body);
+    void _ignoredVia;
     const role = res.locals.auth.role;
     // 必填字段透传（含满意度评分映射），供 transition() 做 A+ 必填校验
     const fields: Record<string, unknown> = { ...rest };
@@ -296,6 +302,10 @@ router.post('/open/work_order/:id/transition', async (req, res, next) => {
         role,
         fields,
       });
+      // 批次三 Y3 防后门（QA 修复②：无条件版）：验收事件只允许走专用验收端点。
+      // 通用 transition 端点只要触发 acceptance_* 事件 → 一律 403（不看任何客户端自证标记），
+      // 抛错令整个事务回滚（验收状态/凭证/事件全部不落库），堵"传 via 绕过验收联动"的后门路径。
+      assertAcceptanceBackdoorGuard(r.transition?.event);
       // A5 手动派单/改派通知（forward/dispatched 经通用 transition 触发）
       if (r.transition?.event === 'forward' || r.transition?.event === 'dispatch') {
         const newAssignee =
@@ -344,8 +354,10 @@ router.get('/open/work_orders', async (req, res, next) => {
     // P-3：limit/offset 强制上限，防止调用方拉取整表（DoS 面）。
     const limit = Math.min(Math.max(1, Math.floor(Number(req.query.limit) || 20)), 200);
     const offset = Math.max(0, Math.min(Math.floor(Number(req.query.offset) || 0), 10000));
+    // 批次三：unsettled=1 → 只返回未被任何结算单占用的工单（结算页"新建结算"数据源）
+    const unsettled = req.query.unsettled === '1' || req.query.unsettled === 'true';
     const data = await withTenantClient(tenantId, (client) =>
-      list(client, tenantId, { status, limit, offset, assignee }),
+      list(client, tenantId, { status, limit, offset, assignee, unsettledOnly: unsettled }),
     );
     // A+ Phase3：随列表下发每个工单"当前状态可执行的转移"（含必填/角色门禁），供 SPA 动态渲染动作按钮。
     const def = await withTenantClient(tenantId, (client) => getWorkflowDef(client, tenantId, 'work_order'));

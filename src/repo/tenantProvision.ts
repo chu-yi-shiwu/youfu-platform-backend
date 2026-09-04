@@ -13,6 +13,7 @@ import type { PoolClient } from 'pg';
 import crypto from 'node:crypto';
 import { hashPassword } from '../account.js';
 import { DEFAULT_WORK_ORDER_DEF } from '../engine/stateMachine.js';
+import { ensureAcceptanceEdges } from '../engine/acceptanceEdges.js'; // 批次三 卡4：验收边幂等注入
 import { ROLES, DEFAULT_PERM_MATRIX, type Role } from '../middleware/role.js';
 
 // 行业取值与 platform.ts 注册向导 category 枚举一致（z.enum 为事实源，此处保持同步）
@@ -104,7 +105,12 @@ export async function provisionNewTenantContent(
 
   // ② 业务流状态图：模板源有则 1:1 复制（行业流程一致）；无则落引擎默认 4 态
   //   （与 getWorkflowDef 运行时兜底同口径；显式落库让租户后台可直接可视化调流程）。
-  const wfDef = templateDef ?? DEFAULT_WORK_ORDER_DEF;
+  //   批次三 卡4：落库前幂等注入两条验收边（acceptance_pass / acceptance_reject，仅当不存在时），
+  //   新租户开通即具备「完工验收」能力；老租户走 POST /workflow-defs/:entityType/enable-acceptance 自愿升级。
+  const wfDefRaw = templateDef ?? DEFAULT_WORK_ORDER_DEF;
+  const wfDef = typeof wfDefRaw === 'string'
+    ? ensureAcceptanceEdges(JSON.parse(wfDefRaw) as import('../engine/stateMachine.js').WorkflowDef).def
+    : ensureAcceptanceEdges(wfDefRaw as import('../engine/stateMachine.js').WorkflowDef).def;
   if (templateDef) workflowDefSource = 'template';
   await client.query(
     `INSERT INTO workflow_def (tenant_id, entity_type, def, version) VALUES ($1, 'work_order', $2, 1)

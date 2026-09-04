@@ -38,7 +38,7 @@ export const KNOWN_V1_SEGMENTS: ReadonlySet<string> = new Set([
   'generate', 'generate-from-theme', 'health', 'inventory', 'items', 'jssdk-config',
   'materials', 'open', 'open-api-logs', 'optimize', 'orders', 'plans', 'points',
   'preview', 'process-mining', 'product-catalog', 'public', 'records', 'scan',
-  'service-desks', 'similar', 'sla', 'stats', 'summary', 'tasks',
+  'service-desks', 'settlements', 'similar', 'sla', 'stats', 'summary', 'tasks',
   'template-contributions', 'templates', 'tenant-info', 'tenants', 'themes',
   'tickets', 'upload', 'usage', 'webhooks', 'workers', 'workflow',
 ]);

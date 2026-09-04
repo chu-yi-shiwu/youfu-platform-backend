@@ -54,7 +54,12 @@ describe('provisionNewTenantContent（SaaS 前置开通补全护栏）', () => {
     // workflow_def 落库内容 = 模板源 def 原样
     const wfIns = calls.find((c) => c.text.includes("INSERT INTO workflow_def"))!;
     expect(wfIns.params![0]).toBe(NEW_T);
-    expect(JSON.parse(wfIns.params![1])).toEqual(richDef);
+    // 批次三：def 落库 = 模板源 def + 验收边幂等注入（模板原有结构保留）
+    const savedDef = JSON.parse(wfIns.params![1]);
+    expect(savedDef.initial).toBe(richDef.initial);
+    expect(savedDef.states).toEqual(expect.arrayContaining(richDef.states));
+    expect(savedDef.transitions.some((t: any) => t.event === 'acceptance_pass' && t.to === 'closed')).toBe(true);
+    expect(savedDef.transitions.some((t: any) => t.event === 'acceptance_reject' && t.to === 'processing')).toBe(true);
     // admin 账号：role=admin、密码是 scrypt 哈希（绝不存明文）
     const accIns = calls.find((c) => c.text.includes("INSERT INTO account_user"))!;
     expect(accIns.params![0]).toBe(NEW_T);
@@ -71,8 +76,11 @@ describe('provisionNewTenantContent（SaaS 前置开通补全护栏）', () => {
     expect(r.workflowDefSource).toBe('default');
     const wfIns = calls.find((c) => c.text.includes("INSERT INTO workflow_def"))!;
     const def = JSON.parse(wfIns.params![1]);
-    expect(def.states).toEqual(['draft', 'assigned', 'processing', 'completed']);
+    // 批次三：默认 4 态 + 注入验收边后的目标态 closed（幂等注入补态）
+    expect(def.states).toEqual(expect.arrayContaining(['draft', 'assigned', 'processing', 'completed']));
+    expect(def.states).toContain('closed');
     expect(def.config?.doneStates).toEqual(['completed']);
+    expect(def.transitions.some((t: any) => t.event === 'acceptance_pass')).toBe(true);
   });
 
   it('读上下文=模板源、写上下文=新租户（RLS SET LOCAL 收口断言）', async () => {

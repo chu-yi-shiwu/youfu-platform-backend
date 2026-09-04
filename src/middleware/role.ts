@@ -25,14 +25,19 @@ export const PERMS = [
   'inspect.execute',
   'asset.scan',
   'optimize.tune',
+  // 批次三 卡4：结算三凭证（读列表/详情/导出 = settlement.read；建/改/删/确认 = settlement.edit）
+  'settlement.read',
+  'settlement.edit',
 ] as const;
 export type Perm = (typeof PERMS)[number];
 
 // 默认权限矩阵（内置；租户可经 role_permission 表覆盖）。
 // 新角色按最小权限给默认：reviewer 审核工单（看板+工单）；service_desk 接线派单（+派单覆盖）。
+// 批次三：settlement.read（列表/详情/导出）默认 admin/operator；settlement.edit 仅 admin；
+// 其余角色不给结算权限点（未覆盖存量租户随默认矩阵自动生效，批次二已实证该机制）。
 export const DEFAULT_PERM_MATRIX: Record<Role, readonly Perm[]> = {
   admin: [...PERMS],
-  operator: ['dashboard.view', 'intake.create', 'ticket.manage', 'basicdata.edit', 'dispatch.override', 'inspect.execute', 'asset.scan'],
+  operator: ['dashboard.view', 'intake.create', 'ticket.manage', 'basicdata.edit', 'dispatch.override', 'inspect.execute', 'asset.scan', 'settlement.read'],
   dispatcher: ['dashboard.view', 'ticket.manage', 'dispatch.override', 'inspect.execute', 'asset.scan'],
   worker: ['inspect.execute', 'asset.scan'],
   reviewer: ['dashboard.view', 'ticket.manage'],

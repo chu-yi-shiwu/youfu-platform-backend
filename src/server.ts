@@ -44,6 +44,8 @@ import llmUsageRouter from './routes/llmUsage.js';
 import equipmentRouter from './routes/equipment.js';
 import uploadRouter from './routes/upload.js';// B0 文件上传（H5 拍照落库）
 import uploadsRouter from './routes/uploads.js';// R19-005 鉴权上传文件路由（替代零鉴权静态托管）
+import settlementRouter from './routes/settlement.js';// 注册制批次三 卡4：结算三凭证（/settlements）
+import acceptanceRouter from './routes/acceptance.js';// 注册制批次三 卡4：专用验收端点（/open/work_order/:id/acceptance）
 import platformRouter from './routes/platform.js';// 城市级平台层（E_min）
 import templateMarketRouter from './routes/templateMarket.js';// E2 模板市场（官方模板库/应用/效果）
 import openApiRouter from './routes/openApi.js';// E0_open 开放 API（app_key 认证）
@@ -190,6 +192,9 @@ app.use('/api/v1/ai', aiPreviewRouter);
 app.use('/api/v1/llm', llmUsageRouter);
 // B0 文件上传（H5 拍照落库）：挂在 /api/v1，自动过 authMiddleware 获得租户隔离。
 app.use('/api/v1', uploadRouter);
+// 注册制批次三 卡4：结算三凭证 + 专用验收端点（均挂 /api/v1，JWT 鉴权 + RLS 租户隔离）。
+app.use('/api/v1', settlementRouter);
+app.use('/api/v1', acceptanceRouter);
 
 // R19-005：以鉴权路由取代零鉴权 express.static（详见 routes/uploads.ts）。
 // 须注册在 SPA 兜底正则之前，否则 /uploads/* 会被 index.html 兜底吞掉；URL 形态保持不变。

@@ -6,8 +6,9 @@ import { z } from 'zod';
 import { withTenantClient } from '../db/pool.js';
 import { AppError } from '../middleware/error.js';
 import { requirePermission } from '../middleware/role.js';
-import { getWorkflowDef, saveWorkflowDef, getWorkflowDefVersion, listWorkflowDefHistory, getWorkflowDefHistoryVersion } from '../engine/workflowDef.js';
+import { getWorkflowDef, saveWorkflowDef, ensureWorkflowDef, getWorkflowDefVersion, listWorkflowDefHistory, getWorkflowDefHistoryVersion } from '../engine/workflowDef.js';
 import { THEME_TEMPLATES, themeLabel, type ThemeTemplate } from '../engine/themes.js';
+import { ensureAcceptanceEdges } from '../engine/acceptanceEdges.js'; // 批次三：验收边幂等注入
 import type { WorkflowDef } from '../engine/stateMachine.js';
 
 const router = Router();
@@ -120,6 +121,46 @@ router.post('/generate-from-theme', async (req, res, next) => {
       });
     });
     return res.json({ ok: true, code: 0, entityType, name: tpl.name });
+  } catch (e) {
+    next(e);
+  }
+});
+
+// ============ 批次三 卡4：老租户自愿升级——给 work_order def 追加验收边 ============
+// POST /api/v1/workflow-defs/:entityType/enable-acceptance（admin only）
+// 幂等：两条验收边已存在则 added=0 直接 ok；否则追加边（含目标态补入）并写历史快照
+// （saveWorkflowDef 内置「旧版→workflow_def_history」append-only 快照，reason='enable-acceptance'）。
+router.post('/:entityType/enable-acceptance', async (req, res, next) => {
+  try {
+    const auth = res.locals.auth;
+    const tenantId = auth.tenantId;
+    const { entityType } = req.params;
+    if (!/^[a-z][a-z0-9_]*$/.test(entityType)) throw new AppError('BAD_PARAM', 'bad entityType', 400);
+    // admin only（dev 模式放行本地联调，与 requirePermission 同语义）
+    if (auth.authMode !== 'dev' && auth.role !== 'admin') {
+      throw new AppError('FORBIDDEN', 'only admin can enable acceptance edges', 403);
+    }
+    const result = await withTenantClient(tenantId, async (client) => {
+      await requirePermission(auth, client, 'workflow.edit');
+      // 无 def 行的租户先落引擎默认图（显式落库后再注入，保证升级可追溯）
+      const cur = await ensureWorkflowDef(client, tenantId, entityType);
+      const { def, added } = ensureAcceptanceEdges(cur);
+      if (added.length > 0) {
+        await saveWorkflowDef(client, tenantId, entityType, def, {
+          operator: auth.username,
+          reason: 'enable-acceptance',
+        });
+      }
+      return { added };
+    });
+    return res.json({
+      ok: true,
+      code: 0,
+      entityType,
+      added_count: result.added.length,
+      added_edges: result.added,
+      version: 'incremented-if-changed',
+    });
   } catch (e) {
     next(e);
   }
