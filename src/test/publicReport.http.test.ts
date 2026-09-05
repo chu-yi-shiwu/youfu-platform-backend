@@ -121,6 +121,9 @@ describe('POST /public/repair-report（免登录报修主流程）', () => {
     expect(arg.source).toBe('public_report');
     expect(arg.ext.consent).toBe(true);
     expect(arg.ext.retention.days).toBeGreaterThan(0);
+    // #935 拆分后跨模块契约：route 生成的 view_token（64 hex）必须落进 createWithIdem 的 ext
+    //（幂等重放回原 token 的前提——落库与响应同源；曾用变异 '' 验证此断言可抓）
+    expect(arg.ext.public_view_token).toMatch(/^[0-9a-f]{48}$/); // crypto.randomBytes(24).hex = 48 字符
     
     expect(arg.ext.inferred.category).toBe('空调');
   });
