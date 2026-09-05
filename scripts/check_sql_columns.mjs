@@ -316,8 +316,26 @@ console.log(
     `扫描 src 文件=${scanned}（无 SQL 跳过 ${skippedFiles}）；校验列引用=${colChecks}；` +
     `动态列（模板拼装，未静态校验）=${dynamicColTotal}；basicData 类型=${declared.size}`,
 );
+// 未知表豁免清单（2026-09-06 盲区收敛）：清单内的表允许"迁移中无 DDL"静默跳过，每项必须给理由；
+// 清单外的未知表一律 FAIL——防未来的视图/CTE/动态表名悄悄绕过列契约校验（openapiCoverage 同款门禁模式）。
+const KNOWN_SKIPPED_TABLES = new Map([
+  // _migrations：迁移登记工具表，由初始化通道建立且 DDL 不在业务迁移文件中，列引用均为静态字面量。
+  ['_migrations', '迁移登记工具表，DDL 不在业务迁移文件中，由初始化通道建立'],
+]);
 if (skippedTables.size > 0) {
-  console.log(`[check_sql_columns] 未校验（迁移中无该表，视为视图/CTE/动态表名）：${[...skippedTables].sort().join(', ')}`);
+  const unknown = [...skippedTables].filter((t) => !KNOWN_SKIPPED_TABLES.has(t));
+  const exempted = [...skippedTables].filter((t) => KNOWN_SKIPPED_TABLES.has(t));
+  if (exempted.length > 0) {
+    console.log(
+      `[check_sql_columns] 豁免未校验（在清单内，理由见脚本）：${exempted.sort().join(', ')}`,
+    );
+  }
+  if (unknown.length > 0) {
+    problems.push(
+      `未知表无法校验列契约（不在豁免清单）：${unknown.sort().join(', ')}——` +
+        `如是视图/CTE/动态表名，请在 KNOWN_SKIPPED_TABLES 登记并注明理由`,
+    );
+  }
 }
 if (problems.length > 0) {
   console.error(`[check_sql_columns] FAIL —— ${problems.length} 处列漂移：`);
