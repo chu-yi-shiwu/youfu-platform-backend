@@ -97,6 +97,11 @@ function acceptanceHandlers(orderStatus: string, opts?: { slaMinutes?: number | 
     { match: (t: string) => t.includes('UPDATE worker SET load'), reply: () => ({ rows: [], rowCount: 1 }) },
     { match: (t: string) => t.includes('DELETE FROM settlement_item') && t.includes('RETURNING'), reply: () => ({ rows: [{ settlement_id: 'st-1' }], rowCount: 1 }) },
     { match: (t: string) => t.includes('DELETE FROM settlement s'), reply: () => ({ rows: [], rowCount: 1 }) },
+    // QA🟡1：reject 清明细后对仍有剩余明细的草稿单重算表头（recalcHeader 三条 SQL 必须被覆盖，
+    // 否则 strict 收口炸 / 非 strict 兜底空行使 agg.rows[0] 直接 TypeError）
+    { match: (t: string) => t.includes('COALESCE(SUM(amount)') && t.includes('FROM settlement_item'), reply: () => ({ rows: [{ total: '88.00', c: 1 }] }) },
+    { match: (t: string) => t.includes('UPDATE settlement SET total'), reply: () => ({ rows: [], rowCount: 1 }) },
+    { match: (t: string) => t.startsWith('SELECT * FROM settlement WHERE id = $1'), reply: (_t: string, p: any[]) => ({ rows: [{ id: p[0], status: 'draft', item_count: 1 }] }) },
     { match: (t: string) => t.includes('sla_due_at = NULL'), reply: () => ({ rows: [], rowCount: 1 }) },
     { match: (t: string) => t.includes("sla_due_at = now() + ($3::int * interval '1 minute')"), reply: () => ({ rows: [], rowCount: 1 }) },
   ];

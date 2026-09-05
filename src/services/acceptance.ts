@@ -12,6 +12,7 @@
 import type { PoolClient } from 'pg';
 import { AppError } from '../middleware/error.js';
 import { transition } from '../repo/ticket.js';
+import { recalcHeader } from '../repo/settlement.js';
 import { getWorkflowDef } from '../engine/workflowDef.js';
 import { ACCEPTANCE_EVENT_PREFIX, hasAcceptanceEdges } from '../engine/acceptanceEdges.js';
 import type { WorkOrderStatus, WorkflowDef } from '../engine/stateMachine.js';
@@ -134,14 +135,24 @@ export async function applyAcceptance(
     const affectedIds: string[] = Array.from(new Set(removed.rows.map((r: any) => r.settlement_id)));
     // 仅当这些草稿单明细已清空时删除单头（confirmed 单不受影响）
     if (affectedIds.length > 0) {
-      await client.query(
+      const delHeader = await client.query(
         `DELETE FROM settlement s
          WHERE s.tenant_id = $1
            AND s.status = 'draft'
            AND s.id = ANY($2::uuid[])
-           AND NOT EXISTS (SELECT 1 FROM settlement_item si WHERE si.settlement_id = s.id)`,
+           AND NOT EXISTS (SELECT 1 FROM settlement_item si WHERE si.settlement_id = s.id)
+         RETURNING s.id`,
         [tenantId, affectedIds],
       );
+      const emptiedIds = new Set<string>(delHeader.rows.map((r: any) => r.id));
+      // QA🟡1：部分清空的草稿单（还有剩余明细）DELETE 不动它，但其表头 total/item_count
+      // 仍按打回前的明细汇总——不重算的话，管理员确认锁定后将出现「表头总额 ≠ 明细合计」
+      // 的账实不符。对未被删除的受影响单逐个重算表头（复用既有事务 client，不开新连接）。
+      for (const sid of affectedIds) {
+        if (!emptiedIds.has(sid)) {
+          await recalcHeader(client, tenantId, sid);
+        }
+      }
     }
     // ⑤ SLA 重置（架构🟡7）：原实现一律置 NULL = 永久取消 SLA，污染超时率统计口径。
     // 现按建单口径重算：有 sla_minutes 则 now() + sla_minutes 分钟（与 workOrder.ts 建单时

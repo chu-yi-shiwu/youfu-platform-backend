@@ -64,6 +64,8 @@ interface AccHandlersOpts {
   def?: WorkflowDef;
   /** DELETE settlement_item ... RETURNING 的返回行（settlement_id 列表） */
   removedSettlementIds?: string[];
+  /** DELETE settlement s ... RETURNING s.id 的返回行（被整单清空后删掉单头的 settlement_id） */
+  emptiedSettlementIds?: string[];
   slaMinutes?: number | null;
 }
 
@@ -71,6 +73,7 @@ function acceptanceHandlers(opts: AccHandlersOpts = {}): Handler[] {
   const status = opts.status ?? 'completed';
   const def = opts.def ?? RICH_WITH_ACCEPTANCE;
   const removed = opts.removedSettlementIds ?? ['st-1'];
+  const emptied = opts.emptiedSettlementIds ?? [];
   const slaMinutes = opts.slaMinutes === undefined ? 60 : opts.slaMinutes;
   return [
     // ① applyAcceptance 行锁读工单（带 sla_minutes，与 transition 的 SELECT * 区分开）
@@ -98,7 +101,17 @@ function acceptanceHandlers(opts: AccHandlersOpts = {}): Handler[] {
       match: (t) => t.includes('DELETE FROM settlement_item') && t.includes('RETURNING'),
       reply: () => ({ rows: removed.map((id) => ({ settlement_id: id })), rowCount: removed.length }),
     },
-    { match: (t) => t.includes('DELETE FROM settlement s'), reply: () => ({ rows: [], rowCount: 1 }) },
+    {
+      match: (t) => t.includes('DELETE FROM settlement s'),
+      reply: () => ({ rows: emptied.map((id) => ({ id })), rowCount: emptied.length }),
+    },
+    // recalcHeader（QA🟡1）：重算剩余明细所在草稿单的表头 total/item_count
+    {
+      match: (t) => t.includes('COALESCE(SUM(amount)') && t.includes('FROM settlement_item'),
+      reply: () => ({ rows: [{ total: '88.00', c: 1 }] }),
+    },
+    { match: (t) => t.includes('UPDATE settlement SET total'), reply: () => ({ rows: [], rowCount: 1 }) },
+    { match: (t) => t.startsWith('SELECT * FROM settlement WHERE id = $1'), reply: (_t, p) => ({ rows: [{ id: p[0], status: 'draft', item_count: 1 }] }) },
     { match: (t) => t.includes('sla_due_at = NULL'), reply: () => ({ rows: [], rowCount: 1 }) },
     { match: (t) => t.includes("sla_due_at = now() + ($3::int * interval '1 minute')"), reply: () => ({ rows: [], rowCount: 1 }) },
   ];
@@ -321,5 +334,51 @@ describe('③ reject 联动 SQL 序列（架构🔴5：只清本次受影响的�
     h.client = mk.client;
     await accept({ result: 'reject' });
     expect(mk.calls.some((c) => c.text.includes('sla_due_at = NULL'))).toBe(true);
+  });
+
+  // QA🟡1：部分清空的草稿单表头 total/item_count 必须重算——否则管理员确认锁定后
+  // 「表头总额 ≠ 明细合计」，账实不符。
+  it('部分清空（仍剩明细）→ 对剩余明细所在的 settlement_id 重算表头 total/item_count', async () => {
+    // st-1 整单清空被删单头；st-2 还剩其他明细 → 表头必须重算
+    const mk = makeClient(
+      acceptanceHandlers({ removedSettlementIds: ['st-1', 'st-2'], emptiedSettlementIds: ['st-1'] }),
+      { strict: true },
+    );
+    h.client = mk.client;
+    const r = await accept({ result: 'reject' });
+    expect(r.status).toBe(200);
+    const recalcs = mk.calls.filter((c) => c.text.includes('UPDATE settlement SET total'));
+    expect(recalcs, '未对剩余明细的草稿单重算表头').toBeTruthy();
+    // 只重算未被删除的 st-2（被清空删除的 st-1 不应重算）
+    expect(recalcs.map((c) => c.params?.[2])).toEqual(['st-2']);
+    // 重算 SQL 必须限定租户（多租户隔离），且参数顺序 [total, item_count, settlementId, tenantId]
+    expect(recalcs[0].text).toContain('tenant_id');
+    expect(recalcs[0].params?.[3]).toBe(T);
+    // 重算必须发生在单头清理之后（同一事务内先删后算）
+    const idxDelHeader = mk.calls.findIndex((c) => c.text.includes('DELETE FROM settlement s'));
+    const idxRecalc = mk.calls.findIndex((c) => c.text.includes('UPDATE settlement SET total'));
+    expect(idxDelHeader).toBeGreaterThanOrEqual(0);
+    expect(idxRecalc).toBeGreaterThan(idxDelHeader);
+    // 重算前应先汇总剩余明细（COALESCE(SUM(amount) ...）
+    const idxAgg = mk.calls.findIndex((c) => c.text.includes('COALESCE(SUM(amount)'));
+    expect(idxAgg).toBeGreaterThanOrEqual(0);
+    expect(idxAgg).toBeLessThan(idxRecalc);
+  });
+
+  it('整单清空 → 草稿单头仍被删除且不触发表头重算（既有语义不回归）', async () => {
+    const mk = makeClient(
+      acceptanceHandlers({ removedSettlementIds: ['st-1'], emptiedSettlementIds: ['st-1'] }),
+      { strict: true },
+    );
+    h.client = mk.client;
+    const r = await accept({ result: 'reject' });
+    expect(r.status).toBe(200);
+    const delHeader = mk.calls.find((c) => c.text.includes('DELETE FROM settlement s'))!;
+    expect(delHeader, '整单清空时草稿单头必须仍被删除').toBeTruthy();
+    expect(delHeader.text).toContain('ANY($2');
+    expect(delHeader.text).toContain('RETURNING s.id');
+    expect(delHeader.params?.[1]).toEqual(['st-1']);
+    // 单头已删，无剩余明细可算 → 不得出现重算语句
+    expect(mk.calls.some((c) => c.text.includes('UPDATE settlement SET total'))).toBe(false);
   });
 });

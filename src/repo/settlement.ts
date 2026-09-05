@@ -311,7 +311,7 @@ export async function confirmSettlement(
 }
 
 /** 汇总重算表头 total/item_count（改/删明细后调用），返回最新表头。 */
-async function recalcHeader(client: PoolClient, tenantId: string, settlementId: string): Promise<SettlementRow> {
+export async function recalcHeader(client: PoolClient, tenantId: string, settlementId: string): Promise<SettlementRow> {
   const agg = await client.query(
     `SELECT COALESCE(SUM(amount), 0)::numeric(12,2) AS total, COUNT(*)::int AS c
      FROM settlement_item WHERE settlement_id = $1 AND tenant_id = $2`,
