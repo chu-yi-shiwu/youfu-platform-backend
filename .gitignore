@@ -25,3 +25,4 @@ retrain_now.mjs
 a1_dispatch_rules.sql
 tools/coverageAudit.mjs
 tools/routeContract.mjs
+_coverage_stale/
