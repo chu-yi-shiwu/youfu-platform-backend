@@ -11,6 +11,14 @@ import { parseCsv, csvEscape } from '../services/csvUtil.js';
 
 const router = Router();
 
+/**
+ * CSV 单次导入的数据行硬上限（QA🟡9）。
+ * 导入是「单事务 + 逐行 INSERT + 全程持连接」，行数无上限时会长时间占用连接与行锁
+ * （N 行 = N 次往返），大文件足以把连接池拖干。超限一律 400 请调用方拆分分批，
+ * 不静默截断（静默截断会让用户以为导全了，实则丢数据）。
+ */
+const CSV_IMPORT_MAX_ROWS = 2000;
+
 type FieldDef = { key: string; label: string };
 type TypeDef = {
   table: string;
@@ -437,9 +445,49 @@ router.post('/basic-data/:type/import', async (req, res, next) => {
     if (rows.length < 2) return res.json({ ok: true, code: 0, inserted: 0 });
     const headers = rows[0].map((h) => h.trim());
     const dataRows = rows.slice(1);
+    // QA🟡9①：行数上限（见 CSV_IMPORT_MAX_ROWS 注释）——超限直接 400，不静默截断。
+    if (dataRows.length > CSV_IMPORT_MAX_ROWS) {
+      throw new AppError(
+        'BAD_INPUT',
+        `CSV 数据行 ${dataRows.length} 行，超过单次导入上限 ${CSV_IMPORT_MAX_ROWS} 行，请拆分后分批导入`,
+        400,
+      );
+    }
+    // QA🟡9②：唯一码预检（仅对声明 uniqueCode 的字典，与 POST 建档同口径）。
+    // 先做「CSV 内自撞」，再做「与库内撞码」——撞码一律前置为 409，
+    // 否则中途撞 DB 唯一索引会抛 23505 把整个事务打成 aborted，错误信息还是 PG 方言。
+    const codeIdx = def.uniqueCode ? headers.indexOf('code') : -1;
+    const codeLines = new Map<string, number[]>(); // code → 出现过的 CSV 行号（表头算第 1 行）
+    if (codeIdx >= 0) {
+      dataRows.forEach((r, i) => {
+        const raw = String(r[codeIdx] ?? '').trim();
+        if (!raw) return; // 无编号的行不参与撞码（后续按 !obj.name 跳过）
+        const lines = codeLines.get(raw) ?? [];
+        lines.push(i + 2);
+        codeLines.set(raw, lines);
+      });
+      const selfDup = [...codeLines.entries()].filter(([, lines]) => lines.length > 1);
+      if (selfDup.length > 0) {
+        throw new AppError(
+          'CONFLICT',
+          `CSV 内部编号重复：${selfDup.slice(0, 5).map(([c, lines]) => `${c}（第 ${lines.join('、')} 行）`).join('；')}`,
+          409,
+        );
+      }
+    }
     let inserted = 0;
     await withTenantClient(tenantId, async (client) => {
       await requirePermission(auth, client, 'basicdata.edit');
+      if (codeLines.size > 0) {
+        const dup = await client.query(
+          `SELECT code FROM ${def.table} WHERE tenant_id=$1 AND code = ANY($2::text[])`,
+          [tenantId, [...codeLines.keys()]],
+        );
+        if (dup.rowCount && dup.rowCount > 0) {
+          const hit = dup.rows.slice(0, 10).map((r: { code: string }) => r.code).join('、');
+          throw new AppError('CONFLICT', `以下编号已存在，无法导入：${hit}`, 409);
+        }
+      }
       for (const r of dataRows) {
         const obj: Record<string, unknown> = {};
         headers.forEach((h, i) => {

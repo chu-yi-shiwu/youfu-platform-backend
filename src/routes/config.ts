@@ -5,15 +5,13 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { withTenantClient } from '../db/pool.js';
 import { AppError } from '../middleware/error.js';
+// 审查修复（架构🟡12）：requireConfigRole 曾在 role.ts 与 config.ts 各实现一份（双份角色白名单，
+// 改一处漏一处）。统一 re-export role.ts 的唯一实现，调用点零改动。
+import { requireConfigRole, assertAdmin } from '../middleware/role.js';
 
 const router = Router();
 
-export function requireConfigRole(_req: unknown, res: any): void {
-  const role = res.locals.auth.role;
-  if (role !== 'admin' && role !== 'operator') {
-    throw new AppError('FORBIDDEN', 'only admin/operator can manage config', 403);
-  }
-}
+export { requireConfigRole };
 
 // ============ dispatch_rule ============
 const ruleSchema = z.object({
@@ -249,10 +247,8 @@ router.get('/config/system', async (req, res, next) => {
   try {
     // R38-R3-F1 修复：系统配置（key/value）此前 GET 无守卫，operator/reporter 均可读。
     // 前端零调用此端点，收紧为 admin-only；写入侧本就有 requireConfigRole。
-    const role = res.locals.auth.role;
-    if (role !== 'admin') {
-      throw new AppError('FORBIDDEN', 'admin only', 403);
-    }
+    // 审查修复（架构🟡12）：admin 判定改引 role.ts 的 assertAdmin（ROLE_RANK 单一事实源）。
+    assertAdmin(res.locals.auth, 'admin only');
     const tenantId = res.locals.auth.tenantId;
     const items = await withTenantClient(tenantId, (client) =>
       client

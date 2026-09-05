@@ -59,12 +59,23 @@ export async function createSettlementDraft(
   workOrderIds: string[],
   operator?: string,
 ): Promise<SettlementDraftResult> {
+  // ⓪ 入参去重（QA🟡3）：同一单传两次会自己撞自己的 UNIQUE(work_order_id) → 明确 400 而非 500/谜之冲突
+  const dupIds = Array.from(
+    new Set(workOrderIds.filter((x, i) => workOrderIds.indexOf(x) !== i)),
+  );
+  if (dupIds.length > 0) {
+    throw new AppError('BAD_REQUEST', `work_order_ids 存在重复：${dupIds.join('、')}`, 400);
+  }
   // ① 逐单校验：租户内存在 + 状态可入账 + 未被任何结算单占用（UNIQUE(work_order_id) 语义）
   // work_order_id 为 text 业务号（001 主键），cast 用 text[] 而非 uuid[]（live 修复：uuid cast 对业务号 22P02）
+  // QA🟡3：加 FOR UPDATE 行锁——先 SELECT 判占用再 INSERT 存在 TOCTOU 窗口（并发建单双双通过校验），
+  // 锁住工单行让同单的并发建结算串行化（锁在调用方事务内，COMMIT/ROLLBACK 即释放）。
   const found = await client.query(
     `SELECT id, order_no, status, catalog AS category FROM work_orders
      -- live 修复（#927）：work_orders 的分类列实名是 catalog（001_init.sql:28），别名 category 供预填复用
-     WHERE tenant_id = $1 AND id = ANY($2::text[])`,
+     WHERE tenant_id = $1 AND id = ANY($2::text[])
+     ORDER BY id
+     FOR UPDATE`,
     [tenantId, workOrderIds],
   );
   const foundMap = new Map<string, { order_no: string; status: string; category: string | null }>(
@@ -105,9 +116,10 @@ export async function createSettlementDraft(
     await client.query('SAVEPOINT st_no_retry');
     try {
       const ins = await client.query(
-        `INSERT INTO settlement (tenant_id, settlement_no, status, total, item_count)
-         VALUES ($1, $2, 'draft', 0, 0) RETURNING id`,
-        [tenantId, settlementNo],
+        // created_by：创建人留痕（072 增列；此前 operator 参数被 void 丢弃，QA 已指出）
+        `INSERT INTO settlement (tenant_id, settlement_no, status, total, item_count, created_by)
+         VALUES ($1, $2, 'draft', 0, 0, $3) RETURNING id`,
+        [tenantId, settlementNo, operator ?? null],
       );
       await client.query('RELEASE SAVEPOINT st_no_retry');
       headerId = ins.rows[0].id;
@@ -126,41 +138,77 @@ export async function createSettlementDraft(
     throw new AppError('CONFLICT', `结算单号生成冲突（当日重试 3 次失败）：${settlementNo}`, 409);
   }
 
-  // ③ 明细预填：按工单 category 匹配 product_catalog（code 或 name 相等），命中快照，未命中 price=0 + note 提示
+  // ③ 明细预填（架构🔴3 批量化）：
+  //    改前为「循环内逐单 SELECT product_catalog + 逐单 INSERT」，200 单 = 400 次往返且全程持事务；
+  //    现改为 ①一次查回本批全部价目建 Map ②一条 unnest 多行 INSERT。
+  //    语义与改前逐条等价：命中快照（code 优先、其次 name）；未命中 price=0 + note='价目未匹配，请手填'；qty 默认 1；amount=price*qty。
+  const catValues = Array.from(
+    new Set(
+      workOrderIds
+        .map((id) => foundMap.get(id)?.category)
+        .filter((c): c is string => typeof c === 'string' && c.length > 0),
+    ),
+  );
+  const byCode = new Map<string, { code: string; name: string; price: number }>();
+  const byName = new Map<string, { code: string; name: string; price: number }>();
+  if (catValues.length > 0) {
+    const catRows = await client.query(
+      `SELECT code, name, price FROM product_catalog
+       WHERE tenant_id = $1 AND enabled = true
+         AND (code = ANY($2::text[]) OR name = ANY($2::text[]))`,
+      [tenantId, catValues],
+    );
+    for (const r of catRows.rows) {
+      const row = { code: String(r.code), name: String(r.name), price: Number(r.price) || 0 };
+      if (catValues.includes(row.code) && !byCode.has(row.code)) byCode.set(row.code, row);
+      if (catValues.includes(row.name) && !byName.has(row.name)) byName.set(row.name, row);
+    }
+  }
+
+  const woIds: string[] = [];
+  const catCodes: Array<string | null> = [];
+  const catNames: Array<string | null> = [];
+  const prices: number[] = [];
+  const qtys: number[] = [];
+  const amounts: number[] = [];
+  const notes: Array<string | null> = [];
   let total = 0;
   let itemCount = 0;
   for (const id of workOrderIds) {
     const wo = foundMap.get(id)!;
-    let price = 0;
-    let categoryCode: string | null = null;
-    let categoryName: string | null = null;
-    let itemNote: string | null = null;
-    if (wo.category) {
-      const cat = await client.query(
-        `SELECT code, name, price FROM product_catalog
-         WHERE tenant_id = $1 AND enabled = true AND (code = $2 OR name = $2)
-         LIMIT 1`,
-        [tenantId, wo.category],
-      );
-      if (cat.rows.length > 0) {
-        categoryCode = cat.rows[0].code;
-        categoryName = cat.rows[0].name;
-        price = Number(cat.rows[0].price) || 0;
-      } else {
-        itemNote = '价目未匹配，请手填';
-      }
-    } else {
-      itemNote = '价目未匹配，请手填';
-    }
+    const hit = wo.category ? (byCode.get(wo.category) ?? byName.get(wo.category) ?? null) : null;
+    const price = hit ? hit.price : 0;
+    const itemNote = hit ? null : '价目未匹配，请手填';
     const qty = 1;
     const amount = Math.round(price * qty * 100) / 100;
-    await client.query(
-      `INSERT INTO settlement_item (tenant_id, settlement_id, work_order_id, category_code, category_name, price, qty, amount, note)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-      [tenantId, headerId, id, categoryCode, categoryName, price, qty, amount, itemNote],
-    );
+    woIds.push(id);
+    catCodes.push(hit?.code ?? null);
+    catNames.push(hit?.name ?? null);
+    prices.push(price);
+    qtys.push(qty);
+    amounts.push(amount);
+    notes.push(itemNote);
     total = Math.round((total + amount) * 100) / 100;
     itemCount += 1;
+  }
+
+  if (woIds.length > 0) {
+    try {
+      await client.query(
+        `INSERT INTO settlement_item
+           (tenant_id, settlement_id, work_order_id, category_code, category_name, price, qty, amount, note)
+         SELECT $1, $2, t.wo_id, t.cat_code, t.cat_name, t.price, t.qty, t.amount, t.note
+         FROM unnest($3::text[], $4::text[], $5::text[], $6::numeric[], $7::numeric[], $8::numeric[], $9::text[])
+              AS t(wo_id, cat_code, cat_name, price, qty, amount, note)`,
+        [tenantId, headerId, woIds, catCodes, catNames, prices, qtys, amounts, notes],
+      );
+    } catch (e: any) {
+      // QA🟡3：并发兜底——已有行锁但仍撞 UNIQUE(work_order_id) 时，转成与 conflicts 同口径的 409
+      if (e?.code === '23505') {
+        throw new AppError('CONFLICT', '工单已被其他结算单占用（并发冲突），请刷新后重试', 409);
+      }
+      throw e;
+    }
   }
 
   // ④ 表头汇总
@@ -172,7 +220,6 @@ export async function createSettlementDraft(
     'SELECT * FROM settlement WHERE id = $1 AND tenant_id = $2',
     [headerId, tenantId],
   );
-  void operator;
   return { ok: true, settlement: header.rows[0] as SettlementRow };
 }
 

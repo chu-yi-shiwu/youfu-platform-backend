@@ -1,6 +1,6 @@
 // ⑦P0 过程挖掘看板 —— API 路由（飞轮"眼睛"数据接口）。
 // GET /api/v1/process-mining?entityType=work_order&days=30&limit=50000
-// 复用 withTenantClient（SET LOCAL app.tenant_id + SET ROLE youfu_app → RLS 生效）。
+// 复用 withTenantClient（SET LOCAL app.tenant_id + SET LOCAL ROLE youfu_app → RLS 生效）。
 import { Router } from 'express';
 import { withTenantClient } from '../db/pool.js';
 import { processMining } from '../repo/processMining.js';

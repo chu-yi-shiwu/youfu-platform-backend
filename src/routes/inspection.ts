@@ -965,7 +965,10 @@ router.get('/export', async (req, res, next) => {
     });
     const csv = '﻿' + [header.join(','), ...lines].join('\r\n');
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
-    res.setHeader('Content-Disposition', `attachment; filename="inspection_report_${month || 'all'}.csv"`);
+    // 审查修复（QA🟡9）：month 直接来自查询参数，拼进 Content-Disposition 可被注入
+    // （如塞入 CRLF / 额外 header 字段）。白名单校验：只接受 YYYY-MM，否则回落 'all'。
+    const safeMonth = /^\d{4}-\d{2}$/.test(month) ? month : 'all';
+    res.setHeader('Content-Disposition', `attachment; filename="inspection_report_${safeMonth}.csv"`);
     return res.send(csv);
   } catch (e) {
     next(e);

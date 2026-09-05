@@ -4,6 +4,9 @@
 //   3) 迁移幂等静态检查：每个 NNN_*.sql 必须含 IF NOT EXISTS / ON CONFLICT / DROP POLICY IF EXISTS 等幂等保护
 //   4) RLS 策略存在性扫描：所有含 tenant_id 的租户表必须启用 ROW LEVEL SECURITY 且有租户隔离策略
 //      （铁底线静态卡点：漏配 RLS 的租户表在合并前即被拦下，配合每日自动化 ECS 实读形成双层防护）
+//   5) SQL 列契约门：源码 SQL 列引用 ↔ 迁移 DDL 全仓比对（scripts/check_sql_columns.mjs）
+//      （批次三两起 live 事故的根因防线：071 uuid/text 类型错配 + category/catalog 列名漂移，
+//        556 个 mock 全绿照样漏，只有静态契约门能提前拦下）
 // 全部通过 exit 0；任一失败 exit 1。
 //
 // 注：ECS 仅 Node16，无法跑新版 vitest；本闸门在本地 Node22 环境执行（与单测/构建同环境）。
@@ -38,7 +41,7 @@ const noVitest = process.argv.includes('--no-vitest');
 const runVitest = forceVitest || (!noVitest && Boolean(process.stdout.isTTY));
 
 // 1) vitest 全绿
-console.log('[1/4] vitest run' + (runVitest ? '' : '（非 TTY 跳过，单独跑 `npm test` 或加 --force-vitest）'));
+console.log('[1/5] vitest run' + (runVitest ? '' : '（非 TTY 跳过，单独跑 `npm test` 或加 --force-vitest）'));
 if (runVitest) {
   try {
     execSync('npx --no-install vitest run', { cwd: root, stdio: 'inherit' });
@@ -55,7 +58,7 @@ if (runVitest) {
 //    数字(limit/offset)、参数化 where、SET LOCAL/SET ROLE 等无法 $1 参数化的 admin 命令、
 //    参数编号(params.length)/对象字段(cur.status/to)等内部变量。
 //    非安全非风险表达式仅输出"待复核"提示，不阻断闸门（避免误杀）。
-console.log('[2/4] SQL 注入静态扫描');
+console.log('[2/5] SQL 注入静态扫描');
 let hits = 0;
 const SAFE_EXPR = /\.(join|replace|slice|toUpperCase|toFixed)\(|^((limit|offset|where|clauses|sets|safeTenant|col|status|category|name|pinyin|low|id|params|code|key|norm|parsed|asset_no|cur|to|length))$|\./i;
 const RISK_EXPR = /req\s*\.?/i;
@@ -91,7 +94,7 @@ if (hits === 0) pass('未发现 SQL 注入风险（仅允许白名单列拼接/�
 else fail(`${hits} 处 SQL 注入风险`);
 
 // 3) 迁移幂等静态检查
-console.log('[3/4] 迁移幂等检查');
+console.log('[3/5] 迁移幂等检查');
 let nonIdem = 0;
 for (const f of readdirSync(root).filter((x) => /^\d+_.*\.sql$/.test(x))) {
   const sql = readFileSync(join(root, f), 'utf8');
@@ -102,7 +105,10 @@ for (const f of readdirSync(root).filter((x) => /^\d+_.*\.sql$/.test(x))) {
     /DROP CONSTRAINT IF EXISTS/i.test(sql) || // ALTER TABLE x DROP CONSTRAINT IF EXISTS（062/063 幂等写法）
     /ADD COLUMN IF NOT EXISTS/i.test(sql) ||
     /CREATE OR REPLACE/i.test(sql) || // CREATE OR REPLACE FUNCTION/PROCEDURE/VIEW 本身可重跑，幂等
-    /DROP FUNCTION IF EXISTS/i.test(sql);
+    /DROP FUNCTION IF EXISTS/i.test(sql) ||
+    // DO $$ 匿名块 + 块内条件跳过（070 写法：先比对目标定义，一致则 RAISE NOTICE 跳过，
+    // 不一致才删旧建新；终态收敛、可重跑）。QA 实测 070 连跑两次第二次 NOTICE 跳过。
+    /DO\s+\$\$[\s\S]*?IF[\s\S]*?THEN[\s\S]*?\$\$;\s*$/i.test(sql.trim());
   if (!guarded) {
     console.error(`  非幂等迁移 ${f}（缺 IF NOT EXISTS / ON CONFLICT 等幂等保护）`);
     nonIdem++;
@@ -112,7 +118,7 @@ if (nonIdem === 0) pass('所有迁移含幂等保护');
 else fail(`${nonIdem} 个迁移缺幂等保护`);
 
 // 4) RLS 策略存在性扫描：所有含 tenant_id 的租户表必须启用 RLS 且有租户隔离策略
-console.log('[4/4] RLS 策略存在性扫描');
+console.log('[4/5] RLS 策略存在性扫描');
 // 提取 CREATE TABLE 的表名与列定义体（括号配对，忽略列默认值里的函数括号）
 function createTableBodies(sql: string): { name: string; body: string }[] {
   const out: { name: string; body: string }[] = [];
@@ -176,6 +182,15 @@ for (const t of [...tenantTables].sort()) {
 }
 if (rlsMiss === 0) pass(`所有 ${tenantTables.size} 个租户表已启用 RLS 且有隔离策略`);
 else fail(`${rlsMiss} 个租户表缺 RLS 保护`);
+
+// 5) SQL 列契约门：源码 SQL 列引用 ↔ 迁移 DDL 全仓比对（独立脚本，复用其解析与报告）
+console.log('[5/5] SQL 列契约门（源码 ↔ DDL）');
+try {
+  execSync('node scripts/check_sql_columns.mjs', { cwd: root, stdio: 'inherit' });
+  pass('全仓 SQL 列引用均命中迁移 DDL');
+} catch {
+  fail('存在 SQL 列漂移（见上方 check_sql_columns 输出；批次三两起 live 事故的同型根因）');
+}
 
 console.log(failed ? '发布闸门：未通过 ❌' : '发布闸门：通过 ✅');
 process.exit(failed ? 1 : 0);

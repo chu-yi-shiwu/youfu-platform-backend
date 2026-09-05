@@ -51,7 +51,8 @@ router.get('/settlements', async (req, res, next) => {
       code: 0,
       items: data.items,
       total: data.total,
-      grand_total: data.items.reduce((s: number, it: any) => s + Number(it.total ?? 0), 0),
+      // 架构🟡13 契约诚实：这是**当前返回页**的合计（非全量口径），故名 page_total。
+      page_total: data.items.reduce((s: number, it: any) => s + Number(it.total ?? 0), 0),
     });
   } catch (e) {
     next(e);

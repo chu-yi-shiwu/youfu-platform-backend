@@ -2,7 +2,7 @@
 // 关键约束：
 //  - 使用 pg.Pool（连接池），不在每请求新建连接。
 //  - SET LOCAL app.tenant_id 必须在独立 client 的事务内执行，请求结束释放回池。
-//  - SET ROLE youfu_app 切换为受限角色，使 RLS policy(TO youfu_app) 生效。
+//  - SET LOCAL ROLE youfu_app 切换为受限角色，使 RLS policy(TO youfu_app) 生效（事务内有效，自动复位）。
 import { Pool } from 'pg';
 import 'dotenv/config';
 import { AppError } from '../middleware/error.js';
@@ -13,6 +13,15 @@ const pool = new Pool({
   database: process.env.PGDATABASE ?? 'youfu',
   user: process.env.PGUSER ?? 'youfu_app',
   password: process.env.PGPASSWORD ?? 'change_me',
+  // 审查修复（架构🔴4）：此前全默认（max=10、无超时护栏）——连接耗尽时请求无限排队，
+  // 慢查询/长事务会静默拖垮整站。现显式设限：
+  //   - max=20：单进程部署下足够，超出排队而非无限增长；
+  //   - connectionTimeoutMillis=3000：拿不到连接 3s 快速失败（可观测的 5xx 优于雪崩式挂起）；
+  //   - idleTimeoutMillis=30000：空闲 30s 回收，防连接长期占用。
+  // 诚实边界：刻意**不加** statement_timeout（会影响既有慢查询语义，另行立项评估）。
+  max: 20,
+  connectionTimeoutMillis: 3000,
+  idleTimeoutMillis: 30000,
 });
 
 /**
@@ -43,8 +52,10 @@ export async function withTenantClient<T>(
     // 会话级租户隔离：事务内有效，连接释放后失效（P1 规避并发泄漏核心）
     // SET LOCAL 不支持 $1 参数化，需用白名单校验后的 tenant_id 拼字符串
     await client.query(`SET LOCAL app.tenant_id = '${safeTenant.replace(/'/g, "''")}'`);
-    // 切换受限角色，使 RLS policy 生效
-    await client.query('SET ROLE youfu_app');
+    // 切换受限角色，使 RLS policy 生效。审查修复（架构🔴4）：会话级 SET ROLE 在连接归还
+    // 池后不复位（下个请求若不在事务内执行会沿用 youfu_app）。改 SET LOCAL ROLE：
+    // 随事务结束自动复位，杜绝跨请求角色泄漏。本行已在 BEGIN 之后，语义安全。
+    await client.query('SET LOCAL ROLE youfu_app');
     const result = await fn(client);
     await client.query('COMMIT');
     return result;

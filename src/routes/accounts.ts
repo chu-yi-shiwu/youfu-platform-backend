@@ -7,8 +7,8 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { withTenantClient } from '../db/pool.js';
 import { AppError } from '../middleware/error.js';
-import { requireConfigRole, ROLES, DEFAULT_PERM_MATRIX, canAssignRole, ROLE_RANK, type Role } from '../middleware/role.js';
-import { requireRole, type AuthLocals } from '../middleware/auth.js';
+import { requireConfigRole, assertAdmin, ROLES, DEFAULT_PERM_MATRIX, canAssignRole, ROLE_RANK, type Role } from '../middleware/role.js';
+import type { AuthLocals } from '../middleware/auth.js';
 import { hashPassword, toPublic } from '../account.js';
 
 const router = Router();
@@ -38,9 +38,9 @@ const accountUpdateSchema = z.object({
 router.get('/accounts/roles/permissions', async (req, res, next) => {
   try {
     const auth = res.locals.auth as AuthLocals;
-    if (!requireRole(auth, 'admin')) {
-      throw new AppError('FORBIDDEN', 'admin only', 403);
-    }
+    // 审查修复（架构🟡12）：admin 门禁统一走 role.ts 的 assertAdmin（ROLE_RANK 单一事实源 +
+    // dev 放行同口径）；原 requireRole(auth, 'admin') 把 'admin' 字面量散落在账户模块四处。
+    assertAdmin(auth, 'admin only');
     const tenantId = auth.tenantId;
     const rows = await withTenantClient(tenantId, (client) =>
       client.query(`SELECT role, perm FROM role_permission WHERE tenant_id=$1`, [tenantId]),
@@ -64,9 +64,7 @@ router.get('/accounts/roles/permissions', async (req, res, next) => {
 router.put('/accounts/roles/:role/permissions', async (req, res, next) => {
   try {
     const auth = res.locals.auth as AuthLocals;
-    if (!requireRole(auth, 'admin')) {
-      throw new AppError('FORBIDDEN', 'admin only', 403);
-    }
+    assertAdmin(auth, 'admin only');
     const role = req.params.role as Role;
     if (!ROLES.includes(role)) throw new AppError('BAD_PARAM', `unknown role: ${role}`, 400);
     const body = z.object({ perms: z.array(z.string().min(1).max(64)) }).parse(req.body);
@@ -92,13 +90,11 @@ router.put('/accounts/roles/:role/permissions', async (req, res, next) => {
 // ============ 账户列表（不外泄密码哈希） ============
 // R38-R3-F1 修复：GET /accounts 此前无角色守卫，operator/reporter 均可枚举本租户
 // 全部账号（username/role/active）。前端仅 TrialUsers/FoundationPage 两个 admin 页调用，
-// 收紧为 admin-only 无断裂风险（requireRole 在 dev 模式放行，不影响本地联调）。
+// 收紧为 admin-only 无断裂风险（assertAdmin 在 dev 模式放行，不影响本地联调）。
 router.get('/accounts', async (req, res, next) => {
   try {
     const auth = res.locals.auth as AuthLocals;
-    if (!requireRole(auth, 'admin')) {
-      throw new AppError('FORBIDDEN', 'admin only', 403);
-    }
+    assertAdmin(auth, 'admin only');
     const tenantId = res.locals.auth.tenantId;
     const items = await withTenantClient(tenantId, (client) =>
       client
@@ -116,9 +112,7 @@ router.get('/accounts/:id', async (req, res, next) => {
   try {
     // R38-R3-F1 修复：与列表同口径，admin-only（详情含角色/账号结构）
     const auth0 = res.locals.auth as AuthLocals;
-    if (!requireRole(auth0, 'admin')) {
-      throw new AppError('FORBIDDEN', 'admin only', 403);
-    }
+    assertAdmin(auth0, 'admin only');
     const tenantId = res.locals.auth.tenantId;
     const item = await withTenantClient(tenantId, (client) =>
       client

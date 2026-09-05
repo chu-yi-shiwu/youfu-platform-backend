@@ -11,7 +11,7 @@ import { createWithIdem, transition, list, findOne, findOneForUpdate } from '../
 import { ticketStats } from '../repo/stats.js';
 import { pickWorker, resolveDispatch, getActiveRules } from '../engine/dispatch.js';
 import { AppError } from '../middleware/error.js';
-import { requirePermission } from '../middleware/role.js';
+import { requirePermission, assertOpsRole } from '../middleware/role.js';
 import { resolveScanFromDb } from '../scan.js';
 import { setSlaDueAt, slaScan, type SlaScanRow } from '../engine/sla.js';
 import { runSlaScanForTenant } from '../scheduler/slaScheduler.js';
@@ -21,15 +21,65 @@ import { incrementalLearn } from '../services/modelTrainer.js';
 import { emitDomainEvent } from '../db/eventBus.js';
 import { resolveDispatchShadow } from '../services/k2Shadow.js'; // R12-F1：自动派单/抢单也回填 dispatch 影子
 import { insertNotification, wechatSelfTest } from '../services/notify.js';
-import type { WorkOrderStatus } from '../engine/stateMachine.js';
+import type { WorkOrderStatus, WorkflowDef } from '../engine/stateMachine.js';
 import { getWorkflowDef } from '../engine/workflowDef.js';
-import { availableTransitions, learningTriggerStates, autoRouteFor, shouldTriggerLearning } from '../engine/stateMachine.js';
+import {
+  availableTransitions, learningTriggerStates, autoRouteFor, shouldTriggerLearning, RICH_WORK_ORDER_DEF,
+} from '../engine/stateMachine.js';
 import { safeParseJsonb } from '../util/jsonb.js';
 import { validateIntake } from '../services/dataQuality.js';
 import { buildRecommend } from '../services/dispatchRecommend.js';
 import { assertAcceptanceBackdoorGuard } from '../services/acceptance.js'; // 批次三 Y3 防后门守卫
 
 const router = Router();
+
+/**
+ * 反查「当前登录身份」对应的 worker.id（业务编码）。
+ * 生产实测事实（team-lead 2026-09-xx，务必按此实现，别按 uuid 猜）：
+ *   - worker.id = text、worker.account_id = text、work_orders.assignee_id = text；
+ *     只有 account_user.id 是 uuid → 参数一律按 text 传，**绝不加 ::uuid 强转**（PG 会报 operator 不存在）；
+ *   - 存量数据 account_id 有脏值：有的工人 account_id 存的是自己的 worker.id，有的存的是真实账号 id
+ *     → 双路匹配 (account_id=$1 OR id=$1)，缺一即出现"查不到档案"的假阴性。
+ * 返回 null = 查不到档案 → 调用方一律 **降级放行**（console.warn + 按现状放行），
+ * 不可拒绝、不可过滤：一线工人的可用性优先于收口（否则脏数据直接让接单页全空）。
+ */
+async function resolveWorkerId(
+  client: PoolClient,
+  tenantId: string,
+  authUserId: string | undefined,
+): Promise<string | null> {
+  const uid = authUserId ?? '';
+  if (!uid) return null;
+  const r = await client.query<{ id: string }>(
+    'SELECT id FROM worker WHERE tenant_id=$2 AND (account_id=$1 OR id=$1) LIMIT 2',
+    [uid, tenantId],
+  );
+  if (r.rowCount === 0) return null;
+  if (r.rows.length > 1) {
+    // 多命中：同一身份挂了多份档案（脏数据）。取第一个并告警，由运维按日志清洗。
+    console.warn('[workOrder] worker 档案多命中，取第一个（account_id/id 重复关联，需清洗）', {
+      tenantId, authUserId: uid, ids: r.rows.map((x) => x.id),
+    });
+  }
+  return r.rows[0].id;
+}
+
+/**
+ * 抢单角色白名单（架构🟡12：消除硬编码角色数组）。
+ * 单一事实源 = 本租户 workflow_def 的 claim 转移 allowedRoles（引擎 RICH def 默认
+ * ['worker','admin','dispatcher','service_desk']）。此前本端点硬编码五角色（多放 operator，
+ * 且租户在配置台改了 allowedRoles 也不生效，两处口径会漂移）。
+ * 租户删掉 claim 边 → 回退引擎默认边，绝不因配置缺失把抢单通道堵死。
+ */
+function claimAllowedRoles(def: WorkflowDef): readonly string[] {
+  const fromDef = (def.transitions ?? [])
+    .filter((t) => t.event === 'claim')
+    .flatMap((t) => t.allowedRoles ?? []);
+  if (fromDef.length > 0) return fromDef;
+  return RICH_WORK_ORDER_DEF.transitions
+    .filter((t) => t.event === 'claim')
+    .flatMap((t) => t.allowedRoles ?? []);
+}
 
 /**
  * 建单后自动派单（2026-08-29 从 POST /open/work_order handler 抽取为共享函数）：
@@ -227,6 +277,11 @@ router.post('/open/work_order', async (req, res, next) => {
       });
     }
     const result = await withTenantClient(tenantId, async (client) => {
+      // 审查修复（架构🔴1 缩范围版）：建单属管理动作，加 ticket.manage 权限点。
+      // worker 默认矩阵无 ticket.manage（只有 inspect.execute/asset.scan）——刻意**不**给
+      // 列表/详情/流转加该权限点，否则小程序工人接单页会当场全空（生产事故）。
+      // C 端公开报修走 /public/report（publicReportRouter，免登录），不受本门禁影响。
+      await requirePermission(res.locals.auth, client, 'ticket.manage');
       const { row, created } = await createWithIdem(client, {
         id: body.id,
         tenantId,
@@ -302,6 +357,10 @@ router.post('/open/work_order/:id/transition', async (req, res, next) => {
         role,
         fields,
       });
+      // 审查修复（架构🔴1）：本端点**不加** ticket.manage 权限点——
+      //   ① 流转已由引擎的 tdef.allowedRoles 门禁把关（src/repo/ticket.ts transition()），
+      //      再叠权限点属双重门禁且会误伤 worker 接单/完成动作（工人默认矩阵无 ticket.manage）；
+      //   ② 验收类事件另有 Y3 无条件守卫，通用端点绝不可走验收流转。
       // 批次三 Y3 防后门（QA 修复②：无条件版）：验收事件只允许走专用验收端点。
       // 通用 transition 端点只要触发 acceptance_* 事件 → 一律 403（不看任何客户端自证标记），
       // 抛错令整个事务回滚（验收状态/凭证/事件全部不落库），堵"传 via 绕过验收联动"的后门路径。
@@ -356,9 +415,24 @@ router.get('/open/work_orders', async (req, res, next) => {
     const offset = Math.max(0, Math.min(Math.floor(Number(req.query.offset) || 0), 10000));
     // 批次三：unsettled=1 → 只返回未被任何结算单占用的工单（结算页"新建结算"数据源）
     const unsettled = req.query.unsettled === '1' || req.query.unsettled === 'true';
-    const data = await withTenantClient(tenantId, (client) =>
-      list(client, tenantId, { status, limit, offset, assignee, unsettledOnly: unsettled }),
-    );
+    // 审查修复（架构🔴1 缩范围版 · worker 数据可见性）：worker 强制只看自己名下的单。
+    // 刻意不加 ticket.manage 权限点（工人默认矩阵没有，加了会让小程序接单页全空）。
+    // JWT sub=account_user.id → 经 worker.account_id 反查真实 worker.id（业务编码）。
+    const data = await withTenantClient(tenantId, async (client) => {
+      let scopedAssignee = assignee;
+      if (res.locals.auth.role === 'worker') {
+        const myWorkerId = await resolveWorkerId(client, tenantId, res.locals.auth.userId);
+        if (myWorkerId) {
+          scopedAssignee = myWorkerId; // 覆盖显式传入的 assignee（防越权看别人的单）
+        } else {
+          // 档案查不到（account_id 脏值/为空的老数据）→ 降级放行并告警：宁可漏，不能让一线干不了活。
+          console.warn('[workOrder.list] worker profile not found, 降级放行全量（不可阻断一线作业）', {
+            tenantId, userId: res.locals.auth.userId,
+          });
+        }
+      }
+      return list(client, tenantId, { status, limit, offset, assignee: scopedAssignee, unsettledOnly: unsettled });
+    });
     // A+ Phase3：随列表下发每个工单"当前状态可执行的转移"（含必填/角色门禁），供 SPA 动态渲染动作按钮。
     const def = await withTenantClient(tenantId, (client) => getWorkflowDef(client, tenantId, 'work_order'));
     // DEF-2 修复：列表项补充 order_no，供前端展示业务工单号
@@ -427,6 +501,20 @@ router.get('/open/work_order/:id', async (req, res, next) => {
     const result = await withTenantClient(tenantId, async (client) => {
       const ticketRow = await findOne(client, tenantId, req.params.id);
       if (!ticketRow) return null;
+      // 审查修复（架构🔴1 缩范围版 · worker 数据可见性）：worker 只能看自己名下的单详情。
+      // 与列表端点同口径：反查不到档案时降级放行（不可阻断一线作业）。
+      if (res.locals.auth.role === 'worker') {
+        const myWorkerId = await resolveWorkerId(client, tenantId, res.locals.auth.userId);
+        if (myWorkerId) {
+          if (ticketRow.assignee_id !== myWorkerId) {
+            throw new AppError('FORBIDDEN', '仅可查看本人名下的工单', 403);
+          }
+        } else {
+          console.warn('[workOrder.detail] worker profile not found, 降级放行（不可阻断一线作业）', {
+            tenantId, userId: res.locals.auth.userId,
+          });
+        }
+      }
       // 与列表接口对齐：补充 code（业务工单号）= order_no，供 SPA 详情页展示（DEF-2 修复一致性）。
       const ticket = { ...ticketRow, code: ticketRow.order_no };
       const def = await getWorkflowDef(client, tenantId, 'work_order');
@@ -573,6 +661,9 @@ router.post('/open/notifications/read', async (req, res, next) => {
 router.post('/open/notify/selftest', async (req, res, next) => {
   try {
     const tenantId = res.locals.auth.tenantId;
+    // 审查修复（QA🟡7）：自检会真实调用微信订阅消息接口（消耗接口配额）——
+    // 原实现零门禁，任意登录账号可无限触发。与 /sla/scan 同走运维角色门禁。
+    assertOpsRole(res.locals.auth);
     const accountId = res.locals.auth.userId || '';
     // 解析当前登录工人（account_id 或 worker.id 任一匹配，兼容两种 userId 语义）
     const workerId = await withTenantClient(tenantId, (client) =>
@@ -666,6 +757,10 @@ router.post('/scan', async (req, res, next) => {
 router.post('/sla/scan', async (req, res, next) => {
   try {
     const tenantId = res.locals.auth.tenantId;
+    // 审查修复（QA🟡7）：SLA 扫描会写 escalated_at + 发通知触发全租户扫描，属运维动作——
+    // 原实现零门禁，任意登录账号（含 worker）可无限触发。运维角色清单集中在 role.ts 的 OPS_ROLES
+    // （单一事实源），dev 模式放行，杜绝散落硬编码字符串。
+    assertOpsRole(res.locals.auth);
     const hits = await runSlaScanForTenant(tenantId);
     return res.json({
       ok: true,
@@ -750,15 +845,15 @@ router.get('/open/claim-hall', async (req, res, next) => {
 });
 
 // POST /api/v1/open/work_order/:id/claim —— 抢单（人员认领未分配工单，部门不匹配驳回）
-// 门禁同 RICH def claim 转移：worker/admin/dispatcher/service_desk 可抢。
+// 门禁来源（架构🟡12）：本租户 workflow_def 的 claim 转移 allowedRoles（引擎 RICH def 默认
+// worker/admin/dispatcher/service_desk），不再在本文件硬编码角色数组。
+// ⚠️ 行为变更：此前硬编码多放了 operator → 现按引擎口径收口；operator 请用派单（dispatch.override）。
+// 需要放行的租户：到 业务规则设置台 给 claim 边 allowedRoles 加上 operator 即生效（配置即事实）。
 // C-2 身份根治：token userId 即 worker.id（id 同源），body workerId 不一致 403。
 router.post('/open/work_order/:id/claim', async (req, res, next) => {
   try {
     const tenantId = res.locals.auth.tenantId;
     const role = res.locals.auth.role;
-    if (role && !['worker', 'admin', 'dispatcher', 'service_desk', 'operator'].includes(role)) {
-      throw new AppError('FORBIDDEN', `role ${role} not allowed to claim`, 403);
-    }
     const b = z.object({ workerId: z.string().min(1).optional(), department: z.string().optional() }).parse(req.body);
     // C-2 身份根治：token 的 userId 即 worker.id（worker 与 account_user id 同源）。
     // 服务端只信 token 身份；body.workerId 仅兼容旧客户端——若传且与 token 身份不一致 → 403（堵伪造/替抢）。
@@ -770,6 +865,11 @@ router.post('/open/work_order/:id/claim', async (req, res, next) => {
     // 必须经 worker.account_id 反查真实 worker.id，不能直接拿 userId 当 worker.id 查。
     const workerId = authUserId ?? b.workerId!; // 优先 token 身份；无 token 身份时回退 body（兼容）
     const ticket = await withTenantClient(tenantId, async (client) => {
+      const def = await getWorkflowDef(client, tenantId, 'work_order');
+      const allowed = claimAllowedRoles(def);
+      if (role && !allowed.includes(role)) {
+        throw new AppError('FORBIDDEN', `role ${role} not allowed to claim`, 403);
+      }
       const cur = await findOneForUpdate(client, tenantId, req.params.id);
       if (!cur) throw new AppError('NOT_FOUND', 'work order not found', 404);
       if (cur.status !== 'claim_hall' && cur.status !== 'pending_dispatch') {

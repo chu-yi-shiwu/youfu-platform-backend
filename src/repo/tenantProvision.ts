@@ -7,8 +7,9 @@
 //      （覆盖替换语义，落库即定格快照）；preset 缺失或与默认一致 → 0 行落库 → 继承官方推荐基线，
 //      随平台升级自动受益（架构评审定案口径）。
 // 诚实边界（DMR）：reporter_dict / location_dict 属机构私有数据（含手机号 PII / 机构专属位置），绝不跨租户复制。
-// 事务契约：调用方持 BEGIN 后的单一 client；本函数负责 SET LOCAL app.tenant_id / SET ROLE youfu_app 的
+// 事务契约：调用方持 BEGIN 后的单一 client；本函数负责 SET LOCAL app.tenant_id / SET LOCAL ROLE youfu_app 的
 // 读写上下文切换（读=模板源租户，写=新租户），全成或随调用方 ROLLBACK 整体回滚。
+// （架构🔴4：一律 SET LOCAL，不用会话级 SET ROLE —— 连接归还池后角色不复位会造成越权读。）
 import type { PoolClient } from 'pg';
 import crypto from 'node:crypto';
 import { hashPassword } from '../account.js';
@@ -73,7 +74,9 @@ export async function provisionNewTenantContent(
   if (input.sourceTenantId !== input.tenantId) {
     // —— 读模板源（RLS 上下文 = 源租户）——
     await setTenantCtx(input.sourceTenantId);
-    await client.query('SET ROLE youfu_app');
+    // 审查修复（架构🔴4）：SET LOCAL ROLE 替代会话级 SET ROLE——本函数在调用方 BEGIN 后的
+    // 单连接事务内执行（platform.ts:139 起事务），事务结束自动复位，避免连接归还后角色泄漏。
+    await client.query('SET LOCAL ROLE youfu_app');
     const cats = await client.query(
       `SELECT code, name, sort, enabled FROM fault_category WHERE tenant_id = $1 AND enabled = true`,
       [input.sourceTenantId],
@@ -100,13 +103,17 @@ export async function provisionNewTenantContent(
     // 保证后续 ②workflow_def / ③account_user / ④role_permission 的写入全部在 RLS 门内
     //（QA 修正：原补在④，导致自指路径下②③仍 42501）。
     await setTenantCtx(input.tenantId);
-    await client.query('SET ROLE youfu_app');
+    // 同上（架构🔴4）：自指路径也在调用方事务内，SET LOCAL ROLE 自动复位。
+    await client.query('SET LOCAL ROLE youfu_app');
   }
 
   // ② 业务流状态图：模板源有则 1:1 复制（行业流程一致）；无则落引擎默认 4 态
   //   （与 getWorkflowDef 运行时兜底同口径；显式落库让租户后台可直接可视化调流程）。
   //   批次三 卡4：落库前幂等注入两条验收边（acceptance_pass / acceptance_reject，仅当不存在时），
   //   新租户开通即具备「完工验收」能力；老租户走 POST /workflow-defs/:entityType/enable-acceptance 自愿升级。
+  //   审查修复（架构🟡12 · 注释诚实）：下行是 ON CONFLICT DO **NOTHING** —— 若该租户的
+  //   work_order def 行已存在（重跑/重试开租户），本条被静默跳过，已有 def **不会被**补验收边。
+  //   即"开通即具备验收能力"只对首次落库成立；重跑场景由 enable-acceptance 端点兜底（幂等）。
   const wfDefRaw = templateDef ?? DEFAULT_WORK_ORDER_DEF;
   const wfDef = typeof wfDefRaw === 'string'
     ? ensureAcceptanceEdges(JSON.parse(wfDefRaw) as import('../engine/stateMachine.js').WorkflowDef).def
@@ -118,7 +125,12 @@ export async function provisionNewTenantContent(
     [input.tenantId, typeof wfDef === 'string' ? wfDef : JSON.stringify(wfDef)],
   );
 
-  // ③ 机构管理员账号（新租户必无同名账号，UNIQUE(tenant_id,username) 兜底）
+  // ③ 机构管理员账号
+  //   审查修复（架构🟡12 · 注释诚实）：本条 INSERT **没有** ON CONFLICT——
+  //   一旦同租户同名账号已存在（重跑/重试/手工补过账号），UNIQUE(tenant_id, username) 会抛 23505，
+  //   经 error.ts 映射为 409，并让**整个开租户事务回滚**（②流程/④权限基线一并撤销，不留半截租户）。
+  //   这是刻意的 fail-closed：宁可开不出来，也不开出一个管理员归属不清的租户；
+  //   旧注释写「约束兜底」易被误读为"冲突会自动跳过"，故在此写明真实后果。
   await client.query(
     `INSERT INTO account_user (tenant_id, username, password_hash, display_name, role, active)
      VALUES ($1, $2, $3, $4, $5, true)`,

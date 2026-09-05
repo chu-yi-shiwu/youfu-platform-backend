@@ -56,7 +56,11 @@ router.post('/template-contributions', async (req, res, next) => {
         `INSERT INTO platform_audit (actor, action, resource, target_tenant, payload) VALUES ($1,$2,$3,$4,$5)`,
         [actor ?? 'tenant', 'template.contribute', r.rows[0].id, tenantId, JSON.stringify({ name: b.name })],
       );
-    } catch { /* 审计失败不阻断 */ }
+    } catch (e) { /* 审计失败不阻断，但必须留痕（QA🟡6：原静默吞异常） */
+      console.warn('[audit] template.contribute 审计写入失败（不阻断主流程）', {
+        actor, tenantId, err: e instanceof Error ? e.message : String(e),
+      });
+    }
     return res.status(201).json({
       ok: true, code: 0, item: r.rows[0],
       note: '已提交为草稿，待平台审核通过后进入模板市场',

@@ -56,6 +56,46 @@ export const ROLE_RANK: Record<Role, number> = {
   admin: 4,
 };
 
+// —— 角色分组（单一事实源，架构🟡12）——
+// 此前 'admin'/'operator' 这类角色名以字面量散落在 config.ts / llmUsage.ts / accounts.ts /
+// workOrder.ts 等处，新增角色要改 N 处。集中到这里，各处只引用分组常量与判定函数。
+/** 管理配置类资源（派单规则 / 术语 / 系统配置 / 账户写）的角色：admin 全权 + operator 业务配置。 */
+export const CONFIG_ROLES: readonly Role[] = ['admin', 'operator'];
+/** 运维类后台动作（SLA 扫描 / 通知自检 / 巡检报表导出）的角色：一线 worker / reviewer 不参与。 */
+export const OPS_ROLES: readonly Role[] = ['admin', 'operator', 'dispatcher'];
+
+/** admin 判定：按 ROLE_RANK 取最高层级（admin=4 且唯一），避免 role === 'admin' 字面量散落。 */
+export function isAdmin(role: string | undefined): boolean {
+  if (!role) return false;
+  return (ROLE_RANK[role as Role] ?? 0) >= ROLE_RANK.admin;
+}
+/** 配置类角色判定（与 requireConfigRole 同口径）。 */
+export function isConfigRole(role: string | undefined): boolean {
+  return !!role && CONFIG_ROLES.includes(role as Role);
+}
+/** 运维类角色判定。 */
+export function isOpsRole(role: string | undefined): boolean {
+  return !!role && OPS_ROLES.includes(role as Role);
+}
+/** admin 判定的"含 dev 放行"版（dev 模式恒 true，与既有 dev 约定一致）。 */
+export function isAdminOrDev(auth: AuthLocals): boolean {
+  return auth.authMode === 'dev' || isAdmin(auth.role);
+}
+/** admin 门禁：非 admin → 403。 */
+export function assertAdmin(auth: AuthLocals, message = 'admin only'): void {
+  if (!isAdminOrDev(auth)) throw new AppError('FORBIDDEN', message, 403);
+}
+/**
+ * 运维后台动作门禁（QA🟡7 / 架构🟡12）：非运维角色 → 403。
+ * 用途：/sla/scan、/open/notify/selftest 等会真实消耗外部配额或改动全租户数据的端点。
+ */
+export function assertOpsRole(auth: AuthLocals): void {
+  if (auth.authMode === 'dev') return;
+  if (!isOpsRole(auth.role)) {
+    throw new AppError('FORBIDDEN', `role ${auth.role ?? '(none)'} not allowed for this operation`, 403);
+  }
+}
+
 /**
  * 角色分配门禁（R15-005 修复）：账户写接口（建/改）据此阻止越级与提权。
  *   - admin 可分配任意角色（含 admin）；
@@ -111,17 +151,24 @@ export async function listPerms(auth: AuthLocals, client: PoolClient): Promise<s
   return [...(DEFAULT_PERM_MATRIX[(auth.role as Role) ?? 'worker'] ?? [])];
 }
 
-/** 权限守卫（async，需在 withTenantClient 内调用）：无权限抛 403 */
-export async function requirePermission(auth: AuthLocals, client: PoolClient, perm: string): Promise<void> {
+/**
+ * 权限守卫（async，需在 withTenantClient 内调用）：无权限抛 403。
+ * 审查修复（架构🔴1⑤）：参数类型由 string 收紧为 Perm——编译期就暴露拼错/未登记的权限点
+ * （此前传入 'settlment.read' 这类错字也能通过编译，运行期恒 403 且难排查）。
+ */
+export async function requirePermission(auth: AuthLocals, client: PoolClient, perm: Perm): Promise<void> {
   if (!(await hasPerm(auth, client, perm))) {
     throw new AppError('FORBIDDEN', `permission denied: ${perm}`, 403);
   }
 }
 
-/** 旧守卫（同步、throw）：admin/operator 可管理配置类资源。保持兼容。 */
+/**
+ * 旧守卫（同步、throw）：admin/operator 可管理配置类资源。保持兼容。
+ * 审查修复（架构🟡12）：白名单改引 CONFIG_ROLES 单一事实源（不再内联 role !== 'admin' && ...）。
+ */
 export function requireConfigRole(_req: unknown, res: any): void {
   const role = res.locals.auth.role;
-  if (role !== 'admin' && role !== 'operator') {
+  if (!isConfigRole(role)) {
     throw new AppError('FORBIDDEN', 'only admin/operator can manage', 403);
   }
 }

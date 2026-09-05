@@ -31,7 +31,8 @@ export function asPgError(err: unknown): PgLikeError | null {
 
 /**
  * 把已知 PG 错误翻译为带语义的 AppError；非 PG/未识别错误码返回 null（走原路径）。
- * 覆盖：23505 唯一冲突 → 409；23514 check 约束 → 400；22P02 非法字面量 → 400。
+ * 覆盖：23505 唯一冲突 → 409；23514 check 约束 → 400；22P02 非法字面量 → 400；
+ *       42501 RLS 违规 → 403；23503 外键 → 409；23502 非空 → 400（审查修复 QA💭）。
  */
 export function pgErrorToAppError(err: unknown): AppError | null {
   const pg = asPgError(err);
@@ -50,6 +51,17 @@ export function pgErrorToAppError(err: unknown): AppError | null {
     case '22P02':
       // invalid_text_representation：常见于 uuid/text 列收到非法字面量
       return new AppError('BAD_PARAM', '参数格式不正确（非法 ID 或枚举值）', 400);
+    // 审查修复（QA💭）：补三类高频 PG 错误——此前一并按 500 冒泡，排障靠猜。
+    case '42501':
+      // insufficient_privilege：RLS 策略拒绝（典型 = 写入时 tenant_id 与会话上下文不符，
+      // 或应用身份缺表权限）。属权限问题不是服务故障，映射 403。
+      return new AppError('FORBIDDEN', '无权执行该操作（RLS 租户隔离拒绝），请确认数据归属与账号权限', 403);
+    case '23503':
+      // foreign_key_violation：引用了不存在/正被引用的主外键行
+      return new AppError('CONFLICT', '关联数据校验失败（外键约束），请检查引用对象是否存在或仍被占用', 409);
+    case '23502':
+      // not_null_violation：必填列缺失。pg 的 column 字段带列名，文案带上便于定位。
+      return new AppError('BAD_PARAM', `缺少必填字段${pg.column ? `（${pg.column}）` : ''}`, 400);
     default:
       return null;
   }

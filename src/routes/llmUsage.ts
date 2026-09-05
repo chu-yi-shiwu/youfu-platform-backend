@@ -2,13 +2,16 @@
 // 仅 admin 可看；汇总本租户（含 system 级）LLM 网关调用的 tokens / 成本 / 成功率。
 import { Router } from 'express';
 import { withTenantClient } from '../db/pool.js';
+import { isAdminOrDev } from '../middleware/role.js';
 
 const router = Router();
 
 router.get('/usage', async (req, res, next) => {
   try {
     const auth = res.locals.auth;
-    if (auth.role !== 'admin') {
+    // 审查修复（架构🟡12）：admin 字面量判定改引 role.ts（ROLE_RANK 单一事实源 + dev 放行同口径）。
+    // ⚠️ 行为不变点：仍以 403 JSON 直接返回（不走 next(e) 的 AppError 通道），保持原响应契约。
+    if (!isAdminOrDev(auth)) {
       return res.status(403).json({ ok: false, code: 'FORBIDDEN', message: '需要管理员权限' });
     }
     const rows = await withTenantClient(auth.tenantId, async (client) => {

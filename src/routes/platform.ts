@@ -14,6 +14,19 @@ import { provisionNewTenantContent } from '../repo/tenantProvision.js';
 
 const router = Router();
 
+/**
+ * 分页/条数参数钳制（架构🟡10①）：非数字、NaN、负数、超限全部收敛到 [min, max]。
+ * 此前各端点只做 `Math.min(Number(x) || 默认, 上限)` —— 负数能穿过去（`Number(-5)` 是 truthy），
+ * 直接拼进 SQL 的 LIMIT/OFFSET 会让 PG 报 2201W，端点 500。
+ * @param raw 查询参数（unknown）
+ * @param fallback 缺失/非数字时的默认值
+ */
+function clampInt(raw: unknown, fallback: number, min: number, max: number): number {
+  const n = Math.floor(Number(raw));
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(Math.max(n, min), max);
+}
+
 // ---- 审计（append-only：表只 GRANT SELECT/INSERT；失败不阻断主流程） ----
 async function audit(
   actor: string,
@@ -27,8 +40,12 @@ async function audit(
       `INSERT INTO platform_audit (actor, action, resource, target_tenant, payload) VALUES ($1,$2,$3,$4,$5)`,
       [actor, action, resource ?? null, targetTenant ?? null, payload ? JSON.stringify(payload) : null],
     );
-  } catch {
-    /* ignore */
+  } catch (e) {
+    // 审查修复（QA🟡6）：原 `catch {}` 静默吞掉审计写失败——审计断链无人知晓。
+    // 审计属旁路（失败绝不阻断主流程），但必须留痕以便事后追账。
+    console.warn('[audit] platform_audit 写入失败（不阻断主流程）', {
+      actor, action, resource, targetTenant, err: e instanceof Error ? e.message : String(e),
+    });
   }
 }
 
@@ -201,15 +218,19 @@ router.get('/summary', async (req, res, next) => {
       const or = row.overdue_rate === null ? null : Number(row.overdue_rate);
       const sa = row.satisfaction_avg === null ? null : Number(row.satisfaction_avg);
       const ei = row.eff_index === null ? null : Number(row.eff_index);
-      const checks = [
-        cr !== null && cr >= BASELINE.close_rate_min,
-        or !== null && or <= BASELINE.overdue_rate_max,
-        sa !== null && sa >= BASELINE.satisfaction_min,
+      // 审查修复（架构🟡10②）：原 checks 三项已是 boolean（永不 null），
+      // `filter(c => c !== null)` 恒返回全量 → known.length 恒为 3，
+      // 于是「指标全空 → 判黄」的分支永远走不到，无数据租户会被误判成 red。
+      // 改为显式三态：指标为 NULL（无数据）= null（不参评），有值才判达标与否。
+      const checks: Array<boolean | null> = [
+        cr === null ? null : cr >= BASELINE.close_rate_min,
+        or === null ? null : or <= BASELINE.overdue_rate_max,
+        sa === null ? null : sa >= BASELINE.satisfaction_min,
       ];
-      const known = checks.filter((c) => c !== null);
+      const known = checks.filter((c): c is boolean => c !== null);
       const pass = known.filter(Boolean).length;
       let light: 'red' | 'yellow' | 'green' = 'red';
-      if (known.length === 0) light = 'yellow';
+      if (known.length === 0) light = 'yellow'; // 无一指标有值：无数据可判，不得判红
       else if (pass === known.length) light = 'green';
       else if (pass >= 1 && (cr === null || cr >= BASELINE.close_rate_min)) light = 'yellow';
       return {
@@ -332,8 +353,10 @@ router.get('/audit-logs', async (req, res, next) => {
     const actor = (req.query.actor as string) || '';
     const action = (req.query.action as string) || '';
     const tenant = (req.query.tenant as string) || '';
-    const limit = Math.min(Number(req.query.limit) || 50, 200);
-    const offset = Math.max(Number(req.query.offset) || 0, 0);
+    // 审查修复（架构🟡10①）：原来只有上限钳制，limit=-5 会直接进 SQL 的 LIMIT → 2201W 语法错/500。
+    // 统一走 clampInt 做「下限 1 + 上限 200 + 非数字回落默认」。
+    const limit = clampInt(req.query.limit, 50, 1, 200);
+    const offset = clampInt(req.query.offset, 0, 0, 100000);
     const conds: string[] = [];
     const params: unknown[] = [];
     if (actor) { params.push(actor); conds.push(`actor ILIKE '%' || $${params.length} || '%'`); }
@@ -356,8 +379,8 @@ router.get('/audit-logs', async (req, res, next) => {
 router.get('/open-api-logs', async (req, res, next) => {
   try {
     const appId = (req.query.appId as string) || '';
-    const limit = Math.min(Number(req.query.limit) || 50, 200);
-    const offset = Math.max(Number(req.query.offset) || 0, 0);
+    const limit = clampInt(req.query.limit, 50, 1, 200);
+    const offset = clampInt(req.query.offset, 0, 0, 100000);
     const conds: string[] = [];
     const params: unknown[] = [];
     if (appId) { params.push(appId); conds.push(`l.app_id = $${params.length}`); }
@@ -441,14 +464,23 @@ router.post('/tenants/:id/locations', async (req, res, next) => {
 router.get('/tenants/:id/reporters', async (req, res, next) => {
   try {
     const tenantId = (req.params.id || '').trim();
-    const r = await withTenantClient(tenantId, (client) =>
-      client.query(
+    // 审查修复（架构🟡10③）：原实现硬编码 LIMIT 500 且无 offset —— 报修人字典超过 500 条后
+    // 永远取不到后半页，且前端无法分页。改为受控分页（上限 500 保持既有防护），并回 total。
+    const limit = clampInt(req.query.limit, 100, 1, 500);
+    const offset = clampInt(req.query.offset, 0, 0, 100000);
+    const r = await withTenantClient(tenantId, async (client) => {
+      const items = await client.query(
         `SELECT id, code, name, phone, role, enabled
-         FROM reporter_dict WHERE tenant_id = $1 ORDER BY name LIMIT 500`,
+         FROM reporter_dict WHERE tenant_id = $1 ORDER BY name LIMIT $2 OFFSET $3`,
+        [tenantId, limit, offset],
+      );
+      const cnt = await client.query(
+        `SELECT count(*)::int AS c FROM reporter_dict WHERE tenant_id = $1`,
         [tenantId],
-      ),
-    );
-    return res.json({ ok: true, code: 0, items: r.rows });
+      );
+      return { items: items.rows, total: cnt.rows[0]?.c ?? 0 };
+    });
+    return res.json({ ok: true, code: 0, items: r.items, total: r.total, limit, offset });
   } catch (e) { next(e); }
 });
 router.post('/tenants/:id/reporters', async (req, res, next) => {

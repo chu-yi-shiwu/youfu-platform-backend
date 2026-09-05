@@ -127,7 +127,8 @@ router.post('/generate-from-theme', async (req, res, next) => {
 });
 
 // ============ 批次三 卡4：老租户自愿升级——给 work_order def 追加验收边 ============
-// POST /api/v1/workflow-defs/:entityType/enable-acceptance（admin only）
+// POST /api/v1/workflow-defs/:entityType/enable-acceptance（门禁：workflow.edit 权限点，
+// 默认仅 admin；租户可在 role_permission 授予其它角色）
 // 幂等：两条验收边已存在则 added=0 直接 ok；否则追加边（含目标态补入）并写历史快照
 // （saveWorkflowDef 内置「旧版→workflow_def_history」append-only 快照，reason='enable-acceptance'）。
 router.post('/:entityType/enable-acceptance', async (req, res, next) => {
@@ -136,10 +137,9 @@ router.post('/:entityType/enable-acceptance', async (req, res, next) => {
     const tenantId = auth.tenantId;
     const { entityType } = req.params;
     if (!/^[a-z][a-z0-9_]*$/.test(entityType)) throw new AppError('BAD_PARAM', 'bad entityType', 400);
-    // admin only（dev 模式放行本地联调，与 requirePermission 同语义）
-    if (auth.authMode !== 'dev' && auth.role !== 'admin') {
-      throw new AppError('FORBIDDEN', 'only admin can enable acceptance edges', 403);
-    }
+    // 审查修复（架构🟡12）：删掉此前的 `auth.role !== 'admin'` 硬编码双保险——
+    // 与紧随其后的 requirePermission('workflow.edit') 语义重复，且租户在 role_permission 里
+    // 显式授予某角色 workflow.edit 时会被这行误杀（权限点才是单一事实源）。
     const result = await withTenantClient(tenantId, async (client) => {
       await requirePermission(auth, client, 'workflow.edit');
       // 无 def 行的租户先落引擎默认图（显式落库后再注入，保证升级可追溯）
