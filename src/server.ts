@@ -49,6 +49,7 @@ import acceptanceRouter from './routes/acceptance.js';// 注册制批次三 卡4
 import platformRouter from './routes/platform.js';// 城市级平台层（E_min）
 import templateMarketRouter from './routes/templateMarket.js';// E2 模板市场（官方模板库/应用/效果）
 import openApiRouter from './routes/openApi.js';// E0_open 开放 API（app_key 认证）
+import metaRouter from './routes/meta.js';// #938 展示标签字典（公开端点，挂 auth 之前）
 import { startInspectionScheduler } from './scheduler/inspectionScheduler.js';// G3 真 cron 调度
 import { startSlaScheduler } from './scheduler/slaScheduler.js';// 拆雷三件套②：SLA 定时扫描+升级通知
 import { startTemplateEffectsScheduler } from './scheduler/templateEffectScheduler.js';// E2 效果回写 cron
@@ -148,6 +149,8 @@ app.use('/api/v1', publicReportRouter);
 app.use('/api/v1', publicAiChatRouter);
 // ③ 微信 JSSDK 签名端点（免登录，挂 auth 之前；供 H5 在微信内录音前注入 wx.config）
 app.use('/api/v1/wechat', wechatRouter);
+// #938 展示标签字典（免登录，挂 auth 之前；展示标签非敏感，apiGuard 白名单已登记 meta）
+app.use('/api/v1', metaRouter);
 
 // 认证/租户（生产化①：AUTH_MODE=dev|prod，prod 强制 JWT）：仅对 /api 生效，
 // 静态首页与 SPA 路由（试点模式公开可访问，无需鉴权）。

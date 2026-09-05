@@ -21,4 +21,9 @@ describe('server.ts 路由挂载冒烟（批次三 卡4）', () => {
     expect(serverSrc).toMatch(/import acceptanceRouter from '\.\/routes\/acceptance\.js'/);
     expect(serverSrc).toMatch(/app\.use\('\/api\/v1', acceptanceRouter\)/);
   });
+
+  it('metaRouter（#938 展示标签字典）：import 与 app.use 挂载成对存在（公开端点挂 auth 之前）', () => {
+    expect(serverSrc).toMatch(/import metaRouter from '\.\/routes\/meta\.js'/);
+    expect(serverSrc).toMatch(/app\.use\('\/api\/v1', metaRouter\)/);
+  });
 });

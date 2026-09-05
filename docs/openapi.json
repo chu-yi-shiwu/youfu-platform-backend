@@ -4,7 +4,7 @@
     "title": "优服家 API",
     "version": "0.0.0-generated",
     "description": "多租户物业 SaaS 后端开放规范（M-3 交付）。\n\n**口径**：本文件由 `tools/generate_openapi.mjs` 自动扫描 `src/server.ts` 挂载表与 `src/routes/*.ts`、`src/webhook/routes.ts` 路由声明生成（generated，非手写）。\n\n**诚实边界**：summary/description 取自路由上方中文注释（启发式）；请求/响应 schema 为宽松骨架，字段一律以服务端实现为准，不编造字段。\n\n**鉴权**：租户/管理端 JWT Bearer；开放 API 走 X-App-Key + X-App-Secret（openApiAuth）；公开端点见各操作 security: []。",
-    "x-generated-at": "2026-09-05T11:19:31.861Z",
+    "x-generated-at": "2026-09-05T15:11:17.486Z",
     "x-generator": "tools/generate_openapi.mjs",
     "x-source": "src/server.ts + src/routes/*.ts + src/webhook/routes.ts（代码扫描口径）"
   },
@@ -37,6 +37,10 @@
     {
       "name": "wechat",
       "description": "路由文件：src/routes/wechat.ts"
+    },
+    {
+      "name": "meta",
+      "description": "路由文件：src/routes/meta.ts"
     },
     {
       "name": "workOrder",
@@ -2143,6 +2147,34 @@
           },
           "503": {
             "description": "HTTP 503",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "description": "骨架占位：字段以服务端实现为准"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/meta/labels": {
+      "get": {
+        "tags": [
+          "meta"
+        ],
+        "summary": "GET /api/v1/meta/labels",
+        "description": "来源：src/routes/meta.ts:13\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "HTTP 200",
             "content": {
               "application/json": {
                 "schema": {
