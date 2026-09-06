@@ -4,7 +4,7 @@
     "title": "优服家 API",
     "version": "0.0.0-generated",
     "description": "多租户物业 SaaS 后端开放规范（M-3 交付）。\n\n**口径**：本文件由 `tools/generate_openapi.mjs` 自动扫描 `src/server.ts` 挂载表与 `src/routes/*.ts`、`src/webhook/routes.ts` 路由声明生成（generated，非手写）。\n\n**诚实边界**：summary/description 取自路由上方中文注释（启发式）；请求/响应 schema 为宽松骨架，字段一律以服务端实现为准，不编造字段。\n\n**鉴权**：租户/管理端 JWT Bearer；开放 API 走 X-App-Key + X-App-Secret（openApiAuth）；公开端点见各操作 security: []。",
-    "x-generated-at": "2026-09-06T09:12:46.569Z",
+    "x-generated-at": "2026-09-06T10:43:17.762Z",
     "x-generator": "tools/generate_openapi.mjs",
     "x-source": "src/server.ts + src/routes/*.ts + src/webhook/routes.ts（代码扫描口径）"
   },
@@ -1979,7 +1979,7 @@
           "energyCollection"
         ],
         "summary": "— 能源平台收单（公开路径，自带验签）",
-        "description": "幂等：data->>'task_ref' 命中即 200 回放，不重复建单。\n\n来源：src/routes/energyCollection.ts:69\n\n服务端响应状态码（代码扫描）：200, 201\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "幂等：data->>'task_ref' 命中即 200 回放，不重复建单。\n\n来源：src/routes/energyCollection.ts:73\n\n服务端响应状态码（代码扫描）：200, 201\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -2031,7 +2031,7 @@
           "energyCollection"
         ],
         "summary": "POST /api/v1/energy/token-exchange",
-        "description": "来源：src/routes/energyCollection.ts:136\n\n服务端响应状态码（代码扫描）：200, 401\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/energyCollection.ts:140\n\n服务端响应状态码（代码扫描）：200, 401\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -2083,7 +2083,7 @@
           "energyCollection"
         ],
         "summary": "— worker 只读列表（第四源数据源）。",
-        "description": "越权链：query.assignee 与 token worker 身份不一致 → 403；\n可见范围 = data->>'worker_ref' = token.worker_ref ∪ assignee = token.sub（授权交集第二半）。\n\n来源：src/routes/energyCollection.ts:202\n\n服务端响应状态码（代码扫描）：200, 403\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "越权链：query.assignee 与 token worker 身份不一致 → 403；\n可见范围 = data->>'worker_ref' = token.worker_ref ∪ assignee = token.sub（授权交集第二半）。\n\n来源：src/routes/energyCollection.ts:206\n\n服务端响应状态码（代码扫描）：200, 403\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -2123,7 +2123,7 @@
           "energyCollection"
         ],
         "summary": "— worker 只读详情（越权链点对点：非本人任务 → 403）",
-        "description": "来源：src/routes/energyCollection.ts:241\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/energyCollection.ts:245\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -2162,7 +2162,7 @@
           "energyCollection"
         ],
         "summary": "workflow_def 配置验证端点（配置驱动实证）：GET /energy/def → 当前生效状态图",
-        "description": "来源：src/routes/energyCollection.ts:268\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/energyCollection.ts:272\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -2190,7 +2190,7 @@
           "energyCollection"
         ],
         "summary": "POST /api/v1/energy/webhook/status-update",
-        "description": "来源：src/routes/energyCollection.ts:297\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/energyCollection.ts:302\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []

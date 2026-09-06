@@ -169,6 +169,40 @@ describe('POST /energy/webhook/dispatch —— 收单验签与幂等', () => {
     expect(b.item.location).toBe('资兴市中医医院');
   });
 
+  it('E02b T303c-fix：template_code 随壳收单落 data，且 /energy/tasks 原样透传（mp 端 form-session 前分流的依据）', async () => {
+    const r = await signedFetch('/api/v1/energy/webhook/dispatch', {
+      ...shell('t303c-fix-e02b-ref'),
+      template_code: 'M11',
+    });
+    expect(r.status).toBe(201);
+    const b = (await r.json()) as any;
+    expect(b.ok).toBe(true);
+    expect(b.item.data.template_code).toBe('M11');
+
+    // worker 只读列表透传：data JSONB 原样返回（mp normEn 从 t.data.template_code 取值）
+    const nowSec = Math.floor(Date.now() / 1000);
+    const token = signJwt(
+      { sub: 'w-001', worker_ref: 'youfu:w-001', scope: 'energy_collection', tid: 't-verification', iat: nowSec, exp: nowSec + 900 },
+      't303a-test-jwt-secret',
+    );
+    const tr = await fetch(url + '/api/v1/energy/tasks?assignee=w-001', {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    expect(tr.status).toBe(200);
+    const tb = (await tr.json()) as any;
+    const hit = (tb.items || []).find((t: any) => t.data && t.data.task_ref === 't303c-fix-e02b-ref');
+    expect(hit).toBeTruthy();
+    expect(hit.data.template_code).toBe('M11');
+  });
+
+  it('E02c T303c-fix 兼容：旧版能源 payload 无 template_code → 照收，落 null（strict 白名单内追加不破坏兼容）', async () => {
+    // shell 不含 template_code —— 模拟旧版能源侧派单壳
+    const r = await signedFetch('/api/v1/energy/webhook/dispatch', shell('t303c-fix-e02c-ref'));
+    expect(r.status).toBe(201);
+    const b = (await r.json()) as any;
+    expect(b.item.data.template_code).toBeNull();
+  });
+
   it('E03 结构化采集字段 → z.strict 422 拒收，零进 PG（红线硬保证）', async () => {
     const before = state.tasks.length;
     const polluted = { ...shell('t303a-e03-ref-0001'), electricity_kwh: 123456, meter_no: 'DB-001' };
