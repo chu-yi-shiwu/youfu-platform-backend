@@ -45,11 +45,13 @@ refreshAuthMode();
 // v5.0 P0：+ /v1/auth/wx-login（微信 openid 免密登录，免登录）
 // T303a：+ /v1/energy/webhook/dispatch（能源平台派单，自带 HMAC 验签）
 //        + /v1/energy/token-exchange（service_key 换 worker token，自带凭证校验）
+// T303b：+ /v1/energy/webhook/status-update（能源平台状态回流，同信任域 HMAC 验签）
 const PUBLIC_POST_PATHS = new Set([
   '/v1/auth/login',
   '/v1/auth/wx-login',
   '/v1/energy/webhook/dispatch',
   '/v1/energy/token-exchange',
+  '/v1/energy/webhook/status-update',
 ]);
 function isPublicPath(req: Request): boolean {
   return req.method === 'POST' && (PUBLIC_POST_PATHS.has(req.path) || (req.originalUrl ?? '').endsWith('/auth/login') || (req.originalUrl ?? '').endsWith('/auth/wx-login'));

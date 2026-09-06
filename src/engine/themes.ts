@@ -70,6 +70,10 @@ export const ENERGY_COLLECTION_DEF: WorkflowDef = {
   transitions: [
     { from: 'created', to: 'dispatched', event: 'dispatch', allowedRoles: ['admin', 'operator'] },
     { from: 'dispatched', to: 'in_progress', event: 'start', allowedRoles: ['admin', 'worker'] },
+    // T303b G4：worker 免开单直报——dispatched --submit--> submitted（能源平台
+    // form-submit 成功后经 status-update webhook 触发；同状态重放 200 幂等，
+    // 其余非法跳转仍由 workflow_def 引擎 422 拒绝）
+    { from: 'dispatched', to: 'submitted', event: 'submit', allowedRoles: ['admin', 'worker'] },
     { from: 'in_progress', to: 'submitted', event: 'submit', allowedRoles: ['admin', 'worker'] },
     { from: 'submitted', to: 'reviewed', event: 'review', allowedRoles: ['admin', 'operator'] },
     { from: 'reviewed', to: 'archived', event: 'archive', allowedRoles: ['admin', 'operator'] },

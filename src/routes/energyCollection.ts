@@ -277,4 +277,68 @@ router.get('/energy/def', async (_req: any, res: any, next: any) => {
   }
 });
 
+// ---------------------------------------------------------------------------
+// T303b G4 状态回流：能源平台 form-submit 成功 → POST /energy/webhook/status-update
+// 与 dispatch 同信任域（同密钥同签名域，复用 verifyEnergySignature）。
+// 语义：验签 → task_ref 定位唯一任务 → 同状态重复回调幂等回放 200（不 422）→
+// transitionEntity 按 workflow_def 引擎推进（非法跳转 BAD_STATE 422）。
+// 目标态由 workflow_def 决定（能源侧只发事件 'submit'，映射见能源侧
+// constants/youfuStatusMap.ts），本端不硬编码状态跳转表。
+// ---------------------------------------------------------------------------
+const StatusUpdateBody = z
+  .object({
+    task_ref: z.string().min(8).max(64),
+    status: z.literal('submitted'), // 能源侧当前唯一可回流事件（form 回填完成）
+    submitted_at: z.string().max(40).optional(),
+    record_ref: z.string().max(64).nullable().optional(), // 能源库 youfu_form_submission.id 溯源
+  })
+  .strict();
+
+router.post('/energy/webhook/status-update', async (req: any, res: any, next: any) => {
+  try {
+    verifyEnergySignature(req);
+    const b = StatusUpdateBody.parse(req.body);
+    const tenantId = process.env.ENERGY_DISPATCH_TENANT ?? DEFAULT_TENANT_ID;
+
+    const result = await withTenantClient(tenantId, async (client: any) => {
+      const found = await client.query(
+        `SELECT * FROM business_flow_tasks
+         WHERE tenant_id = $1 AND entity_type = $2 AND data->>'task_ref' = $3 LIMIT 1`,
+        [tenantId, ENTITY, b.task_ref],
+      );
+      if (!found.rows[0]) {
+        throw new AppError('NOT_FOUND', `energy collection task not found: ${b.task_ref}`, 404);
+      }
+      const row = found.rows[0];
+      // 幂等回放：已处于 submitted（或经 reviewed/archive 继续推进过）时，
+      // 同状态重复回调一律 200，绝不 422——webhook 至少一次投递的必然伴生。
+      if (row.status === b.status) {
+        const def = await getWorkflowDefOrDefault(client, tenantId, ENTITY, ENERGY_COLLECTION_DEF);
+        return { replay: true as const, item: { ...row, available: availableTransitions(def, row.status) } };
+      }
+
+      const extra: Record<string, unknown> = { submitted_by: 'energy-platform' };
+      if (b.submitted_at !== undefined) extra.submitted_at = b.submitted_at;
+      if (b.record_ref !== undefined) extra.record_ref = b.record_ref;
+      const updated = await transitionEntity(client, tenantId, {
+        table: 'business_flow_tasks',
+        id: row.id,
+        event: 'submit',
+        entityType: ENTITY,
+        fallbackDef: ENERGY_COLLECTION_DEF,
+        actor: 'energy-webhook',
+        extra,
+      });
+      return { replay: false as const, item: updated };
+    });
+
+    if (result.replay) {
+      return res.status(200).json({ ok: true, code: 0, idempotent_replay: true, item: result.item });
+    }
+    return res.status(200).json({ ok: true, code: 0, item: result.item });
+  } catch (e) {
+    next(e);
+  }
+});
+
 export default router;
