@@ -16,6 +16,7 @@
     "seed:workflow:reset": "tsx scripts/seed-workflow-def.ts --reset",
     "register:webhook": "node scripts/register-webhook.mjs",
     "test": "vitest run",
+    "typecheck": "tsc --noEmit",
     "release-gate": "tsx scripts/releaseGate.ts",
     "seed:energy-collection": "tsx scripts/seed-energy-collection-def.ts",
     "seed:energy-collection:reset": "tsx scripts/seed-energy-collection-def.ts --reset"

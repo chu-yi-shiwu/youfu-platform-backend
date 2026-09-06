@@ -124,7 +124,8 @@ describe('服务台管理（requireConfigRole 门禁）', () => {
     h.client = makeClient(deskHandlers()).client;
     const res = await get('/service-desks');
     expect(res.status).toBe(200);
-    const body = await res.json();
+    // P2-3 typecheck：res.json() 返回 unknown，按响应形状显式收窄（下同）
+    const body = (await res.json()) as { ok: boolean; items: Array<{ name: string }> };
     expect(body.ok).toBe(true);
     expect(body.items).toHaveLength(1);
     expect(body.items[0].name).toBe('一楼服务台');
@@ -135,7 +136,7 @@ describe('服务台管理（requireConfigRole 门禁）', () => {
     h.client = m.client;
     const res = await post('/service-desks', { name: '一楼服务台' });
     expect(res.status).toBe(201);
-    const body = await res.json();
+    const body = (await res.json()) as { item: { id: string } };
     expect(body.item.id).toBe(DESK);
     const ins = m.calls.find((c) => c.text.startsWith('INSERT INTO service_desk'))!;
     expect(ins.params).toEqual([T, '一楼服务台', null]); // template 缺省 → null
@@ -161,7 +162,7 @@ describe('服务台管理（requireConfigRole 门禁）', () => {
     h.client = makeClient(deskHandlers()).client;
     const ok = await put(`/service-desks/${DESK}`, { name: '二楼服务台' });
     expect(ok.status).toBe(200);
-    const body = await ok.json();
+    const body = (await ok.json()) as { item: { name: string } };
     expect(body.item.name).toBe('二楼服务台');
 
     h.client = makeClient(deskHandlers({ deskExists: false })).client;
@@ -216,7 +217,7 @@ describe('来电弹屏代申告（POST /tickets）', () => {
     h.client = m.client;
     const res = await post('/tickets', payload);
     expect(res.status).toBe(201);
-    const body = await res.json();
+    const body = (await res.json()) as { item: { title: string; business_type: string } };
     expect(body.item.title).toBe('服务台代申告·张三');
     expect(body.item.business_type).toBe('维修');
 
@@ -255,7 +256,7 @@ describe('来电弹屏代申告（POST /tickets）', () => {
     h.client = makeClient(deskHandlers({ idemGrabbed: false, existingWo: existing })).client;
     const res = await post('/tickets', payload);
     expect(res.status).toBe(201);
-    const body = await res.json();
+    const body = (await res.json()) as { item: { id: string; order_no: string } };
     expect(body.item.id).toBe('wo-existing-1'); // 复用既有单而非新建
     expect(body.item.order_no).toBe('WO_1');
   });
@@ -275,7 +276,7 @@ describe('来电弹屏代申告（POST /tickets）', () => {
     h.client = makeClient(deskHandlers()).client; // mock 返回覆盖集 {settlement.edit}，不含 intake.create
     const res = await post('/tickets', payload);
     expect(res.status).toBe(403);
-    const body = await res.json();
+    const body = (await res.json()) as { message: string };
     expect(body.message).toContain('intake.create');
     currentRole = 'admin';
   });
