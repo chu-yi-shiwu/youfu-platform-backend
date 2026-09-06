@@ -60,6 +60,26 @@ export const CYCLE_CHECK_DEF: WorkflowDef = {
   config: { doneStates: ['checked'], learningTriggers: ['checked'] },
 };
 
+// T303a 能耗采集任务（entity_type=energy_collection）：能源平台派单镜像态。
+// 状态镜像能源侧采集任务生命周期：created→dispatched→in_progress→submitted→
+// reviewed→archived（+cancelled 撤销路径）。租户 workflow_def 有 DB 配置时
+// 优先 DB（getWorkflowDefOrDefault），本内置兜底保证"零配置即可收单建单"。
+export const ENERGY_COLLECTION_DEF: WorkflowDef = {
+  initial: 'created',
+  states: ['created', 'dispatched', 'in_progress', 'submitted', 'reviewed', 'archived', 'cancelled'],
+  transitions: [
+    { from: 'created', to: 'dispatched', event: 'dispatch', allowedRoles: ['admin', 'operator'] },
+    { from: 'dispatched', to: 'in_progress', event: 'start', allowedRoles: ['admin', 'worker'] },
+    { from: 'in_progress', to: 'submitted', event: 'submit', allowedRoles: ['admin', 'worker'] },
+    { from: 'submitted', to: 'reviewed', event: 'review', allowedRoles: ['admin', 'operator'] },
+    { from: 'reviewed', to: 'archived', event: 'archive', allowedRoles: ['admin', 'operator'] },
+    { from: 'created', to: 'cancelled', event: 'cancel', allowedRoles: ['admin', 'operator'] },
+    { from: 'dispatched', to: 'cancelled', event: 'cancel', allowedRoles: ['admin', 'operator'] },
+    { from: 'in_progress', to: 'cancelled', event: 'cancel', allowedRoles: ['admin', 'operator'] },
+  ],
+  config: { doneStates: ['archived'], learningTriggers: ['reviewed'] },
+};
+
 export interface ThemeTemplate {
   entityType: string;
   name: string;
@@ -73,6 +93,7 @@ export const THEME_TEMPLATES: ThemeTemplate[] = [
   { entityType: 'transport_task', name: '运送', def: TRANSPORT_DEF },
   { entityType: 'emergency_plan', name: '应急预案', def: EMERGENCY_DEF },
   { entityType: 'cycle_check', name: '循环签到', def: CYCLE_CHECK_DEF },
+  { entityType: 'energy_collection', name: '能耗采集', def: ENERGY_COLLECTION_DEF },
 ];
 
 const LABEL_MAP: Record<string, string> = {

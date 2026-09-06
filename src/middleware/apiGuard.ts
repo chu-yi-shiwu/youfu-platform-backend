@@ -41,6 +41,7 @@ export const KNOWN_V1_SEGMENTS: ReadonlySet<string> = new Set([
   'service-desks', 'settlements', 'similar', 'sla', 'stats', 'summary', 'tasks',
   'template-contributions', 'templates', 'tenant-info', 'tenants', 'themes',
   'tickets', 'upload', 'usage', 'webhooks', 'workers', 'workflow',
+  'energy', // T303a 能耗采集收单/worker token/只读列表（src/routes/energyCollection.ts）
 ]);
 
 // 纯函数：路径（挂载后相对 /api，如 /v1/stats/x）是否落在已知 API 区域内。

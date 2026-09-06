@@ -46,6 +46,7 @@ import uploadRouter from './routes/upload.js';// B0 文件上传（H5 拍照落�
 import uploadsRouter from './routes/uploads.js';// R19-005 鉴权上传文件路由（替代零鉴权静态托管）
 import settlementRouter from './routes/settlement.js';// 注册制批次三 卡4：结算三凭证（/settlements）
 import acceptanceRouter from './routes/acceptance.js';// 注册制批次三 卡4：专用验收端点（/open/work_order/:id/acceptance）
+import energyCollectionRouter from './routes/energyCollection.js';// T303a 能耗采集收单（能源平台 webhook + worker token + 只读列表）
 import platformRouter from './routes/platform.js';// 城市级平台层（E_min）
 import templateMarketRouter from './routes/templateMarket.js';// E2 模板市场（官方模板库/应用/效果）
 import openApiRouter from './routes/openApi.js';// E0_open 开放 API（app_key 认证）
@@ -84,7 +85,9 @@ const app = express();
 // Nginx 追加的那一跳，客户端自带的 XFF 伪造段被忽略。恒定生效，去掉环境开关以防误配漏开。
 app.set('trust proxy', 1);
 // B0：放宽 JSON body 上限到 10MB（base64 上传图片可能较大）；其余路由均为小 JSON，无影响。
-app.use(express.json({ limit: '10mb' }));
+// T303a：verify 钩子捕获原始字节 → /energy/webhook/dispatch 对 raw body 做 HMAC 验签
+//（JSON 重序列化不稳定，签名域必须是原始字节；仅捕获不改动解析行为）。
+app.use(express.json({ limit: '10mb', verify: (req: any, _res, buf) => { req.rawBody = buf; } }));
 
 // S-4 显式 CORS 策略：仅放行配置的来源（默认生产域名），禁用通配 *，凭据跨域拒绝。
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS ?? 'https://youfu.banerz.cn')
@@ -145,6 +148,10 @@ app.use('/api/v1/open-api', openApiRouter);
 
 // P1 需求侧 public 报修（免登录，挂 auth 之前；org 显式指定机构 + 限流 + D3 硬拒）
 app.use('/api/v1', publicReportRouter);
+// T303a 能耗采集：/energy/webhook/dispatch（能源平台 HMAC 验签）、/energy/token-exchange
+//（service_key）、/energy/tasks（worker token verifyJwt，prod 语义）——机器/worker 凭证
+// 自治，不走租户 authMiddleware（worker token 无 users 行，挂 auth 后会被 401 挡死）。
+app.use('/api/v1', energyCollectionRouter);
 // L3 对话管家（免登录，挂 auth 之前；org 白名单 + 限流 + I4/LLM 双开关 + consent 硬拒）
 app.use('/api/v1', publicAiChatRouter);
 // ③ 微信 JSSDK 签名端点（免登录，挂 auth 之前；供 H5 在微信内录音前注入 wx.config）

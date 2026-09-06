@@ -4,7 +4,7 @@
     "title": "优服家 API",
     "version": "0.0.0-generated",
     "description": "多租户物业 SaaS 后端开放规范（M-3 交付）。\n\n**口径**：本文件由 `tools/generate_openapi.mjs` 自动扫描 `src/server.ts` 挂载表与 `src/routes/*.ts`、`src/webhook/routes.ts` 路由声明生成（generated，非手写）。\n\n**诚实边界**：summary/description 取自路由上方中文注释（启发式）；请求/响应 schema 为宽松骨架，字段一律以服务端实现为准，不编造字段。\n\n**鉴权**：租户/管理端 JWT Bearer；开放 API 走 X-App-Key + X-App-Secret（openApiAuth）；公开端点见各操作 security: []。",
-    "x-generated-at": "2026-09-05T15:11:17.486Z",
+    "x-generated-at": "2026-09-06T05:59:25.270Z",
     "x-generator": "tools/generate_openapi.mjs",
     "x-source": "src/server.ts + src/routes/*.ts + src/webhook/routes.ts（代码扫描口径）"
   },
@@ -29,6 +29,10 @@
     {
       "name": "publicReport",
       "description": "路由文件：src/routes/publicReport.ts"
+    },
+    {
+      "name": "energyCollection",
+      "description": "路由文件：src/routes/energyCollection.ts"
     },
     {
       "name": "publicAiChat",
@@ -1879,7 +1883,7 @@
           "publicReport"
         ],
         "summary": "============ §6.2 服务台「平台动态卡」（免登录聚合公开指标，脱敏） ============",
-        "description": "设计：报修人端首页底部小卡——今日已处理 / 平均响应 / 服务热线。\n口径（诚实）：今日已处理 = 今日进入完成态（workflow_def doneStates）的工单数；\n平均响应 = ticket_event 中 assign→processing 时长的分钟均值（无事件数据返回 0 + note，不编造）；\n服务热线 = system_config.hotline（未配置返回空串，前端不显示该项）。\n\n来源：src/routes/publicReport.ts:575\n\n服务端响应状态码（代码扫描）：200, 404, 422\n\n免登录公开端点（限流保护）\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "设计：报修人端首页底部小卡——今日已处理 / 平均响应 / 服务热线。\n口径（诚实）：今日已处理 = 今日进入完成态（workflow_def doneStates）的工单数；\n平均响应 = ticket_event 中 assign→processing 时长的分钟均值（无事件数据返回 0 + note，不编造）；\n服务热线 = system_config.hotline（未配置返回空串，前端不显示该项）。\n\n来源：src/routes/publicReport.ts:593\n\n服务端响应状态码（代码扫描）：200, 404, 422\n\n免登录公开端点（限流保护）\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [],
         "responses": {
           "200": {
@@ -1927,7 +1931,7 @@
           "publicReport"
         ],
         "summary": "POST /api/v1/public/feedback",
-        "description": "来源：src/routes/publicReport.ts:627\n\n服务端响应状态码（代码扫描）：201, 404\n\n免登录公开端点（限流保护）\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/publicReport.ts:645\n\n服务端响应状态码（代码扫描）：201, 404\n\n免登录公开端点（限流保护）\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [],
         "responses": {
           "201": {
@@ -1963,6 +1967,217 @@
                 "type": "object",
                 "additionalProperties": true,
                 "description": "骨架占位：请求字段以服务端实现为准"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/energy/webhook/dispatch": {
+      "post": {
+        "tags": [
+          "energyCollection"
+        ],
+        "summary": "— 能源平台收单（公开路径，自带验签）",
+        "description": "幂等：data->>'task_ref' 命中即 200 回放，不重复建单。\n\n来源：src/routes/energyCollection.ts:69\n\n服务端响应状态码（代码扫描）：200, 201\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "HTTP 200",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "description": "骨架占位：字段以服务端实现为准"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "HTTP 201",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "description": "骨架占位：字段以服务端实现为准"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "description": "骨架占位：请求字段以服务端实现为准"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/energy/token-exchange": {
+      "post": {
+        "tags": [
+          "energyCollection"
+        ],
+        "summary": "POST /api/v1/energy/token-exchange",
+        "description": "来源：src/routes/energyCollection.ts:136\n\n服务端响应状态码（代码扫描）：200, 401\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "HTTP 200",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "description": "骨架占位：字段以服务端实现为准"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "HTTP 401",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "description": "骨架占位：字段以服务端实现为准"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "description": "骨架占位：请求字段以服务端实现为准"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/energy/tasks": {
+      "get": {
+        "tags": [
+          "energyCollection"
+        ],
+        "summary": "— worker 只读列表（第四源数据源）。",
+        "description": "越权链：query.assignee 与 token worker 身份不一致 → 403；\n可见范围 = data->>'worker_ref' = token.worker_ref ∪ assignee = token.sub（授权交集第二半）。\n\n来源：src/routes/energyCollection.ts:202\n\n服务端响应状态码（代码扫描）：200, 403\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "HTTP 200",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "description": "骨架占位：字段以服务端实现为准"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "HTTP 403",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "description": "骨架占位：字段以服务端实现为准"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/energy/tasks/{id}": {
+      "get": {
+        "tags": [
+          "energyCollection"
+        ],
+        "summary": "— worker 只读详情（越权链点对点：非本人任务 → 403）",
+        "description": "来源：src/routes/energyCollection.ts:241\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "HTTP 200",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "description": "骨架占位：字段以服务端实现为准"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "路径参数（原代码声明形如 :param）"
+          }
+        ]
+      }
+    },
+    "/api/v1/energy/def": {
+      "get": {
+        "tags": [
+          "energyCollection"
+        ],
+        "summary": "workflow_def 配置验证端点（配置驱动实证）：GET /energy/def → 当前生效状态图",
+        "description": "来源：src/routes/energyCollection.ts:268\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "HTTP 200",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "description": "骨架占位：字段以服务端实现为准"
+                }
               }
             }
           }
@@ -2047,7 +2262,7 @@
           "publicAiChat"
         ],
         "summary": "— 话轮拉取（刷新 UI / 续聊恢复）",
-        "description": "R38-R2 修复：\nF1 id 先过 UUID 校验（原实现非 UUID 直落 PG uuid 比较 → 22P02 → 500；与 auth/me 同口径）；\nF2 防御纵深：会话绑定了 reporter_anon 时，请求携带 anon 且不匹配 → 403\n（不携带则维持原行为，兼容已部署 H5/MP 旧版；两端新版本 GET 均随带 anon）。\n\n来源：src/routes/publicAiChat.ts:88\n\n服务端响应状态码（代码扫描）：200, 403, 404, 422\n\n免登录公开端点（限流保护）\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "R38-R2 修复：\nF1 id 先过 UUID 校验（原实现非 UUID 直落 PG uuid 比较 → 22P02 → 500；与 auth/me 同口径）；\nF2 防御纵深：会话绑定了 reporter_anon 时，请求携带 anon 且不匹配 → 403\n（不携带则维持原行为，兼容已部署 H5/MP 旧版；两端新版本 GET 均随带 anon）。\n\n来源：src/routes/publicAiChat.ts:93\n\n服务端响应状态码（代码扫描）：200, 403, 404, 422\n\n免登录公开端点（限流保护）\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [],
         "responses": {
           "200": {

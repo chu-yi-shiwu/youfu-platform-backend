@@ -43,7 +43,14 @@ refreshAuthMode();
 // 公开路径豁免（登录端点必须公开，否则永远拿不到令牌）。
 // 中间件挂在 /api 下，req.path 为挂载后相对路径（如 /v1/auth/login）。
 // v5.0 P0：+ /v1/auth/wx-login（微信 openid 免密登录，免登录）
-const PUBLIC_POST_PATHS = new Set(['/v1/auth/login', '/v1/auth/wx-login']);
+// T303a：+ /v1/energy/webhook/dispatch（能源平台派单，自带 HMAC 验签）
+//        + /v1/energy/token-exchange（service_key 换 worker token，自带凭证校验）
+const PUBLIC_POST_PATHS = new Set([
+  '/v1/auth/login',
+  '/v1/auth/wx-login',
+  '/v1/energy/webhook/dispatch',
+  '/v1/energy/token-exchange',
+]);
 function isPublicPath(req: Request): boolean {
   return req.method === 'POST' && (PUBLIC_POST_PATHS.has(req.path) || (req.originalUrl ?? '').endsWith('/auth/login') || (req.originalUrl ?? '').endsWith('/auth/wx-login'));
 }
