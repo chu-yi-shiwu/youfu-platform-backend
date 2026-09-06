@@ -53,14 +53,15 @@ vi.mock('../services/wechat.js', () => ({
   downloadMedia: vi.fn(),
 }));
 vi.mock('../services/wechatMp.js', () => ({
-  mpConfigured: false,
+  mpConfigured: vi.fn(() => false),
   decryptPhoneCode: vi.fn(),
-  genMpCode: vi.fn(),
+  genMpCode: vi.fn(async () => Buffer.from('fakepng')),
 }));
 
 import publicReportRouter from '../routes/publicReport.js';
 import { createWithIdem } from '../repo/ticket.js';
 import { errorMiddleware } from '../middleware/error.js';
+import { mpConfigured, genMpCode } from '../services/wechatMp.js';
 
 const app = express();
 app.use(express.json({ limit: '1mb' }));
@@ -221,5 +222,41 @@ describe('GET /public/fault-categories（报修页分类下拉）', () => {
     expect(r.status).toBe(200);
     const j = (await r.json()) as any;
     expect(JSON.stringify(j)).toContain('空调');
+  });
+});
+
+describe('GET /public/mp-qrcode（贴码生成 · env_version 通道）', () => {
+  beforeAll(() => {
+    vi.mocked(mpConfigured).mockReturnValue(true);
+    vi.mocked(genMpCode).mockResolvedValue(Buffer.from('fakepng'));
+  });
+  afterAll(() => {
+    vi.mocked(mpConfigured).mockReturnValue(false);
+    vi.mocked(genMpCode).mockReset();
+  });
+
+  it('⑩env 缺省 → genMpCode 收到 trial（体验版缺省，防正式版未发布扫码"尚未发布"）', async () => {
+    const r = await get('/public/mp-qrcode?path=pages/index/index?org=t-demo');
+    expect(r.status).toBe(200);
+    expect(vi.mocked(genMpCode).mock.calls.at(-1)?.[2]).toBe('trial');
+  });
+
+  it('⑪env=release → 透传 release（正式发布后对外贴码用）', async () => {
+    const r = await get('/public/mp-qrcode?path=pages/index/index?org=t-demo&env=release');
+    expect(r.status).toBe(200);
+    expect(vi.mocked(genMpCode).mock.calls.at(-1)?.[2]).toBe('release');
+  });
+
+  it('⑫env 乱写 → 回退 trial（不 422，贴码生成低风险宽松处理）', async () => {
+    const r = await get('/public/mp-qrcode?path=pages/index/index?org=t-demo&env=whatever');
+    expect(r.status).toBe(200);
+    expect(vi.mocked(genMpCode).mock.calls.at(-1)?.[2]).toBe('trial');
+  });
+
+  it('⑬scene 编码：org 进 scene 而非 path query（R1 断点回归锁定）', async () => {
+    await get('/public/mp-qrcode?path=pages/index/index?org=t-demo');
+    const [p, scene] = vi.mocked(genMpCode).mock.calls.at(-1) ?? [];
+    expect(p).toBe('pages/index/index?org=t-demo');
+    expect(scene).toBe('org=t-demo');
   });
 });

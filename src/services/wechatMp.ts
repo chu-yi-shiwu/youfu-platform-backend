@@ -85,12 +85,19 @@ export async function decryptPhoneCode(phoneCode: string): Promise<string | null
 // 生成带参小程序码（v0.4.0：扫码带 org/loc/role 参数；path 不计入 scene 长度限制）
 // 入参：path = 小程序页面路径（可带 query，如 pages/index/index?org=xxx&loc=yyy）
 // 返回：Buffer（二进制 PNG）；失败 null
-export async function genMpCode(path: string, scene: string = 'qr'): Promise<Buffer | null> {
+// envVersion：小程序码指向的版本。getwxacodeunlimit 缺省=release（正式版），
+// 正式版未发布时扫码报"小程序尚未发布"（09-06 真机实锤）。现阶段无正式版，默认 trial（体验版）；
+// 正式发布对外后，调用方须显式传 release 重出对外贴码（体验版码仅 mp 后台体验员可扫）。
+export async function genMpCode(
+  path: string,
+  scene: string = 'qr',
+  envVersion: 'trial' | 'release' | 'develop' = 'trial',
+): Promise<Buffer | null> {
   if (!mpConfigured() || !path) return null;
   try {
     const accessToken = await getMpAccessToken();
     if (!accessToken) return null;
-    const body = JSON.stringify({ scene, path, width: 430 });
+    const body = JSON.stringify({ scene, path, width: 430, env_version: envVersion });
     const result = await new Promise<{ buf: Buffer | null; errcode?: number; errmsg?: string }>((resolve) => {
       const u = new URL(`https://api.weixin.qq.com/wxa/getwxacodeunlimit?access_token=${encodeURIComponent(accessToken)}`);
       const req = https.request(

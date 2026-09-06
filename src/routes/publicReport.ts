@@ -558,6 +558,11 @@ router.get('/public/mp-qrcode', loginRateLimit(10), async (req, res, next) => {
     if (!path.startsWith('pages/index/index')) {
       return res.status(403).json({ ok: false, code: 'PATH_FORBIDDEN', message: '仅允许生成报修首页二维码' });
     }
+    // env：小程序码指向版本（trial=体验版/release=正式版）。缺省 trial——正式版未发布时
+    // release 码扫码报"尚未发布"（09-06 真机实锤）；正式发布后对外贴码须显式 env=release 重出。
+    const envRaw = String(req.query.env || '').trim();
+    const env: 'trial' | 'release' | 'develop' =
+      envRaw === 'release' ? 'release' : envRaw === 'develop' ? 'develop' : 'trial';
     if (!mpConfigured()) return res.status(409).json({ ok: false, code: 'MP_NOT_CONFIGURED', message: '小程序能力未配置' });
     // #942 R1 深化修复：getwxacodeunlimit 不传播 path 上的 query——org 必须走 scene 通道，
     // 否则扫码进入后 options.org 恒为 undefined，贴码报修主链路断点（前端只能靠"缺少机构"弹窗兜底）。
@@ -577,7 +582,7 @@ router.get('/public/mp-qrcode', loginRateLimit(10), async (req, res, next) => {
       if (s.length <= 32 && s) scene = s;
       else if (params.get('org') && params.get('org')!.length <= 30) scene = `org=${params.get('org')}`;
     }
-    const buf = await genMpCode(path, scene);
+    const buf = await genMpCode(path, scene, env);
     if (!buf) return res.status(502).json({ ok: false, code: 'QRCODE_GEN_FAIL', message: '小程序码生成失败（可能是体验版未发布该页面或小程序码配额/限频）' });
     res.setHeader('Content-Type', 'image/png');
     res.setHeader('Cache-Control', 'public, max-age=300');
