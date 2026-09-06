@@ -3,7 +3,7 @@
 // org 缺失时 zod 统一报"参数不完整"掩盖真实缺因 → 已加前置明示 422。
 // 本文件覆盖：org 缺失前置 422（口径对齐 GET 分支）、机构白名单 404、message 缺失 422。
 // 模式复用 publicReport.http.test.ts：vi.mock 池与重依赖，express 真 handler。
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeAll, afterAll } from 'vitest';
 import express from 'express';
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -23,10 +23,13 @@ vi.mock('../db/pool.js', () => ({
   withTenantClient: async (_tid: string, fn: (c: unknown) => unknown) => fn({ query: vi.fn(async () => ({ rows: [], rowCount: 0 })) }),
   assertSafeTenantId: (t: string) => t,
 }));
+// #942 R11：GET 归属校验行为锁定（R4 收紧：会话有 anon 而请求缺 anon 也 403）
+const convRow = { id: '123e4567-e89b-42d3-a456-426614174000', reporter_anon: 'anon-owner' };
 vi.mock('../repo/aiConversation.js', () => ({
   createConversation: vi.fn(),
-  getConversation: vi.fn(),
-  listTurns: vi.fn(),
+  getConversation: vi.fn(async (_c: unknown, _t: string, id: string) =>
+    id === '123e4567-e89b-42d3-a456-426614174000' ? convRow : null),
+  listTurns: vi.fn(async () => [{ id: 1, role: 'user', text: 'hi' }]),
 }));
 vi.mock('../services/conversationAgent.js', () => ({
   runAgentTurn: vi.fn(),
@@ -125,5 +128,46 @@ describe('POST /public/ai-chat —— org 前置明示（#942 教训）', () => 
     } finally {
       server.close();
     }
+  });
+});
+
+describe('GET /public/ai-chat/:id —— anon 归属校验（R4 收紧锁定）', () => {
+  const UUID = '123e4567-e89b-42d3-a456-426614174000';
+  let base = '';
+  let server: Server;
+
+  beforeAll(async () => {
+    const app = express();
+    app.use(express.json());
+    app.use('/api/v1', router);
+    await new Promise<void>((resolve) => {
+      server = app.listen(0, () => {
+        base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+        resolve();
+      });
+    });
+  });
+  afterAll(() => { server.close(); });
+
+  const get = (q: string) => fetch(`${base}/api/v1/public/ai-chat/${UUID}${q}`);
+
+  it('请求缺 anon 且会话有 anon → 403（收紧后不再放行）', async () => {
+    const r = await get('?org=t-ok');
+    expect(r.status).toBe(403);
+    const b = (await r.json()) as any;
+    expect(b.code).toBe('FORBIDDEN');
+  });
+
+  it('anon 不匹配 → 403', async () => {
+    const r = await get('?org=t-ok&anon=anon-other');
+    expect(r.status).toBe(403);
+  });
+
+  it('anon 匹配 → 200 返回话轮', async () => {
+    const r = await get('?org=t-ok&anon=anon-owner');
+    expect(r.status).toBe(200);
+    const b = (await r.json()) as any;
+    expect(b.ok).toBe(true);
+    expect(b.items).toHaveLength(1);
   });
 });
