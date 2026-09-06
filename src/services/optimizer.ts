@@ -111,6 +111,146 @@ export function generateMiningOptimizations(result: ProcessMiningResult): Optimi
   return decisions;
 }
 
+// ── 位置×类目高频重复告警（2026-09-06 任务③：C1 优化建议引擎新规则）──
+// 规则：同一「位置×类目」在滚动 30 天内 ≥3 次同类报修 → 产出「建议巡检/根因排查」建议。
+// 红线：只读 work_orders，不写状态、不自动派单、不自动升级优先级；产出走既有
+//   optimization_feedback pending 建议通道（recordWorkflowRecommendations / /optimize/generate），
+//   applyWorkflowOptimizations 对本 target 不做自动改流程（见 isAutoApplicableTarget 守卫）。
+// 陪检/运送业务线（transport/escort 及类目名含陪检/护送/运送等）不参与本规则（另一条业务线）。
+// 模型/阈值体系（CMAB/StatsModel/AUTO_TUNE）与本规则零交集——纯 SQL 聚合 + 纯函数分组。
+
+export interface RepeatHotspotRow {
+  location: string | null;
+  catalog: string | null; // 类目 id（work_orders.catalog uuid）
+  catalog_name?: string | null; // 类目展示名（LEFT JOIN fault_category 带出，可空）
+  business_type?: string | null;
+  created_at: string | Date;
+}
+
+export interface RepeatHotspot {
+  location: string; // 归一化后位置（trim + 空白折叠；诚实口径=文本精确匹配，不做激进归一化）
+  catalog: string;
+  catalog_name: string | null;
+  count: number;
+}
+
+export interface RepeatHotspotOpts {
+  windowDays?: number; // 滚动窗口天数（缺省 30）
+  minCount?: number; // 触发阈值（缺省 ≥3 次）
+  now?: Date; // 可注入当前时间（单测滚动窗口边界用；缺省取系统时间）
+}
+
+export const REPEAT_HOTSPOT_DEFAULTS = { windowDays: 30, minCount: 3 } as const;
+
+// 陪检/运送业务线排除词（business_type 与类目展示名 contains 匹配，大小写不敏感）
+export const REPEAT_HOTSPOT_EXCLUDED_KEYWORDS: readonly string[] = [
+  '陪检', '护送', '运送', '转运', '转科', 'transport', 'escort',
+];
+
+/** 位置归一化：trim + 连续空白折叠为单空格（诚实口径：仅空白归一，文本精确匹配）。 */
+export function normalizeLocationKey(raw: string | null | undefined): string {
+  return (raw ?? '').trim().replace(/\s+/g, ' ');
+}
+
+function isExcludedBusinessLine(...texts: Array<string | null | undefined>): boolean {
+  for (const t of texts) {
+    if (!t) continue;
+    const lower = t.toLowerCase();
+    if (REPEAT_HOTSPOT_EXCLUDED_KEYWORDS.some((k) => lower.includes(k.toLowerCase()))) return true;
+  }
+  return false;
+}
+
+/**
+ * 纯函数：滚动窗口内聚合「位置×类目」重复对（不碰 DB，可单测）。
+ * 口径：
+ *  - 窗口 [now - windowDays, now]（含边界，created_at 毫秒比较）；
+ *  - location/catalog 任一为空不成组（诚实留白，不臆造分组键）；
+ *  - 排除陪检/运送业务线（business_type 或类目名命中排除词）；
+ *  - count ≥ minCount 才产出，按 count 降序、同数按位置字典序稳定排序。
+ */
+export function groupRepeatHotspots(rows: RepeatHotspotRow[], opts: RepeatHotspotOpts = {}): RepeatHotspot[] {
+  const windowDays = opts.windowDays ?? REPEAT_HOTSPOT_DEFAULTS.windowDays;
+  const minCount = opts.minCount ?? REPEAT_HOTSPOT_DEFAULTS.minCount;
+  const nowMs = (opts.now ?? new Date()).getTime();
+  const windowStartMs = nowMs - windowDays * 864e5;
+  const counts = new Map<string, RepeatHotspot>();
+  for (const r of rows) {
+    if (isExcludedBusinessLine(r.business_type, r.catalog_name)) continue;
+    const locKey = normalizeLocationKey(r.location);
+    const catKey = (r.catalog ?? '').trim();
+    if (!locKey || !catKey) continue;
+    const t = r.created_at instanceof Date ? r.created_at.getTime() : Date.parse(r.created_at);
+    if (!Number.isFinite(t) || t < windowStartMs || t > nowMs) continue;
+    const key = `${locKey}\u0001${catKey}`;
+    const cur = counts.get(key);
+    if (cur) cur.count++;
+    else counts.set(key, { location: locKey, catalog: catKey, catalog_name: r.catalog_name ?? null, count: 1 });
+  }
+  return [...counts.values()]
+    .filter((h) => h.count >= minCount)
+    .sort((a, b) => b.count - a.count || a.location.localeCompare(b.location) || a.catalog.localeCompare(b.catalog));
+}
+
+/** 纯函数：热点 → 优化建议（复用引擎既有 OptimizationDecision/pending 通道，每热点一条）。 */
+export function generateRepeatHotspotOptimizations(
+  hotspots: RepeatHotspot[],
+  opts: RepeatHotspotOpts = {},
+): OptimizationDecision[] {
+  const windowDays = opts.windowDays ?? REPEAT_HOTSPOT_DEFAULTS.windowDays;
+  const minCount = opts.minCount ?? REPEAT_HOTSPOT_DEFAULTS.minCount;
+  return hotspots.map((h) => ({
+    scope: 'workflow' as const,
+    target: 'work_order:repeat_hotspot',
+    recommendation: {
+      action: 'inspect_root_cause',
+      location: h.location,
+      catalog: h.catalog,
+      catalog_name: h.catalog_name,
+      count: h.count,
+      window_days: windowDays,
+      min_count: minCount,
+    },
+    reason: `位置「${h.location}」×类目「${h.catalog_name ?? h.catalog}」近 ${windowDays} 天重复报修 ${h.count} 次（≥${minCount}），建议安排巡检/根因排查，而非继续被动接单`,
+  }));
+}
+
+/**
+ * 只读检测：拉取租户窗口内工单（location/catalog/类目名/业务线/创建时间）后走纯函数聚合。
+ * RLS 纪律：client 须来自 withTenantClient（自动注入 tenant_id），SQL 仍显式 WHERE tenant_id=$1 双保险。
+ * 只 SELECT，不写任何状态；cancelled 单也计入（重复报修行为本身即信号，口径诚实不做状态过滤）。
+ */
+export async function detectRepeatHotspots(
+  client: PoolClient,
+  tenantId: string,
+  opts: RepeatHotspotOpts = {},
+): Promise<RepeatHotspot[]> {
+  const windowDays = opts.windowDays ?? REPEAT_HOTSPOT_DEFAULTS.windowDays;
+  const r = await client.query<{
+    location: string | null;
+    catalog: string | null;
+    catalog_name: string | null;
+    business_type: string | null;
+    created_at: Date;
+  }>(
+    `SELECT wo.location, wo.catalog, fc.name AS catalog_name, wo.business_type, wo.created_at
+       FROM work_orders wo
+       LEFT JOIN fault_category fc ON fc.id = wo.catalog AND fc.tenant_id = wo.tenant_id
+      WHERE wo.tenant_id = $1 AND wo.created_at >= now() - ($2 || ' days')::interval`,
+    [tenantId, String(windowDays)],
+  );
+  return groupRepeatHotspots(r.rows, opts);
+}
+
+/** applyWorkflowOptimizations 的自动改流程守卫：仅认识这三类 target，其余（如 repeat_hotspot）跳过不应用。 */
+export function isAutoApplicableTarget(target: string): boolean {
+  return (
+    target === 'work_order:recheck_gate' ||
+    target === 'work_order:sla_tighten' ||
+    target.endsWith(':auto_escalate')
+  );
+}
+
 /** 读模型参数（model_state）。无则返回 null。 */
 export async function getModelParams(
   client: PoolClient,
@@ -215,7 +355,7 @@ export function applyRecommendationToDef(def: WorkflowDef, decision: Optimizatio
 export async function applyWorkflowOptimizations(
   client: PoolClient,
   tenantId: string,
-): Promise<{ applied: number; targets: string[] }> {
+): Promise<{ applied: number; targets: string[]; skipped: string[] }> {
   const rows = await client.query<{ id: string; target: string; recommendation: unknown }>(
     `SELECT id, target, recommendation FROM optimization_feedback
      WHERE tenant_id = $1 AND scope = 'workflow' AND status = 'pending'`,
@@ -223,7 +363,15 @@ export async function applyWorkflowOptimizations(
   );
   let applied = 0;
   const targets: string[] = [];
+  const skipped: string[] = [];
   for (const row of rows.rows) {
+    // 守卫（2026-09-06 任务③）：只自动改流程本引擎认识的 target；不认识的（如
+    // work_order:repeat_hotspot 巡检/根因排查建议）保持 pending 留给人工消费，
+    // 绝不标记 applied 造成「建议被静默吞掉」的假闭环。
+    if (!isAutoApplicableTarget(row.target)) {
+      skipped.push(row.target);
+      continue;
+    }
     const entityType = row.target.split(':')[0];
     const def = await ensureWorkflowDef(client, tenantId, entityType);
     const decision: OptimizationDecision = {
@@ -241,5 +389,5 @@ export async function applyWorkflowOptimizations(
     applied++;
     targets.push(row.target);
   }
-  return { applied, targets };
+  return { applied, targets, skipped };
 }

@@ -9,6 +9,8 @@ import { AppError } from '../middleware/error.js';
 import {
   generateOptimizations,
   generateMiningOptimizations,
+  generateRepeatHotspotOptimizations,
+  detectRepeatHotspots,
   getModelParams,
   applyDispatchOptimizations,
   recordWorkflowRecommendations,
@@ -30,6 +32,10 @@ router.post('/optimize/generate', async (req, res, next) => {
       const params = await getModelParams(client, tenantId);
       const metrics = await processMetrics(client, tenantId);
       const dec = generateOptimizations(params, metrics);
+      // 位置×类目高频重复告警（2026-09-06 任务③）：只读检测，命中产出「巡检/根因排查」
+      // workflow 建议，随 dec 走既有 pending 落库通道（AUTO_TUNE 与否均只记建议，不改流程）。
+      const hotspots = await detectRepeatHotspots(client, tenantId);
+      dec.push(...generateRepeatHotspotOptimizations(hotspots));
       if (autoTune) {
         await applyDispatchOptimizations(client, tenantId, dec);
         await recordWorkflowRecommendations(client, tenantId, dec);
