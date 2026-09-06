@@ -30,6 +30,11 @@ const chatSchema = z.object({
 
 router.post('/public/ai-chat', loginRateLimit(30), async (req, res, next) => {
   try {
+    // org 缺失前置明示（#942 教训）：zod 统一报"参数不完整"会掩盖真实缺因，前端无法引导用户绑机构
+    const rawOrg = (req.body || {}).org;
+    if (!rawOrg || typeof rawOrg !== 'string' || !rawOrg.trim()) {
+      return res.status(422).json({ ok: false, code: 'VALIDATION_ORG_REQUIRED', message: '缺少机构：请在小程序「我的」页填写机构码，或扫描设备报修码进入' });
+    }
     const b = chatSchema.parse(req.body);
     const tr = await pool.query(`SELECT tenant_id, name FROM tenant_registry WHERE tenant_id = $1 AND status = 'active'`, [b.org]);
     if (tr.rowCount === 0) return res.status(404).json({ ok: false, code: 'ORG_404', message: '机构不存在或未启用' });
