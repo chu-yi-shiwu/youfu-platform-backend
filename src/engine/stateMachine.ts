@@ -63,6 +63,7 @@ export const RICH_WORK_ORDER_DEF: WorkflowDef = {
     'pending_dispatch', // 待派单
     'claim_hall',      // 抢单大厅(未命中自动派单时归属，待人员抢单)
     'assigned',        // 已派单/待接收
+    'arrived',         // 已到场（074 里程碑：工人到场打卡，start 处理前的中间态）
     'processing',      // 处理中
     'paused',          // 暂停中
     'suspended',       // 已挂起
@@ -82,6 +83,10 @@ export const RICH_WORK_ORDER_DEF: WorkflowDef = {
     { from: 'draft', to: 'pending_accept', event: 'submit' },
     { from: 'pending_accept', to: 'pending_dispatch', event: 'accept', allowedRoles: ['admin', 'dispatcher', 'service_desk'] },
     { from: 'pending_dispatch', to: 'assigned', event: 'dispatch', allowedRoles: ['admin', 'dispatcher', 'service_desk'], requiredFields: ['assignee'] },
+    { from: 'assigned', to: 'arrived', event: 'arrive', allowedRoles: ['admin', 'worker'] },
+    // 074 里程碑：到场后 start 开始处理；保留 assigned→processing 'receive' 旧边（无到场打卡的
+    // 旧客户端/旧单兼容路径，绝不门死存量流转）。arrived 也属活跃态 → 补 cancel 逃逸边。
+    { from: 'arrived', to: 'processing', event: 'start', allowedRoles: ['admin', 'worker'] },
     { from: 'assigned', to: 'processing', event: 'receive', allowedRoles: ['admin', 'worker'] },
     { from: 'assigned', to: 'pending_dispatch', event: 'return', requiredFields: ['return_reason'] },
     { from: 'assigned', to: 'assigned', event: 'forward', requiredFields: ['assignee'], allowedRoles: ['admin', 'dispatcher', 'service_desk'] },
@@ -104,6 +109,7 @@ export const RICH_WORK_ORDER_DEF: WorkflowDef = {
     { from: 'pending_accept', to: 'cancelled', event: 'cancel', requiredFields: ['cancel_reason'], allowedRoles: ['admin', 'dispatcher'] },
     { from: 'pending_dispatch', to: 'cancelled', event: 'cancel', requiredFields: ['cancel_reason'], allowedRoles: ['admin', 'dispatcher'] },
     { from: 'assigned', to: 'cancelled', event: 'cancel', requiredFields: ['cancel_reason'], allowedRoles: ['admin', 'dispatcher'] },
+    { from: 'arrived', to: 'cancelled', event: 'cancel', requiredFields: ['cancel_reason'], allowedRoles: ['admin', 'dispatcher'] },
     { from: 'processing', to: 'cancelled', event: 'cancel', requiredFields: ['cancel_reason'], allowedRoles: ['admin', 'dispatcher'] },
     { from: 'paused', to: 'cancelled', event: 'cancel', requiredFields: ['cancel_reason'], allowedRoles: ['admin', 'dispatcher'] },
     { from: 'suspended', to: 'cancelled', event: 'cancel', requiredFields: ['cancel_reason'], allowedRoles: ['admin', 'dispatcher'] },
@@ -196,6 +202,26 @@ export function autoRouteFor(def: WorkflowDef, from: string): AutoRoute | null {
     return { to: ar.to, strategy: ar.strategy };
   }
   return null;
+}
+
+// ── 074 生命周期里程碑时间列（2026-09-06 任务④）──
+// 状态 → work_orders 里程碑列（074_work_order_milestone_timestamps.sql）的单一事实源，
+// 三条写路径共用：transition()（人工/接口流转）、autoDispatchAfterCreate（自动派单旁路）、
+// claim（抢单旁路）、linkedWorkOrder 自动派单旁路——保证派工/到场/完成时间口径一致。
+// 注：processing 为「最近一次进入」语义（resume/reject 再入会刷新 started_at），
+//     首末之分由 ticket_event/domain_event 事件流水兜底，不在此处做首次判定。
+export const STATUS_TIMESTAMP_COLUMNS: Readonly<Record<string, string>> = {
+  pending_accept: 'accepted_at', // 受理
+  assigned: 'assigned_at',       // 派单（含抢单）
+  arrived: 'arrived_at',         // 到场
+  processing: 'started_at',      // 开始处理
+  completed: 'completed_at',     // 完成
+  evaluated: 'rated_at',         // 评价
+};
+
+/** 给定目标状态返回应回填的里程碑时间列名；不在映射内返回 undefined（纯函数可单测）。 */
+export function timestampColumnFor(status: string): string | undefined {
+  return STATUS_TIMESTAMP_COLUMNS[status];
 }
 
 /** 返回所有声明了合法 autoRoute 的初态（供管理端可视化/测试）。 */

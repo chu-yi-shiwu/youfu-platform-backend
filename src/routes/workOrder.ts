@@ -25,6 +25,7 @@ import type { WorkOrderStatus, WorkflowDef } from '../engine/stateMachine.js';
 import { getWorkflowDef } from '../engine/workflowDef.js';
 import {
   availableTransitions, learningTriggerStates, autoRouteFor, shouldTriggerLearning, RICH_WORK_ORDER_DEF,
+  timestampColumnFor,
 } from '../engine/stateMachine.js';
 import { safeParseJsonb } from '../util/jsonb.js';
 import { validateIntake } from '../services/dataQuality.js';
@@ -125,8 +126,11 @@ export async function autoDispatchAfterCreate(
     autoFlow = true;
     assignee = picked.id;
     reason = resolved ? resolved.reason : 'auto dispatched by least_load fallback';
+    // 074 里程碑回填：自动派单不走 transition()（load 手工 +1 的既有旁路），此处按 dispatchTarget
+    // 同步回填里程碑列（映射与 transition() 同源 stateMachine.STATUS_TIMESTAMP_COLUMNS，口径一致）。
+    const milestoneCol = timestampColumnFor(dispatchTarget);
     await client.query(
-      'UPDATE work_orders SET status = $1, assignee_id = $2, auto_flow = true, updated_at = now() WHERE id = $3',
+      `UPDATE work_orders SET status = $1, assignee_id = $2, auto_flow = true, updated_at = now()${milestoneCol ? `, ${milestoneCol} = now()` : ''} WHERE id = $3`,
       [dispatchTarget, picked.id, row.id],
     );
     await client.query('UPDATE worker SET load = load + 1 WHERE id = $1', [picked.id]);
@@ -890,8 +894,9 @@ router.post('/open/work_order/:id/claim', async (req, res, next) => {
       if (woDept && wDept && woDept !== wDept) {
         throw new AppError('FORBIDDEN', `worker department ${wDept} mismatch work order department ${woDept}`, 403);
       }
+      // 074 里程碑回填：抢单与自动派单同为 assigned 旁路写路径，同步回填 assigned_at（口径一致）。
       await client.query(
-        'UPDATE work_orders SET status=$1, assignee_id=$2, auto_flow=false, updated_at=now() WHERE id=$3 AND tenant_id=$4',
+        'UPDATE work_orders SET status=$1, assignee_id=$2, auto_flow=false, updated_at=now(), assigned_at=now() WHERE id=$3 AND tenant_id=$4',
         ['assigned', realWorkerId, req.params.id, tenantId],
       );
       await client.query('UPDATE worker SET load = load + 1 WHERE id=$1', [realWorkerId]);

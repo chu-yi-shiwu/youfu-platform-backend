@@ -8,7 +8,7 @@
 import type { PoolClient } from 'pg';
 import { createWithIdem } from '../repo/ticket.js';
 import { pickWorker, resolveDispatch, getActiveRules } from '../engine/dispatch.js';
-import { autoRouteFor } from '../engine/stateMachine.js';
+import { autoRouteFor, timestampColumnFor } from '../engine/stateMachine.js';
 import { getWorkflowDef } from '../engine/workflowDef.js';
 import { setSlaDueAt } from '../engine/sla.js';
 import { emitDomainEvent } from '../db/eventBus.js';
@@ -102,8 +102,11 @@ export async function createLinkedWorkOrder(
     autoFlow = true;
     assignee = picked.id;
     reason = resolved ? resolved.reason : 'auto dispatched by least_load fallback';
+    // 074 里程碑回填：本函数为自动派单旁路（不走 transition()），按 dispatchTarget 同步回填
+    // 里程碑列（映射与 transition() 同源 stateMachine.STATUS_TIMESTAMP_COLUMNS，口径一致）。
+    const milestoneCol = timestampColumnFor(dispatchTarget);
     await client.query(
-      'UPDATE work_orders SET status = $1, assignee_id = $2, auto_flow = true, updated_at = now() WHERE id = $3',
+      `UPDATE work_orders SET status = $1, assignee_id = $2, auto_flow = true, updated_at = now()${milestoneCol ? `, ${milestoneCol} = now()` : ''} WHERE id = $3`,
       [dispatchTarget, picked.id, row.id],
     );
     await client.query('UPDATE worker SET load = load + 1 WHERE id = $1', [picked.id]);

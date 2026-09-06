@@ -155,7 +155,7 @@ export async function toolCreateTicket(
     if (m.rowCount) { catalogId = m.rows[0].id; catalogName = m.rows[0].name; }
     else catalogName = catName; // 诚实：匹配不到则保留名称不绑定 id
   }
-  const priority = llm?.priority || inferPriority(desc);
+  const priority = llm?.priority || inferPriority(desc, catalogName);
   const title = generateTitle({ description: desc, categoryName: catalogName });
   const viewToken = crypto.randomBytes(24).toString('hex');
   const { row } = await withTenantClient(tenantId, async (client) => {

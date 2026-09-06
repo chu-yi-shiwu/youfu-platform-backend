@@ -2,6 +2,7 @@
 // 纯函数 + 轻量 DB 查询，供 publicReport 复用，亦可单测。
 // v0.3：语义关联增强 —— 动态用租户自身分类体系做 token 匹配 + 通用故障词表 + 优先级语义推断
 import type { PoolClient } from 'pg';
+import { matchPriorityRule } from './priorityRules.js'; // 优先级预填规则矩阵（2026-09-06）
 
 // 通用故障/设备词表 → 分类 hint（与租户 fault_category 名称对齐；纯本地零依赖）
 // 说明：这些 hint 会与租户分类名做 ILIKE 模糊匹配，找不到则回落到分类 token 匹配
@@ -153,8 +154,13 @@ export async function resolveFaultCategory(
   return null;
 }
 
-// 优先级推断 v0.3（语义）：分档 urgent/normal/low
-export function inferPriority(description: string): 'low' | 'normal' | 'urgent' {
+// 优先级推断 v0.4（2026-09-06）：历史数据背书的预填规则矩阵（priorityRules.ts）优先，
+// 类目名可参与匹配（catalogName 可选传入，不传则只匹配描述，旧调用点行为不变）；
+// 规则未命中时走原有关键词推断（v0.3 逻辑原样保留，不破坏已有行为）。
+export function inferPriority(description: string, catalogName?: string | null): 'low' | 'normal' | 'urgent' {
+  // 预填规则矩阵（跳闸断电/电梯困人/漏水/医用气体 → urgent；陪检运送类目不参与）
+  const ruleHit = matchPriorityRule(description, catalogName);
+  if (ruleHit) return ruleHit.priority;
   // urgent：影响安全/生产/大面积
   const urgentKw = [
     '紧急', '漏水', '断电', '停电', '冒烟', '起火', '危险', '停水', '堵塞', '溢', '伤人', '漏电',

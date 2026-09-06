@@ -17,6 +17,7 @@ import { withTenantClient } from '../db/pool.js';
 import { AppError } from '../middleware/error.js';
 import { createWithIdem } from '../repo/ticket.js';
 import { matchCategoryHint, resolveFaultCategory, inferPriority, resolveAsset, generateTitle, businessTypeForCategory } from './intakeEnrich.js';
+import { resolvePrefillPriority } from './priorityRules.js'; // 优先级预填规则矩阵（user>rule>llm>default）
 import { llmInferCategory } from './llm.js';
 import { resolveScanFromDb } from '../scan.js'; // ⑤ 扫码关联：复用 DB 权威解析
 import { getLlmEnabled } from '../repo/tenantSettings.js';
@@ -217,9 +218,19 @@ export async function createPublicRepairReport(
 
     // LLM 语义推断（B 档）：已移到事务外执行（R5-BUG-001 修复），此处只消费 llmInferred
     const { catalogId, catalogName } = await resolveCatalogChain(client, tenantId, b, desc, llmInferred, scan.scannedCatalogCode);
-    // 优先级：报修端点选优先（用户明确意图，尊重覆盖），否则 LLM，否则规则引擎
+    // 优先级预填链（2026-09-06）：user（用户点选，完全尊重）> rule（历史数据背书的规则矩阵，
+    // 见 priorityRules.ts，优先于 LLM——临床/安全场景不让 LLM 降档）> llm > legacy 关键词推断。
+    // prefill.source 落 ext.inferred/filled.priority_source 留痕，后续可审计每次预填来源。
     const llmPriority = llmInferred?.priority as 'urgent' | 'normal' | 'low' | null | undefined;
-    const priority: 'urgent' | 'normal' | 'low' = b.priority || llmPriority || inferPriority(desc);
+    const prefill = resolvePrefillPriority({
+      userPriority: b.priority ?? null,
+      llmPriority: llmPriority ?? null,
+      description: desc,
+      catalogName: catalogName ?? null,
+      fallbackPriority: inferPriority(desc, catalogName),
+    });
+    const priority: 'urgent' | 'normal' | 'low' = prefill.priority;
+    const prioritySource = prefill.source;
     const asset = await resolveAssetChain(client, tenantId, desc, llmInferred, scan.scannedAssetId, scan.scannedAssetName);
     // 主题命名（DMR：从表述提炼，分类前缀兜底，识别失败诚实标记）
     const title = generateTitle({
@@ -251,9 +262,9 @@ export async function createPublicRepairReport(
         // 无损耗原始媒体附件：随工单整行流转（任何读取 work_orders 的接口都带出 ext）
         attachments: finalAttachments,
         images: finalAttachments.filter((a) => a.kind === 'image').map((a) => a.url), // 兼容旧逻辑
-        inferred: { category: catalogName ?? null, priority, asset: asset?.name ?? null },
+        inferred: { category: catalogName ?? null, priority, priority_source: prioritySource, asset: asset?.name ?? null },
         // ④ 回收闭环：把模型初始补全落库为 ext.filled，使「我的报修」可读到 AI 识别结果，用户再纠偏
-        filled: { category: catalogName ?? null, priority, asset: asset?.name ?? null },
+        filled: { category: catalogName ?? null, priority, priority_source: prioritySource, asset: asset?.name ?? null },
         // ⑤ 手机号身份锚点：留存报修人手机（与 contact 列一致），支持换设备凭「手机号+工单号」安全找回
         reporter_phone: b.phone ?? null,
         // 微信用户授权带入的报修人信息：服务侧可明确服务对象（派单/回访）；未授权则为 null

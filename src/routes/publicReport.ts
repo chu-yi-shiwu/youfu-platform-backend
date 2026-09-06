@@ -335,7 +335,7 @@ router.post('/public/infer', loginRateLimit(30), async (req, res, next) => {
       if (source === 'rule') {
         const inferred = await resolveFaultCategory(client, org, desc);
         categoryName = inferred?.name ?? null;
-        priority = inferPriority(desc);
+        priority = inferPriority(desc, categoryName);
         const asset = await resolveAsset(client, org, desc);
         assetName = asset?.name ?? null;
       }
