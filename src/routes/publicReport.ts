@@ -559,7 +559,25 @@ router.get('/public/mp-qrcode', loginRateLimit(10), async (req, res, next) => {
       return res.status(403).json({ ok: false, code: 'PATH_FORBIDDEN', message: '仅允许生成报修首页二维码' });
     }
     if (!mpConfigured()) return res.status(409).json({ ok: false, code: 'MP_NOT_CONFIGURED', message: '小程序能力未配置' });
-    const buf = await genMpCode(path);
+    // #942 R1 深化修复：getwxacodeunlimit 不传播 path 上的 query——org 必须走 scene 通道，
+    // 否则扫码进入后 options.org 恒为 undefined，贴码报修主链路断点（前端只能靠"缺少机构"弹窗兜底）。
+    // scene 硬限制 32 字符：org 优先编码，装得下再带 loc/role。
+    let scene = 'qr';
+    const qIdx = path.indexOf('?');
+    if (qIdx >= 0) {
+      const params = new URLSearchParams(path.slice(qIdx + 1));
+      const parts: string[] = [];
+      for (const key of ['org', 'loc', 'role']) {
+        const v = params.get(key);
+        if (v) parts.push(`${key}=${v}`);
+      }
+      let s = parts.join('&');
+      while (s.length > 32 && parts.length > 1) parts.pop(); // 超 32 从尾部丢（loc/role 先牺牲）
+      s = parts.join('&');
+      if (s.length <= 32 && s) scene = s;
+      else if (params.get('org') && params.get('org')!.length <= 30) scene = `org=${params.get('org')}`;
+    }
+    const buf = await genMpCode(path, scene);
     if (!buf) return res.status(502).json({ ok: false, code: 'QRCODE_GEN_FAIL', message: '小程序码生成失败（可能是体验版未发布该页面或小程序码配额/限频）' });
     res.setHeader('Content-Type', 'image/png');
     res.setHeader('Cache-Control', 'public, max-age=300');

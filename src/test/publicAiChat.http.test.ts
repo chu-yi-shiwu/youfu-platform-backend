@@ -102,4 +102,28 @@ describe('POST /public/ai-chat —— org 前置明示（#942 教训）', () => 
       server.close();
     }
   });
+
+  it('org 为数字（类型错）→ 422 VALIDATION_ORG_REQUIRED（前置 typeof 拦截，#942 R2 边界）', async () => {
+    const { server, url } = await makeApp();
+    try {
+      const r = await post(url, { org: 123, message: 'x' });
+      expect(r.status).toBe(422);
+      const b = (await r.json()) as any;
+      expect(b.code).toBe('VALIDATION_ORG_REQUIRED');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('org 超 64 字符 → 过前置但被 zod max(64) 拦 → 422 VALIDATION_001（#942 R2 边界）', async () => {
+    const { server, url } = await makeApp();
+    try {
+      const r = await post(url, { org: 't-' + 'a'.repeat(64), message: 'x' });
+      expect(r.status).toBe(422);
+      const b = (await r.json()) as any;
+      expect(b.code).toBe('VALIDATION_001');
+    } finally {
+      server.close();
+    }
+  });
 });
