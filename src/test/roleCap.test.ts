@@ -1,5 +1,5 @@
-import { describe, it, expect } from 'vitest';
-import { canAssignRole, ROLE_RANK } from '../middleware/role.js';
+import { describe, it, expect, vi } from 'vitest';
+import { canAssignRole, ROLE_RANK, hasPermDefault, requireAnyPermission } from '../middleware/role.js';
 
 describe('role: 层级定义', () => {
   it('ROLE_RANK 严格递增 worker<dispatcher<operator<admin', () => {
@@ -70,5 +70,36 @@ describe('role: reviewer / service_desk（AL-002）', () => {
     expect(canAssignRole('reviewer', 'admin')).toBe(false);
     expect(canAssignRole('service_desk', 'admin')).toBe(false);
     expect(canAssignRole('service_desk', 'reviewer')).toBe(false);
+  });
+});
+
+describe('role: 建单权限（#942 R15 陪检登记 403 修复）', () => {
+  it('worker 默认矩阵含 intake.create（录入面）且不含 ticket.manage（管理面）', () => {
+    expect(hasPermDefault('worker', 'intake.create')).toBe(true);
+    expect(hasPermDefault('worker', 'ticket.manage')).toBe(false);
+  });
+
+  it('requireAnyPermission：worker 命中 intake.create → 放行（陪检登记链路）', async () => {
+    const client = { query: vi.fn(async () => ({ rows: [], rowCount: 0 })) } as any;
+    const auth = { authMode: 'prod', role: 'worker', tenantId: 't-demo' } as any;
+    await expect(requireAnyPermission(auth, client, ['intake.create', 'ticket.manage'])).resolves.toBeUndefined();
+  });
+
+  it('requireAnyPermission：reviewer 仅 ticket.manage → 仍放行（不回归既有能力）', async () => {
+    const client = { query: vi.fn(async () => ({ rows: [], rowCount: 0 })) } as any;
+    const auth = { authMode: 'prod', role: 'reviewer', tenantId: 't-demo' } as any;
+    await expect(requireAnyPermission(auth, client, ['intake.create', 'ticket.manage'])).resolves.toBeUndefined();
+  });
+
+  it('requireAnyPermission：worker 对纯 ticket.manage 守卫 → 403（无权限放大）', async () => {
+    const client = { query: vi.fn(async () => ({ rows: [], rowCount: 0 })) } as any;
+    const auth = { authMode: 'prod', role: 'worker', tenantId: 't-demo' } as any;
+    await expect(requireAnyPermission(auth, client, ['ticket.manage'])).rejects.toThrow(/permission denied/);
+  });
+
+  it('租户覆盖表模式：worker 覆盖行含 intake.create → 放行（交集判定）', async () => {
+    const client = { query: vi.fn(async () => ({ rows: [{ perm: 'intake.create' }], rowCount: 1 })) } as any;
+    const auth = { authMode: 'prod', role: 'worker', tenantId: 't-demo' } as any;
+    await expect(requireAnyPermission(auth, client, ['intake.create', 'ticket.manage'])).resolves.toBeUndefined();
   });
 });

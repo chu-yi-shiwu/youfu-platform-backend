@@ -176,7 +176,7 @@ describe('provisionNewTenantContent 第④步：行业权限基线（注册制�
   });
 
   it('preset ≠ 默认矩阵 → 该角色全量行落库 + permBaseline=snapshot', async () => {
-    // worker 默认 = [inspect.execute, asset.scan]；登记为不同集合 → 落库定格
+    // worker 默认 = [inspect.execute, asset.scan, intake.create]（R15）；登记为不同集合 → 落库定格
     INDUSTRY_PERM_PRESETS.hospital = { worker: ['inspect.execute'] };
     const { client, calls } = makeClient({ srcCategories: [] });
     const r = await provisionNewTenantContent(client, {
@@ -190,7 +190,8 @@ describe('provisionNewTenantContent 第④步：行业权限基线（注册制�
   });
 
   it('preset = 默认矩阵（集合相等、无序）→ 0 行落库（继承基线，不无谓定格）', async () => {
-    INDUSTRY_PERM_PRESETS.hospital = { worker: ['asset.scan', 'inspect.execute'] }; // 与默认同集合，顺序不同
+    // #942 R15：worker 默认基线 = [inspect.execute, asset.scan, intake.create]（陪检登记录入面）
+    INDUSTRY_PERM_PRESETS.hospital = { worker: ['intake.create', 'asset.scan', 'inspect.execute'] }; // 与默认同集合，顺序不同
     const { client, calls } = makeClient({ srcCategories: [] });
     const r = await provisionNewTenantContent(client, {
       tenantId: NEW_T, name: '测试医院', sourceTenantId: SRC_T, category: 'hospital',

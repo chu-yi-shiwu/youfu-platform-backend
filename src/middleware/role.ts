@@ -39,7 +39,10 @@ export const DEFAULT_PERM_MATRIX: Record<Role, readonly Perm[]> = {
   admin: [...PERMS],
   operator: ['dashboard.view', 'intake.create', 'ticket.manage', 'basicdata.edit', 'dispatch.override', 'inspect.execute', 'asset.scan', 'settlement.read'],
   dispatcher: ['dashboard.view', 'ticket.manage', 'dispatch.override', 'inspect.execute', 'asset.scan'],
-  worker: ['inspect.execute', 'asset.scan'],
+  // worker + intake.create（#942 R15）：陪检登记（#6）等登录态录入复用建单引擎，
+  // 入口在工人工作台对全员可见——录入（intake.create）≠ 管理（ticket.manage），
+  // worker 仅解锁建单/录入面，管理动作仍 403（最小权限）。
+  worker: ['inspect.execute', 'asset.scan', 'intake.create'],
   reviewer: ['dashboard.view', 'ticket.manage'],
   service_desk: ['dashboard.view', 'ticket.manage', 'dispatch.override'],
 };
@@ -159,6 +162,37 @@ export async function listPerms(auth: AuthLocals, client: PoolClient): Promise<s
 export async function requirePermission(auth: AuthLocals, client: PoolClient, perm: Perm): Promise<void> {
   if (!(await hasPerm(auth, client, perm))) {
     throw new AppError('FORBIDDEN', `permission denied: ${perm}`, 403);
+  }
+}
+
+/**
+ * 任一满足型权限守卫：多个权限点命中任意一个即放行（全部不满足才 403）。
+ * 用途：同一动作存在多条合规权限路径时避免权限矩阵回归——如登录态建单
+ * （/open/work_order）：operator 等走 ticket.manage，worker 走 intake.create（#942 R15：
+ * 陪检登记复用建单引擎，此前仅挂 ticket.manage 把工人登记陪检当场 403）。
+ * 覆盖表模式：role_permission 行的权限集合与 perms 有交集即放行。
+ */
+export async function hasPermAny(auth: AuthLocals, client: PoolClient, perms: readonly Perm[]): Promise<boolean> {
+  if (auth.authMode === 'dev') return true;
+  if (auth.role === 'admin') return true;
+  const r = await client.query(
+    `SELECT perm FROM role_permission WHERE tenant_id = $1 AND role = $2`,
+    [auth.tenantId, auth.role ?? ''],
+  );
+  if (r.rowCount && r.rowCount > 0) {
+    const set = new Set(r.rows.map((x: { perm: string }) => x.perm));
+    return perms.some((p) => set.has(p));
+  }
+  return perms.some((p) => hasPermDefault(auth.role, p));
+}
+
+export async function requireAnyPermission(
+  auth: AuthLocals,
+  client: PoolClient,
+  perms: readonly Perm[],
+): Promise<void> {
+  if (!(await hasPermAny(auth, client, perms))) {
+    throw new AppError('FORBIDDEN', `permission denied: ${perms.join('|')}`, 403);
   }
 }
 

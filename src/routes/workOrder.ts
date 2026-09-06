@@ -11,7 +11,7 @@ import { createWithIdem, transition, list, findOne, findOneForUpdate } from '../
 import { ticketStats } from '../repo/stats.js';
 import { pickWorker, resolveDispatch, getActiveRules } from '../engine/dispatch.js';
 import { AppError } from '../middleware/error.js';
-import { requirePermission, assertOpsRole } from '../middleware/role.js';
+import { requirePermission, requireAnyPermission, assertOpsRole } from '../middleware/role.js';
 import { resolveScanFromDb } from '../scan.js';
 import { setSlaDueAt, slaScan, type SlaScanRow } from '../engine/sla.js';
 import { runSlaScanForTenant } from '../scheduler/slaScheduler.js';
@@ -277,11 +277,13 @@ router.post('/open/work_order', async (req, res, next) => {
       });
     }
     const result = await withTenantClient(tenantId, async (client) => {
-      // 审查修复（架构🔴1 缩范围版）：建单属管理动作，加 ticket.manage 权限点。
-      // worker 默认矩阵无 ticket.manage（只有 inspect.execute/asset.scan）——刻意**不**给
-      // 列表/详情/流转加该权限点，否则小程序工人接单页会当场全空（生产事故）。
+      // #942 R15 修复：建单权限点由 ticket.manage 改为 intake.create | ticket.manage（任一）。
+      // 背景：陪检登记（#6）等登录态录入复用建单引擎且入口在工人工作台全员可见，
+      // 仅挂 ticket.manage 把 worker 登记陪检当场 403（真机实锤 permission denied）。
+      // 语义对齐 serviceDesk 建单（intake.create）——录入≠管理；worker 仅解锁录入面，
+      // ticket.manage 的其余管理面（流转配置等）对 worker 仍 403，无权限放大。
       // C 端公开报修走 /public/report（publicReportRouter，免登录），不受本门禁影响。
-      await requirePermission(res.locals.auth, client, 'ticket.manage');
+      await requireAnyPermission(res.locals.auth, client, ['intake.create', 'ticket.manage']);
       const { row, created } = await createWithIdem(client, {
         id: body.id,
         tenantId,
