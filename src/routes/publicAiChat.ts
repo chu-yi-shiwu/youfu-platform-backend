@@ -19,8 +19,8 @@ const router = Router();
 export const CONVERSATION_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 const chatSchema = z.object({
-  org: z.string().min(1).max(64),
-  message: z.string().min(1).max(1000),
+  org: z.string().trim().min(1).max(64), // #942 R4：trim 防空格机构穿透到租户查询层
+  message: z.string().trim().min(1).max(1000), // trim 防纯空格消息
   conversation_id: z.string().uuid().optional(),
   // consent：用户在 UI 上显式勾选「同意 AI 代我创建工单」才为 true；缺省/false 一律拒（DMR 铁律）
   consent: z.boolean().optional(),
@@ -92,7 +92,7 @@ router.post('/public/ai-chat', loginRateLimit(30), async (req, res, next) => {
 //      （不携带则维持原行为，兼容已部署 H5/MP 旧版；两端新版本 GET 均随带 anon）。
 router.get('/public/ai-chat/:id', loginRateLimit(30), async (req, res, next) => {
   try {
-    const org = (req.query.org as string) || '';
+    const org = String(req.query.org || '').trim(); // #942 R4：trim 对齐 POST 口径，防空格机构穿透
     if (!org) return res.status(422).json({ ok: false, code: 'VALIDATION_001', message: '缺少机构' });
     const UUID_RE = CONVERSATION_UUID_RE;
     if (!UUID_RE.test(req.params.id)) {
@@ -101,8 +101,9 @@ router.get('/public/ai-chat/:id', loginRateLimit(30), async (req, res, next) => 
     const tenantId = org;
     const conv = await withTenantClient(tenantId, (client) => getConversation(client, tenantId, req.params.id));
     if (!conv) return res.status(404).json({ ok: false, code: 'NOT_FOUND', message: '会话不存在' });
-    const anon = (req.query.anon as string) || '';
-    if (conv.reporter_anon && anon && conv.reporter_anon !== anon) {
+    const anon = String(req.query.anon || '').trim();
+    // #942 R4 收紧：会话有归属 anon 时，请求缺 anon 也 403（原条件缺 anon 直接放行，纵深防御有洞）
+    if (conv.reporter_anon && (!anon || conv.reporter_anon !== anon)) {
       return res.status(403).json({ ok: false, code: 'FORBIDDEN', message: '会话归属校验失败' });
     }
     const turns = await withTenantClient(tenantId, (client) => listTurns(client, tenantId, req.params.id));
