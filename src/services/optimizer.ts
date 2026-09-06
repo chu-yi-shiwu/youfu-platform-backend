@@ -22,7 +22,10 @@ import type { WorkflowDef } from '../engine/stateMachine.js';
 import { ensureWorkflowDef, saveWorkflowDef } from '../engine/workflowDef.js';
 
 export interface OptimizationDecision {
-  scope: 'dispatch' | 'workflow';
+  // 2026-09-06 任务⑦新增 'transport'：陪检线运力走廊建议（语义=运力调度，非流程改写）。
+  // 注意：optimization_feedback.scope 的 DDL CHECK 只允许 ('dispatch','workflow')，
+  // 落库时须经 dbScopeFor() 映射（transport → workflow 持久化，语义由 target='transport:*' 前缀保留）。
+  scope: 'dispatch' | 'workflow' | 'transport';
   target: string;
   recommendation: Record<string, unknown>;
   reason: string;
@@ -143,8 +146,10 @@ export interface RepeatHotspotOpts {
 export const REPEAT_HOTSPOT_DEFAULTS = { windowDays: 30, minCount: 3 } as const;
 
 // 陪检/运送业务线排除词（business_type 与类目展示名 contains 匹配，大小写不敏感）
+// 2026-09-06 任务⑦补充 '检查申请'：该词属陪检线词汇，补入后维修线排除集 L 与
+// 陪检线命中集完全相等（互斥闭合：维修线排除的行 = 陪检线纳入的行，无交叠缝隙）。
 export const REPEAT_HOTSPOT_EXCLUDED_KEYWORDS: readonly string[] = [
-  '陪检', '护送', '运送', '转运', '转科', 'transport', 'escort',
+  '陪检', '护送', '运送', '转运', '转科', '检查申请', 'transport', 'escort',
 ];
 
 /** 位置归一化：trim + 连续空白折叠为单空格（诚实口径：仅空白归一，文本精确匹配）。 */
@@ -162,21 +167,24 @@ function isExcludedBusinessLine(...texts: Array<string | null | undefined>): boo
 }
 
 /**
- * 纯函数：滚动窗口内聚合「位置×类目」重复对（不碰 DB，可单测）。
- * 口径：
+ * 私有通用聚合：按 includeRow 谓词筛行后聚合「位置×类目」重复对。
+ * 口径（维修线热点与陪检线运力走廊共用，保证同口径可比）：
  *  - 窗口 [now - windowDays, now]（含边界，created_at 毫秒比较）；
  *  - location/catalog 任一为空不成组（诚实留白，不臆造分组键）；
- *  - 排除陪检/运送业务线（business_type 或类目名命中排除词）；
  *  - count ≥ minCount 才产出，按 count 降序、同数按位置字典序稳定排序。
  */
-export function groupRepeatHotspots(rows: RepeatHotspotRow[], opts: RepeatHotspotOpts = {}): RepeatHotspot[] {
+function groupHotspotsBy(
+  rows: RepeatHotspotRow[],
+  opts: RepeatHotspotOpts,
+  includeRow: (r: RepeatHotspotRow) => boolean,
+): RepeatHotspot[] {
   const windowDays = opts.windowDays ?? REPEAT_HOTSPOT_DEFAULTS.windowDays;
   const minCount = opts.minCount ?? REPEAT_HOTSPOT_DEFAULTS.minCount;
   const nowMs = (opts.now ?? new Date()).getTime();
   const windowStartMs = nowMs - windowDays * 864e5;
   const counts = new Map<string, RepeatHotspot>();
   for (const r of rows) {
-    if (isExcludedBusinessLine(r.business_type, r.catalog_name)) continue;
+    if (!includeRow(r)) continue;
     const locKey = normalizeLocationKey(r.location);
     const catKey = (r.catalog ?? '').trim();
     if (!locKey || !catKey) continue;
@@ -190,6 +198,14 @@ export function groupRepeatHotspots(rows: RepeatHotspotRow[], opts: RepeatHotspo
   return [...counts.values()]
     .filter((h) => h.count >= minCount)
     .sort((a, b) => b.count - a.count || a.location.localeCompare(b.location) || a.catalog.localeCompare(b.catalog));
+}
+
+/**
+ * 纯函数（维修线）：滚动窗口内聚合「位置×类目」重复对（不碰 DB，可单测）。
+ * 排除陪检/运送业务线（business_type 或类目名命中排除词表 REPEAT_HOTSPOT_EXCLUDED_KEYWORDS）。
+ */
+export function groupRepeatHotspots(rows: RepeatHotspotRow[], opts: RepeatHotspotOpts = {}): RepeatHotspot[] {
+  return groupHotspotsBy(rows, opts, (r) => !isExcludedBusinessLine(r.business_type, r.catalog_name));
 }
 
 /** 纯函数：热点 → 优化建议（复用引擎既有 OptimizationDecision/pending 通道，每热点一条）。 */
@@ -242,6 +258,84 @@ export async function detectRepeatHotspots(
   return groupRepeatHotspots(r.rows, opts);
 }
 
+// ── 陪检线运力走廊告警（2026-09-06 任务⑦：与维修线热点规则互斥的独立规则）──
+// 语义差异：维修线热点=同一位置设备反复故障（巡检/根因排查）；陪检线走廊=同一位置×类目
+//   运力需求重复堆积（运力不足信号），建议是运力调度（固定班次/常驻岗/合并派单），不是修设备。
+// 互斥口径：本规则只纳入 business_type 或类目名命中 REPEAT_HOTSPOT_EXCLUDED_KEYWORDS 的工单
+//   （维修线恰恰排除同一词表），两条规则的命中集互斥、无交叠。
+// 红线：只读 work_orders，不写状态、不碰 model_state、不碰派单训练链路、不动 MODEL_AUTO_TUNE；
+//   scope='transport' 落库映射为 workflow pending 建议，isAutoApplicableTarget 守卫永不放行
+//   transport:repeat_corridor（绝不自动改流程/自动 applied）。
+
+/**
+ * 纯函数（陪检线）：滚动窗口内聚合「位置×类目」运力走廊对（不碰 DB，可单测）。
+ * 与维修线共用同一分组口径（trim+空白折叠文本精确匹配、[now-30d, now] 含边界、count≥3、降序）。
+ */
+export function groupEscortCorridors(rows: RepeatHotspotRow[], opts: RepeatHotspotOpts = {}): RepeatHotspot[] {
+  return groupHotspotsBy(rows, opts, (r) => isExcludedBusinessLine(r.business_type, r.catalog_name));
+}
+
+/** 纯函数：陪检走廊热点 → 优化建议（每热点一条，scope='transport'，语义=运力调度非故障维修）。 */
+export function generateEscortCorridorOptimizations(
+  hotspots: RepeatHotspot[],
+  opts: RepeatHotspotOpts = {},
+): OptimizationDecision[] {
+  const windowDays = opts.windowDays ?? REPEAT_HOTSPOT_DEFAULTS.windowDays;
+  const minCount = opts.minCount ?? REPEAT_HOTSPOT_DEFAULTS.minCount;
+  return hotspots.map((h) => ({
+    scope: 'transport' as const,
+    target: 'transport:repeat_corridor',
+    recommendation: {
+      action: 'review_staffing',
+      location: h.location,
+      catalog: h.catalog,
+      catalog_name: h.catalog_name,
+      count: h.count,
+      window_days: windowDays,
+      min_count: minCount,
+      suggestions: ['评估固定班次', '常驻陪检岗', '合并派单'],
+    },
+    reason: `位置「${h.location}」×类目「${h.catalog_name ?? h.catalog}」近 ${windowDays} 天陪检/运送类工单 ${h.count} 次（≥${minCount}），属运力走廊信号而非设备故障：建议评估固定班次/常驻陪检岗/合并派单，而非按维修根因排查`,
+  }));
+}
+
+/**
+ * 只读检测（陪检线）：拉取租户窗口内工单后走纯函数聚合，口径与 detectRepeatHotspots 完全一致
+ * （同一份 SELECT，分组谓词不同），保证两条规则看到的数据面相同、仅业务线归属互斥。
+ * RLS 纪律：client 须来自 withTenantClient（自动注入 tenant_id），SQL 仍显式 WHERE tenant_id=$1 双保险。
+ */
+export async function detectEscortHotspots(
+  client: PoolClient,
+  tenantId: string,
+  opts: RepeatHotspotOpts = {},
+): Promise<RepeatHotspot[]> {
+  const windowDays = opts.windowDays ?? REPEAT_HOTSPOT_DEFAULTS.windowDays;
+  const r = await client.query<{
+    location: string | null;
+    catalog: string | null;
+    catalog_name: string | null;
+    business_type: string | null;
+    created_at: Date;
+  }>(
+    `SELECT wo.location, wo.catalog, fc.name AS catalog_name, wo.business_type, wo.created_at
+       FROM work_orders wo
+       LEFT JOIN fault_category fc ON fc.id = wo.catalog AND fc.tenant_id = wo.tenant_id
+      WHERE wo.tenant_id = $1 AND wo.created_at >= now() - ($2 || ' days')::interval`,
+    [tenantId, String(windowDays)],
+  );
+  return groupEscortCorridors(r.rows, opts);
+}
+
+/**
+ * OptimizationDecision.scope → optimization_feedback.scope 的落库映射（DDL CHECK 兜底）。
+ * optimization_feedback.scope 的 CHECK 约束只允许 ('dispatch','workflow')；transport 语义建议
+ * 以 scope='workflow' 持久化（走 pending 建议通道），语义由 target='transport:*' 前缀保留，
+ * 且 applyWorkflowOptimizations 的 isAutoApplicableTarget 守卫对 transport:* 永不放行 → 永不自动 applied。
+ */
+export function dbScopeFor(scope: OptimizationDecision['scope']): 'dispatch' | 'workflow' {
+  return scope === 'dispatch' ? 'dispatch' : 'workflow';
+}
+
 /** applyWorkflowOptimizations 的自动改流程守卫：仅认识这三类 target，其余（如 repeat_hotspot）跳过不应用。 */
 export function isAutoApplicableTarget(target: string): boolean {
   return (
@@ -289,18 +383,20 @@ export async function applyDispatchOptimizations(
   }
 }
 
-/** 把 workflow 类决策作为 pending 建议落库，待 T-① 引擎消费应用。 */
+/** 把 workflow 类决策作为 pending 建议落库，待 T-① 引擎消费应用。
+ *  2026-09-06 任务⑦：同时收运力走廊（scope='transport'）建议——落库映射为 workflow pending，
+ *  守卫（isAutoApplicableTarget）永不放行 transport:* target，只会保持 pending 留给人工消费。 */
 export async function recordWorkflowRecommendations(
   client: PoolClient,
   tenantId: string,
   decisions: OptimizationDecision[],
 ): Promise<void> {
-  const wf = decisions.filter((d) => d.scope === 'workflow');
+  const wf = decisions.filter((d) => d.scope !== 'dispatch');
   for (const d of wf) {
     await client.query(
       `INSERT INTO optimization_feedback (tenant_id, scope, target, recommendation, reason, status)
-       VALUES ($1, 'workflow', $2, $3, $4, 'pending')`,
-      [tenantId, d.target, JSON.stringify(d.recommendation), d.reason],
+       VALUES ($1, $2, $3, $4, $5, 'pending')`,
+      [tenantId, dbScopeFor(d.scope), d.target, JSON.stringify(d.recommendation), d.reason],
     );
   }
 }
