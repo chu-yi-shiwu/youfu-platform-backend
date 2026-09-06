@@ -280,7 +280,8 @@ router.get('/energy/def', async (_req: any, res: any, next: any) => {
 // ---------------------------------------------------------------------------
 // T303b G4 状态回流：能源平台 form-submit 成功 → POST /energy/webhook/status-update
 // 与 dispatch 同信任域（同密钥同签名域，复用 verifyEnergySignature）。
-// 语义：验签 → task_ref 定位唯一任务 → 同状态重复回调幂等回放 200（不 422）→
+// 语义：验签 → task_ref 定位唯一任务 → 恰处于目标态（submitted）时重复回调
+// 幂等回放 200（不 422；后续态/回退态不回放，由 workflow_def 引擎 422 裁决）→
 // transitionEntity 按 workflow_def 引擎推进（非法跳转 BAD_STATE 422）。
 // 目标态由 workflow_def 决定（能源侧只发事件 'submit'，映射见能源侧
 // constants/youfuStatusMap.ts），本端不硬编码状态跳转表。
@@ -310,8 +311,11 @@ router.post('/energy/webhook/status-update', async (req: any, res: any, next: an
         throw new AppError('NOT_FOUND', `energy collection task not found: ${b.task_ref}`, 404);
       }
       const row = found.rows[0];
-      // 幂等回放：已处于 submitted（或经 reviewed/archive 继续推进过）时，
-      // 同状态重复回调一律 200，绝不 422——webhook 至少一次投递的必然伴生。
+      // 幂等回放边界（T303b-fix 修3 如实描述）：仅当任务当前 status 恰为
+      // 'submitted'（即本次回调的目标态）时 200 回放——webhook 至少一次投递
+      // 的必然伴生重复。若任务已被人工推进到 reviewed/archived 等后续态，
+      // 重复回调不再回放，落入 transitionEntity 判非法跳转（422，S04 实证）；
+      // 反向（回退态）同样 422，由 workflow_def 引擎统一裁决。
       if (row.status === b.status) {
         const def = await getWorkflowDefOrDefault(client, tenantId, ENTITY, ENERGY_COLLECTION_DEF);
         return { replay: true as const, item: { ...row, available: availableTransitions(def, row.status) } };
