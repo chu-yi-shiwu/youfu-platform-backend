@@ -47,10 +47,10 @@ describe('applyArrivedPatch（JSON 增量补丁）', () => {
     expect(r.addedEdges).toBe(3);
     expect(r.def.states).toEqual(['draft', 'assigned', 'arrived', 'processing', 'completed']);
     for (const edge of ARRIVED_TRANSITIONS) {
-      const hit = r.def.transitions.find((t: any) => t.from === edge.from && t.event === edge.event && t.to === edge.to);
+      const hit = r.def.transitions.find((t) => t.from === edge.from && t.event === edge.event && t.to === edge.to);
       expect(hit).toBeDefined();
-      expect(hit.allowedRoles).toEqual(edge.allowedRoles);
-      expect(hit.requiredFields).toEqual(edge.requiredFields); // undefined for前两条
+      expect(hit!.allowedRoles).toEqual(edge.allowedRoles);
+      expect(hit!.requiredFields).toEqual(edge.requiredFields); // undefined for前两条
     }
     // 既有边原样保留（不删不改：assigned--start-->processing 兼容路径仍在）
     expect(r.def.transitions).toContainEqual({ from: 'assigned', to: 'processing', event: 'start' });
@@ -61,7 +61,7 @@ describe('applyArrivedPatch（JSON 增量补丁）', () => {
     const twice = applyArrivedPatch(once);
     expect(twice.changed).toBe(false);
     expect(twice.addedEdges).toBe(0);
-    expect(twice.def.transitions.filter((t: any) => t.to === 'arrived' || t.from === 'arrived')).toHaveLength(3);
+    expect(twice.def.transitions.filter((t) => t.to === 'arrived' || t.from === 'arrived')).toHaveLength(3);
     expect(twice.def).toEqual(once);
   });
 
