@@ -40,4 +40,13 @@ describe('flow 实体类型清单（/flow/entities 数据源）', () => {
     const list = await listEntityTypes(fakeClient([]), 't-x');
     expect(list.length).toBe(2);
   });
+
+  // #948 语义分治：*_form 后缀 = 表单/对话配置 def，不进业务流实体清单。
+  it('表单配置 def（*_form 后缀）→ 不进实体清单（repair_form 被过滤）', async () => {
+    const list = await listEntityTypes(fakeClient(['repair_form', 'cycle_check']), 't-x');
+    const keys = list.map((e) => e.entityType);
+    expect(keys).not.toContain('repair_form');
+    expect(keys).toContain('cycle_check'); // 普通自定义流程不受影响
+    expect(keys).not.toContain('repair');  // 旧幽灵 key 迁移后自然消失
+  });
 });

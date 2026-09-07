@@ -106,6 +106,9 @@ const LABEL_MAP: Record<string, string> = {
   transport_task: '运送',
   emergency_plan: '应急预案',
   cycle_check: '循环签到',
+  // #948 语义分治：repair_form = 对话/表单配置 def（借 workflow_def 存储），非业务流。
+  // 仅用于配置中心列表展示友好名；业务流入口已由 listEntityTypes 过滤 _form 后缀。
+  repair_form: '报修表单',
 };
 
 /** 给列表展示用：entity_type → 友好名（优先 def.config.name，其次内置映射）。 */

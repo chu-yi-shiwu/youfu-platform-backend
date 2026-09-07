@@ -42,9 +42,12 @@ export async function listEntityTypes(client: any, tenantId: string) {
     `SELECT DISTINCT entity_type FROM workflow_def WHERE tenant_id = $1 ORDER BY entity_type`,
     [tenantId],
   );
-  const configured = r.rows.map((row: any) => String(row.entity_type));
+  const configured: string[] = r.rows.map((row: any) => String(row.entity_type));
+  // #948 语义分治：*_form 后缀的 workflow_def 行是表单/对话配置（config.fields），
+  // 不是业务流——不进实体清单（否则 mp 宫格/后台入口会漏出"报修表单"假业务）。
+  const flowConfigs = configured.filter((t) => !/_form$/.test(t));
   const builtins = Object.keys(ENTITY_DEF);
-  const all = Array.from(new Set([...builtins, ...configured]));
+  const all = Array.from(new Set([...builtins, ...flowConfigs]));
   return all.map((t) => ({ entityType: t, label: themeLabel(t), builtin: builtins.includes(t) }));
 }
 
