@@ -29,6 +29,34 @@ export function asPgError(err: unknown): PgLikeError | null {
   return null;
 }
 
+// ---- body-parser 错误族映射（P2-6，QA 深审登记）----
+// 非 JSON body / 超限 body 此前落 500 INTERNAL——这是客户端问题不是服务端故障。
+// 按 err.type 分类：解析失败 → 400 BAD_JSON；超限 → 413 PAYLOAD_TOO_LARGE；
+// 字符集/编码不支持 → 415。fail-closed 语义不变（一样拒收），错误分类更准，
+// 且不再把解析器原始报错当作内部错误打印。
+const BODY_PARSE_MAP: Record<string, { status: number; code: string; message: string }> = {
+  'entity.parse.failed': { status: 400, code: 'BAD_JSON', message: 'request body is not valid JSON' },
+  'entity.too.large': { status: 413, code: 'PAYLOAD_TOO_LARGE', message: 'request body too large' },
+  'charset.unsupported': { status: 415, code: 'UNSUPPORTED_CHARSET', message: 'unsupported request charset' },
+  'encoding.unsupported': { status: 415, code: 'UNSUPPORTED_ENCODING', message: 'unsupported content-encoding' },
+  'entity.request.aborted': { status: 400, code: 'BODY_ABORTED', message: 'request body aborted' },
+};
+
+export function asBodyParseError(err: unknown): { status: number; code: string; message: string } | null {
+  if (err instanceof Error) {
+    const type = (err as { type?: unknown }).type;
+    const mapped = typeof type === 'string' ? BODY_PARSE_MAP[type] : undefined;
+    if (mapped) {
+      const status = (err as { status?: unknown }).status;
+      const statusCode = (err as { statusCode?: unknown }).statusCode;
+      const resolved =
+        typeof status === 'number' ? status : typeof statusCode === 'number' ? statusCode : mapped.status;
+      return { status: resolved, code: mapped.code, message: mapped.message };
+    }
+  }
+  return null;
+}
+
 /**
  * 把已知 PG 错误翻译为带语义的 AppError；非 PG/未识别错误码返回 null（走原路径）。
  * 覆盖：23505 唯一冲突 → 409；23514 check 约束 → 400；22P02 非法字面量 → 400；
@@ -78,6 +106,11 @@ export function errorMiddleware(err: unknown, _req: Request, res: Response, _nex
   }
   if (err instanceof AppError) {
     return res.status(err.status).json({ ok: false, code: err.code, message: err.message });
+  }
+  // body-parser 错误族 → 语义化 4xx（P2-6：非 JSON 400 / 超限 413 / 编码 415）
+  const bpMapped = asBodyParseError(err);
+  if (bpMapped) {
+    return res.status(bpMapped.status).json({ ok: false, code: bpMapped.code, message: bpMapped.message });
   }
   // PG 已知错误码 → 语义化 4xx（23505 唯一冲突 / 23514 check / 22P02 非法字面量）
   const pgMapped = pgErrorToAppError(err);

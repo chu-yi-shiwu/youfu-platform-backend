@@ -209,3 +209,34 @@ describe('POST /energy/webhook/status-update —— T303b G4 状态回流', () =
     expect(r2.status).toBe(422);
   });
 });
+
+describe('P2-6 健壮性：webhook body 上限 + 畸形 body 错误分类（QA 深审红灯转绿）', () => {
+  const rawPost = (path: string, body: string, headers: Record<string, string> = {}) =>
+    fetch(url + path, { method: 'POST', headers: { 'Content-Type': 'application/json', ...headers }, body });
+
+  it('S06 80KB body（express 默认 100kb 限内、超 64KB webhook 门）→ 413（门在验签前生效）', async () => {
+    // 无签名头也必须 413：大小门先于验签，异常大包不消耗 HMAC 计算
+    const huge = JSON.stringify({ task_ref: 'x'.repeat(8), pad: 'y'.repeat(80 * 1024) });
+    expect(huge.length).toBeGreaterThan(64 * 1024);
+    expect(Buffer.byteLength(huge)).toBeLessThan(100 * 1024); // 确保不是被 express json limit 抢先拒
+    const r = await rawPost('/api/v1/energy/webhook/status-update', huge);
+    expect(r.status).toBe(413);
+    expect(((await r.json()) as any).code).toBe('PAYLOAD_TOO_LARGE');
+  });
+
+  it('S07 200KB 超限 body → 413（此前 QA 实测 500）', async () => {
+    const huge = JSON.stringify({ task_ref: 'x'.repeat(8), pad: 'z'.repeat(200 * 1024) });
+    const r = await rawPost('/api/v1/energy/webhook/status-update', huge);
+    expect(r.status).toBe(413);
+    expect(((await r.json()) as any).code).toBe('PAYLOAD_TOO_LARGE');
+  });
+
+  it('S08 非 JSON body → 400 BAD_JSON（此前落 500 INTERNAL）', async () => {
+    const r = await rawPost('/api/v1/energy/webhook/status-update', 'not-json-at-all', {
+      'X-Energy-Timestamp': String(Date.now()),
+      'X-Energy-Signature': 'a'.repeat(64),
+    });
+    expect(r.status).toBe(400);
+    expect(((await r.json()) as any).code).toBe('BAD_JSON');
+  });
+});

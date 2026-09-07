@@ -52,6 +52,20 @@ function verifyEnergySignature(req: any): void {
   }
 }
 
+// P2-6（QA 深审登记）：webhook body 硬上限。合法 G1/G4 payload（任务壳/回执）
+// 均在 1KB 以内，200KB 级 body 只可能是异常/滥用流量——在验签（HMAC 计算）
+// 之前直接 413 拒收，省计算也防大包耗资源。fail-closed 语义不变。
+const WEBHOOK_MAX_BODY_BYTES = 64 * 1024;
+
+function verifyEnergyWebhook(req: any): void {
+  const raw = req.rawBody as Buffer | undefined;
+  const size = raw ? raw.length : 0;
+  if (size > WEBHOOK_MAX_BODY_BYTES) {
+    throw new AppError('PAYLOAD_TOO_LARGE', `webhook body exceeds ${WEBHOOK_MAX_BODY_BYTES} bytes`, 413);
+  }
+  verifyEnergySignature(req);
+}
+
 // 派单任务壳白名单（strict：未知字段=结构化采集字段 → 422，红线硬保证）
 const DispatchBody = z
   .object({
@@ -72,7 +86,7 @@ const DispatchBody = z
 // 幂等：data->>'task_ref' 命中即 200 回放，不重复建单。
 router.post('/energy/webhook/dispatch', async (req: any, res: any, next: any) => {
   try {
-    verifyEnergySignature(req);
+    verifyEnergyWebhook(req);
     const b = DispatchBody.parse(req.body);
     const tenantId = process.env.ENERGY_DISPATCH_TENANT ?? DEFAULT_TENANT_ID;
 
@@ -301,7 +315,7 @@ const StatusUpdateBody = z
 
 router.post('/energy/webhook/status-update', async (req: any, res: any, next: any) => {
   try {
-    verifyEnergySignature(req);
+    verifyEnergyWebhook(req);
     const b = StatusUpdateBody.parse(req.body);
     const tenantId = process.env.ENERGY_DISPATCH_TENANT ?? DEFAULT_TENANT_ID;
 
