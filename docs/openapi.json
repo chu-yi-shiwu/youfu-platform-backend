@@ -4,7 +4,7 @@
     "title": "优服家 API",
     "version": "0.0.0-generated",
     "description": "多租户物业 SaaS 后端开放规范（M-3 交付）。\n\n**口径**：本文件由 `tools/generate_openapi.mjs` 自动扫描 `src/server.ts` 挂载表与 `src/routes/*.ts`、`src/webhook/routes.ts` 路由声明生成（generated，非手写）。\n\n**诚实边界**：summary/description 取自路由上方中文注释（启发式）；请求/响应 schema 为宽松骨架，字段一律以服务端实现为准，不编造字段。\n\n**鉴权**：租户/管理端 JWT Bearer；开放 API 走 X-App-Key + X-App-Secret（openApiAuth）；公开端点见各操作 security: []。",
-    "x-generated-at": "2026-09-06T18:24:26.189Z",
+    "x-generated-at": "2026-09-07T06:20:37.271Z",
     "x-generator": "tools/generate_openapi.mjs",
     "x-source": "src/server.ts + src/routes/*.ts + src/webhook/routes.ts（代码扫描口径）"
   },
@@ -149,6 +149,10 @@
     {
       "name": "basicData",
       "description": "路由文件：src/routes/basicData.ts"
+    },
+    {
+      "name": "intakeOptions",
+      "description": "路由文件：src/routes/intakeOptions.ts"
     },
     {
       "name": "adminAiChat",
@@ -9292,7 +9296,7 @@
           "faultCategory"
         ],
         "summary": "============ 故障目录列表（租户内公开读，enabled=true 优先） ============",
-        "description": "来源：src/routes/faultCategory.ts:21\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/faultCategory.ts:24\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -9318,7 +9322,7 @@
           "faultCategory"
         ],
         "summary": "============ 新建故障分类（配置角色可写） ============",
-        "description": "来源：src/routes/faultCategory.ts:39\n\n服务端响应状态码（代码扫描）：201\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/faultCategory.ts:42\n\n服务端响应状态码（代码扫描）：201\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -9358,7 +9362,7 @@
           "faultCategory"
         ],
         "summary": "============ 更新故障分类 ============",
-        "description": "来源：src/routes/faultCategory.ts:60\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/faultCategory.ts:69\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -9407,7 +9411,7 @@
           "faultCategory"
         ],
         "summary": "============ 删除故障分类 ============",
-        "description": "来源：src/routes/faultCategory.ts:88\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/faultCategory.ts:104\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -10347,7 +10351,7 @@
           "basicData"
         ],
         "summary": "============ 列表（支持名称/关键字搜索）============",
-        "description": "来源：src/routes/basicData.ts:288\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/basicData.ts:310\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -10384,7 +10388,7 @@
           "basicData"
         ],
         "summary": "============ 新建 ============",
-        "description": "来源：src/routes/basicData.ts:315\n\n服务端响应状态码（代码扫描）：201\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/basicData.ts:337\n\n服务端响应状态码（代码扫描）：201\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -10435,7 +10439,7 @@
           "basicData"
         ],
         "summary": "============ 更新 ============",
-        "description": "来源：src/routes/basicData.ts:351\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/basicData.ts:373\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -10493,7 +10497,7 @@
           "basicData"
         ],
         "summary": "============ 删除 ============",
-        "description": "来源：src/routes/basicData.ts:389\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/basicData.ts:411\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -10541,7 +10545,7 @@
           "basicData"
         ],
         "summary": "============ CSV 导出 ============",
-        "description": "来源：src/routes/basicData.ts:416\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/basicData.ts:438\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -10580,7 +10584,7 @@
           "basicData"
         ],
         "summary": "============ CSV 导入 ============",
-        "description": "来源：src/routes/basicData.ts:437\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/basicData.ts:459\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -10619,6 +10623,34 @@
                 "type": "object",
                 "additionalProperties": true,
                 "description": "骨架占位：请求字段以服务端实现为准"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/meta/intake-options": {
+      "get": {
+        "tags": [
+          "intakeOptions"
+        ],
+        "summary": "GET /api/v1/meta/intake-options",
+        "description": "来源：src/routes/intakeOptions.ts:17\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "HTTP 200",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "description": "骨架占位：字段以服务端实现为准"
+                }
               }
             }
           }

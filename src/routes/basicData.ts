@@ -218,6 +218,28 @@ export const TYPES: Record<string, TypeDef> = {
     }),
     jsonCols: ['default_fields'],
   },
+  // ===== FE Intake 业务类型登记处（075 迁移）：申报页业务类型后端事实源 =====
+  business_type: {
+    table: 'business_type_dict',
+    columns: ['id', 'tenant_id', 'code', 'name', 'sort', 'enabled', 'remark', 'created_at', 'updated_at'],
+    insertCols: ['code', 'name', 'sort', 'enabled', 'remark'],
+    // numeric 列 sort 不可 ILIKE（对齐 priority_dict 口径，P0-2 引擎修复①）
+    searchCols: ['name', 'code', 'remark'],
+    fields: [
+      { key: 'name', label: '业务类型名称' },
+      { key: 'code', label: '编码' },
+      { key: 'sort', label: '排序(小在前)' },
+      { key: 'enabled', label: '启用' },
+      { key: 'remark', label: '备注' },
+    ],
+    schema: z.object({
+      name: z.string().min(1),
+      code: z.string().optional(),
+      sort: z.number().optional(),
+      enabled: z.boolean().optional(),
+      remark: z.string().optional(),
+    }),
+  },
   // ===== 注册制批次一（055 迁移）：位置 / 报修人字典（卡1）=====
   location: {
     table: 'location_dict',

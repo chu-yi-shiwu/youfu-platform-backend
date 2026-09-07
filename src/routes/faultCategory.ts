@@ -15,6 +15,9 @@ const schema = z.object({
   name: z.string().min(1),
   sort: z.number().int().optional(),
   enabled: z.boolean().optional(),
+  // 075 迁移（FE Intake 配置化）：目录归属的业务类型码 + 技能标签（jsonb 数组），均可空
+  business_type: z.string().optional(),
+  skill_tags: z.array(z.string()).optional(),
 });
 
 // ============ 故障目录列表（租户内公开读，enabled=true 优先） ============
@@ -41,12 +44,18 @@ router.post('/fault-categories', async (req, res, next) => {
     requireConfigRole(req, res);
     const tenantId = res.locals.auth.tenantId;
     const b = schema.parse(req.body);
+    // 动态列 INSERT：undefined=不写该列（业务类型/技能标签未提供时让 DB NULL 生效，INSERT 语义干净）
+    const extras: Array<[string, unknown]> = [];
+    if (b.business_type !== undefined) extras.push(['business_type', b.business_type]);
+    if (b.skill_tags !== undefined) extras.push(['skill_tags', JSON.stringify(b.skill_tags)]);
+    const extraCols = extras.map(([c]) => c);
+    const extraPh = extras.map((_, i) => `$${i + 7}`);
     const item = await withTenantClient(tenantId, (client) =>
       client
         .query(
-          `INSERT INTO fault_category (id, tenant_id, code, name, sort, enabled)
-           VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`,
-          [randomUUID(), tenantId, b.code, b.name, b.sort ?? 0, b.enabled ?? true],
+          `INSERT INTO fault_category (id, tenant_id, code, name, sort, enabled${extraCols.length ? ', ' + extraCols.join(', ') : ''})
+           VALUES ($1,$2,$3,$4,$5,$6${extraPh.length ? ', ' + extraPh.join(', ') : ''}) RETURNING *`,
+          [randomUUID(), tenantId, b.code, b.name, b.sort ?? 0, b.enabled ?? true, ...extras.map(([, v]) => v)],
         )
         .then((r) => r.rows[0]),
     );
@@ -72,9 +81,16 @@ router.put('/fault-categories/:id', async (req, res, next) => {
       const r = await client.query(
         `UPDATE fault_category SET
            code=COALESCE($3,code), name=COALESCE($4,name), sort=COALESCE($5,sort),
-           enabled=COALESCE($6,enabled), updated_at=now()
+           enabled=COALESCE($6,enabled),
+           business_type=COALESCE($7,business_type),
+           skill_tags=COALESCE($8,skill_tags),
+           updated_at=now()
          WHERE id=$1 AND tenant_id=$2 RETURNING *`,
-        [req.params.id, tenantId, b.code ?? null, b.name ?? null, b.sort ?? null, b.enabled ?? null],
+        [
+          req.params.id, tenantId,
+          b.code ?? null, b.name ?? null, b.sort ?? null, b.enabled ?? null,
+          b.business_type ?? null, b.skill_tags === undefined ? null : JSON.stringify(b.skill_tags),
+        ],
       );
       return r.rows[0];
     });

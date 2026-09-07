@@ -51,6 +51,7 @@ import platformRouter from './routes/platform.js';// 城市级平台层（E_min�
 import templateMarketRouter from './routes/templateMarket.js';// E2 模板市场（官方模板库/应用/效果）
 import openApiRouter from './routes/openApi.js';// E0_open 开放 API（app_key 认证）
 import metaRouter from './routes/meta.js';// #938 展示标签字典（公开端点，挂 auth 之前）
+import intakeOptionsRouter from './routes/intakeOptions.js';// FE Intake 申报页配置聚合（租户级，挂 auth 之后）
 import { startInspectionScheduler } from './scheduler/inspectionScheduler.js';// G3 真 cron 调度
 import { startSlaScheduler } from './scheduler/slaScheduler.js';// 拆雷三件套②：SLA 定时扫描+升级通知
 import { startTemplateEffectsScheduler } from './scheduler/templateEffectScheduler.js';// E2 效果回写 cron
@@ -195,6 +196,7 @@ app.use('/api/v1', accountsRouter);
 app.use('/api/v1', tenantInfoRouter);
 app.use('/api/v1/workflow-defs', workflowDefRouter);
 app.use('/api/v1', basicDataRouter);
+app.use('/api/v1', intakeOptionsRouter);// FE Intake 申报页配置聚合（租户级，需登录；经 authMiddleware 得 tenantId）
 app.use('/api/v1', adminAiChatRouter);// 管理对话：POST /admin/ai-chat（Bearer JWT + admin/operator）
 app.use('/api/v1', equipmentRouter);// P4 设备管理（设备 / 设备类型 / 设备厂商，主数据 CRUD，对齐 UOne C 族）
 app.use('/api/v1/flow', businessFlowRouter);

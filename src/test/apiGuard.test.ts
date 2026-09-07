@@ -37,6 +37,7 @@ describe('apiGuard isKnownApiPath（RV-001）', () => {
     expect(isKnownApiPath('/v1/public/ai-chat')).toBe(true);
     expect(isKnownApiPath('/v1/auth/login')).toBe(true);
     expect(isKnownApiPath('/v1/meta/labels')).toBe(true); // #938 展示标签字典（公开端点）
+    expect(isKnownApiPath('/v1/meta/intake-options')).toBe(true); // FE Intake 申报页配置聚合（租户级，经 meta 首段放行）
   });
 
   it('白名单不含参数占位符（:entityType 等不作为段名）', () => {
