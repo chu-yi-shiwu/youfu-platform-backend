@@ -58,44 +58,65 @@ export function parseAdminAction(raw: string): AdminAgentAction | null {
 }
 
 // ---------- 系统提示词（按角色白名单动态生成） ----------
+// P4 失稳迭代（2026-09-08）：live 探针实锤模型低频不调工具直接回话，根因两层——
+//   ①只读角色工具编号写死 3/4 起跳（清单断裂）；②输出契约只有末尾一句、零示例。
+// 修复：动态编号 + 显式输出协议段 + 判断流程①②③ + 按角色 few-shot 示例 + 硬规则强化。
 export function buildAdminSystemPrompt(allowedTools: readonly string[] = ADMIN_TOOL_NAMES): string {
-  const lines = [
-    '你是优服家管理后台的 AI 管家。你可以把自然语言转成结构化的「创建建议卡」，也可以只读查询工单情况。你绝不直接创建或修改任何数据。',
-    '可用工具（以 JSON 输出调用）：',
+  const canCreate = allowedTools.includes('parse_intent');
+  const lines: string[] = [
+    '你是优服家管理后台的 AI 管家。你绝不直接创建或修改任何数据：创建类操作只输出「建议卡」JSON（由用户确认后提交），查询类操作只调用只读工具。你的每一条输出都必须是一个 JSON 对象，以 { 开头、以 } 结尾。',
+    '可用工具（必须以 JSON 输出调用）：',
   ];
-  if (allowedTools.includes('parse_intent')) {
+  let n = 0;
+  if (canCreate) {
     lines.push(
-      '1. parse_intent {"type":"dict_entry","dict_type":"location|reporter","payload":{...}} —— 解析为字典建议卡：',
+      `${++n}. parse_intent {"type":"dict_entry","dict_type":"location|reporter","payload":{...}} —— 解析为字典建议卡：`,
       '   location（位置字典）payload 字段：code(编号)、name(名称)、category(类别，设备/房间/工位)、default_reporter_name(默认报修人姓名，仅供参考)；',
       '   reporter（报修人字典）payload 字段：code(编号)、name(姓名)、phone(手机号)、role(角色说明)。',
-      '2. parse_intent {"type":"worker_onboarding","payload":{...}} —— 解析为员工入驻建议卡：',
+      `${++n}. parse_intent {"type":"worker_onboarding","payload":{...}} —— 解析为员工入驻建议卡：`,
       '   payload 字段：username(登录用户名)、display_name(姓名)、phone(手机号)、skill_tags(技能标签数组)。',
     );
   }
   if (allowedTools.includes('query_tickets')) {
     lines.push(
-      '3. query_tickets {"status":"...","priority":"urgent|normal|low","department":"...","service_desk":"...","source":"...","today_only":true,"limit":5} —— 只读查询工单：',
+      `${++n}. query_tickets {"status":"...","priority":"urgent|normal|low","department":"...","service_desk":"...","source":"...","today_only":true,"limit":5} —— 只读查询工单：`,
       '   各参数只放用户明确说出的条件，不用的字段省略；status 可逗号分隔多个；limit 建议 5，最大 10。',
     );
   }
   if (allowedTools.includes('get_stats')) {
     lines.push(
-      '4. get_stats {} —— 今日工单概览（今日新增按状态分布 + 当前未完成总数）。用户问「今天/现在整体情况」时用这个。',
+      `${++n}. get_stats {} —— 今日工单概览（今日新增按状态分布 + 当前未完成总数）。用户问「今天/现在整体情况」时用这个。`,
     );
   }
   lines.push(
-    '规则：',
+    '输出协议（唯一合法输出，二选一）：',
+    '{"action":"tool","tool":"<工具名>","args":{...}}',
+    '{"action":"reply","content":"<给用户的文字>"}',
+    '判断流程（每条消息按序执行）：',
+    '① 用户的问题能否由上面的工具回答？能 → 必须输出工具调用 JSON；涉及工单数量/状态/明细的问题，禁止不调用工具就用文字回答，禁止凭空编造数字；',
+    '② 用户意图明确但关键信息不足以成卡/成查询 → 输出 reply JSON 诚实追问，只问缺的那一项；',
   );
-  if (allowedTools.includes('parse_intent')) {
-    lines.push('- 用户意图明确（新增位置/报修人/开通员工）时输出 {"action":"tool","tool":"parse_intent",...}，payload 只放用户明确说出的字段，绝不编造；');
+  if (canCreate) {
+    lines.push('③ 用户要求创建数据时输出 parse_intent 工具调用，args 只放用户明确说出的字段，绝不编造；');
   } else {
-    lines.push('- 你没有创建类工具：用户要求新增/创建任何数据时，诚实告知该操作仅管理员和操作员可用，并建议其改问工单情况；');
+    lines.push('③ 你没有创建类工具：用户要求新增/创建任何数据时，输出 reply JSON 诚实告知该操作仅管理员和操作员可用，并建议其改问工单情况；');
+  }
+  lines.push('示例：');
+  if (canCreate) {
+    lines.push(
+      '用户：新增位置 3F-A01 三楼会议室 → {"action":"tool","tool":"parse_intent","args":{"type":"dict_entry","dict_type":"location","payload":{"code":"3F-A01","name":"三楼会议室","category":"房间"}}}',
+      '用户：开通员工张三，手机号 13800001234 → {"action":"tool","tool":"parse_intent","args":{"type":"worker_onboarding","payload":{"display_name":"张三","phone":"13800001234"}}}',
+    );
+  }
+  if (allowedTools.includes('query_tickets')) {
+    lines.push('用户：查一下处理中的单 → {"action":"tool","tool":"query_tickets","args":{"status":"assigned,processing","limit":5}}');
+  }
+  if (allowedTools.includes('get_stats')) {
+    lines.push('用户：今天整体情况怎么样 → {"action":"tool","tool":"get_stats","args":{}}');
   }
   lines.push(
-    '- 用户问工单数量/明细（多少单、哪些单、查一下）时优先用查询工具，绝不凭空编数字；',
-    '- 用户没说清对象类型或关键信息不足以成卡/成查询时，输出 {"action":"reply","content":"诚实的追问"}；',
-    '- 手机号必须是 1 开头的 11 位数字，否则视为未提供；',
-    '- 只输出 JSON，不要输出 JSON 以外的任何文字。',
+    '用户：帮我把张三加进去 → {"action":"reply","content":"您想新增报修人「张三」还是开通员工账号？请确认对象类型。"}',
+    '硬规则：手机号必须是 1 开头的 11 位数字，否则视为未提供、不得写进 args；只输出 JSON，不要输出 JSON 以外的任何文字。',
   );
   return lines.join('\n');
 }
@@ -296,6 +317,25 @@ export interface AdminTurnResult {
 const FALLBACK_REPLY =
   '抱歉，我暂时没理解您的意思，您可以换个说法，例如「新增位置 3F-A01 三楼会议室」「开通员工张三，手机号 13800001234」或「今天有多少待处理的工单」。';
 
+// ---------- 纠偏重试（P4 失稳迭代 2026-09-08）：模型偶发不调工具直接回话/输出自由文本 ----------
+// 强查询意图信号（确定性关键词，不做短路边界——只作重试触发条件，最终仍由模型按协议输出）。
+export const QUERY_INTENT_RE = /(多少|几单|几个|哪些|查一下|查查|统计|概览|概况|情况|列表|明细)/;
+
+/** 纯函数：是否命中强查询意图（可单测） */
+export function looksLikeQueryIntent(message: string): boolean {
+  return QUERY_INTENT_RE.test(message);
+}
+
+const NUDGE_SYSTEM_MSG =
+  '上一次输出不符合输出协议或未调用工具。重新判断：若用户问题可由可用工具回答，必须输出 {"action":"tool","tool":"<工具名>","args":{...}} 的 JSON；只有关键信息不足时才输出 reply JSON 诚实追问。只输出一个 JSON 对象，不要输出 JSON 以外的任何文字。';
+
+/** 内部：判断是否需要一次纠偏重试。无查询工具的角色不重试（纯建卡链路失稳面不同，保持零改动）。 */
+function needsNudge(action: AdminAgentAction | null, message: string, allowed: readonly string[]): boolean {
+  if (!allowed.includes('query_tickets')) return false;
+  if (!action) return true; // 自由文本/非法 JSON
+  return action.action === 'reply' && looksLikeQueryIntent(message); // 强查询意图却回了纯文字
+}
+
 export async function runAdminTurn(tenantId: string, message: string, opts?: AdminTurnOptions): Promise<AdminTurnResult> {
   // 新手引导意图 → 确定性短路返回固定四步文案（纯回复，无卡，不消耗 LLM 调用）
   if (matchOnboardingIntent(message)) {
@@ -314,7 +354,23 @@ export async function runAdminTurn(tenantId: string, message: string, opts?: Adm
     response_format: { type: 'json_object' },
     max_tokens: 500,
   });
-  const action = parseAdminAction(result.content);
+  let action = parseAdminAction(result.content);
+  // 有界纠偏重试：仅一次（最多 2 次 LLM 调用）；重试失败/抛错 → 落回首轮结果走既有诚实降级
+  if (needsNudge(action, message, allowed)) {
+    try {
+      const retry = await chatCompletion({
+        messages: [...messages, { role: 'system', content: NUDGE_SYSTEM_MSG }],
+        task: 'admin_ai_chat',
+        tenantId,
+        response_format: { type: 'json_object' },
+        max_tokens: 500,
+      });
+      const nudged = parseAdminAction(retry.content);
+      if (nudged) action = nudged;
+    } catch {
+      // 重试通道异常（配额/网络）：保持首轮 action 原状（null → FALLBACK，reply → 原样透传）
+    }
+  }
   if (!action) {
     // 模型输出不合规 → 诚实固定话术（不编造卡片）
     return { reply: FALLBACK_REPLY };

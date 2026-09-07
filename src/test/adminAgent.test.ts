@@ -19,6 +19,7 @@ import {
   buildConfirmCard,
   runAdminTurn,
   matchOnboardingIntent,
+  looksLikeQueryIntent,
   sanitizeTicketQueryArgs,
   toolsForRole,
   ADMIN_TOOL_NAMES,
@@ -116,6 +117,39 @@ describe('buildAdminSystemPrompt（按白名单动态生成）', () => {
     const p = buildAdminSystemPrompt(READONLY_TOOL_NAMES);
     expect(p).not.toContain('parse_intent');
     expect(p).toContain('query_tickets');
+  });
+});
+
+describe('buildAdminSystemPrompt · P4 失稳迭代（动态编号+输出协议+示例+硬规则）', () => {
+  it('只读角色：工具编号从 1 连续起跳（治 3/4 断裂），不再出现 3./4. 编号', () => {
+    const p = buildAdminSystemPrompt(READONLY_TOOL_NAMES);
+    expect(p).toContain('1. query_tickets');
+    expect(p).toContain('2. get_stats');
+    expect(p).not.toContain('3. query_tickets');
+    expect(p).not.toContain('4. get_stats');
+  });
+  it('全量角色：编号 1/2/3 连续（parse_intent 两段 + 查询）', () => {
+    const p = buildAdminSystemPrompt();
+    expect(p).toContain('1. parse_intent');
+    expect(p).toContain('2. parse_intent');
+    expect(p).toContain('3. query_tickets');
+    expect(p).toContain('4. get_stats');
+  });
+  it('输出协议段 + 判断流程 + 硬规则：禁止不调工具直接答数字', () => {
+    for (const p of [buildAdminSystemPrompt(), buildAdminSystemPrompt(READONLY_TOOL_NAMES)]) {
+      expect(p).toContain('输出协议');
+      expect(p).toContain('{"action":"tool"');
+      expect(p).toContain('{"action":"reply"');
+      expect(p).toContain('禁止不调用工具就用文字回答');
+      expect(p).toContain('示例：');
+      expect(p).toContain('只输出 JSON');
+    }
+  });
+  it('按角色注入示例：只读角色示例不含 parse_intent 调用', () => {
+    const p = buildAdminSystemPrompt(READONLY_TOOL_NAMES);
+    expect(p).not.toContain('"tool":"parse_intent"');
+    expect(p).toContain('"tool":"query_tickets"');
+    expect(p).toContain('"tool":"get_stats"');
   });
 });
 
@@ -260,5 +294,78 @@ describe('新手四步引导（注册制批次二 P1：引导意图确定性短�
     expect(matchOnboardingIntent('第一步该干嘛')).toBe(true);
     expect(matchOnboardingIntent('从哪开始录入')).toBe(true);
     expect(matchOnboardingIntent('开通员工张三')).toBe(false); // 明确建卡意图不抢引导
+  });
+});
+
+describe('P4 纠偏重试（有界一次：不合规输出/强查询意图纯文字回复 → 追加纠偏 system 重调）', () => {
+  const executor = vi.fn();
+  beforeEach(() => {
+    executor.mockReset();
+  });
+
+  it('looksLikeQueryIntent 纯函数边界', () => {
+    expect(looksLikeQueryIntent('今天有多少待处理的工单')).toBe(true);
+    expect(looksLikeQueryIntent('查一下处理中的单')).toBe(true);
+    expect(looksLikeQueryIntent('整体情况怎么样')).toBe(true);
+    expect(looksLikeQueryIntent('帮我把张三加进去')).toBe(false);
+    expect(looksLikeQueryIntent('在吗')).toBe(false);
+  });
+
+  it('首轮自由文本 + 强查询意图 → 纠偏重试命中工具 → 正常出结果卡（不再落 FALLBACK）', async () => {
+    executor.mockResolvedValueOnce({ reply: '查询完成：共 2 单符合条件。', card: { type: 'ticket_result', total: 2, items: [] } });
+    llmState.chatResults = [
+      '这是自由文本不是 JSON',
+      '{"action":"tool","tool":"query_tickets","args":{"priority":"urgent","today_only":true}}',
+    ];
+    const r = await runAdminTurn('t1', '今天有多少 urgent 单', { role: 'reviewer', toolExecutor: executor });
+    expect(executor).toHaveBeenCalledOnce();
+    expect(r.reply).toContain('共 2 单');
+    expect(r.result_card?.type).toBe('ticket_result');
+  });
+
+  it('强查询意图却回纯文字 reply → 重试；重试后仍回 reply（真追问）→ 尊重结果不强迫造卡', async () => {
+    llmState.chatResults = [
+      '{"action":"reply","content":"您想查哪个科室的单？"}',
+      '{"action":"reply","content":"请告诉我科室名称，我帮您查。"}',
+    ];
+    const r = await runAdminTurn('t1', '查一下那些单子', { role: 'reviewer', toolExecutor: executor });
+    expect(r.reply).toContain('请告诉我科室名称');
+    expect(r.confirm_card).toBeUndefined();
+    expect(r.result_card).toBeUndefined();
+  });
+
+  it('纠偏消息确实下发：第二次调用 messages = system+user+nudge 共 3 条', async () => {
+    llmState.chatResults = [
+      '{"action":"reply","content":"好的"}',
+      '{"action":"reply","content":"还是回答您"}',
+    ];
+    const { chatCompletion } = await import('../services/llm.js');
+    await runAdminTurn('t1', '今天情况怎么样', { role: 'operator', toolExecutor: executor });
+    const lastCall = vi.mocked(chatCompletion).mock.lastCall?.[0];
+    expect(lastCall?.messages).toHaveLength(3);
+    expect(lastCall?.messages[2].role).toBe('system');
+    expect(lastCall?.messages[2].content).toContain('输出协议');
+  });
+
+  it('非查询意图纯 reply（真实追问）→ 不重试，只调一次 LLM', async () => {
+    llmState.chatResults = ['{"action":"reply","content":"您想新增位置还是开通员工？"}'];
+    const { chatCompletion } = await import('../services/llm.js');
+    vi.mocked(chatCompletion).mockClear();
+    const r = await runAdminTurn('t1', '帮我把张三加进去', { toolExecutor: executor });
+    expect(vi.mocked(chatCompletion)).toHaveBeenCalledTimes(1);
+    expect(r.reply).toContain('位置');
+  });
+
+  it('重试也失败（两次自由文本）→ 诚实 FALLBACK', async () => {
+    llmState.chatResults = ['自由文本一', '自由文本二'];
+    const r = await runAdminTurn('t1', '今天有多少单', { toolExecutor: executor });
+    expect(r.reply).toContain('换个说法');
+    expect(executor).not.toHaveBeenCalled();
+  });
+
+  it('重试通道抛错（无脚本结果）→ 落回首轮结果路径，不向调用方抛异常', async () => {
+    llmState.chatResults = ['自由文本'];
+    const r = await runAdminTurn('t1', '查一下单子', { toolExecutor: executor });
+    expect(r.reply).toContain('换个说法');
   });
 });
