@@ -44,7 +44,6 @@ describe('safeEqualHex', () => {
 
 describe('requireScope', () => {
   it('scopes 含目标 scope → 放行（next 无参）', () => {
-    const next = (() => {}) as any;
     const spy = { calls: [] as any[] };
     const wrapped = (...args: any[]) => { spy.calls.push(args); };
     requireScope('ticket.manage')({} as any, mockRes(['ticket.manage']) as any, wrapped as any);

@@ -89,7 +89,7 @@ export class StatsModelBackend implements ModelBackend {
 
 /** 未来集成缝：重型模型经 HTTP 调外部 Python 服务；当前不实现、接口预留。 */
 export class RemoteMLBackend implements ModelBackend {
-  constructor(private endpoint?: string) {}
+  constructor(_endpoint?: string) {}
   score(_ctx: DispatchContext): number {
     throw new Error(
       'RemoteMLBackend not implemented: reserved for future Python ML service (set MODEL_BACKEND=remote to enable)',

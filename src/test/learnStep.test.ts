@@ -16,8 +16,6 @@ const { runIncrementalLearnStep } = await import('../routes/workOrder.js');
 const { incrementalLearn } = await import('../services/modelTrainer.js');
 const learnMock = incrementalLearn as unknown as ReturnType<typeof vi.fn>;
 
-type QueryFn = (text: string, params?: any[]) => Promise<{ rows: any[]; rowCount?: number }>;
-
 function makeClient(opts: { guardRowCount?: number } = {}) {
   const calls: Array<{ text: string; params?: any[] }> = [];
   const client = {

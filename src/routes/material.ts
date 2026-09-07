@@ -77,7 +77,6 @@ router.put('/materials/:id', async (req, res, next) => {
     const item = await withTenantClient(tenantId, async (client) => {
       const cur = await client.query(`SELECT * FROM material WHERE id = $1 AND tenant_id = $2`, [req.params.id, tenantId]);
       if (cur.rowCount === 0) throw new AppError('NOT_FOUND', 'material not found', 404);
-      const c = cur.rows[0];
       const r = await client.query(
         `UPDATE material SET code=COALESCE($3,code), name=COALESCE($4,name), category=COALESCE($5,category),
            spec=COALESCE($6,spec), unit=COALESCE($7,unit), price=COALESCE($8,price), enabled=COALESCE($9,enabled), doc=COALESCE($10,doc), updated_at=now()

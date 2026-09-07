@@ -101,7 +101,6 @@ router.put('/product-catalog/:id', async (req, res, next) => {
     const item = await withTenantClient(tenantId, async (client) => {
       const cur = await client.query(`SELECT * FROM product_catalog WHERE id=$1 AND tenant_id=$2`, [req.params.id, tenantId]);
       if (cur.rowCount === 0) throw new AppError('NOT_FOUND', 'product_catalog not found', 404);
-      const c = cur.rows[0];
       const r = await client.query(
         `UPDATE product_catalog SET
            code=COALESCE($3,code), name=COALESCE($4,name), category=COALESCE($5,category),

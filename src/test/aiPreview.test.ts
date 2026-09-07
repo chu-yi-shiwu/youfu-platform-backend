@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import type { Request, Response, NextFunction } from 'express';
+import type { Request } from 'express';
 
 // AI 端点测试：mock LLM + DB，覆盖 /preview /similar /feedback /agent-stats /gen-config 关键逻辑
 const dbCalls: string[] = [];

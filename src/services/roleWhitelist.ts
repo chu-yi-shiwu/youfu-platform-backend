@@ -38,7 +38,6 @@ export function parseRoleCheckAllowlist(defText: string): string[] {
   const clauses = splitTopLevelAnd(stripConstraintParens(defText));
   const allowSets: string[][] = [];
   const deny = new Set<string>();
-  let sawAllowClause = false;
   let sawDenyClause = false;
 
   for (const clause of clauses) {
@@ -67,12 +66,10 @@ export function parseRoleCheckAllowlist(defText: string): string[] {
       const set = (m[1].match(/'([^']*)'/g) ?? []).map((l) => l.slice(1, -1));
       if (set.length === 0) return []; // 有结构无字面量 → 语义不明
       allowSets.push(set);
-      sawAllowClause = true;
       continue;
     }
     if ((m = clause.match(/role\s*=\s*'([^']*)'/i))) {
       allowSets.push([m[1]]);
-      sawAllowClause = true;
       continue;
     }
     // 子条件含引号字面量却识别不出任何角色条件 → 语义不明 → fail-closed

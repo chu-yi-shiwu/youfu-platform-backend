@@ -13,7 +13,7 @@ import { pickWorker, resolveDispatch, getActiveRules } from '../engine/dispatch.
 import { AppError } from '../middleware/error.js';
 import { requirePermission, requireAnyPermission, assertOpsRole } from '../middleware/role.js';
 import { resolveScanFromDb } from '../scan.js';
-import { setSlaDueAt, slaScan, type SlaScanRow } from '../engine/sla.js';
+import { setSlaDueAt } from '../engine/sla.js';
 import { runSlaScanForTenant } from '../scheduler/slaScheduler.js';
 import { dispatchEvent } from '../webhook/dispatch.js';
 import { StatsModelBackend, type ModelBackend } from '../engine/model/ModelBackend.js';

@@ -303,7 +303,7 @@ describe('patrol.ts · 巡更点位与任务', () => {
 
   it('⑭checkin 签满 → done + complete 事件；已终态 → 409；任务不存在 → 404', async () => {
     taskRow = { ...taskRow, point_ids: [U1], checkins: [] };
-    const r = await req('POST', '/api/v1/patrol/tasks/pt-1/checkin', { point_id: U1 });
+    await req('POST', '/api/v1/patrol/tasks/pt-1/checkin', { point_id: U1 });
     const updIdx = calls().findIndex((s) => s.includes('UPDATE patrol_task SET status'));
     expect(callParams(updIdx)[2]).toBe('done');
     expect(evArg().type).toBe('complete');

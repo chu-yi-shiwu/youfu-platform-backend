@@ -6,7 +6,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import crypto from 'node:crypto';
 import pool, { withTenantClient } from '../db/pool.js';
-import { signJwt, AUTH_MODE, loginRateLimit } from '../middleware/auth.js';
+import { signJwt, loginRateLimit } from '../middleware/auth.js';
 import { platformAdminAuth } from '../middleware/platformAuth.js';
 import { verifyPassword, hashPassword } from '../account.js';
 import { llmConfigured } from '../services/llm.js';

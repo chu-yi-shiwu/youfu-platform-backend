@@ -9,13 +9,11 @@ import fs from 'node:fs';
 import path from 'node:path';
 import pool from '../db/pool.js';
 import { withTenantClient } from '../db/pool.js';
-import { AppError } from '../middleware/error.js';
 import { loginRateLimit } from '../middleware/auth.js';
 import { resolveFaultCategory, inferPriority, resolveAsset } from '../services/intakeEnrich.js'; // /public/infer 规则引擎兜底
 import { llmInferCategory } from '../services/llm.js';
 import { resolveScanFromDb } from '../scan.js'; // ⑤ 扫码关联：复用 DB 权威解析
 import { getLlmEnabled } from '../repo/tenantSettings.js';
-import { autoDispatchAfterCreate } from './workOrder.js'; // 2026-08-29：公开报修单复用后台建单的自动派单（修复卡 draft 无通知断链）
 import { mpConfigured, decryptPhoneCode, genMpCode } from '../services/wechatMp.js';
 import { reportSchema, CTYPE_EXT, isAudioCType } from './publicReportSchema.js';
 import { createPublicRepairReport } from '../services/publicReportCreate.js';

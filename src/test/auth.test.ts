@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import type { Request, Response, NextFunction } from 'express';
+import type { Request, NextFunction } from 'express';
 
 // 动态导入以控制 AUTH_MODE / JWT_SECRET 模块级常量
 async function loadAuth() {

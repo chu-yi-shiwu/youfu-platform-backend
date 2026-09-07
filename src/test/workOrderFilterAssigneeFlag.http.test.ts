@@ -28,7 +28,7 @@ import serviceDeskRouter from '../routes/serviceDesk.js';
 
 interface Handler {
   match: (text: string) => boolean;
-  reply: (text: string, params?: unknown[]) => { rows: unknown[]; rowCount?: number };
+  reply: (text: string, params: unknown[]) => { rows: unknown[]; rowCount?: number };
 }
 
 function makeClient(handlers: Handler[], opts?: { strict?: boolean }) {

@@ -6,7 +6,7 @@ vi.mock('../db/pool.js', () => ({
   withTenantClient: (_t: string, fn: (c: unknown) => unknown) => fn(clientForTest),
 }));
 let clientForTest: any = {};
-const listMock = vi.fn(async (_c: unknown, _t: string, _f: unknown) => ({ items: [], total: 0 }));
+const listMock = vi.fn(async (_c: unknown, _t: string, _f: unknown): Promise<{ items: any[]; total: number }> => ({ items: [], total: 0 }));
 vi.mock('../repo/ticket.js', () => ({ list: (...a: unknown[]) => (listMock as any)(...a) }));
 vi.mock('../engine/workflowDef.js', () => ({ getWorkflowDef: async () => ({ key: 'work_order', states: [] }) }));
 vi.mock('../engine/stateMachine.js', () => ({ doneStates: () => ['completed', 'closed', 'evaluated'] }));
@@ -17,7 +17,7 @@ const executor = makeAdminToolExecutor('t-test');
 
 beforeEach(() => {
   listMock.mockClear();
-  listMock.mockImplementation(async (_c: unknown, _t: string, _f: unknown) => ({ items: [], total: 0 }));
+  listMock.mockImplementation(async (_c: unknown, _t: string, _f: unknown): Promise<{ items: any[]; total: number }> => ({ items: [], total: 0 }));
 });
 
 describe('query_tickets（sanitize 复洗 + 关键词兜底）', () => {

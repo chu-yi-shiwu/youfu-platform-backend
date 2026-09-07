@@ -77,7 +77,6 @@ router.put('/fault-categories/:id', async (req, res, next) => {
         tenantId,
       ]);
       if (cur.rowCount === 0) throw new AppError('NOT_FOUND', 'fault_category not found', 404);
-      const c = cur.rows[0];
       const r = await client.query(
         `UPDATE fault_category SET
            code=COALESCE($3,code), name=COALESCE($4,name), sort=COALESCE($5,sort),

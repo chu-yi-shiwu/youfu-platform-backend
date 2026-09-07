@@ -1,6 +1,6 @@
 // 批次 C 单测：聚焦纯函数 + 真实链路用例（防批次 A 式"假绿"）。
 // 不依赖真实 PG：纯函数直接测；ticketStats 用 mock client 走真实调用路径。
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import { applyStockAction } from '../services/inventory.js';
 import { buildServiceDeskTicket } from '../services/serviceDeskTicket.js';
 import { summarizeLinkedOrders } from '../services/assetHistory.js';

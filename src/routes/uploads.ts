@@ -22,8 +22,6 @@ import { withTenantClient } from '../db/pool.js';
 
 const router = Router();
 
-// 与 upload.ts 扩展名白名单对齐（D1 含语音）。
-const EXT_WHITELIST = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'pdf', 'm4a', 'mp3', 'wav', 'ogg'];
 const MIME: Record<string, string> = {
   jpg: 'image/jpeg',
   jpeg: 'image/jpeg',
