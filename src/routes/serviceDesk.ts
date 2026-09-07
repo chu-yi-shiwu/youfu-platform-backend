@@ -122,6 +122,8 @@ router.delete('/service-desks/:id/agents/:agentId', async (req, res, next) => {
 });
 
 // 来电弹屏代申告：生成标准工单进入派单流（坐席角色即可，不强制 admin；需登录由 authMiddleware 保证）
+// 决策 #5 豁免说明：本路径天然绑定 deskId（deskId 为必填且已做存在性校验），
+// 租户开启 ticket_require_service_desk 严格开关时无需也不应重复校验——代申告本身即"有服务台"的建单通道。
 router.post('/tickets', async (req, res, next) => {
   try {
     const tenantId = res.locals.auth.tenantId;

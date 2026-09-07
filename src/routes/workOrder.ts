@@ -35,6 +35,22 @@ import { assertAcceptanceBackdoorGuard } from '../services/acceptance.js'; // �
 const router = Router();
 
 /**
+ * 决策 #5（服务台租户开关）：读取租户级「必须指定服务台」开关。
+ * 键名 ticket_require_service_desk（system_config，key-value，零 DDL）；缺行/非 'true' = 关（默认宽松）。
+ * 开启后：直接建单路径（POST /open/work_order）不带 service_desk → 422 SERVICE_DESK_REQUIRED；
+ * 来电弹屏代申告（routes/serviceDesk.ts POST /tickets）天然带 deskId，豁免该校验。
+ */
+export const TICKET_REQUIRE_SERVICE_DESK_KEY = 'ticket_require_service_desk';
+
+async function isTicketRequireServiceDesk(client: PoolClient, tenantId: string): Promise<boolean> {
+  const r = await client.query<{ value: string | null }>(
+    'SELECT value FROM system_config WHERE tenant_id = $1 AND key = $2',
+    [tenantId, TICKET_REQUIRE_SERVICE_DESK_KEY],
+  );
+  return r.rows[0]?.value === 'true';
+}
+
+/**
  * 反查「当前登录身份」对应的 worker.id（业务编码）。
  * 生产实测事实（team-lead 2026-09-xx，务必按此实现，别按 uuid 猜）：
  *   - worker.id = text、worker.account_id = text、work_orders.assignee_id = text；
@@ -288,6 +304,11 @@ router.post('/open/work_order', async (req, res, next) => {
       // ticket.manage 的其余管理面（流转配置等）对 worker 仍 403，无权限放大。
       // C 端公开报修走 /public/report（publicReportRouter，免登录），不受本门禁影响。
       await requireAnyPermission(res.locals.auth, client, ['intake.create', 'ticket.manage']);
+      // 决策 #5：租户级「必须指定服务台」开关（默认关=宽松，缺服务台完全合法；铁律：报修人零门槛）。
+      // 仅约束直接建单路径；幂等重放同样要求带 service_desk（语义一致，补上后重放即命中幂等返回原单）。
+      if (!body.service_desk && (await isTicketRequireServiceDesk(client, tenantId))) {
+        throw new AppError('SERVICE_DESK_REQUIRED', '该租户已开启「必须指定服务台」，请先选择服务台后再提交', 422);
+      }
       const { row, created } = await createWithIdem(client, {
         id: body.id,
         tenantId,
@@ -416,6 +437,16 @@ router.get('/open/work_orders', async (req, res, next) => {
     const status = req.query.status as WorkOrderStatus | undefined;
     // C-2：assignee 过滤（我的任务/某工人任务视图）；不传=全部
     const assignee = typeof req.query.assignee === 'string' && req.query.assignee ? req.query.assignee : undefined;
+    // 决策 #8：服务端筛选四参（可选、精确匹配、语义同 status/assignee）；query 全是 string，
+    // 缺省/空串统一归一为 undefined = 不过滤（与旧版行为完全一致）。
+    const qstr = (k: string): string | undefined => {
+      const v = req.query[k];
+      return typeof v === 'string' && v ? v : undefined;
+    };
+    const department = qstr('department');
+    const priority = qstr('priority');
+    const source = qstr('source');
+    const serviceDesk = qstr('service_desk');
     // P-3：limit/offset 强制上限，防止调用方拉取整表（DoS 面）。
     const limit = Math.min(Math.max(1, Math.floor(Number(req.query.limit) || 20)), 200);
     const offset = Math.max(0, Math.min(Math.floor(Number(req.query.offset) || 0), 10000));
@@ -437,7 +468,11 @@ router.get('/open/work_orders', async (req, res, next) => {
           });
         }
       }
-      return list(client, tenantId, { status, limit, offset, assignee: scopedAssignee, unsettledOnly: unsettled });
+      return list(client, tenantId, {
+        status, limit, offset, assignee: scopedAssignee, unsettledOnly: unsettled,
+        // 决策 #8：四参透传（不传 = 不过滤，零回归）
+        department, priority, source, service_desk: serviceDesk,
+      });
     });
     // A+ Phase3：随列表下发每个工单"当前状态可执行的转移"（含必填/角色门禁），供 SPA 动态渲染动作按钮。
     const def = await withTenantClient(tenantId, (client) => getWorkflowDef(client, tenantId, 'work_order'));

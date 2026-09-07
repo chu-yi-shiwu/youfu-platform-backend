@@ -291,4 +291,48 @@ router.put('/config/system', async (req, res, next) => {
   }
 });
 
+// ============ 租户开关：ticket_require_service_desk（决策 #5） ============
+// 存储：复用 system_config（tenant_id + key-value，零 DDL）；缺行 = 关（默认宽松）。
+// 行为：开 → 直接建单（POST /open/work_order）缺 service_desk → 422 SERVICE_DESK_REQUIRED；
+//       来电弹屏代申告（serviceDesk.ts POST /tickets）天然带服务台，豁免。
+const REQUIRE_DESK_KEY = 'ticket_require_service_desk';
+
+router.get('/config/ticket-require-service-desk', async (req, res, next) => {
+  try {
+    const tenantId = res.locals.auth.tenantId;
+    // 读取不做角色门禁（仅布尔开关，无敏感信息）；建单页/报修页需据此决定是否必填服务台。
+    const enabled = await withTenantClient(tenantId, (client) =>
+      client
+        .query(`SELECT value FROM system_config WHERE tenant_id = $1 AND key = $2`, [tenantId, REQUIRE_DESK_KEY])
+        .then((r) => r.rows[0]?.value === 'true'),
+    );
+    return res.json({ ok: true, code: 0, key: REQUIRE_DESK_KEY, enabled });
+  } catch (e) {
+    next(e);
+  }
+});
+
+router.put('/config/ticket-require-service-desk', async (req, res, next) => {
+  try {
+    requireConfigRole(req, res);
+    const tenantId = res.locals.auth.tenantId;
+    const body = z.object({ enabled: z.boolean() }).parse(req.body);
+    const item = await withTenantClient(tenantId, (client) =>
+      client
+        .query(
+          `INSERT INTO system_config (tenant_id, key, value, updated_at)
+           VALUES ($1,$2,$3,now())
+           ON CONFLICT (tenant_id, key)
+           DO UPDATE SET value = EXCLUDED.value, updated_at = now()
+           RETURNING id, key, value, updated_at`,
+          [tenantId, REQUIRE_DESK_KEY, String(body.enabled)],
+        )
+        .then((r) => r.rows[0]),
+    );
+    return res.json({ ok: true, code: 0, key: REQUIRE_DESK_KEY, enabled: body.enabled, item });
+  } catch (e) {
+    next(e);
+  }
+});
+
 export default router;

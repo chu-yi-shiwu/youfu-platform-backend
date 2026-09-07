@@ -55,6 +55,8 @@ export interface WorkOrderRow {
   department?: string | null;
   satisfaction_score?: number | null;
   ext?: unknown;
+  // 决策 #7：列表/详情下发承接人姓名（LEFT JOIN worker 而来；无承接人 → null）
+  assignee_name?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -273,8 +275,13 @@ export async function findOne(
   tenantId: string,
   id: string,
 ): Promise<WorkOrderRow | null> {
+  // 决策 #7：LEFT JOIN worker 下发承接人姓名（assignee_name）；无承接人/档案缺失 → null，不丢行。
+  // JOIN 条件带 tenant_id，防跨租户脏数据串名。
   const r = await client.query<WorkOrderRow>(
-    'SELECT * FROM work_orders WHERE id = $1 AND tenant_id = $2',
+    `SELECT wo.*, w.name AS assignee_name
+       FROM work_orders wo
+       LEFT JOIN worker w ON w.id = wo.assignee_id AND w.tenant_id = wo.tenant_id
+      WHERE wo.id = $1 AND wo.tenant_id = $2`,
     [id, tenantId],
   );
   return r.rows[0] ?? null;
@@ -297,35 +304,68 @@ export async function list(
   client: PoolClient,
   tenantId: string,
   // 批次三纯加法：unsettledOnly（可选）——过滤"未被任何结算单占用"的工单（结算页建单数据源）。
-  filter: { status?: WorkOrderStatus; assignee?: string; limit?: number; offset?: number; unsettledOnly?: boolean },
+  // 决策 #8 纯加法：department/priority/source/service_desk 四个可选精确匹配过滤（语义同 status/assignee）；
+  // 全部不传时行为与旧版完全一致（零回归）。
+  filter: {
+    status?: WorkOrderStatus;
+    assignee?: string;
+    limit?: number;
+    offset?: number;
+    unsettledOnly?: boolean;
+    department?: string;
+    priority?: string;
+    source?: string;
+    service_desk?: string;
+  },
 ): Promise<{ items: WorkOrderRow[]; total: number }> {
-  const conds = ['tenant_id = $1'];
+  const conds = ['wo.tenant_id = $1'];
   const params: unknown[] = [tenantId];
   if (filter.status) {
     // 批次三④：支持逗号分隔多态过滤（如 'completed,closed,evaluated'，结算向导数据源）；
     // 单值时 = ANY(['x']) 与原 status = $n 语义等价，既有调用方零影响。
     const statuses = filter.status.split(',').map((s) => s.trim()).filter(Boolean);
     params.push(statuses);
-    conds.push(`status = ANY($${params.length}::text[])`);
+    conds.push(`wo.status = ANY($${params.length}::text[])`);
   }
   if (filter.assignee) {
     params.push(filter.assignee);
-    conds.push(`assignee_id = $${params.length}`);
+    conds.push(`wo.assignee_id = $${params.length}`);
+  }
+  if (filter.department) {
+    params.push(filter.department);
+    conds.push(`wo.department = $${params.length}`);
+  }
+  if (filter.priority) {
+    params.push(filter.priority);
+    conds.push(`wo.priority = $${params.length}`);
+  }
+  if (filter.source) {
+    params.push(filter.source);
+    conds.push(`wo.source = $${params.length}`);
+  }
+  if (filter.service_desk) {
+    params.push(filter.service_desk);
+    conds.push(`wo.service_desk = $${params.length}`);
   }
   // 一单终身一结算：settlement_item 以 UNIQUE(work_order_id) 占用，NOT EXISTS 即"未结算"
   if (filter.unsettledOnly) {
-    conds.push('NOT EXISTS (SELECT 1 FROM settlement_item si WHERE si.work_order_id = work_orders.id)');
+    conds.push('NOT EXISTS (SELECT 1 FROM settlement_item si WHERE si.work_order_id = wo.id)');
   }
   const where = conds.join(' AND ');
   const totalR = await client.query<{ c: string }>(
-    `SELECT COUNT(*)::text AS c FROM work_orders WHERE ${where}`,
+    `SELECT COUNT(*)::text AS c FROM work_orders wo WHERE ${where}`,
     params,
   );
   // P-3：limit/offset 强制上限，防止调用方拉取整表（DoS 面）。
   const limit = Math.min(Math.max(1, Math.floor(Number(filter.limit) || 20)), 200);
   const offset = Math.max(0, Math.min(Math.floor(Number(filter.offset) || 0), 10000));
+  // 决策 #7：LEFT JOIN worker 下发承接人姓名（assignee_name），无承接人 → null。
+  // JOIN 条件带 tenant_id 防跨租户串名；SELECT wo.* 保持全部既有列不丢。
   const listR = await client.query<WorkOrderRow>(
-    `SELECT * FROM work_orders WHERE ${where} ORDER BY created_at DESC LIMIT ${limit} OFFSET ${offset}`,
+    `SELECT wo.*, w.name AS assignee_name
+       FROM work_orders wo
+       LEFT JOIN worker w ON w.id = wo.assignee_id AND w.tenant_id = wo.tenant_id
+      WHERE ${where} ORDER BY wo.created_at DESC LIMIT ${limit} OFFSET ${offset}`,
     params,
   );
   return { items: listR.rows, total: Number(totalR.rows[0].c) };

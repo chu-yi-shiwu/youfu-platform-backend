@@ -70,8 +70,10 @@ function deskHandlers(opts: { deskExists?: boolean; idemGrabbed?: boolean; exist
     // 幂等抢键（R1-001 零 DDL 串行化）
     { match: (t) => t.includes('INSERT INTO idempotency_key'), reply: () => ({ rows: [], rowCount: idemGrabbed ? 1 : 0 }) },
     { match: (t) => t.includes('SELECT work_order_id FROM idempotency_key WHERE key = $1'), reply: () => (opts.existingWo ? { rows: [{ work_order_id: opts.existingWo.id as string }] } : { rows: [] }) },
-    // findOne 回查既有单
-    { match: (t) => t.includes('SELECT * FROM work_orders WHERE id = $1 AND tenant_id = $2'), reply: () => ({ rows: opts.existingWo ? [opts.existingWo] : [] }) },
+    // findOne 回查既有单（2026-09-07 决策 #7：findOne 改为 LEFT JOIN worker 下发 assignee_name，
+    // SQL 形状变为 SELECT wo.* ... LEFT JOIN worker w ... WHERE wo.id=$1 AND wo.tenant_id=$2；
+    // 正则同时兼容新旧两种形状，断言语义不变）
+    { match: (t) => /FROM work_orders( wo)?\s+((LEFT JOIN worker[\s\S]*?)?WHERE\s+(wo\.)?id = \$1 AND (wo\.)?tenant_id = \$2)/.test(t), reply: () => ({ rows: opts.existingWo ? [opts.existingWo] : [] }) },
     // 建单 INSERT
     { match: (t) => t.startsWith('INSERT INTO work_orders'), reply: (_t, p) => ({ rows: [{ id: p[0], tenant_id: p[1], order_no: p[2], business_type: p[3], title: p[7], status: 'draft' }], rowCount: 1 }) },
     // hasPerm 覆盖查询（operator/service_desk 角色走查库路径）
