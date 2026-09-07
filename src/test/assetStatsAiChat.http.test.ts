@@ -1,7 +1,7 @@
 // assetStatsAiChat.http.test.ts —— routes 层公网暴露面批次二（#932，承接 #931）。
 // 覆盖三组路由：asset.ts（资产管理 12 端点：档案 CRUD/调拨/故障转单/历史/维保台账/CSV 导出导入）、
 // stats.ts（报表大屏 4 端点：by-catalog/process/data-quality/overdue）、
-// adminAiChat.ts（管理对话 1 端点：requireConfigRole + 双开关 503 降级）。
+// adminAiChat.ts（管理对话 1 端点：角色白名单门禁 + 双开关 503 降级 + context/result_card 透传）。
 // 模式复用 upload.http.test.ts / publicReport.http.test.ts：vi.mock 重依赖，
 // 真 handler + 真 errorMiddleware + 真 requireConfigRole（按注入角色测 403/放行）+ 真 csvUtil（RFC4180 真解析）。
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
@@ -82,8 +82,10 @@ vi.mock('../engine/stateMachine.js', () => ({ doneStates: () => (doneStates as a
 // ---- adminAiChat.ts 依赖打桩 ----
 const conversationAvailable = vi.fn(async (_t: string): Promise<{ ok: boolean; reason?: string }> => ({ ok: true }));
 vi.mock('../services/conversationAgent.js', () => ({ conversationAvailable: (t: string) => (conversationAvailable as any)(t) }));
-const runAdminTurn = vi.fn(async (_t: string, message: string): Promise<{ reply: string; confirm_card: any }> => ({ reply: `收到：${message}`, confirm_card: { kind: 'location', fields: [] } }));
-vi.mock('../services/adminAgent.js', () => ({ runAdminTurn: (t: string, m: string) => (runAdminTurn as any)(t, m) }));
+const runAdminTurn = vi.fn(async (_t: string, message: string, _opts?: unknown): Promise<{ reply: string; confirm_card: any; result_card?: any }> => ({ reply: `收到：${message}`, confirm_card: { kind: 'location', fields: [] } }));
+vi.mock('../services/adminAgent.js', () => ({ runAdminTurn: (t: string, m: string, o?: unknown) => (runAdminTurn as any)(t, m, o) }));
+// 智能体批次一：只读工具执行器整体打桩（http 层只测路由门禁/透传；工具执行逻辑在 adminAgentTools 单测/adminAgent 单测覆盖）
+vi.mock('../services/adminAgentTools.js', () => ({ makeAdminToolExecutor: (_t: string) => async () => null }));
 
 import assetRouter from '../routes/asset.js';
 import statsRouter from '../routes/stats.js';
@@ -369,12 +371,26 @@ describe('stats.ts · 报表大屏 4 端点', () => {
 });
 
 describe('adminAiChat.ts · 管理对话端点（建议卡，绝不写库）', () => {
-  it('㉕worker → 403（仅 admin/operator）', async () => {
+  it('㉕worker/dispatcher → 403（AI 助理白名单外角色）', async () => {
     authRole = 'worker';
-    const r = await req('POST', '/admin/ai-chat', { message: '帮我把一号楼加进位置字典' });
-    expect(r.status).toBe(403);
-    const j = (await r.json()) as any;
-    expect(j.code).toBe('FORBIDDEN');
+    const r1 = await req('POST', '/admin/ai-chat', { message: '帮我把一号楼加进位置字典' });
+    expect(r1.status).toBe(403);
+    expect(((await r1.json()) as any).code).toBe('FORBIDDEN');
+    authRole = 'dispatcher';
+    const r2 = await req('POST', '/admin/ai-chat', { message: '查一下今天的工单' });
+    expect(r2.status).toBe(403);
+    expect(((await r2.json()) as any).code).toBe('FORBIDDEN');
+  });
+
+  it('㉕breview/service_desk → 200（智能体批次一角色扩容：只读问答放行，工具收窄在 runAdminTurn 执行层）', async () => {
+    authRole = 'reviewer';
+    const r1 = await req('POST', '/admin/ai-chat', { message: '今天有多少待处理工单' });
+    expect(r1.status).toBe(200);
+    expect(runAdminTurn).toHaveBeenCalledWith(TENANT, '今天有多少待处理工单', expect.objectContaining({ role: 'reviewer' }));
+    authRole = 'service_desk';
+    const r2 = await req('POST', '/admin/ai-chat', { message: '查一下处理中的单' });
+    expect(r2.status).toBe(200);
+    expect(runAdminTurn).toHaveBeenCalledWith(TENANT, '查一下处理中的单', expect.objectContaining({ role: 'service_desk' }));
   });
 
   it('㉖schema：空 message → 422；conversation_id 非 uuid → 422；超 1000 字 → 422', async () => {
@@ -392,7 +408,7 @@ describe('adminAiChat.ts · 管理对话端点（建议卡，绝不写库）', (
     expect(runAdminTurn).not.toHaveBeenCalled();
   });
 
-  it('㉘happy（operator）→ conversation_id 透传 + runAdminTurn(tenantId, message) + 建议卡回包', async () => {
+  it('㉘happy（operator）→ conversation_id 透传 + runAdminTurn(tenantId, message, opts) + 建议卡回包', async () => {
     const cid = '11111111-1111-4111-8111-111111111111';
     const r = await req('POST', '/admin/ai-chat', { message: '把一号楼加进位置字典', conversation_id: cid });
     expect(r.status).toBe(200);
@@ -400,9 +416,19 @@ describe('adminAiChat.ts · 管理对话端点（建议卡，绝不写库）', (
     expect(j.conversation_id).toBe(cid); // 前端生成并回传续聊
     expect(j.reply).toBe('收到：把一号楼加进位置字典');
     expect(j.confirm_card.kind).toBe('location');
-    expect(runAdminTurn).toHaveBeenCalledWith(TENANT, '把一号楼加进位置字典');
+    expect(runAdminTurn).toHaveBeenCalledWith(TENANT, '把一号楼加进位置字典', expect.objectContaining({ role: 'operator', toolExecutor: expect.any(Function) }));
     // 本端点只产出建议卡绝不写库：无任何 INSERT/UPDATE 打到库
     expect(calls().every((s) => !/insert into|update /i.test(s))).toBe(true);
+  });
+
+  it('㉘bcontext.page 透传 opts + result_card 透传回包（智能体批次一）', async () => {
+    runAdminTurn.mockImplementationOnce(async () => ({ reply: '共 3 单符合条件', confirm_card: undefined, result_card: { type: 'ticket_result', total: 3, items: [] } }));
+    const r = await req('POST', '/admin/ai-chat', { message: '今天 urgent 单', context: { page: '/tickets' } });
+    expect(r.status).toBe(200);
+    const j = (await r.json()) as any;
+    expect(j.result_card).toBeDefined();
+    expect(j.result_card.type).toBe('ticket_result');
+    expect(runAdminTurn).toHaveBeenCalledWith(TENANT, '今天 urgent 单', expect.objectContaining({ contextPage: '/tickets' }));
   });
 
   it('㉙未传 conversation_id → 服务端生成 uuid', async () => {

@@ -316,6 +316,9 @@ export async function list(
     priority?: string;
     source?: string;
     service_desk?: string;
+    // 智能体批次一（2026-09-07）纯加法：createdSince（可选）——只查该时刻之后创建的工单
+    // （AI 管家「今天」语义；不传行为与旧版完全一致，零回归）。
+    createdSince?: Date;
   },
 ): Promise<{ items: WorkOrderRow[]; total: number }> {
   const conds = ['wo.tenant_id = $1'];
@@ -350,6 +353,11 @@ export async function list(
   // 一单终身一结算：settlement_item 以 UNIQUE(work_order_id) 占用，NOT EXISTS 即"未结算"
   if (filter.unsettledOnly) {
     conds.push('NOT EXISTS (SELECT 1 FROM settlement_item si WHERE si.work_order_id = wo.id)');
+  }
+  // 智能体批次一纯加法：createdSince（AI 管家「今天」语义），不传不拼条件
+  if (filter.createdSince) {
+    params.push(filter.createdSince);
+    conds.push(`wo.created_at >= $${params.length}`);
   }
   const where = conds.join(' AND ');
   const totalR = await client.query<{ c: string }>(
