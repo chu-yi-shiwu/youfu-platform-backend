@@ -251,7 +251,7 @@ export async function detectRepeatHotspots(
   }>(
     `SELECT wo.location, wo.catalog, fc.name AS catalog_name, wo.business_type, wo.created_at
        FROM work_orders wo
-       LEFT JOIN fault_category fc ON fc.id = wo.catalog AND fc.tenant_id = wo.tenant_id
+       LEFT JOIN fault_category fc ON fc.id::text = wo.catalog AND fc.tenant_id = wo.tenant_id
       WHERE wo.tenant_id = $1 AND wo.created_at >= now() - ($2 || ' days')::interval`,
     [tenantId, String(windowDays)],
   );
@@ -319,7 +319,7 @@ export async function detectEscortHotspots(
   }>(
     `SELECT wo.location, wo.catalog, fc.name AS catalog_name, wo.business_type, wo.created_at
        FROM work_orders wo
-       LEFT JOIN fault_category fc ON fc.id = wo.catalog AND fc.tenant_id = wo.tenant_id
+       LEFT JOIN fault_category fc ON fc.id::text = wo.catalog AND fc.tenant_id = wo.tenant_id
       WHERE wo.tenant_id = $1 AND wo.created_at >= now() - ($2 || ' days')::interval`,
     [tenantId, String(windowDays)],
   );

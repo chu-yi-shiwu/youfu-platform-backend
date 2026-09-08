@@ -94,4 +94,15 @@ describe('POST /api/v1/optimize/generate（autoTune=false · transport 决策落
     expect(escortInsert!.params[1]).toBe('workflow');
     expect(escortInsert!.params[0]).toBe(T);
   });
+
+  it('② SQL 契约：两检测器 JOIN 谓词必为 fc.id::text = wo.catalog（uuid=text 500 事故回归锁，live 2026-09-08 实证）', async () => {
+    const { readFileSync } = await import('node:fs');
+    const src = readFileSync(new URL('../services/optimizer.ts', import.meta.url), 'utf8');
+    const joins = src.match(/LEFT JOIN fault_category fc ON [^\n]+/g) ?? [];
+    expect(joins.length).toBe(2); // detectRepeatHotspots + detectEscortHotspots
+    for (const j of joins) {
+      expect(j).toContain('fc.id::text = wo.catalog');
+      expect(j).not.toMatch(/fc\.id = wo\.catalog/);
+    }
+  });
 });
