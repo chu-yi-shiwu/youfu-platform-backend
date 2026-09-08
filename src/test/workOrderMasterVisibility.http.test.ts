@@ -4,7 +4,9 @@
 //     - 列表：worker 与 operator 一律 scope 到 assignee=本人（未分派单列表不可见）；
 //       显式传 assignee=他人 被覆盖（防越权）；
 //     - 详情：本人单 200；他人单/未分派单 403（未分派唯一可见面=抢单大厅）；
-//     - 降级纪律：档案查不到 → 放行全量（一线可用性优先，既有口径回归）；
+//     - 降级纪律：档案查不到 → 放行全量（一线可用性优先，既有口径回归；
+//       列表侧 M4 + 详情侧 M10 双覆盖）；
+//     - 防越权覆盖：显式传 assignee=他人被覆盖，worker（M1）与 operator（M11）双覆盖；
 //     - 8 operator 试点兼容：抢单大厅 /open/claim-hall 未分派单照常可见（不受影响）；
 //     - 非师傅角色（admin/dispatcher）行为零变化（列表不过滤）。
 //
@@ -130,6 +132,15 @@ describe('P2-2 派了才可见：师傅角色列表按分派关系过滤', () =>
     const listCall = calls.find((c) => c.text.includes('FROM work_orders wo') && c.text.includes('ORDER BY'));
     expect(listCall!.params).not.toContain(ME); // 未注入 scope = 降级放行
   });
+  it('M11 operator 列表：显式传 assignee=他人同样被覆盖（QA 复验缺口②：operator 侧防越权对齐 worker）', async () => {
+    const calls = makeClient(listHandlers());
+    const r = await get('/open/work_orders?assignee=W9999', 'operator');
+    expect(r.status).toBe(200);
+    const listCall = calls.find((c) => c.text.includes('FROM work_orders wo') && c.text.includes('ORDER BY'));
+    expect(listCall).toBeTruthy();
+    expect(listCall!.params).toContain(ME);
+    expect(listCall!.params).not.toContain('W9999');
+  });
 });
 
 describe('P2-2 派了才可见：详情同口径', () => {
@@ -153,6 +164,15 @@ describe('P2-2 派了才可见：详情同口径', () => {
 
   it('M8 operator 详情：分派给本人 → 200（试点师傅正常作业）', async () => {
     makeClient(findOneHandlers(ME));
+    const r = await get('/open/work_order/wo-x', 'operator');
+    expect(r.status).toBe(200);
+  });
+
+  it('M10 详情降级纪律：operator 档案查不到 → 放行（QA 复验缺口①：详情侧降级同列表，不 500 不误 403）', async () => {
+    makeClient([
+      { match: (t) => t.includes('FROM worker WHERE'), reply: () => ({ rows: [], rowCount: 0 }) },
+      ...findOneHandlers(OTHER).slice(1),
+    ]);
     const r = await get('/open/work_order/wo-x', 'operator');
     expect(r.status).toBe(200);
   });

@@ -56,18 +56,22 @@ allowedRoles（架构🟡12 既定口径），P2-2 未触碰该端点。
 - `resolveWorkerId` 防御加固：`rowCount===0 || rows.length===0 → null`、
   `rows[0]?.id ?? null`——保证降级路径自身永不 500。
 
-## 4. 回归护栏（M1~M9）
+## 4. 回归护栏（M1~M11）
 
 | 用例 | 断言 |
 | --- | --- |
 | M1 | worker 列表：显式 assignee=他人被覆盖为本人（防越权） |
 | M2 | operator 列表：scope 注入本人（P2-2 新行为） |
 | M3 | admin 列表：不注入过滤，零变化 |
-| M4 | 档案查不到 → 放行全量（降级纪律） |
+| M4 | 档案查不到 → 放行全量（降级纪律，列表侧） |
 | M5/M6 | worker 详情：本人 200 / 他人 403 |
 | M7 | operator 详情：未分派 NULL → 403 |
 | M8 | operator 详情：本人单 200 |
 | M9 | claim-hall 未分派单照常可见（试点兼容回归） |
+| M10 | 详情侧降级：operator 档案查不到 → 放行 200（QA 复验缺口①补齐） |
+| M11 | operator 列表：显式 assignee=他人被覆盖（QA 复验缺口②补齐） |
+
+> M10/M11 为 QA 增量复验（三单全 PASS）提出的两条信息级缺口，已当场补齐。
 
 ## 5. 生效与风险
 
