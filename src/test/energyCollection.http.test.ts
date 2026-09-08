@@ -203,6 +203,21 @@ describe('POST /energy/webhook/dispatch —— 收单验签与幂等', () => {
     expect(b.item.data.template_code).toBeNull();
   });
 
+  it('E02d P2-7（B 方案）：redispatch_of 随壳收单落 data（票据链优服侧可查）；旧版无此字段照收', async () => {
+    // 重派壳：新 task_ref + redispatch_of 指向原单
+    const r = await signedFetch('/api/v1/energy/webhook/dispatch', {
+      ...shell('p2-7-e02d-ref-new'),
+      redispatch_of: 't303a-e02-ref-0001',
+    });
+    expect(r.status).toBe(201);
+    const b = (await r.json()) as any;
+    expect(b.item.data.redispatch_of).toBe('t303a-e02-ref-0001');
+    // 兼容：普通派单（无 redispatch_of）照收，落 null
+    const plain = await signedFetch('/api/v1/energy/webhook/dispatch', shell('p2-7-e02d-ref-plain'));
+    expect(plain.status).toBe(201);
+    expect(((await plain.json()) as any).item.data.redispatch_of).toBeNull();
+  });
+
   it('E03 结构化采集字段 → z.strict 422 拒收，零进 PG（红线硬保证）', async () => {
     const before = state.tasks.length;
     const polluted = { ...shell('t303a-e03-ref-0001'), electricity_kwh: 123456, meter_no: 'DB-001' };

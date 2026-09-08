@@ -78,6 +78,9 @@ const DispatchBody = z
     // 落 data JSONB 供 /energy/tasks 返回 → mp 端 form-session 前分流高频/长尾。
     // optional+nullable：旧版能源 payload 无此字段照收（strict 白名单内追加，不破坏兼容）。
     template_code: z.string().max(20).nullable().optional(),
+    // P2-7（B 方案）：重派关联原单随任务壳透传（能源侧 youfu_dispatch_log.redispatch_of），
+    // 落 data JSONB 票据链两端可查。optional+nullable：普通派单无此字段照收。
+    redispatch_of: z.string().max(64).nullable().optional(),
     created_at: z.string().max(40).optional(),
   })
   .strict();
@@ -113,7 +116,7 @@ router.post('/energy/webhook/dispatch', async (req: any, res: any, next: any) =>
           ENTITY,
           b.title,
           def.initial,
-          JSON.stringify({ task_ref: b.task_ref, site: b.site, deadline: b.deadline ?? null, form_url: b.form_url ?? null, template_code: b.template_code ?? null, source: 'energy-platform', worker_ref: null }),
+          JSON.stringify({ task_ref: b.task_ref, site: b.site, deadline: b.deadline ?? null, form_url: b.form_url ?? null, template_code: b.template_code ?? null, redispatch_of: b.redispatch_of ?? null, source: 'energy-platform', worker_ref: null }),
           b.site,
           'energy-webhook',
         ],
