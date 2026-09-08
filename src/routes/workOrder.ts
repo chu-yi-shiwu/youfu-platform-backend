@@ -71,15 +71,27 @@ async function resolveWorkerId(
     'SELECT id FROM worker WHERE tenant_id=$2 AND (account_id=$1 OR id=$1) LIMIT 2',
     [uid, tenantId],
   );
-  if (r.rowCount === 0) return null;
+  // 防御：rowCount 异常（undefined/null）或 rows 空时一律按"查不到"降级，
+  // 绝不让降级路径本身变成 500（降级纪律：一线可用性优先）。
+  if (r.rowCount === 0 || r.rows.length === 0) return null;
   if (r.rows.length > 1) {
     // 多命中：同一身份挂了多份档案（脏数据）。取第一个并告警，由运维按日志清洗。
     console.warn('[workOrder] worker 档案多命中，取第一个（account_id/id 重复关联，需清洗）', {
       tenantId, authUserId: uid, ids: r.rows.map((x) => x.id),
     });
   }
-  return r.rows[0].id;
+  return r.rows[0]?.id ?? null;
 }
+
+/**
+ * P2-2（初一拍板）：师傅分派机制 = 派了才可见。
+ * 师傅角色 = worker + operator（operator 即生产 8 试点的小程序师傅身份）。
+ * 工单列表/详情一律按分派关系过滤：只看 assignee = 本人 的单，未分派单
+ * （assignee_id IS NULL）全不可见——未分派工单的唯一可见面是抢单大厅
+ * /open/claim-hall（8 operator 试点的抢单行为保留，见可见性矩阵 docs）。
+ * 档案查不到时沿用既定降级纪律（warn + 放行，一线可用性优先）。
+ */
+const MASTER_ROLES: readonly string[] = ['worker', 'operator'];
 
 /**
  * 抢单角色白名单（架构🟡12：消除硬编码角色数组）。
@@ -459,19 +471,21 @@ router.get('/open/work_orders', async (req, res, next) => {
     const autoFlow = req.query.auto_flow === '1' || req.query.auto_flow === 'true';
     const todayOnly = req.query.today === '1' || req.query.today === 'true';
     const timeoutOnly = req.query.timeout === '1' || req.query.timeout === 'true';
-    // 审查修复（架构🔴1 缩范围版 · worker 数据可见性）：worker 强制只看自己名下的单。
-    // 刻意不加 ticket.manage 权限点（工人默认矩阵没有，加了会让小程序接单页全空）。
+    // 审查修复（架构🔴1 缩范围版 · worker 数据可见性）+ P2-2（派了才可见）：
+    // 师傅角色（worker/operator）强制只看分派给自己名下的单——未分派单在工单列表
+    // 全不可见（唯一可见面=抢单大厅）。刻意不加 ticket.manage 权限点（师傅默认
+    // 矩阵没有，加了会让小程序接单页全空）。
     // JWT sub=account_user.id → 经 worker.account_id 反查真实 worker.id（业务编码）。
     const data = await withTenantClient(tenantId, async (client) => {
       let scopedAssignee = assignee;
-      if (res.locals.auth.role === 'worker') {
+      if (res.locals.auth.role && MASTER_ROLES.includes(res.locals.auth.role)) {
         const myWorkerId = await resolveWorkerId(client, tenantId, res.locals.auth.userId);
         if (myWorkerId) {
           scopedAssignee = myWorkerId; // 覆盖显式传入的 assignee（防越权看别人的单）
         } else {
           // 档案查不到（account_id 脏值/为空的老数据）→ 降级放行并告警：宁可漏，不能让一线干不了活。
-          console.warn('[workOrder.list] worker profile not found, 降级放行全量（不可阻断一线作业）', {
-            tenantId, userId: res.locals.auth.userId,
+          console.warn('[workOrder.list] master profile not found, 降级放行全量（不可阻断一线作业）', {
+            tenantId, userId: res.locals.auth.userId, role: res.locals.auth.role,
           });
         }
       }
@@ -551,17 +565,19 @@ router.get('/open/work_order/:id', async (req, res, next) => {
     const result = await withTenantClient(tenantId, async (client) => {
       const ticketRow = await findOne(client, tenantId, req.params.id);
       if (!ticketRow) return null;
-      // 审查修复（架构🔴1 缩范围版 · worker 数据可见性）：worker 只能看自己名下的单详情。
-      // 与列表端点同口径：反查不到档案时降级放行（不可阻断一线作业）。
-      if (res.locals.auth.role === 'worker') {
+      // 审查修复（架构🔴1 缩范围版 · worker 数据可见性）+ P2-2（派了才可见）：
+      // 师傅角色（worker/operator）只能看分派给自己名下的单详情——未分派单
+      // （assignee_id IS NULL）同样 403 不可见（与列表同口径，唯一可见面=抢单大厅）。
+      // 反查不到档案时降级放行（不可阻断一线作业）。
+      if (res.locals.auth.role && MASTER_ROLES.includes(res.locals.auth.role)) {
         const myWorkerId = await resolveWorkerId(client, tenantId, res.locals.auth.userId);
         if (myWorkerId) {
           if (ticketRow.assignee_id !== myWorkerId) {
-            throw new AppError('FORBIDDEN', '仅可查看本人名下的工单', 403);
+            throw new AppError('FORBIDDEN', '仅可查看分派给本人名下的工单（未分派工单请到抢单大厅）', 403);
           }
         } else {
-          console.warn('[workOrder.detail] worker profile not found, 降级放行（不可阻断一线作业）', {
-            tenantId, userId: res.locals.auth.userId,
+          console.warn('[workOrder.detail] master profile not found, 降级放行（不可阻断一线作业）', {
+            tenantId, userId: res.locals.auth.userId, role: res.locals.auth.role,
           });
         }
       }
