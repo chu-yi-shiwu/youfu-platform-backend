@@ -11,6 +11,9 @@ import {
   generateMiningOptimizations,
   generateRepeatHotspotOptimizations,
   detectRepeatHotspots,
+  detectEscortHotspots,
+  generateEscortCorridorOptimizations,
+  dbScopeFor,
   getModelParams,
   applyDispatchOptimizations,
   recordWorkflowRecommendations,
@@ -36,15 +39,20 @@ router.post('/optimize/generate', async (req, res, next) => {
       // workflow 建议，随 dec 走既有 pending 落库通道（AUTO_TUNE 与否均只记建议，不改流程）。
       const hotspots = await detectRepeatHotspots(client, tenantId);
       dec.push(...generateRepeatHotspotOptimizations(hotspots));
+      // 陪检运力走廊（scope='transport'）：与维修热点同一份 SELECT、分组谓词互斥，
+      // 决策落库走既有 pending 通道（autoTune 两种路径均只记 pending，人工消费）。
+      const escortHotspots = await detectEscortHotspots(client, tenantId);
+      dec.push(...generateEscortCorridorOptimizations(escortHotspots));
       if (autoTune) {
         await applyDispatchOptimizations(client, tenantId, dec);
         await recordWorkflowRecommendations(client, tenantId, dec);
       } else {
         for (const d of dec) {
+          // scope 经 dbScopeFor 归一（transport→workflow）满足 DDL CHECK；语义由 target 前缀保留。
           await client.query(
             `INSERT INTO optimization_feedback (tenant_id, scope, target, recommendation, reason, status)
              VALUES ($1, $2, $3, $4, $5, 'pending')`,
-            [tenantId, d.scope, d.target, JSON.stringify(d.recommendation), d.reason],
+            [tenantId, dbScopeFor(d.scope), d.target, JSON.stringify(d.recommendation), d.reason],
           );
         }
       }

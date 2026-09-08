@@ -82,11 +82,17 @@ router.post('/activities/:id/signup', async (req, res, next) => {
     const tenantId = res.locals.auth.tenantId;
     const b = z.object({ user_name: z.string().min(1) }).parse(req.body);
     const item = await withTenantClient(tenantId, async (client) => {
-      const act = await client.query(`SELECT id FROM volunteer_activity WHERE id = $1 AND tenant_id = $2`, [
-        req.params.id,
-        tenantId,
-      ]);
+      const act = await client.query(
+        `SELECT id, status, slots FROM volunteer_activity WHERE id = $1 AND tenant_id = $2 FOR UPDATE`,
+        [req.params.id, tenantId],
+      );
       if (act.rowCount === 0) throw new AppError('NOT_FOUND', 'activity not found', 404);
+      if (act.rows[0].status !== 'open') throw new AppError('BAD_STATE', '活动已关闭，无法报名', 409);
+      const cnt = await client.query(
+        `SELECT count(*)::int AS n FROM volunteer_record WHERE activity_id = $1 AND tenant_id = $2`,
+        [req.params.id, tenantId],
+      );
+      if (cnt.rows[0].n >= act.rows[0].slots) throw new AppError('BAD_STATE', '报名名额已满', 409);
       const r = await client.query(
         `INSERT INTO volunteer_record (tenant_id, activity_id, user_name, status) VALUES ($1,$2,$3,'registered') RETURNING *`,
         [tenantId, req.params.id, b.user_name],
@@ -173,6 +179,9 @@ router.post('/records/:id/approve', async (req, res, next) => {
         tenantId,
       ]);
       if (cur.rowCount === 0) throw new AppError('NOT_FOUND', 'record not found', 404);
+      if (cur.rows[0].status !== 'checked_out') {
+        throw new AppError('BAD_STATE', '只能对已签退的记录审批（先完成签到/签退）', 409);
+      }
       const r = await client.query(
         `UPDATE volunteer_record SET status = 'approved' WHERE id = $1 AND tenant_id = $2 RETURNING *`,
         [req.params.id, tenantId],
