@@ -452,6 +452,13 @@ router.get('/open/work_orders', async (req, res, next) => {
     const offset = Math.max(0, Math.min(Math.floor(Number(req.query.offset) || 0), 10000));
     // 批次三：unsettled=1 → 只返回未被任何结算单占用的工单（结算页"新建结算"数据源）
     const unsettled = req.query.unsettled === '1' || req.query.unsettled === 'true';
+    // 工作台下钻（#949 续）纯加法：三个可选布尔开关（'1'/'true' 均真，风格同 unsettled），不传=不过滤。
+    //   auto_flow=1 → 只回自动流转单（auto_flow = true）；
+    //   today=1     → 只回当日创建单（created_at::date = CURRENT_DATE，与统计卡 today_new 同口径）；
+    //   timeout=1   → 只回超时且未闭环单（sla_due_at 已过且未进终态，终态口径复用 SLA 扫描排除集）。
+    const autoFlow = req.query.auto_flow === '1' || req.query.auto_flow === 'true';
+    const todayOnly = req.query.today === '1' || req.query.today === 'true';
+    const timeoutOnly = req.query.timeout === '1' || req.query.timeout === 'true';
     // 审查修复（架构🔴1 缩范围版 · worker 数据可见性）：worker 强制只看自己名下的单。
     // 刻意不加 ticket.manage 权限点（工人默认矩阵没有，加了会让小程序接单页全空）。
     // JWT sub=account_user.id → 经 worker.account_id 反查真实 worker.id（业务编码）。
@@ -472,6 +479,8 @@ router.get('/open/work_orders', async (req, res, next) => {
         status, limit, offset, assignee: scopedAssignee, unsettledOnly: unsettled,
         // 决策 #8：四参透传（不传 = 不过滤，零回归）
         department, priority, source, service_desk: serviceDesk,
+        // 工作台下钻（#949 续）：三参透传（不传 = 不过滤，零回归）
+        autoFlow, todayOnly, timeoutOnly,
       });
     });
     // A+ Phase3：随列表下发每个工单"当前状态可执行的转移"（含必填/角色门禁），供 SPA 动态渲染动作按钮。

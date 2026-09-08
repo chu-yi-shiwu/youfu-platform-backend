@@ -319,6 +319,19 @@ export async function list(
     // 智能体批次一（2026-09-07）纯加法：createdSince（可选）——只查该时刻之后创建的工单
     // （AI 管家「今天」语义；不传行为与旧版完全一致，零回归）。
     createdSince?: Date;
+    // 工作台下钻（#949 续）纯加法：三个可选筛选，服务工作台统计卡"点数字看明细"真实下钻。
+    // 全部不传时行为与旧版完全一致（零回归）。
+    //   autoFlow    → 只回自动流转单（wo.auto_flow = true，对应工作台"自动派单"卡）。
+    //   todayOnly   → 只回当日创建单（wo.created_at::date = CURRENT_DATE，与 /stats today_new
+    //                 同口径：routes/workOrder.ts /open/me/summary 的 created_at::date = CURRENT_DATE）。
+    //   timeoutOnly → 只回"超时且未闭环"单：期望完成时间已过（sla_due_at IS NOT NULL AND
+    //                 sla_due_at < now()）且未进终态。排除集复用 SLA 扫描既有口径
+    //                 （scheduler/slaScheduler.ts 的 doneStates(def)+terminalStates(def) 并集），
+    //                 由 workflow_def 派生不写死：DEFAULT 4 态兜底=completed；
+    //                 RICH 模板=completed/closed/evaluated/cancelled。
+    autoFlow?: boolean;
+    todayOnly?: boolean;
+    timeoutOnly?: boolean;
   },
 ): Promise<{ items: WorkOrderRow[]; total: number }> {
   const conds = ['wo.tenant_id = $1'];
@@ -358,6 +371,26 @@ export async function list(
   if (filter.createdSince) {
     params.push(filter.createdSince);
     conds.push(`wo.created_at >= $${params.length}`);
+  }
+  // 工作台下钻（#949 续）纯加法三参：不传不拼条件，旧行为零变化。
+  // autoFlow：自动流转单（工作台"自动派单"卡下钻）。
+  if (filter.autoFlow) {
+    conds.push('wo.auto_flow = true');
+  }
+  // todayOnly：当日创建单；created_at::date = CURRENT_DATE 与 /open/me/summary today_new 同口径。
+  if (filter.todayOnly) {
+    conds.push('wo.created_at::date = CURRENT_DATE');
+  }
+  // timeoutOnly：超时且未闭环。排除集=doneStates(def)+terminalStates(def)（SLA 扫描同口径，
+  // 复用 slaScheduler.ts:43 的 slaExclude 派生方式），def 按 tenant 动态取 → 租户自定义工作流
+  // 扩展终态自动纳入排除，不写死枚举。
+  if (filter.timeoutOnly) {
+    const def = await getWorkflowDef(client, tenantId, 'work_order');
+    const exclude = Array.from(new Set([...doneStates(def), ...terminalStates(def)]));
+    params.push(exclude);
+    conds.push(
+      `wo.sla_due_at IS NOT NULL AND wo.sla_due_at < now() AND wo.status <> ALL($${params.length}::text[])`,
+    );
   }
   const where = conds.join(' AND ');
   const totalR = await client.query<{ c: string }>(
