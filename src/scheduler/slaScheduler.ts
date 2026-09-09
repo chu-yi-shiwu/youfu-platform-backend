@@ -8,9 +8,10 @@
 //      in_app 渠道落库即可达；sms/push/wechat 仍按网关配置诚实 stub（delivered=false）。
 import pool from '../db/pool.js';
 import { withTenantClient } from '../db/pool.js';
-import { getWorkflowDef } from '../engine/workflowDef.js';
+import { getWorkflowDef, getWorkflowDefOrDefault } from '../engine/workflowDef.js';
 import { doneStates, terminalStates, type WorkOrderStatus } from '../engine/stateMachine.js';
 import { slaScan, type SlaScanRow } from '../engine/sla.js';
+import { TRANSPORT_DEF } from '../engine/themes.js';
 import { emitDomainEvent } from '../db/eventBus.js';
 import { dispatchEvent } from '../webhook/dispatch.js';
 import { insertNotification } from '../services/notify.js';
@@ -26,6 +27,71 @@ export interface SlaHit {
   fromStatus: WorkOrderStatus;
   escalMinutes: number;
   dueAt: Date;
+}
+
+/** P1（B2 补 SLA）：运送线 SLA 命中记录（与工单线 SlaHit 分离，字段语义不同）。 */
+export interface TransportSlaHit {
+  transportOrderId: string;
+  code: string | null;
+  fromStatus: string;
+  dueAt: Date;
+}
+
+/**
+ * P1（B2 补 SLA）：运送单线 SLA 扫描——此前 cron 只扫 work_orders，运送单超时零告警
+ * （实测 2 单卡 transporting 15 天，审查报告 20260908 🟡实证）。
+ * 口径：
+ *   - 活跃集 = transport_task workflow_def 派生（排除 doneStates ∪ terminalStates，租户可定制不写死）；
+ *   - 命中 = sla_due_at 已过（sla_due_at < now()）且未升级（escalated_at IS NULL）且已设期
+ *     （sla_due_at IS NOT NULL——建单未传 sla_due_at 的单诚实不扫，不替租户估时）；
+ *   - 命中后置 escalated_at（防重复告警）+ domain_event + 通知（在身承运人 carrier + 租户在岗管理员）。
+ * 与工单线 runSlaScanForTenant 同租户隔离（withTenantClient），复用 cron 的逐租户枚举。
+ */
+export async function runTransportSlaScanForTenant(tenantId: string): Promise<TransportSlaHit[]> {
+  return withTenantClient(tenantId, async (client) => {
+    const def = await getWorkflowDefOrDefault(client, tenantId, 'transport_task', TRANSPORT_DEF);
+    const exclude = Array.from(new Set([...doneStates(def), ...terminalStates(def)]));
+    const rows = await client.query(
+      `SELECT id, code, status, carrier, sla_due_at FROM transport_order
+       WHERE tenant_id = $1 AND status <> ALL($2::text[])
+         AND sla_due_at IS NOT NULL AND escalated_at IS NULL AND sla_due_at < now()`,
+      [tenantId, exclude],
+    );
+    const hits: TransportSlaHit[] = [];
+    for (const r of rows.rows) {
+      await client.query('UPDATE transport_order SET escalated_at = now() WHERE id = $1', [r.id]);
+      await emitDomainEvent(client, {
+        tenantId,
+        entityType: 'transport_order',
+        entityId: r.id,
+        type: 'sla_escalated',
+        actor: 'system',
+        payload: { due_at: r.sla_due_at, status: r.status, code: r.code ?? null },
+      });
+      const title = '运送单 SLA 超时';
+      const body = `运送单 ${r.code ?? r.id} 已超过期望完成时间（状态 ${r.status}），请跟进处理`;
+      if (r.carrier) {
+        await insertNotification(client, {
+          tenantId, recipient: r.carrier, recipientKind: 'worker', type: 'sla_escalated',
+          workOrderId: r.id, title, body,
+          payload: { entity_type: 'transport_order', code: r.code ?? null, from_status: r.status },
+        });
+      }
+      const admins = await client.query<{ id: string }>(
+        `SELECT id FROM account_user WHERE tenant_id=$1 AND role='admin' AND active=true`,
+        [tenantId],
+      );
+      for (const a of admins.rows) {
+        await insertNotification(client, {
+          tenantId, recipient: a.id, recipientKind: 'account', type: 'sla_escalated',
+          workOrderId: r.id, title, body,
+          payload: { entity_type: 'transport_order', code: r.code ?? null, from_status: r.status, carrier: r.carrier ?? null },
+        });
+      }
+      hits.push({ transportOrderId: r.id, code: r.code ?? null, fromStatus: r.status, dueAt: new Date(r.sla_due_at) });
+    }
+    return hits;
+  });
 }
 
 /**
@@ -117,6 +183,7 @@ export async function runSlaSchedulerOnce(): Promise<number> {
   try {
     const { rows } = await pool.query('SELECT tenant_id FROM sla_escalation_tenants()');
     let total = 0;
+    let tTotal = 0; // P1：运送线命中数（单独计数，日志分线，返回值仍为工单线命中数保持既有语义）
     for (const r of rows) {
       try {
         const hits = await runSlaScanForTenant(r.tenant_id);
@@ -127,8 +194,19 @@ export async function runSlaSchedulerOnce(): Promise<number> {
       } catch (e) {
         console.error('[scheduler] tenant', r.tenant_id, 'sla scan failed:', e);
       }
+      try {
+        // P1（B2 补 SLA）：运送单线与工单线同租户逐轮扫描；失败只记日志不阻断工单线。
+        const tHits = await runTransportSlaScanForTenant(r.tenant_id);
+        tTotal += tHits.length;
+        for (const h of tHits) {
+          console.warn(`[scheduler] transport SLA escalated tenant=${r.tenant_id} to=${h.transportOrderId} status=${h.fromStatus} due=${h.dueAt.toISOString()}`);
+        }
+      } catch (e) {
+        console.error('[scheduler] tenant', r.tenant_id, 'transport sla scan failed:', e);
+      }
     }
     if (total > 0) console.log(`[scheduler] sla escalated ${total} work orders`);
+    if (tTotal > 0) console.log(`[scheduler] sla escalated ${tTotal} transport orders`);
     return total;
   } catch (e) {
     console.error('[scheduler] tick failed (sla enumeration):', e);

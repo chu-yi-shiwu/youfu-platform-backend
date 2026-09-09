@@ -316,6 +316,9 @@ export async function list(
     priority?: string;
     source?: string;
     service_desk?: string;
+    // P1（TicketList 按"陪检"一键圈单）纯加法：business_type 精确匹配过滤（语义同 department/priority），
+    // 不传行为与旧版完全一致（零回归）。
+    businessType?: string;
     // 智能体批次一（2026-09-07）纯加法：createdSince（可选）——只查该时刻之后创建的工单
     // （AI 管家「今天」语义；不传行为与旧版完全一致，零回归）。
     createdSince?: Date;
@@ -362,6 +365,11 @@ export async function list(
   if (filter.service_desk) {
     params.push(filter.service_desk);
     conds.push(`wo.service_desk = $${params.length}`);
+  }
+  // P1 纯加法：business_type 精确匹配（escort/repair/transport_task...），不传不拼条件
+  if (filter.businessType) {
+    params.push(filter.businessType);
+    conds.push(`wo.business_type = $${params.length}`);
   }
   // 一单终身一结算：settlement_item 以 UNIQUE(work_order_id) 占用，NOT EXISTS 即"未结算"
   if (filter.unsettledOnly) {

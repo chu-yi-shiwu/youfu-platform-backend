@@ -58,6 +58,35 @@ router.post('/activities', async (req, res, next) => {
   }
 });
 
+// P1：活动关闭/重开端点（审查报告 20260908 P1 项）。status 仅 open|closed 双态；
+// 关闭后 signup 端点既有守卫（status!=='open' → 409"活动已关闭"）自然生效，无需重复校验。
+// 幂等：对同值重放直接 UPDATE 成功（不 409，管理端按钮可重复点）。
+router.put('/activities/:id/status', async (req, res, next) => {
+  try {
+    requireConfigRole(req, res);
+    const tenantId = res.locals.auth.tenantId;
+    const b = z.object({ status: z.enum(['open', 'closed']) }).parse(req.body);
+    const item = await withTenantClient(tenantId, async (client) => {
+      const r = await client.query(
+        `UPDATE volunteer_activity SET status = $3 WHERE id = $1 AND tenant_id = $2 RETURNING id, title, status`,
+        [req.params.id, tenantId, b.status],
+      );
+      if (r.rowCount === 0) throw new AppError('NOT_FOUND', 'activity not found', 404);
+      await emitDomainEvent(client, {
+        tenantId,
+        entityType: 'volunteer_activity',
+        entityId: req.params.id,
+        type: b.status === 'closed' ? 'close' : 'reopen',
+        actor: 'config_role',
+      });
+      return r.rows[0];
+    });
+    return res.json({ ok: true, code: 0, item });
+  } catch (e) {
+    next(e);
+  }
+});
+
 router.get('/activities/:id/records', async (req, res, next) => {
   try {
     const tenantId = res.locals.auth.tenantId;
@@ -191,6 +220,32 @@ router.post('/records/:id/approve', async (req, res, next) => {
       return row;
     });
     return res.json({ ok: true, code: 0, item });
+  } catch (e) {
+    next(e);
+  }
+});
+
+// P1：志愿者人员档案维度（审查报告 P2 项提级）。只读聚合：按 user_name 归并全部报名记录，
+// 产出报名数/审批数/累计时长/累计积分/最近动态——人员级视图，activity 级明细不动、零 DDL。
+router.get('/people', async (req, res, next) => {
+  try {
+    const tenantId = res.locals.auth.tenantId;
+    const items = await withTenantClient(tenantId, (client) =>
+      client
+        .query(
+          `SELECT user_name,
+                  COUNT(*)::int AS signup_count,
+                  COUNT(*) FILTER (WHERE status = 'approved')::int AS approved_count,
+                  COALESCE(SUM(duration_min), 0)::int AS total_duration_min,
+                  COALESCE(SUM(points), 0)::int AS total_points,
+                  MAX(created_at) AS last_activity_at
+           FROM volunteer_record WHERE tenant_id = $1
+           GROUP BY user_name ORDER BY total_points DESC, user_name ASC`,
+          [tenantId],
+        )
+        .then((r) => r.rows),
+    );
+    return res.json({ ok: true, code: 0, items });
   } catch (e) {
     next(e);
   }

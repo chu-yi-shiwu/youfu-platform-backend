@@ -459,6 +459,8 @@ router.get('/open/work_orders', async (req, res, next) => {
     const priority = qstr('priority');
     const source = qstr('source');
     const serviceDesk = qstr('service_desk');
+    // P1（服务台按"陪检"一键圈单）：business_type 精确匹配过滤（不传=不过滤，零回归）
+    const businessType = qstr('business_type');
     // P-3：limit/offset 强制上限，防止调用方拉取整表（DoS 面）。
     const limit = Math.min(Math.max(1, Math.floor(Number(req.query.limit) || 20)), 200);
     const offset = Math.max(0, Math.min(Math.floor(Number(req.query.offset) || 0), 10000));
@@ -493,6 +495,8 @@ router.get('/open/work_orders', async (req, res, next) => {
         status, limit, offset, assignee: scopedAssignee, unsettledOnly: unsettled,
         // 决策 #8：四参透传（不传 = 不过滤，零回归）
         department, priority, source, service_desk: serviceDesk,
+        // P1：business_type 透传（不传 = 不过滤，零回归）
+        businessType,
         // 工作台下钻（#949 续）：三参透传（不传 = 不过滤，零回归）
         autoFlow, todayOnly, timeoutOnly,
       });

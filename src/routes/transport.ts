@@ -35,6 +35,7 @@ async function transitionOrder(
   extra: Record<string, unknown> = {},
   track: { loc?: string; note?: string; lat?: number; lng?: number; photo?: string } = {},
   actor = 'config_role',
+  role?: string,
 ): Promise<any> {
   const cur = await client.query(`SELECT * FROM transport_order WHERE id = $1 AND tenant_id = $2`, [orderId, tenantId]);
   if (cur.rowCount === 0) throw new AppError('NOT_FOUND', 'order not found', 404);
@@ -43,6 +44,14 @@ async function transitionOrder(
   const target = applyEvent(def, t.status, event);
   if (!target) {
     throw new AppError('BAD_STATE', `illegal transition ${t.status} --${event}-->`, 422);
+  }
+  // P1（B2 接 allowedRoles）：TRANSPORT_DEF 声明的角色门禁此前只在工作单线强制
+  // （repo/ticket.ts transition()），运送线 applyEvent 仅校验 from+event——被指派工人
+  // 可对自己单子执行声明上仅 admin/operator 可用的 cancel。口径对齐工单线：
+  // 为空/未定义=放行（向后兼容，避免门死自己）；显式配置且调用角色不在其中 → 403。
+  const tdef = (def.transitions ?? []).find((x: any) => x.from === t.status && x.event === event);
+  if (tdef?.allowedRoles && tdef.allowedRoles.length > 0 && !(role && tdef.allowedRoles.includes(role))) {
+    throw new AppError('FORBIDDEN', `role ${role ?? 'unknown'} not allowed to ${event} transport order`, 403);
   }
   const { parameterized: filteredKeys, nowCols } = filterTransportExtraCols(extra);
   const assigns = [
@@ -79,6 +88,7 @@ const orderSchema = z.object({
   item_category: z.string().optional(), // UOne A3 物品分类（标本/药品/文件/器械...）
   order_type: z.enum(['scheduled', 'free']).default('scheduled'), // scheduled 计划运送 | free 自由运送
   work_order_id: z.string().optional(), // P2：来源工单（work_orders.id 为 text 且含 PILOT-WO-002 等非 uuid 业务单号，故用 string 不校验 uuid 形态，与 041 迁移的 text 列对齐）
+  sla_due_at: z.string().optional(), // P1（B2 补 SLA）：期望完成时间；不传 = 不纳入 SLA 扫描（诚实：不替租户估时）
 });
 
 router.get('/orders', async (req, res, next) => {
@@ -163,8 +173,8 @@ router.post('/orders', async (req, res, next) => {
     const b = orderSchema.parse(req.body);
     const item = await withTenantClient(tenantId, async (client) => {
       const r = await client.query(
-        `INSERT INTO transport_order (tenant_id, code, item_name, from_loc, to_loc, carrier, priority, plan_depart_at, item_category, order_type, work_order_id, status)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'pending') RETURNING *`,
+        `INSERT INTO transport_order (tenant_id, code, item_name, from_loc, to_loc, carrier, priority, plan_depart_at, item_category, order_type, work_order_id, sla_due_at, status)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 'pending') RETURNING *`,
         [
           tenantId,
           `T${Date.now()}${Math.random().toString(36).slice(2, 8)}`,
@@ -177,6 +187,7 @@ router.post('/orders', async (req, res, next) => {
           b.item_category ?? null,
           b.order_type,
           b.work_order_id ?? null,
+          b.sla_due_at ?? null,
         ],
       );
       const row = r.rows[0];
@@ -239,7 +250,7 @@ router.post('/orders/:id/transition', async (req, res, next) => {
       const cur = await client.query(`SELECT id, carrier FROM transport_order WHERE id=$1 AND tenant_id=$2`, [req.params.id, tenantId]);
       if (cur.rowCount === 0) throw new AppError('NOT_FOUND', 'order not found', 404);
       await requireAssigneeOrConfig(client, res.locals.auth, cur.rows[0].carrier, 'transport order');
-      return transitionOrder(client, tenantId, req.params.id, event, extra, track, res.locals.auth.userId ?? 'config_role');
+      return transitionOrder(client, tenantId, req.params.id, event, extra, track, res.locals.auth.userId ?? 'config_role', res.locals.auth.role);
     });
     return res.json({ ok: true, code: 0, item });
   } catch (e) {
