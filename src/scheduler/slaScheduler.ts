@@ -41,7 +41,8 @@ export interface TransportSlaHit {
  * P1（B2 补 SLA）：运送单线 SLA 扫描——此前 cron 只扫 work_orders，运送单超时零告警
  * （实测 2 单卡 transporting 15 天，审查报告 20260908 🟡实证）。
  * 口径：
- *   - 活跃集 = transport_task workflow_def 派生（排除 doneStates ∪ terminalStates，租户可定制不写死）；
+ *   - 活跃集 = transport_task workflow_def 派生（排除 doneStates ∪ terminalStates ∪ paused/suspended，
+ *     与工单线口径一致，租户可定制不写死）；
  *   - 命中 = sla_due_at 已过（sla_due_at < now()）且未升级（escalated_at IS NULL）且已设期
  *     （sla_due_at IS NOT NULL——建单未传 sla_due_at 的单诚实不扫，不替租户估时）；
  *   - 命中后置 escalated_at（防重复告警）+ domain_event + 通知（在身承运人 carrier + 租户在岗管理员）。
@@ -50,7 +51,12 @@ export interface TransportSlaHit {
 export async function runTransportSlaScanForTenant(tenantId: string): Promise<TransportSlaHit[]> {
   return withTenantClient(tenantId, async (client) => {
     const def = await getWorkflowDefOrDefault(client, tenantId, 'transport_task', TRANSPORT_DEF);
-    const exclude = Array.from(new Set([...doneStates(def), ...terminalStates(def)]));
+    // P3-②：与工单线 runSlaScanForTenant 口径对齐——除 doneStates ∪ terminalStates 外，
+    // 无条件追加排除挂起态 paused/suspended（防御租户自定义 def 含挂起态被误判 SLA 超时）；
+    // 工单线经 activeStates 二次过滤实现同款排除，运送线无二道过滤，直接落在 SQL 排除集。
+    const exclude = Array.from(
+      new Set([...doneStates(def), ...terminalStates(def), 'paused', 'suspended']),
+    );
     const rows = await client.query(
       `SELECT id, code, status, carrier, sla_due_at FROM transport_order
        WHERE tenant_id = $1 AND status <> ALL($2::text[])

@@ -4,7 +4,7 @@
     "title": "优服家 API",
     "version": "0.0.0-generated",
     "description": "多租户物业 SaaS 后端开放规范（M-3 交付）。\n\n**口径**：本文件由 `tools/generate_openapi.mjs` 自动扫描 `src/server.ts` 挂载表与 `src/routes/*.ts`、`src/webhook/routes.ts` 路由声明生成（generated，非手写）。\n\n**诚实边界**：summary/description 取自路由上方中文注释（启发式）；请求/响应 schema 为宽松骨架，字段一律以服务端实现为准，不编造字段。\n\n**鉴权**：租户/管理端 JWT Bearer；开放 API 走 X-App-Key + X-App-Secret（openApiAuth）；公开端点见各操作 security: []。",
-    "x-generated-at": "2026-09-09T02:29:05.987Z",
+    "x-generated-at": "2026-09-09T04:44:12.377Z",
     "x-generator": "tools/generate_openapi.mjs",
     "x-source": "src/server.ts + src/routes/*.ts + src/webhook/routes.ts（代码扫描口径）"
   },
@@ -2596,7 +2596,7 @@
           "workOrder"
         ],
         "summary": "— 返回某状态下可执行的转移规则（前端动态渲染/权限判断用）。",
-        "description": "status 省略时返回初始态(initial)的可用转移。\n\n来源：src/routes/workOrder.ts:524\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "status 省略时返回初始态(initial)的可用转移。\n\n来源：src/routes/workOrder.ts:526\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -2624,7 +2624,7 @@
           "workOrder"
         ],
         "summary": "— 工单事件流（前端工单详情时间线）",
-        "description": "来源：src/routes/workOrder.ts:544\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/workOrder.ts:546\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -2663,7 +2663,7 @@
           "workOrder"
         ],
         "summary": "— 工单详情（单条）：含当前状态可执行的转移规则 + 事件流。",
-        "description": "A+ Phase4：供 SPA TicketDetail 动态渲染动作按钮（不再前端硬编码状态→事件映射）。\n\n来源：src/routes/workOrder.ts:564\n\n服务端响应状态码（代码扫描）：200, 404\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "A+ Phase4：供 SPA TicketDetail 动态渲染动作按钮（不再前端硬编码状态→事件映射）。\n\n来源：src/routes/workOrder.ts:566\n\n服务端响应状态码（代码扫描）：200, 404\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -2714,7 +2714,7 @@
           "workOrder"
         ],
         "summary": "POST /api/v1/open/work_order/{id}/photos",
-        "description": "来源：src/routes/workOrder.ts:624\n\n服务端响应状态码（代码扫描）：200, 404\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/workOrder.ts:626\n\n服务端响应状态码（代码扫描）：200, 404\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -2777,7 +2777,7 @@
           "workOrder"
         ],
         "summary": "D1：语音留言追加（worker 录语音 → /upload 得 URL → 追加 ext.voice 数组）",
-        "description": "来源：src/routes/workOrder.ts:649\n\n服务端响应状态码（代码扫描）：200, 404\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/workOrder.ts:651\n\n服务端响应状态码（代码扫描）：200, 404\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -2840,7 +2840,7 @@
           "workOrder"
         ],
         "summary": "— 通知列表（?recipient= 过滤；缺省=租户全部）",
-        "description": "审查修复：合并原 454(recipient 版) 与 585(全量版) 重复注册——Express 先注册先匹配，585 版永不生效。\nin_app 落库即可达；sms/push 为 stub 未真发，诚实标注。\n\n来源：src/routes/workOrder.ts:677\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "审查修复：合并原 454(recipient 版) 与 585(全量版) 重复注册——Express 先注册先匹配，585 版永不生效。\nin_app 落库即可达；sms/push 为 stub 未真发，诚实标注。\n\n来源：src/routes/workOrder.ts:679\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -2868,7 +2868,7 @@
           "workOrder"
         ],
         "summary": "— 标记已读（body { ids?: string[] }；缺省=全部已读）",
-        "description": "来源：src/routes/workOrder.ts:705\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/workOrder.ts:707\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -2908,7 +2908,7 @@
           "workOrder"
         ],
         "summary": "— 微信订阅消息自检（工人单点：先授权→立即真发→返回原始 errcode）",
-        "description": "不落库，直接对当前登录工人发起一次真实订阅消息发送，返回微信原始 errcode，供前端「微信通知自检」按钮屏上展示。\n目的：消除「用户点允许 → relay 给后端手动重跑」的来回，实现通知链路自助验证闭环。\n\n来源：src/routes/workOrder.ts:729\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "不落库，直接对当前登录工人发起一次真实订阅消息发送，返回微信原始 errcode，供前端「微信通知自检」按钮屏上展示。\n目的：消除「用户点允许 → relay 给后端手动重跑」的来回，实现通知链路自助验证闭环。\n\n来源：src/routes/workOrder.ts:731\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -2948,7 +2948,7 @@
           "workOrder"
         ],
         "summary": "PATCH /api/v1/open/work_order/{id}/ext",
-        "description": "来源：src/routes/workOrder.ts:769\n\n服务端响应状态码（代码扫描）：200, 404\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/workOrder.ts:771\n\n服务端响应状态码（代码扫描）：200, 404\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -3011,7 +3011,7 @@
           "workOrder"
         ],
         "summary": "— P6 自动派单率/自动闭环率口径（诚实，不编造演示数据）",
-        "description": "来源：src/routes/workOrder.ts:792\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/workOrder.ts:794\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -3039,7 +3039,7 @@
           "workOrder"
         ],
         "summary": "— M3 真实解析：目录码/资产码识别（替代前端 MSW 写死 mock）",
-        "description": "生产化②：优先查库（asset_catalog/asset_registry），DB 权威、查不到诚实 unresolved。\n契约与前端 services.scan 对齐：{ok,code,asset:{qr,resolved,note,...}}\n\n来源：src/routes/workOrder.ts:805\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "生产化②：优先查库（asset_catalog/asset_registry），DB 权威、查不到诚实 unresolved。\n契约与前端 services.scan 对齐：{ok,code,asset:{qr,resolved,note,...}}\n\n来源：src/routes/workOrder.ts:807\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -3079,7 +3079,7 @@
           "workOrder"
         ],
         "summary": "— P4 SLA 守护：扫本租户超时单，标记升级并 emit sla_escalated 事件",
-        "description": "拆雷三件套②（2026-08-31）：扫描实现抽到 src/scheduler/slaScheduler.ts 的 runSlaScanForTenant，\n本端点与进程内 cron 共用同一实现；命中同时落通知（在身 assignee + 租户管理员），契约不变。\n\n来源：src/routes/workOrder.ts:825\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "拆雷三件套②（2026-08-31）：扫描实现抽到 src/scheduler/slaScheduler.ts 的 runSlaScanForTenant，\n本端点与进程内 cron 共用同一实现；命中同时落通知（在身 assignee + 租户管理员），契约不变。\n\n来源：src/routes/workOrder.ts:827\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -3119,7 +3119,7 @@
           "workOrder"
         ],
         "summary": "— 转台（把工单从一个服务台转移到另一个服务台）",
-        "description": "门禁：dispatch.override（RBAC 默认矩阵 admin/operator/dispatcher 有，worker 无）。\n\n来源：src/routes/workOrder.ts:846\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "门禁：dispatch.override（RBAC 默认矩阵 admin/operator/dispatcher 有，worker 无）。\n\n来源：src/routes/workOrder.ts:848\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -3170,7 +3170,7 @@
           "workOrder"
         ],
         "summary": "— 抢单大厅：列出未分配(claim_hall/pending_dispatch)工单，可按部门过滤",
-        "description": "来源：src/routes/workOrder.ts:889\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/workOrder.ts:891\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -3198,7 +3198,7 @@
           "workOrder"
         ],
         "summary": "— 抢单（人员认领未分配工单，部门不匹配驳回）",
-        "description": "门禁来源（架构🟡12）：本租户 workflow_def 的 claim 转移 allowedRoles（引擎 RICH def 默认\nworker/admin/dispatcher/service_desk），不再在本文件硬编码角色数组。\n⚠️ 行为变更：此前硬编码多放了 operator → 现按引擎口径收口；operator 请用派单（dispatch.override）。\n需要放行的租户：到 业务规则设置台 给 claim 边 allowedRoles 加上 operator 即生效（配置即事实）。\nC-2 身份根治：token userId 即 worker.id（id 同源），body workerId 不一致 403。\n\n来源：src/routes/workOrder.ts:921\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "门禁来源（架构🟡12）：本租户 workflow_def 的 claim 转移 allowedRoles（引擎 RICH def 默认\nworker/admin/dispatcher/service_desk），不再在本文件硬编码角色数组。\n⚠️ 行为变更：此前硬编码多放了 operator → 现按引擎口径收口；operator 请用派单（dispatch.override）。\n需要放行的租户：到 业务规则设置台 给 claim 边 allowedRoles 加上 operator 即生效（配置即事实）。\nC-2 身份根治：token userId 即 worker.id（id 同源），body workerId 不一致 403。\n\n来源：src/routes/workOrder.ts:923\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -3249,7 +3249,7 @@
           "workOrder"
         ],
         "summary": "— 派单智能推荐（DMR 可解释呈现，dispatcher 端）。",
-        "description": "当前工人（token 身份）今日工作台统计见下方 /open/me/summary。\n只读推荐：基于 技能匹配 + 当前负载 的确定性评分，不写回任何配置（AUTO_TUNE 无关）。\n诚实口径：无 worker 级满意度数据 → 理由不编造满意度；技能匹配 = 分类名/码与 worker.skill_tags 子串包含（≥2 字符）。\n冷启动（无 dispatch_rule/UCB 数据）时依然有区分度：技能命中优先、负载低次之。\n\n来源：src/routes/workOrder.ts:991\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "当前工人（token 身份）今日工作台统计见下方 /open/me/summary。\n只读推荐：基于 技能匹配 + 当前负载 的确定性评分，不写回任何配置（AUTO_TUNE 无关）。\n诚实口径：无 worker 级满意度数据 → 理由不编造满意度；技能匹配 = 分类名/码与 worker.skill_tags 子串包含（≥2 字符）。\n冷启动（无 dispatch_rule/UCB 数据）时依然有区分度：技能命中优先、负载低次之。\n\n来源：src/routes/workOrder.ts:993\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -3277,7 +3277,7 @@
           "workOrder"
         ],
         "summary": "GET /api/v1/open/me/summary",
-        "description": "来源：src/routes/workOrder.ts:1023\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/workOrder.ts:1025\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
