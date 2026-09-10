@@ -20,6 +20,7 @@ vi.hoisted(() => {
 const state = {
   tasks: [] as any[],
   defRow: null as Record<string, unknown> | null, // 非 null 时模拟 workflow_def DB 配置
+  workerAccounts: {} as Record<string, string>, // T-bridge：account_id → 业务 worker.id（无键=未绑定）
   seq: 0,
 };
 
@@ -28,6 +29,11 @@ function makeClient() {
     query: async (text: unknown, params?: unknown[]) => {
       const sql = String(text);
       const p = (params ?? []) as any[];
+      if (/SELECT id FROM worker WHERE tenant_id = \$1 AND account_id = \$2/i.test(sql)) {
+        // T-bridge 桥接反查：worker.account_id → 业务 worker.id
+        const wid = state.workerAccounts[p[1]];
+        return wid ? { rows: [{ id: wid }], rowCount: 1 } : { rows: [], rowCount: 0 };
+      }
       if (sql.includes('workflow_def')) {
         if (/SELECT version/i.test(sql)) return { rows: [], rowCount: 0 };
         if (/SELECT def FROM workflow_def/i.test(sql)) {
@@ -316,5 +322,59 @@ describe('POST /energy/token-exchange + worker 只读列表 —— token 三链'
     } finally {
       state.defRow = null;
     }
+  });
+
+  // ---- T-bridge（2026-09-11）：账号 JWT 桥接第四源（修复 mp 401→全局登出循环）----
+
+  it('E09 T-bridge：账号 JWT（operator+工人档案）→ 200 第四源可见，列表+详情双通', async () => {
+    const r = await signedFetch('/api/v1/energy/webhook/dispatch', shell('t-bridge-e09-ref'));
+    expect(r.status).toBe(201);
+    const row = state.tasks.find((t) => t.data.task_ref === 't-bridge-e09-ref')!;
+    row.assignee = 'w-chuyi'; // 任务挂业务 worker.id 名下
+    state.workerAccounts['acc-chuyi'] = 'w-chuyi'; // 档案：account_id → worker.id
+
+    const nowSec = Math.floor(Date.now() / 1000);
+    const accToken = signJwt(
+      { sub: 'acc-chuyi', tid: 't-verification', role: 'operator', username: 'chuyi_ops', iat: nowSec, exp: nowSec + 3600 },
+      't303a-test-jwt-secret',
+    );
+    const res = await fetch(url + '/api/v1/energy/tasks', { headers: { Authorization: `Bearer ${accToken}` } });
+    expect(res.status).toBe(200);
+    const b = (await res.json()) as any;
+    const hit = (b.items || []).find((t: any) => t.data && t.data.task_ref === 't-bridge-e09-ref');
+    expect(hit).toBeTruthy();
+    // 详情同样走桥接身份
+    const d = await fetch(url + `/api/v1/energy/tasks/${hit.id}`, { headers: { Authorization: `Bearer ${accToken}` } });
+    expect(d.status).toBe(200);
+    const db2 = (await d.json()) as any;
+    expect(db2.item.data.task_ref).toBe('t-bridge-e09-ref');
+  });
+
+  it('E09b T-bridge：账号 JWT 无工人档案 → 403（非 401，杜绝 mp 全局登出）', async () => {
+    const nowSec = Math.floor(Date.now() / 1000);
+    const accToken = signJwt(
+      { sub: 'acc-noworker', tid: 't-verification', role: 'operator', username: 'no_worker', iat: nowSec, exp: nowSec + 3600 },
+      't303a-test-jwt-secret',
+    );
+    const res = await fetch(url + '/api/v1/energy/tasks', { headers: { Authorization: `Bearer ${accToken}` } });
+    expect(res.status).toBe(403);
+    const b = (await res.json()) as any;
+    expect(b.code).toBe('ENERGY_FORBIDDEN');
+  });
+
+  it('E09c T-bridge 回归：admin 账号 JWT 仍 401 不放大面；worker token 机器链不受影响', async () => {
+    const nowSec = Math.floor(Date.now() / 1000);
+    const adminToken = signJwt(
+      { sub: 'acc-admin', tid: 't-verification', role: 'admin', username: 'admin', iat: nowSec, exp: nowSec + 3600 },
+      't303a-test-jwt-secret',
+    );
+    const res = await fetch(url + '/api/v1/energy/tasks', { headers: { Authorization: `Bearer ${adminToken}` } });
+    expect(res.status).toBe(401);
+    const wt = signJwt(
+      { sub: 'w-001', worker_ref: 'youfu:w-001', scope: 'energy_collection', tid: 't-verification', iat: nowSec, exp: nowSec + 900 },
+      't303a-test-jwt-secret',
+    );
+    const res2 = await fetch(url + '/api/v1/energy/tasks', { headers: { Authorization: `Bearer ${wt}` } });
+    expect(res2.status).toBe(200);
   });
 });

@@ -1,7 +1,10 @@
-// 能耗采集任务路由（T303a 优服家第四源 · 收单 + token 三链）。
+// 能耗采集任务路由（T303a 优服家第四源 · 收单 + token 三链 + 账号 JWT 桥接）。
 // 数据来源：能源平台派单 webhook（HMAC-SHA256 验签 + task_ref 幂等）→
 // workflow_def 配置驱动建单（entity_type=energy_collection，business_flow_tasks）→
 // service_key 换 worker token（worker_ref=youfu:{worker_id}，15min）→ worker 只读列表。
+// T-bridge（2026-09-11 初一"继续推进"核准）：只读接口新增账号 JWT 链——
+// 登录 token（role∈worker/operator）按 worker.account_id 反查业务 worker.id；
+// 修复 mp 第四源 401→api.js 全局登出循环。service_key 机器链语义不变。
 // 红线：结构化采集字段零进优服家 PG——收单 body 走 z.strict() 白名单，
 // 多一个字段即 422 拒收，任务壳只有 task_ref/site/deadline/form_url。
 import { Router } from 'express';
@@ -197,10 +200,14 @@ router.post('/energy/token-exchange', async (req: any, res: any, next: any) => {
 });
 
 // ---------------------------------------------------------------------------
-// worker token 校验（验签/过期链）。prod 语义：verifyJwt 校验签名+exp；
-// scope 必须=energy_collection；租户只取 token 内 tid（不信任客户端头）。
+// worker 身份归一化（双链）。链 A：能源 worker token（scope=energy_collection，
+// token-exchange 签发，机器/表单链）——语义不变；链 B（T-bridge 2026-09-11）：
+// 优服家账号 JWT（登录链，role∈worker/operator）按 worker.account_id 反查业务
+// worker.id 构造 workerRef。修复 mp 第四源 401→api.js 全局登出循环：
+// 无工人档案回 403（mp 仅告警不登出），admin 等其他角色维持 401 不放行。
+// 租户只取 token 内 tid（不信任客户端头）。
 // ---------------------------------------------------------------------------
-function requireWorkerToken(req: any): Record<string, unknown> {
+async function resolveWorkerIdentity(req: any): Promise<{ workerId: string; workerRef: string; tid: string }> {
   const m = /^Bearer\s+(.+)$/i.exec((req.header('Authorization') || '').trim());
   const bearer = m ? m[1] : null;
   if (!bearer) {
@@ -211,10 +218,39 @@ function requireWorkerToken(req: any): Record<string, unknown> {
     throw new AppError('AUTH_CFG', 'JWT_SECRET not configured on server (fail-closed)', 500);
   }
   const payload = verifyJwt(bearer, jwtSecret);
-  if (!payload || payload.scope !== ENTITY) {
+  if (!payload) {
     throw new AppError('AUTH_002', 'invalid or expired worker token', 401);
   }
-  return payload;
+  // 链 A：能源 worker token（原语义原样保留）
+  if (payload.scope === ENTITY) {
+    const workerId = String(payload.sub ?? '');
+    const tid = String(payload.tid ?? '');
+    if (!tid) {
+      throw new AppError('TENANT_001', 'worker token has no tid', 401);
+    }
+    return { workerId, workerRef: String(payload.worker_ref ?? `youfu:${workerId}`), tid };
+  }
+  // 链 B：账号 JWT 桥接（worker/operator；sub=account_user.id → worker.account_id 反查）
+  const role = String(payload.role ?? '');
+  if (role === 'worker' || role === 'operator') {
+    const tid = String(payload.tid ?? '');
+    const accountId = String(payload.sub ?? '');
+    if (!tid || !accountId) {
+      throw new AppError('AUTH_002', 'invalid or expired worker token', 401);
+    }
+    const w: any = await withTenantClient(tid, async (client: any) =>
+      client.query(
+        `SELECT id FROM worker WHERE tenant_id = $1 AND account_id = $2 AND active = true LIMIT 1`,
+        [tid, accountId],
+      ),
+    );
+    const workerId = w.rows[0]?.id ? String(w.rows[0].id) : '';
+    if (!workerId) {
+      throw new AppError('ENERGY_FORBIDDEN', '账号未绑定工人档案，暂无能耗采集任务', 403);
+    }
+    return { workerId, workerRef: `youfu:${workerId}`, tid };
+  }
+  throw new AppError('AUTH_002', 'invalid or expired worker token', 401);
 }
 
 // GET /api/v1/energy/tasks?assignee= —— worker 只读列表（第四源数据源）。
@@ -222,10 +258,7 @@ function requireWorkerToken(req: any): Record<string, unknown> {
 // 可见范围 = data->>'worker_ref' = token.worker_ref ∪ assignee = token.sub（授权交集第二半）。
 router.get('/energy/tasks', async (req: any, res: any, next: any) => {
   try {
-    const payload = requireWorkerToken(req);
-    const workerId = String(payload.sub ?? '');
-    const workerRef = String(payload.worker_ref ?? `youfu:${workerId}`);
-    const tenantId = String(payload.tid ?? '');
+    const { workerId, workerRef, tid: tenantId } = await resolveWorkerIdentity(req);
     if (!tenantId) {
       throw new AppError('TENANT_001', 'worker token has no tid', 401);
     }
@@ -261,10 +294,7 @@ router.get('/energy/tasks', async (req: any, res: any, next: any) => {
 // GET /api/v1/energy/tasks/:id —— worker 只读详情（越权链点对点：非本人任务 → 403）
 router.get('/energy/tasks/:id', async (req: any, res: any, next: any) => {
   try {
-    const payload = requireWorkerToken(req);
-    const workerId = String(payload.sub ?? '');
-    const workerRef = String(payload.worker_ref ?? `youfu:${workerId}`);
-    const tenantId = String(payload.tid ?? '');
+    const { workerId, workerRef, tid: tenantId } = await resolveWorkerIdentity(req);
     const item = await withTenantClient(tenantId, async (client: any) => {
       const def = await getWorkflowDefOrDefault(client, tenantId, ENTITY, ENERGY_COLLECTION_DEF);
       const r = await client.query(
