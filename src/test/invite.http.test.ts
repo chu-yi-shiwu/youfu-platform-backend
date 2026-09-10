@@ -13,6 +13,8 @@
 //   ⑩ redeem 弱密码 → 422
 //   ⑪ 并发双花兜底：事务内 UPDATE used_at 守卫 0 行 → 400 INVITE_INVALID
 //   ⑫ 非 admin 生成码 → 403
+//   ⑬⑭ P2 修复（R4 深测）：suspended/pending 租户在途码 redeem → 403 TENANT_SUSPENDED / TENANT_PENDING
+//   ⑮ P2 口径：registry 无记录的存量租户 redeem 放行 → 201
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import express from 'express';
 import type { Server } from 'node:http';
@@ -297,5 +299,48 @@ describe('redeem 公开激活（防枚举 + 建号 + 双花兜底）', () => {
     expect(r.status).toBe(400);
     const j = (await r.json()) as any;
     expect(j.code).toBe('INVITE_INVALID');
+  });
+
+  it('⑬ P2 修复：suspended 租户的在途码 redeem → 403 TENANT_SUSPENDED（不得建号发token）', async () => {
+    scriptValidInvite();
+    h.script(/FROM tenant_registry/, [{ status: 'suspended' }]);
+    const r = await fetch(`${base}/api/v1/invites/redeem`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ code: VALID_CODE, password: 'secret66' }),
+    });
+    expect(r.status).toBe(403);
+    const j = (await r.json()) as any;
+    expect(j.code).toBe('TENANT_SUSPENDED');
+    // 守卫在事务最前：不得触碰建号/claim 写路径
+    expect(h.calls.some((c) => /INSERT INTO account_user/.test(c.sql))).toBe(false);
+    expect(h.calls.some((c) => /UPDATE invite_codes SET used_at/.test(c.sql))).toBe(false);
+  });
+
+  it('⑭ P2 修复：pending 租户的在途码 redeem → 403 TENANT_PENDING（与 login 门同口径）', async () => {
+    scriptValidInvite();
+    h.script(/FROM tenant_registry/, [{ status: 'pending' }]);
+    const r = await fetch(`${base}/api/v1/invites/redeem`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ code: VALID_CODE, password: 'secret66' }),
+    });
+    expect(r.status).toBe(403);
+    const j = (await r.json()) as any;
+    expect(j.code).toBe('TENANT_PENDING');
+  });
+
+  it('⑮ P2 口径：registry 无记录的存量租户 redeem 放行（与 login 行为一致）→ 201', async () => {
+    scriptValidInvite();
+    h.script(/FROM account_user/, []);
+    h.script(/UPDATE invite_codes SET used_at/, [{ id: 'inv-r1' }]);
+    h.script(/INSERT INTO account_user/, [{ id: 'u-new2', tenant_id: 't-redeem', username: 'newbie', display_name: '新人', role: 'operator', active: true }]);
+    h.script(/role_permission/, []);
+    const r = await fetch(`${base}/api/v1/invites/redeem`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ code: VALID_CODE, password: 'secret66' }),
+    });
+    expect(r.status).toBe(201);
   });
 });

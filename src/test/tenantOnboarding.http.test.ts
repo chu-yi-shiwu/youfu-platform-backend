@@ -208,6 +208,7 @@ describe('平台试用审批 /platform/trial-applications', () => {
   it('⑥ approve → 租户以 pending 落库 + 申请置 approved + admin 密码明文一次', async () => {
     h.reset();
     h.script(/SELECT \* FROM trial_applications WHERE id/, [PENDING_ROW]);
+    h.script(/FOR UPDATE/, [{ status: 'pending' }]); // 事务内行锁预检命中 pending
     h.script(/INSERT INTO tenant_registry/, [{ tenant_id: 't-kangning' }]);
     h.script(/UPDATE trial_applications/, [{ id: 'ta-9', status: 'approved', tenant_id: 't-kangning' }]);
     const r = await fetch(`${base}/api/v1/platform/trial-applications/ta-9/review`, {
@@ -237,6 +238,36 @@ describe('平台试用审批 /platform/trial-applications', () => {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ action: 'reject' }),
+    });
+    expect(r.status).toBe(409);
+    const j = (await r.json()) as any;
+    expect(j.code).toBe('TRIAL_REVIEWED');
+  });
+
+  it('⑦b 并发守卫：approve 事务内行锁预检读到 approved → 409（不撞 PK 冒 500）', async () => {
+    h.reset();
+    h.script(/SELECT \* FROM trial_applications WHERE id/, [PENDING_ROW]); // 事务外预检仍是 pending（模拟并发穿透）
+    // FOR UPDATE 不命中脚本 → rowCount 0（另一事务已置 approved 并提交）
+    const r = await fetch(`${base}/api/v1/platform/trial-applications/ta-9/review`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ action: 'approve', tenant_id: 't-kangning', admin_username: 'knadmin' }),
+    });
+    expect(r.status).toBe(409);
+    const j = (await r.json()) as any;
+    expect(j.code).toBe('TRIAL_REVIEWED');
+    // 不得触碰 tenant_registry（未进入开通写入段）
+    expect(h.calls.some((c) => /INSERT INTO tenant_registry/.test(c.sql))).toBe(false);
+  });
+
+  it('⑦c reject 原子守卫：UPDATE 0 行（已被并发审批）→ 409', async () => {
+    h.reset();
+    h.script(/SELECT \* FROM trial_applications WHERE id/, [PENDING_ROW]);
+    h.script(/UPDATE trial_applications/, [], 0); // 带 status='pending' 条件的 UPDATE 落空
+    const r = await fetch(`${base}/api/v1/platform/trial-applications/ta-9/review`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ action: 'reject', reason: '晚了一步' }),
     });
     expect(r.status).toBe(409);
     const j = (await r.json()) as any;

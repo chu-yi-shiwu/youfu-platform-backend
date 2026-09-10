@@ -563,12 +563,16 @@ router.post('/trial-applications/:id/review', async (req, res, next) => {
     }
 
     if (b.action === 'reject') {
+      // P3 修复（R4 深测）：UPDATE 带 status='pending' 原子守卫，并发双拒第二事务 rowCount=0 → 409
       const r = await pool.query(
         `UPDATE trial_applications
          SET status = 'rejected', reviewed_by = $2, reviewed_at = now(), reject_reason = $3
-         WHERE id = $1 RETURNING id, status, reject_reason`,
+         WHERE id = $1 AND status = 'pending' RETURNING id, status, reject_reason`,
         [appId, admin.username, b.reason ?? null],
       );
+      if ((r.rowCount ?? 0) === 0) {
+        return res.status(409).json({ ok: false, code: 'TRIAL_REVIEWED', message: '该申请已审批，不可重复操作' });
+      }
       await audit(admin.username, 'trial_application.reject', appId, null, { reason: b.reason ?? null });
       return res.json({ ok: true, code: 0, item: r.rows[0] });
     }
@@ -586,6 +590,17 @@ router.post('/trial-applications/:id/review', async (req, res, next) => {
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
+      // P3 修复（R4 深测）：事务内行锁原子预检——并发双审时第二事务在此等待，
+      // 等第一事务提交后读到 approved → 409，杜绝穿透预检撞 tenant_registry PK 冒 500。
+      const recheck = await client.query(
+        `SELECT status FROM trial_applications WHERE id = $1 FOR UPDATE`,
+        [appId],
+      );
+      if ((recheck.rowCount ?? 0) === 0 || recheck.rows[0].status !== 'pending') {
+        await client.query('ROLLBACK').catch(() => undefined);
+        // release 交给外层 finally，此处不重复释放
+        return res.status(409).json({ ok: false, code: 'TRIAL_REVIEWED', message: '该申请已审批，不可重复操作' });
+      }
       await client.query(
         `INSERT INTO tenant_registry (tenant_id, name, category, quota, status) VALUES ($1,$2,$3,$4::jsonb,$5)`,
         [b.tenant_id, application.org_name, application.category, JSON.stringify({ repair_daily: 500 }), 'pending'],

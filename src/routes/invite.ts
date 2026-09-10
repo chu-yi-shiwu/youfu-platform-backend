@@ -124,6 +124,7 @@ router.post('/invites', async (req, res, next) => {
       ok: true,
       code: 0,
       invite: {
+        id: row.id, // P3 契约补全（R4 深测）：作废需 id，创建响应直接带回免二次查询
         code,
         username: row.username,
         display_name: row.display_name,
@@ -237,6 +238,20 @@ router.post('/invites/redeem', loginRateLimit(10), async (req, res, next) => {
     }
     const tenantId = invite.tenant_id;
     const result = await withTenantClient(tenantId, async (client) => {
+      // 🔴 P2 修复（R4 深测实锤）：租户 status 守卫——suspended/pending 租户的在途邀请码
+      //    不得激活建号+发 JWT（与 /auth/login 的 TENANT_SUSPENDED/TENANT_PENDING 门同口径）。
+      //    缺记录（未登记 registry 的存量租户）→ 放行，与 login 行为一致。
+      const reg = await client.query(
+        `SELECT status FROM tenant_registry WHERE tenant_id = $1`,
+        [tenantId],
+      );
+      const regStatus = reg.rows[0]?.status as string | undefined;
+      if (regStatus === 'suspended') {
+        throw new AppError('TENANT_SUSPENDED', 'tenant suspended by platform', 403);
+      }
+      if (regStatus === 'pending') {
+        throw new AppError('TENANT_PENDING', '租户待激活，请联系平台管理员', 403);
+      }
       // 账号名冲突（生成后又被手工建号）：语义化 409，与 POST /auth/users 同口径
       const existing = await findUserByUsername(client, tenantId, invite.username);
       if (existing) throw new AppError('USER_EXISTS', '该用户名在本机构已存在', 409);
