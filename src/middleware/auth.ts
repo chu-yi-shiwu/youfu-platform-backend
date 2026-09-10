@@ -49,6 +49,7 @@ refreshAuthMode();
 const PUBLIC_POST_PATHS = new Set([
   '/v1/auth/login',
   '/v1/auth/wx-login',
+  '/v1/invites/redeem', // 八件增量 BE-1：邀请码公开激活（扫码/手输码建号，loginRateLimit 保护）
   '/v1/energy/webhook/dispatch',
   '/v1/energy/token-exchange',
   '/v1/energy/webhook/status-update',
@@ -219,6 +220,38 @@ export function loginRateLimit(max = 10, windowMs = 60_000) {
       if (loginAttempts.size > MAX_LOGIN_IP_ENTRIES) {
         const keys = [...loginAttempts.keys()];
         for (const k of keys.slice(0, keys.length >> 1)) loginAttempts.delete(k);
+      }
+    }
+    next();
+  };
+}
+
+/**
+ * 八件增量 BE-2：试用申请 IP 限流（内存滑动窗口，复用 loginRateLimit 同款模式）。
+ * 同 IP 5 次/天；仅 prod 生效；dev 放行以免干扰本地联调与测试。
+ * 手机号维度 24h×1 由查库判定（trial_applications 索引 idx_trial_apps_phone），不在此层。
+ */
+const trialIpAttempts = new Map<string, number[]>();
+export function trialRateLimit(max = 5, windowMs = 24 * 3600 * 1000) {
+  return (req: Request, res: Response, next: NextFunction) => {
+    if (AUTH_MODE !== 'prod') return next();
+    const ip = (req.ip || req.socket.remoteAddress || 'unknown') as string;
+    const now = Date.now();
+    const arr = (trialIpAttempts.get(ip) ?? []).filter((t) => now - t < windowMs);
+    if (arr.length >= max) {
+      return res.status(429).json({ ok: false, code: 'RATE_TRIAL', message: '试用申请过于频繁，请明天再试' });
+    }
+    arr.push(now);
+    trialIpAttempts.set(ip, arr);
+    // 内存上限保护：与 loginRateLimit 同款清理/减半策略
+    if (trialIpAttempts.size > MAX_LOGIN_IP_ENTRIES) {
+      const cutoff = now - windowMs;
+      for (const [k, v] of trialIpAttempts) {
+        if (v.length === 0 || v[v.length - 1] < cutoff) trialIpAttempts.delete(k);
+      }
+      if (trialIpAttempts.size > MAX_LOGIN_IP_ENTRIES) {
+        const keys = [...trialIpAttempts.keys()];
+        for (const k of keys.slice(0, keys.length >> 1)) trialIpAttempts.delete(k);
       }
     }
     next();

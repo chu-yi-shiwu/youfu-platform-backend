@@ -52,12 +52,20 @@ router.post('/auth/login', loginRateLimit(), async (req, res, next) => {
     const { username, password, tenant } = loginSchema.parse(req.body);
     const tenantId = normalizeTenant(tenant) ?? req.header('X-Tenant-Id') ?? DEFAULT_LOGIN_TENANT;
 
-    // 平台层停用租户禁止登录（E_min：tenant_registry.status=suspended）
+    // 平台层停用/未激活租户禁止登录（E_min：tenant_registry.status）
     const reg = await withTenantClient(tenantId, (client) =>
       client.query(`SELECT status FROM tenant_registry WHERE tenant_id=$1`, [tenantId]),
     );
-    if (reg.rowCount && reg.rowCount > 0 && reg.rows[0].status === 'suspended') {
-      return res.status(403).json({ ok: false, code: 'TENANT_SUSPENDED', message: 'tenant suspended by platform' });
+    if (reg.rowCount && reg.rowCount > 0) {
+      const regStatus = reg.rows[0].status as string;
+      // 既有口径不动：suspended → TENANT_SUSPENDED
+      if (regStatus === 'suspended') {
+        return res.status(403).json({ ok: false, code: 'TENANT_SUSPENDED', message: 'tenant suspended by platform' });
+      }
+      // 八件增量 BE-2：审批制开通的租户在激活前禁止登录（pending → TENANT_PENDING）
+      if (regStatus === 'pending') {
+        return res.status(403).json({ ok: false, code: 'TENANT_PENDING', message: '租户待激活，请联系平台管理员' });
+      }
     }
 
     const user = await withTenantClient(tenantId, (client) => findUserByUsername(client, tenantId, username));

@@ -13,6 +13,8 @@ import wechatRouter from './routes/wechat.js';// ③ 微信 JSSDK 公开签名�
 import workOrderRouter from './routes/workOrder.js';
 import webhookRouter from './webhook/routes.js';
 import authRouter from './routes/auth.js';
+import inviteRouter from './routes/invite.js';// 八件增量 BE-1：邀请码域（admin 生成/列表/作废 + 公开 redeem 激活）
+import adminQrcodeRouter from './routes/adminQrcode.js';// 八件增量 BE-2：admin 机构级贴码（org 取登录租户上下文）
 import configRouter from './routes/config.js';
 import templateContributionsRouter from './routes/templateContributions.js';// UGC 模板贡献（租户侧）
 import inspectionRouter from './routes/inspection.js';
@@ -171,6 +173,8 @@ app.use('/api', authMiddleware);
 app.use('/api/v1', workOrderRouter);
 app.use('/api/v1', webhookRouter);
 app.use('/api/v1', authRouter);
+app.use('/api/v1', inviteRouter);// 八件增量 BE-1：/invites（admin）+ /invites/redeem（公开豁免）
+app.use('/api/v1', adminQrcodeRouter);// 八件增量 BE-2：/admin/mp-qrcode（admin，机构级贴码）
 app.use('/api/v1', configRouter);
 app.use('/api/v1', templateContributionsRouter); // UGC 模板贡献（租户侧，requireConfigRole）
 app.use('/api/v1/inspection', inspectionRouter);

@@ -9,7 +9,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import pool from '../db/pool.js';
 import { withTenantClient } from '../db/pool.js';
-import { loginRateLimit } from '../middleware/auth.js';
+import { loginRateLimit, trialRateLimit } from '../middleware/auth.js';
 import { resolveFaultCategory, inferPriority, resolveAsset } from '../services/intakeEnrich.js'; // /public/infer 规则引擎兜底
 import { llmInferCategory } from '../services/llm.js';
 import { resolveScanFromDb } from '../scan.js'; // ⑤ 扫码关联：复用 DB 权威解析
@@ -585,6 +585,59 @@ router.get('/public/mp-qrcode', loginRateLimit(10), async (req, res, next) => {
     res.setHeader('Content-Type', 'image/png');
     res.setHeader('Cache-Control', 'public, max-age=300');
     return res.send(buf);
+  } catch (e) { next(e); }
+});
+
+// ============ 八件增量 BE-2：机构搜索（mp org-select 选页用，公开） ============
+// GET /api/v1/public/tenants?q= —— 仅 active 租户，name/tenant_id 模糊匹配，≤20 条，
+// 只回 tenant_id/name/category（不回 quota/status 等内部字段）。
+router.get('/public/tenants', loginRateLimit(30), async (req, res, next) => {
+  try {
+    const q = (req.query.q as string || '').trim();
+    // 搜索词最短 2 字符：过短模糊匹配近似全量枚举，直接拒（前端提示继续输入）
+    if (q.length < 2) {
+      return res.status(422).json({ ok: false, code: 'VALIDATION_001', message: '请输入至少 2 个字符进行搜索' });
+    }
+    const r = await pool.query(
+      `SELECT tenant_id, name, category FROM tenant_registry
+       WHERE status = 'active' AND (name ILIKE $1 OR tenant_id ILIKE $1)
+       ORDER BY name LIMIT 20`,
+      [`%${q}%`],
+    );
+    return res.json({ ok: true, code: 0, items: r.rows });
+  } catch (e) { next(e); }
+});
+
+// ============ 八件增量 BE-2：试用申请（公开提交 → 平台审批开通） ============
+// POST /api/v1/public/trial-applications —— 限频双闸：
+//   ① 同手机号 24h×1（查库，索引 idx_trial_apps_phone）；
+//   ② 同 IP 5 次/天（内存滑动窗口 trialRateLimit，仅 prod 生效）。
+// 超限一律 429 RATE_TRIAL；入库 pending 等平台管理员审批。
+const trialApplicationSchema = z.object({
+  org_name: z.string().min(2, '机构名称至少 2 字').max(64),
+  contact_name: z.string().min(2, '联系人姓名至少 2 字').max(32),
+  phone: z.string().regex(/^1\d{10}$/, '手机号需 11 位'),
+  category: z.enum(['hospital', 'property', 'school', 'municipal', 'other']).default('other'),
+  note: z.string().max(200).optional(),
+});
+router.post('/public/trial-applications', loginRateLimit(10), trialRateLimit(), async (req, res, next) => {
+  try {
+    const b = trialApplicationSchema.parse(req.body);
+    // 手机号维度限频：24h 内同号已有申请 → 429（诚实：入库判定而非内存，重启不失忆）
+    const dup = await pool.query(
+      `SELECT 1 FROM trial_applications WHERE phone = $1 AND created_at > now() - interval '24 hours' LIMIT 1`,
+      [b.phone],
+    );
+    if ((dup.rowCount ?? 0) > 0) {
+      return res.status(429).json({ ok: false, code: 'RATE_TRIAL', message: '同一手机号 24 小时内仅可提交一次试用申请' });
+    }
+    const r = await pool.query(
+      `INSERT INTO trial_applications (org_name, contact_name, phone, category, note, ip)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       RETURNING id, org_name, status, created_at`,
+      [b.org_name, b.contact_name, b.phone, b.category, b.note ?? null, req.ip ?? null],
+    );
+    return res.status(201).json({ ok: true, code: 0, item: r.rows[0] });
   } catch (e) { next(e); }
 });
 

@@ -4,7 +4,7 @@
     "title": "优服家 API",
     "version": "0.0.0-generated",
     "description": "多租户物业 SaaS 后端开放规范（M-3 交付）。\n\n**口径**：本文件由 `tools/generate_openapi.mjs` 自动扫描 `src/server.ts` 挂载表与 `src/routes/*.ts`、`src/webhook/routes.ts` 路由声明生成（generated，非手写）。\n\n**诚实边界**：summary/description 取自路由上方中文注释（启发式）；请求/响应 schema 为宽松骨架，字段一律以服务端实现为准，不编造字段。\n\n**鉴权**：租户/管理端 JWT Bearer；开放 API 走 X-App-Key + X-App-Secret（openApiAuth）；公开端点见各操作 security: []。",
-    "x-generated-at": "2026-09-09T04:44:12.377Z",
+    "x-generated-at": "2026-09-10T16:44:07.908Z",
     "x-generator": "tools/generate_openapi.mjs",
     "x-source": "src/server.ts + src/routes/*.ts + src/webhook/routes.ts（代码扫描口径）"
   },
@@ -57,6 +57,14 @@
     {
       "name": "auth",
       "description": "路由文件：src/routes/auth.ts"
+    },
+    {
+      "name": "invite",
+      "description": "路由文件：src/routes/invite.ts"
+    },
+    {
+      "name": "adminQrcode",
+      "description": "路由文件：src/routes/adminQrcode.ts"
     },
     {
       "name": "config",
@@ -292,7 +300,7 @@
           "platform"
         ],
         "summary": "POST /api/v1/platform/tenants",
-        "description": "来源：src/routes/platform.ts:136\n\n服务端响应状态码（代码扫描）：201, 409\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/platform.ts:137\n\n服务端响应状态码（代码扫描）：201, 409\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -407,7 +415,7 @@
           "platform"
         ],
         "summary": "GET /api/v1/platform/summary",
-        "description": "来源：src/routes/platform.ts:211\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/platform.ts:215\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -435,7 +443,7 @@
           "platform"
         ],
         "summary": "— 应用列表（secret 不返回，仅展示 key/scopes/状态）",
-        "description": "来源：src/routes/platform.ts:277\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/platform.ts:281\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -461,7 +469,7 @@
           "platform"
         ],
         "summary": "— 创建应用（返回 app_key + app_secret，secret 仅此一次）",
-        "description": "来源：src/routes/platform.ts:290\n\n服务端响应状态码（代码扫描）：201\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/platform.ts:294\n\n服务端响应状态码（代码扫描）：201\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -501,7 +509,7 @@
           "platform"
         ],
         "summary": "— 吊销应用（立即失效，不可逆）",
-        "description": "来源：src/routes/platform.ts:309\n\n服务端响应状态码（代码扫描）：200, 404\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/platform.ts:313\n\n服务端响应状态码（代码扫描）：200, 404\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -564,7 +572,7 @@
           "platform"
         ],
         "summary": "---- PUT /platform/auth/password —— 平台管理员修改自己的密码（登录态 + 旧密码校验） ----",
-        "description": "来源：src/routes/platform.ts:329\n\n服务端响应状态码（代码扫描）：200, 401, 404\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/platform.ts:333\n\n服务端响应状态码（代码扫描）：200, 401, 404\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -628,7 +636,7 @@
           "platform"
         ],
         "summary": "---- 审计日志查询（平台操作 audit + 开放 API 调用 log；append-only 只读） ----",
-        "description": "来源：src/routes/platform.ts:351\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/platform.ts:355\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -656,7 +664,7 @@
           "platform"
         ],
         "summary": "GET /api/v1/platform/open-api-logs",
-        "description": "来源：src/routes/platform.ts:379\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/platform.ts:383\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -684,7 +692,7 @@
           "platform"
         ],
         "summary": "PUT /api/v1/platform/tenants/{id}/llm",
-        "description": "来源：src/routes/platform.ts:404\n\n服务端响应状态码（代码扫描）：200, 409, 422\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/platform.ts:408\n\n服务端响应状态码（代码扫描）：200, 409, 422\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -759,7 +767,7 @@
           "platform"
         ],
         "summary": "---- 位置字典 CRUD（v0.4.0：报修位置预录入，扫码自动带出） ----",
-        "description": "来源：src/routes/platform.ts:429\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/platform.ts:433\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -796,7 +804,7 @@
           "platform"
         ],
         "summary": "POST /api/v1/platform/tenants/{id}/locations",
-        "description": "来源：src/routes/platform.ts:442\n\n服务端响应状态码（代码扫描）：201\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/platform.ts:446\n\n服务端响应状态码（代码扫描）：201\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -847,7 +855,7 @@
           "platform"
         ],
         "summary": "---- 报修人角色字典 CRUD（v0.4.0：姓名+手机号预录入，扫码自动带出） ----",
-        "description": "来源：src/routes/platform.ts:464\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/platform.ts:468\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -884,7 +892,7 @@
           "platform"
         ],
         "summary": "POST /api/v1/platform/tenants/{id}/reporters",
-        "description": "来源：src/routes/platform.ts:486\n\n服务端响应状态码（代码扫描）：201\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/platform.ts:490\n\n服务端响应状态码（代码扫描）：201\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -893,6 +901,133 @@
         "responses": {
           "201": {
             "description": "HTTP 201",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "description": "骨架占位：字段以服务端实现为准"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "路径参数（原代码声明形如 :param）"
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "description": "骨架占位：请求字段以服务端实现为准"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/platform/trial-applications": {
+      "get": {
+        "tags": [
+          "platform"
+        ],
+        "summary": "---- GET /platform/trial-applications?status= —— 试用申请列表（分页） ----",
+        "description": "来源：src/routes/platform.ts:514\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "HTTP 200",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "description": "骨架占位：字段以服务端实现为准"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/platform/trial-applications/{id}/review": {
+      "post": {
+        "tags": [
+          "platform"
+        ],
+        "summary": "POST /api/v1/platform/trial-applications/{id}/review",
+        "description": "来源：src/routes/platform.ts:549\n\n服务端响应状态码（代码扫描）：200, 201, 404, 409, 422\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "HTTP 200",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "description": "骨架占位：字段以服务端实现为准"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "HTTP 201",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "description": "骨架占位：字段以服务端实现为准"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "HTTP 404",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "description": "骨架占位：字段以服务端实现为准"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "HTTP 409",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "description": "骨架占位：字段以服务端实现为准"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "HTTP 422",
             "content": {
               "application/json": {
                 "schema": {
@@ -1881,13 +2016,97 @@
         }
       }
     },
+    "/api/v1/public/tenants": {
+      "get": {
+        "tags": [
+          "publicReport"
+        ],
+        "summary": "============ 八件增量 BE-2：机构搜索（mp org-select 选页用，公开） ============",
+        "description": "— 仅 active 租户，name/tenant_id 模糊匹配，≤20 条，\n只回 tenant_id/name/category（不回 quota/status 等内部字段）。\n\n来源：src/routes/publicReport.ts:594\n\n服务端响应状态码（代码扫描）：200, 422\n\n免登录公开端点（限流保护）\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "HTTP 200",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "description": "骨架占位：字段以服务端实现为准"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "HTTP 422",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "description": "骨架占位：字段以服务端实现为准"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/public/trial-applications": {
+      "post": {
+        "tags": [
+          "publicReport"
+        ],
+        "summary": "POST /api/v1/public/trial-applications",
+        "description": "来源：src/routes/publicReport.ts:623\n\n服务端响应状态码（代码扫描）：201, 429\n\n免登录公开端点（限流保护）\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "security": [],
+        "responses": {
+          "201": {
+            "description": "HTTP 201",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "description": "骨架占位：字段以服务端实现为准"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "HTTP 429",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "description": "骨架占位：字段以服务端实现为准"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "description": "骨架占位：请求字段以服务端实现为准"
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/public/service-status": {
       "get": {
         "tags": [
           "publicReport"
         ],
         "summary": "============ §6.2 服务台「平台动态卡」（免登录聚合公开指标，脱敏） ============",
-        "description": "设计：报修人端首页底部小卡——今日已处理 / 平均响应 / 服务热线。\n口径（诚实）：今日已处理 = 今日进入完成态（workflow_def doneStates）的工单数；\n平均响应 = ticket_event 中 assign→processing 时长的分钟均值（无事件数据返回 0 + note，不编造）；\n服务热线 = system_config.hotline（未配置返回空串，前端不显示该项）。\n\n来源：src/routes/publicReport.ts:596\n\n服务端响应状态码（代码扫描）：200, 404, 422\n\n免登录公开端点（限流保护）\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "设计：报修人端首页底部小卡——今日已处理 / 平均响应 / 服务热线。\n口径（诚实）：今日已处理 = 今日进入完成态（workflow_def doneStates）的工单数；\n平均响应 = ticket_event 中 assign→processing 时长的分钟均值（无事件数据返回 0 + note，不编造）；\n服务热线 = system_config.hotline（未配置返回空串，前端不显示该项）。\n\n来源：src/routes/publicReport.ts:649\n\n服务端响应状态码（代码扫描）：200, 404, 422\n\n免登录公开端点（限流保护）\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [],
         "responses": {
           "200": {
@@ -1935,7 +2154,7 @@
           "publicReport"
         ],
         "summary": "POST /api/v1/public/feedback",
-        "description": "来源：src/routes/publicReport.ts:648\n\n服务端响应状态码（代码扫描）：201, 404\n\n免登录公开端点（限流保护）\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/publicReport.ts:701\n\n服务端响应状态码（代码扫描）：201, 404\n\n免登录公开端点（限流保护）\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [],
         "responses": {
           "201": {
@@ -3566,7 +3785,7 @@
           "auth"
         ],
         "summary": "— 受保护：返回当前令牌对应账户",
-        "description": "来源：src/routes/auth.ts:95\n\n服务端响应状态码（代码扫描）：200, 401, 404\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/auth.ts:103\n\n服务端响应状态码（代码扫描）：200, 401, 404\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -3618,7 +3837,7 @@
           "auth"
         ],
         "summary": "— 受保护：登录用户修改自己的密码（需旧密码校验）",
-        "description": "来源：src/routes/auth.ts:137\n\n服务端响应状态码（代码扫描）：200, 401, 404\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/auth.ts:145\n\n服务端响应状态码（代码扫描）：200, 401, 404\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -3682,7 +3901,7 @@
           "auth"
         ],
         "summary": "— admin：创建账户（同租户）",
-        "description": "来源：src/routes/auth.ts:169\n\n服务端响应状态码（代码扫描）：201, 401, 403, 409\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/auth.ts:177\n\n服务端响应状态码（代码扫描）：201, 401, 403, 409\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -3756,7 +3975,7 @@
           "auth"
         ],
         "summary": "— admin：列出租户内账户",
-        "description": "来源：src/routes/auth.ts:187\n\n服务端响应状态码（代码扫描）：200, 401, 403\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/auth.ts:195\n\n服务端响应状态码（代码扫描）：200, 401, 403\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -3808,7 +4027,7 @@
           "auth"
         ],
         "summary": "============ v5.0 P0：微信 openid 绑定/免密登录 ============",
-        "description": "— 需登录态：wx.login code → openid → 绑定当前账号（一次绑定终身免密）\n\n来源：src/routes/auth.ts:201\n\n服务端响应状态码（代码扫描）：200, 401, 409, 502\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "— 需登录态：wx.login code → openid → 绑定当前账号（一次绑定终身免密）\n\n来源：src/routes/auth.ts:209\n\n服务端响应状态码（代码扫描）：200, 401, 409, 502\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -3884,7 +4103,7 @@
           "auth"
         ],
         "summary": "— 免登录：openid 直接换 JWT（未绑定返回提示）",
-        "description": "来源：src/routes/auth.ts:224\n\n服务端响应状态码（代码扫描）：200, 409, 500, 502\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/auth.ts:232\n\n服务端响应状态码（代码扫描）：200, 409, 500, 502\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -3948,6 +4167,239 @@
                 "type": "object",
                 "additionalProperties": true,
                 "description": "骨架占位：请求字段以服务端实现为准"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/invites": {
+      "post": {
+        "tags": [
+          "invite"
+        ],
+        "summary": "---- POST /api/v1/invites —— admin：生成邀请码（明文仅本次响应返回一次；重发先作废旧码） ----",
+        "description": "来源：src/routes/invite.ts:91\n\n服务端响应状态码（代码扫描）：201\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "HTTP 201",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "description": "骨架占位：字段以服务端实现为准"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "description": "骨架占位：请求字段以服务端实现为准"
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "invite"
+        ],
+        "summary": "GET /api/v1/invites",
+        "description": "来源：src/routes/invite.ts:160\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "HTTP 200",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "description": "骨架占位：字段以服务端实现为准"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/invites/{id}": {
+      "delete": {
+        "tags": [
+          "invite"
+        ],
+        "summary": "---- DELETE /api/v1/invites/:id —— admin：作废邀请码（置 revoked_at；已用/已作废幂等视作 404） ----",
+        "description": "来源：src/routes/invite.ts:185\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "HTTP 200",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "description": "骨架占位：字段以服务端实现为准"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "路径参数（原代码声明形如 :param）"
+          }
+        ]
+      }
+    },
+    "/api/v1/invites/redeem": {
+      "post": {
+        "tags": [
+          "invite"
+        ],
+        "summary": "---- POST /api/v1/invites/redeem —— 公开激活：凭码 + 设密码 → 建号 + 签发 JWT ----",
+        "description": "防枚举：码不存在/已过期/已使用/已作废 → 一律 400 INVITE_INVALID + 统一文案；\n建号 + 置 used_at 在同租户单连接事务内完成（并发双花由 UPDATE 行锁 + 守卫条件兜底）。\n\n来源：src/routes/invite.ts:217\n\n服务端响应状态码（代码扫描）：201\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "HTTP 201",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "description": "骨架占位：字段以服务端实现为准"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "description": "骨架占位：请求字段以服务端实现为准"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/admin/mp-qrcode": {
+      "get": {
+        "tags": [
+          "adminQrcode"
+        ],
+        "summary": "GET /api/v1/admin/mp-qrcode",
+        "description": "来源：src/routes/adminQrcode.ts:13\n\n服务端响应状态码（代码扫描）：200, 401, 403, 422, 502, 503\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "HTTP 200",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "description": "骨架占位：字段以服务端实现为准"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "HTTP 401",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "description": "骨架占位：字段以服务端实现为准"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "HTTP 403",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "description": "骨架占位：字段以服务端实现为准"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "HTTP 422",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "description": "骨架占位：字段以服务端实现为准"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "HTTP 502",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "description": "骨架占位：字段以服务端实现为准"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "HTTP 503",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "description": "骨架占位：字段以服务端实现为准"
+                }
               }
             }
           }

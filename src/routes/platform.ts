@@ -106,7 +106,8 @@ router.put('/tenants/:id/status', async (req, res, next) => {
   try {
     const admin = res.locals.platformAdmin!;
     const tenantId = req.params.id;
-    const body = z.object({ status: z.enum(['active', 'suspended']) }).parse(req.body);
+    // 八件增量 BE-2：枚举扩 'pending'——审批制开通后平台管理员点「激活」走本端点
+    const body = z.object({ status: z.enum(['active', 'suspended', 'pending']) }).parse(req.body);
     const r = await pool.query(
       `UPDATE tenant_registry SET status = $1, updated_at = now() WHERE tenant_id = $2 RETURNING tenant_id, name, status`,
       [body.status, tenantId],
@@ -143,6 +144,8 @@ router.post('/tenants', async (req, res, next) => {
       parent_id: z.string().optional(),
       admin_username: z.string().regex(/^[a-z0-9_-]{3,32}$/i, '管理员用户名 3-32 位字母数字下划线').optional(),
       admin_password: z.string().min(8, '管理员密码至少 8 位').max(64).optional(),
+      // 八件增量 BE-2：审批制开通——缺省 active 向后兼容；pending = 待激活（登录 403 TENANT_PENDING）
+      status: z.enum(['active', 'pending']).optional(),
     }).parse(req.body);
     // 防重复
     const dup = await pool.query(`SELECT 1 FROM tenant_registry WHERE tenant_id = $1`, [b.tenant_id]);
@@ -155,8 +158,8 @@ router.post('/tenants', async (req, res, next) => {
     try {
       await client.query('BEGIN');
       await client.query(
-        `INSERT INTO tenant_registry (tenant_id, name, category, parent_id, quota) VALUES ($1,$2,$3,$4,$5::jsonb)`,
-        [b.tenant_id, b.name, b.category, b.parent_id ?? null, JSON.stringify({ repair_daily: 500 })],
+        `INSERT INTO tenant_registry (tenant_id, name, category, parent_id, quota, status) VALUES ($1,$2,$3,$4,$5::jsonb,$6)`,
+        [b.tenant_id, b.name, b.category, b.parent_id ?? null, JSON.stringify({ repair_daily: 500 }), b.status ?? 'active'],
       );
       const src = INDUSTRY_TEMPLATE_SOURCE[b.category] ?? 't-verification';
       const provision = await provisionNewTenantContent(client, {
@@ -174,6 +177,7 @@ router.post('/tenants', async (req, res, next) => {
         : '权限=官方推荐基线（继承，随平台升级自动更新）';
       await audit(admin.username, 'tenant.create', b.tenant_id, b.tenant_id, {
         category: b.category,
+        status: b.status ?? 'active',
         categories_copied: provision.categoriesCopied,
         workflow_def_source: provision.workflowDefSource,
         admin_username: provision.adminUsername,
@@ -181,7 +185,7 @@ router.post('/tenants', async (req, res, next) => {
         perm_roles_snapshotted: provision.permRolesSnapshotted,
       });
       return res.status(201).json({
-        ok: true, code: 0, item: { tenant_id: b.tenant_id, name: b.name, category: b.category, status: 'active' },
+        ok: true, code: 0, item: { tenant_id: b.tenant_id, name: b.name, category: b.category, status: b.status ?? 'active' },
         admin: {
           username: provision.adminUsername,
           // 自动生成时明文仅本次返回；调用方自带密码则不回显
@@ -502,6 +506,126 @@ router.post('/tenants/:id/reporters', async (req, res, next) => {
     await audit(res.locals.platformAdmin?.username ?? 'platform-admin', 'reporter.create', tenantId, tenantId, { code: b.code, name: b.name });
     return res.status(201).json({ ok: true, code: 0, item: r.rows[0] });
   } catch (e) { next(e); }
+});
+
+// ============ 八件增量 BE-2：试用申请审批（平台管理员） ============
+
+// ---- GET /platform/trial-applications?status= —— 试用申请列表（分页） ----
+router.get('/trial-applications', async (req, res, next) => {
+  try {
+    const statusRaw = (req.query.status as string || '').trim();
+    const status = statusRaw
+      ? z.enum(['pending', 'approved', 'rejected']).parse(statusRaw)
+      : null;
+    const limit = clampInt(req.query.limit, 50, 1, 200);
+    const offset = clampInt(req.query.offset, 0, 0, 100000);
+    const where = status ? `WHERE status = $1` : '';
+    const params: unknown[] = status ? [status] : [];
+    params.push(limit, offset);
+    const r = await pool.query(
+      `SELECT id, org_name, contact_name, phone, category, note, status, tenant_id,
+              reviewed_by, reviewed_at, reject_reason, created_at
+       FROM trial_applications ${where} ORDER BY created_at DESC LIMIT $${params.length - 1} OFFSET $${params.length}`,
+      params,
+    );
+    const cnt = await pool.query(
+      `SELECT count(*)::int AS c FROM trial_applications ${where}`,
+      params.slice(0, params.length - 2),
+    );
+    await audit(res.locals.platformAdmin!.username, 'trial_application.list', null, null, { status: status ?? 'all' });
+    return res.json({ ok: true, code: 0, items: r.rows, total: cnt.rows[0]?.c ?? 0, limit, offset });
+  } catch (e) {
+    next(e);
+  }
+});
+
+// ---- POST /platform/trial-applications/:id/review —— 审批（approve=复用开通逻辑以 pending 落库 / reject=记原因） ----
+const trialReviewSchema = z.object({
+  action: z.enum(['approve', 'reject']),
+  tenant_id: z.string().regex(/^[a-z][a-z0-9_-]{2,62}$/i, 'tenant_id 须 3-63 位字母数字下划线').optional(),
+  admin_username: z.string().regex(/^[a-z0-9_-]{3,32}$/i, '管理员用户名 3-32 位字母数字下划线').optional(),
+  reason: z.string().max(200).optional(),
+});
+router.post('/trial-applications/:id/review', async (req, res, next) => {
+  try {
+    const admin = res.locals.platformAdmin!;
+    const b = trialReviewSchema.parse(req.body);
+    const appId = String(req.params.id ?? '');
+    const appRow = await pool.query(`SELECT * FROM trial_applications WHERE id = $1`, [appId]);
+    if (appRow.rowCount === 0) {
+      return res.status(404).json({ ok: false, code: 'TRIAL_404', message: '试用申请不存在' });
+    }
+    const application = appRow.rows[0] as {
+      id: string; org_name: string; category: string; status: string;
+    };
+    if (application.status !== 'pending') {
+      return res.status(409).json({ ok: false, code: 'TRIAL_REVIEWED', message: '该申请已审批，不可重复操作' });
+    }
+
+    if (b.action === 'reject') {
+      const r = await pool.query(
+        `UPDATE trial_applications
+         SET status = 'rejected', reviewed_by = $2, reviewed_at = now(), reject_reason = $3
+         WHERE id = $1 RETURNING id, status, reject_reason`,
+        [appId, admin.username, b.reason ?? null],
+      );
+      await audit(admin.username, 'trial_application.reject', appId, null, { reason: b.reason ?? null });
+      return res.json({ ok: true, code: 0, item: r.rows[0] });
+    }
+
+    // approve：tenant_id 必填（机构标识由平台管理员填写，不臆造）
+    if (!b.tenant_id) {
+      return res.status(422).json({ ok: false, code: 'VALIDATION_001', message: '批准须填写 tenant_id' });
+    }
+    // 防重复
+    const dup = await pool.query(`SELECT 1 FROM tenant_registry WHERE tenant_id = $1`, [b.tenant_id]);
+    if ((dup.rowCount ?? 0) > 0) return res.status(409).json({ ok: false, code: 'TENANT_DUP', message: '该机构已存在' });
+    // 复用 POST /tenants 全量开通（行业分类复制/流程图/权限基线/管理员账号），以 pending 态落库；
+    // 审批批准 ≠ 激活：激活由平台管理员随后走 PUT /tenants/:id/status（pending→active）。
+    const src = INDUSTRY_TEMPLATE_SOURCE[application.category] ?? 't-verification';
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query(
+        `INSERT INTO tenant_registry (tenant_id, name, category, quota, status) VALUES ($1,$2,$3,$4::jsonb,$5)`,
+        [b.tenant_id, application.org_name, application.category, JSON.stringify({ repair_daily: 500 }), 'pending'],
+      );
+      const provision = await provisionNewTenantContent(client, {
+        tenantId: b.tenant_id,
+        name: application.org_name,
+        sourceTenantId: src,
+        category: application.category as 'hospital' | 'property' | 'school' | 'municipal' | 'other',
+        adminUsername: b.admin_username,
+      });
+      await client.query(
+        `UPDATE trial_applications
+         SET status = 'approved', tenant_id = $2, reviewed_by = $3, reviewed_at = now()
+         WHERE id = $1`,
+        [appId, b.tenant_id, admin.username],
+      );
+      await client.query('COMMIT');
+      await audit(admin.username, 'trial_application.approve', appId, b.tenant_id, {
+        tenant_id: b.tenant_id,
+        admin_username: provision.adminUsername,
+        categories_copied: provision.categoriesCopied,
+      });
+      // 管理员密码明文仅本次响应返回一次（现状口径；一次性设置链接列 P2）
+      return res.status(201).json({
+        ok: true,
+        code: 0,
+        item: { id: appId, status: 'approved', tenant_id: b.tenant_id },
+        admin: { username: provision.adminUsername, password: provision.adminPassword },
+        note: '机构已按申请开通（pending 待激活态）：登录暂被拒绝，请在租户列表「激活」后生效。',
+      });
+    } catch (e) {
+      await client.query('ROLLBACK').catch(() => undefined);
+      throw e;
+    } finally {
+      client.release();
+    }
+  } catch (e) {
+    next(e);
+  }
 });
 
 export default router;
