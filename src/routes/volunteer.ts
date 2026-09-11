@@ -27,6 +27,14 @@ const activitySchema = z.object({
   slots: z.number().int().min(0).default(0),
 });
 
+// V2-UX D8（20260912）：服务端时间区间兜底校验——API 直调可绕过 mp/FE 前端校验，
+// end_at ≤ start_at 一律 422 INVALID_RANGE。与 mp 前端 S1 校验同文案口径「结束时间必须晚于开始时间」。
+function assertValidRange(startAt?: string, endAt?: string): void {
+  if (startAt && endAt && new Date(endAt) <= new Date(startAt)) {
+    throw new AppError('INVALID_RANGE', '结束时间必须晚于开始时间', 422);
+  }
+}
+
 router.get('/activities', async (req, res, next) => {
   try {
     const tenantId = res.locals.auth.tenantId;
@@ -51,6 +59,8 @@ router.post('/activities', async (req, res, next) => {
   try {
     const tenantId = res.locals.auth.tenantId;
     const b = activitySchema.parse(req.body);
+    // V2-UX D8：parse 后、入库前兜底（行为等价 zod refine）
+    assertValidRange(b.start_at, b.end_at);
     const item = await withTenantClient(tenantId, async (client) => {
       // V1 守卫迁移：requirePermission 需查 role_permission 表（async），必须用闭包内 client。
       await requirePermission(res.locals.auth, client, 'volunteer.manage');
@@ -126,11 +136,19 @@ router.post('/activities/:id/signup', async (req, res, next) => {
     const b = z.object({ user_name: z.string().min(1) }).parse(req.body);
     const item = await withTenantClient(tenantId, async (client) => {
       const act = await client.query(
-        `SELECT id, status, slots FROM volunteer_activity WHERE id = $1 AND tenant_id = $2 FOR UPDATE`,
+        `SELECT id, status, slots, end_at FROM volunteer_activity WHERE id = $1 AND tenant_id = $2 FOR UPDATE`,
         [req.params.id, tenantId],
       );
       if (act.rowCount === 0) throw new AppError('NOT_FOUND', 'activity not found', 404);
       if (act.rows[0].status !== 'open') throw new AppError('BAD_STATE', '活动已关闭，无法报名', 409);
+      // V2-UX F6/D5（20260912）：end_at 过期守卫——置于 status 检查之后、去重之前。
+      // D5 顺序成文：status 优先于 end_at（closed 活动对外永远提示"已截止"，与 V1 口径一致；
+      // 即使 end_at 同时已过，也只提示"已关闭"），后续守卫（去重/名额）在其之后。
+      // end_at 为 null 放行（S7 存量兼容：历史活动从未填过结束时间，不得一刀切误杀）。
+      const endAt = act.rows[0].end_at;
+      if (endAt !== null && endAt !== undefined && new Date(endAt) < new Date()) {
+        throw new AppError('ACTIVITY_ENDED', '该活动已结束，无法报名', 409);
+      }
       // V1 去重守卫（置于状态检查之后：closed 活动对外永远提示"已截止"，口径唯一；
       // 已报名者优先收"已报名"语义——比"名额已满"更准确）。判重键 user_name 文本为 V1 接受项（V2 挂 user_id 列）。
       const dup = await client.query(

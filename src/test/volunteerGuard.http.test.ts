@@ -8,6 +8,9 @@
 //       ⑥ signup 守卫 SQL 契约：act SELECT 必带 FOR UPDATE（行锁防并发超卖）
 //  V1（20260911）：⑧ 同 (activity_id, user_name) 二次 signup → 409 DUPLICATE（去重守卫，
 //       判重 SQL 契约：含 activity_id + user_name 条件；命中即短路，不产生二次 INSERT，也不再查名额）
+//  V2-UX（20260912）：⑪ end_at 已过 signup → 409 ACTIVITY_ENDED（文案逐字锁定，mp 分流契约）
+//       ⑫ status=closed 且 end_at 过期 → 409 BAD_STATE（D5：status 优先于 end_at）
+//       ⑬ end_at=null → 放行（S7 存量兼容）  ⑭ end_at ≤ start_at 建活动 → 422 INVALID_RANGE（D8）
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
 import express from 'express';
 import type { Server } from 'node:http';
@@ -187,6 +190,65 @@ describe('审批守卫（approve 状态机校验）', () => {
     const s4 = await post('/volunteer/records/rec-4/approve');
     expect(s4.status).toBe(200);
     expect((s4.body.item as any).status).toBe('approved');
+  });
+});
+
+// V2-UX 批次（20260912）：F6 end_at 过期守卫（409 ACTIVITY_ENDED）+ D5 status 优先 + S7 null 放行 + D8 422 INVALID_RANGE
+describe('活动结束守卫（signup ACTIVITY_ENDED，V2-UX 新增）', () => {
+  it('⑪ open 但 end_at 已过 signup → 409 ACTIVITY_ENDED「该活动已结束，无法报名」，无 INSERT', async () => {
+    h.scripted = [
+      // end_at 取过去时刻（远早于现在，天然过期，不依赖测试机时钟方向）
+      { match: /FROM volunteer_activity/, rows: [{ id: 'act-e1', status: 'open', slots: 5, end_at: '2020-01-01T00:00:00Z' }] },
+    ];
+    const r = await post('/volunteer/activities/act-e1/signup', { user_name: '周九' });
+    expect(r.status).toBe(409);
+    expect(r.body.ok).toBe(false);
+    expect(r.body.code).toBe('ACTIVITY_ENDED');
+    // 文案逐字锁定（mp worker 页 409 按 message 子串「已结束」分流，子串断裂即静默失联——V1 教训）
+    expect(r.body.message).toBe('该活动已结束，无法报名');
+    expect(h.calls.find((c) => c.sql.includes('INSERT INTO volunteer_record'))).toBeUndefined();
+  });
+
+  it('⑫ status=closed 且 end_at 同时过期 → 409 BAD_STATE「活动已关闭」（D5：status 优先于 end_at）', async () => {
+    h.scripted = [
+      { match: /FROM volunteer_activity/, rows: [{ id: 'act-e2', status: 'closed', slots: 5, end_at: '2020-01-01T00:00:00Z' }] },
+    ];
+    const r = await post('/volunteer/activities/act-e2/signup', { user_name: '吴十' });
+    expect(r.status).toBe(409);
+    // 若 end_at 守卫先于 status 检查，这里会错报 ACTIVITY_ENDED——D5 口径：closed 永远提示已关闭
+    expect(r.body.code).toBe('BAD_STATE');
+    expect(r.body.message).toContain('已关闭');
+    expect(r.body.message).not.toContain('已结束');
+    expect(h.calls.find((c) => c.sql.includes('INSERT INTO volunteer_record'))).toBeUndefined();
+  });
+
+  it('⑬ end_at=null 存量活动 signup → 正常放行到名额统计/INSERT（S7：不误杀历史活动）', async () => {
+    h.scripted = [
+      { match: /FROM volunteer_activity/, rows: [{ id: 'act-e3', status: 'open', slots: 5, end_at: null }] },
+      { match: /count\(\*\)::int AS n/, rows: [{ n: 0 }] },
+      { match: /INSERT INTO volunteer_record/, rows: [{ id: 'rec-e3', status: 'registered' }] },
+    ];
+    const r = await post('/volunteer/activities/act-e3/signup', { user_name: '郑一' });
+    expect(r.status).toBe(201);
+    expect(r.body.ok).toBe(true);
+    // 放行路径契约：end_at 过期检查不得拦截 null，名额统计与 INSERT 均已执行
+    expect(h.calls.find((c) => c.sql.includes('count(*)::int AS n'))).toBeDefined();
+    expect(h.calls.find((c) => c.sql.includes('INSERT INTO volunteer_record'))).toBeDefined();
+  });
+
+  it('⑭ POST /activities 传 end_at ≤ start_at → 422 INVALID_RANGE「结束时间必须晚于开始时间」（D8 服务端兜底）', async () => {
+    const r = await post('/volunteer/activities', {
+      title: '导诊志愿服务',
+      slots: 5,
+      start_at: '2026-09-15T08:00:00Z',
+      end_at: '2026-09-15T08:00:00Z', // 相等同样拒绝（end_at ≤ start_at）
+    });
+    expect(r.status).toBe(422);
+    expect(r.body.ok).toBe(false);
+    expect(r.body.code).toBe('INVALID_RANGE');
+    expect(r.body.message).toBe('结束时间必须晚于开始时间');
+    // 兜底在入库前：不得产生任何 INSERT
+    expect(h.calls.find((c) => c.sql.includes('INSERT INTO volunteer_activity'))).toBeUndefined();
   });
 });
 
