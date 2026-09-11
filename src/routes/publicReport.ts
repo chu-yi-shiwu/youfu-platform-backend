@@ -556,6 +556,18 @@ router.get('/public/mp-qrcode', loginRateLimit(10), async (req, res, next) => {
     if (!path.startsWith('pages/index/index')) {
       return res.status(403).json({ ok: false, code: 'PATH_FORBIDDEN', message: '仅允许生成报修首页二维码' });
     }
+    // P3（八件 QA）：org 显式带参时校验租户 active（与 /public/scan 同口径）——
+    // 停用/未开通机构不得再产码耗微信配额，且避免贴出扫不进的死码。无 org 的通用码不受影响。
+    const qIdxOrg = path.indexOf('?');
+    if (qIdxOrg >= 0) {
+      const org = new URLSearchParams(path.slice(qIdxOrg + 1)).get('org');
+      if (org) {
+        const tr = await pool.query(`SELECT 1 FROM tenant_registry WHERE tenant_id = $1 AND status = 'active'`, [org]);
+        if (tr.rowCount === 0) {
+          return res.status(404).json({ ok: false, code: 'ORG_404', message: '机构不存在或未启用' });
+        }
+      }
+    }
     // env：小程序码指向版本（trial=体验版/release=正式版）。缺省 trial——正式版未发布时
     // release 码扫码报"尚未发布"（09-06 真机实锤）；正式发布后对外贴码须显式 env=release 重出。
     const envRaw = String(req.query.env || '').trim();

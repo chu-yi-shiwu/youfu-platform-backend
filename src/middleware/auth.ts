@@ -11,6 +11,8 @@
 //  本中间件只验不签，不臆造登录系统。
 import type { Request, Response, NextFunction } from 'express';
 import crypto from 'node:crypto';
+import { AppError } from './error.js';
+import pool from '../db/pool.js';
 
 export interface AuthLocals {
   tenantId: string;
@@ -106,6 +108,37 @@ function str(v: unknown): string | undefined {
   return typeof v === 'string' ? v : undefined;
 }
 
+// ---- 八件 QA P3 修复：suspended/pending 租户「已签发 JWT」的在途拦截 ----
+// 登录(auth.ts)与 redeem(invite.ts)已拒非 active 租户，但已发 token 在有效期内仍全端点畅通
+// （生产实勘：demo_tenant suspended，account_user 零用户——当前无实际在途 token，属增量加固）。
+// 实现：authMiddleware 内（仅 prod）校验 tenant_registry.status，60s 内存缓存——
+// 每租户至多 60s 一次查库，热路径近零开销。诚实边界：
+//   ①停用生效延迟 ≤60s（缓存窗口）；②registry 无记录放行（与 redeem/login 同口径，
+//   兼容存量租户 registry 落库前的过渡窗口）。
+const TENANT_STATUS_TTL_MS = 60_000;
+const tenantStatusCache = new Map<string, { status: string; at: number }>();
+
+// 仅供测试清空状态缓存（不用于生产）
+export function __clearTenantStatusCacheForTest(): void {
+  tenantStatusCache.clear();
+}
+
+export async function assertTenantActive(tenantId: string): Promise<void> {
+  const cached = tenantStatusCache.get(tenantId);
+  let status: string | undefined = cached?.status;
+  if (!cached || Date.now() - cached.at >= TENANT_STATUS_TTL_MS) {
+    const r = await pool.query(`SELECT status FROM tenant_registry WHERE tenant_id = $1`, [tenantId]);
+    status = (r.rows[0] as { status?: string } | undefined)?.status;
+    if (status) tenantStatusCache.set(tenantId, { status, at: Date.now() });
+  }
+  if (status === 'suspended') {
+    throw new AppError('TENANT_SUSPENDED', '机构已被平台停用，如有疑问请联系平台管理员', 403);
+  }
+  if (status === 'pending') {
+    throw new AppError('TENANT_PENDING', '机构尚未激活，请在平台审批开通后使用', 403);
+  }
+}
+
 /**
  * C-3：统一身份解析纯函数（替代 authMiddleware 内 dev/prod 两条重复分支）。
  * 主流程只调一次；返回成功 AuthLocals 或结构化失败（status/code/message），由调用方转 HTTP。
@@ -182,7 +215,11 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction) 
     return res.status(result.status).json({ ok: false, code: result.code, message: result.message });
   }
   res.locals.auth = result.auth;
-  return next();
+  // P3 守卫：prod 下校验租户 registry 状态（60s 缓存）；dev 联调放行以免干扰本地测试
+  if (AUTH_MODE !== 'prod') return next();
+  assertTenantActive(result.auth.tenantId)
+    .then(() => next())
+    .catch(next);
 }
 
 /**

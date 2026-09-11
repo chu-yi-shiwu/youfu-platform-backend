@@ -105,12 +105,21 @@ router.post('/invites', async (req, res, next) => {
          WHERE tenant_id = $1 AND username = $2 AND used_at IS NULL AND revoked_at IS NULL`,
         [tenantId, b.username],
       );
-      const ins = await client.query(
-        `INSERT INTO invite_codes (tenant_id, code_hash, username, display_name, role, created_by, expires_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)
-         RETURNING id, username, display_name, role, expires_at, created_at`,
-        [tenantId, hmacInviteCode(code), b.username, b.display_name ?? null, b.role ?? 'operator', auth.username ?? null, expiresAt.toISOString()],
-      );
+      const ins = await client
+        .query(
+          `INSERT INTO invite_codes (tenant_id, code_hash, username, display_name, role, created_by, expires_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7)
+           RETURNING id, username, display_name, role, expires_at, created_at`,
+          [tenantId, hmacInviteCode(code), b.username, b.display_name ?? null, b.role ?? 'operator', auth.username ?? null, expiresAt.toISOString()],
+        )
+        .catch((e: any) => {
+          // 并发双发兜底（uq_invite_codes_one_active 部分唯一索引，八件 QA P3）：
+          // 23505 → 语义化 409，不把 pg 英文 detail 冒给 admin。
+          if (e?.code === '23505') {
+            throw new AppError('INVITE_CONCURRENT', '该账号已有在途邀请码（并发冲突），请刷新列表后重试', 409);
+          }
+          throw e;
+        });
       return ins.rows[0];
     });
     await audit(auth.username ?? 'admin', 'invite.create', String(row.id), tenantId, {

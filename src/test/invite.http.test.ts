@@ -24,20 +24,25 @@ import { errorMiddleware } from '../middleware/error.js';
 // ---- mock 掉 DB 连接池：脚本化 SQL 响应 + 调用日志（pool.query 与事务 client 同池脚本） ----
 const h = vi.hoisted(() => ({
   calls: [] as Array<{ sql: string; params: unknown[] }>,
-  scripted: [] as Array<{ match: RegExp; rows: any[]; rowCount?: number }>,
+  scripted: [] as Array<{ match: RegExp; rows: any[]; rowCount?: number; err?: any }>,
   reset: () => {
     h.calls.length = 0;
     h.scripted.length = 0;
   },
   script: (match: RegExp, rows: any[], rowCount?: number) =>
     h.scripted.push({ match, rows, rowCount }),
+  // P3（八件 QA）：脚本化抛错——模拟并发双发撞 uq_invite_codes_one_active 的 23505
+  scriptErr: (match: RegExp, err: any) => h.scripted.push({ match, rows: [], err }),
 }));
 
 vi.mock('../db/pool.js', () => {
   const scriptedQuery = async (sql: string, params: unknown[] = []) => {
     h.calls.push({ sql, params });
     for (const s of h.scripted) {
-      if (s.match.test(sql)) return { rows: s.rows, rowCount: s.rowCount ?? s.rows.length };
+      if (s.match.test(sql)) {
+        if (s.err) throw s.err;
+        return { rows: s.rows, rowCount: s.rowCount ?? s.rows.length };
+      }
     }
     return { rows: [], rowCount: 0 };
   };
@@ -169,6 +174,29 @@ describe('邀请码 admin 端点（生成/列表/作废）', () => {
     h.reset();
     const bad = await fetch(`${base}/api/v1/invites/not-a-uuid`, { method: 'DELETE' });
     expect(bad.status).toBe(404);
+  });
+
+  it('⑯ P3：并发双发撞唯一索引（23505）→ 409 INVITE_CONCURRENT（不冒 pg 英文 detail）', async () => {
+    h.reset();
+    h.script(/FROM account_user/, []);
+    h.script(/UPDATE invite_codes SET revoked_at/, []);
+    h.scriptErr(
+      /INSERT INTO invite_codes/,
+      Object.assign(new Error('duplicate key value violates unique constraint "uq_invite_codes_one_active"'), {
+        code: '23505',
+        detail: 'Key (tenant_id, username)=(t-invite-test, wangwu) already exists.',
+      }),
+    );
+    const r = await fetch(`${base}/api/v1/invites`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ username: 'wangwu' }),
+    });
+    expect(r.status).toBe(409);
+    const j = (await r.json()) as any;
+    expect(j.code).toBe('INVITE_CONCURRENT');
+    expect(j.message).toContain('并发');
+    expect(JSON.stringify(j)).not.toContain('already exists');
   });
 
   it('⑫ 非 admin 生成码 → 403', async () => {

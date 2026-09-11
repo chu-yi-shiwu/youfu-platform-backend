@@ -1,6 +1,14 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { Request, NextFunction } from 'express';
 
+// mock 池：prod 放行路径的租户状态守卫会查 tenant_registry（P3 修复后新增依赖）。
+// 缺省返回空（registry 无记录 → 放行口径），不触真实 PG。
+vi.mock('../db/pool.js', () => ({
+  default: { query: vi.fn(async () => ({ rows: [], rowCount: 0 })) },
+  assertSafeTenantId: (t: string) => t,
+  withTenantClient: async (_tid: string, fn: (c: any) => Promise<any>) => fn({ query: async () => ({ rows: [], rowCount: 0 }) }),
+}));
+
 // 动态导入以控制 AUTH_MODE / JWT_SECRET 模块级常量
 async function loadAuth() {
   vi.resetModules();
@@ -148,6 +156,8 @@ describe('authMiddleware · prod mode（强制真实 JWT）', () => {
     const res = makeRes();
     const { next, wasCalled } = makeNext();
     authMiddleware(req, res, next);
+    // P3 修复后 prod 放行走异步租户状态守卫（then(next)），等微任务队列排空再断言
+    await new Promise<void>((r) => setImmediate(r));
     expect(wasCalled()).toBe(true);
     expect((res as any).locals?.auth ?? (req as any).locals?.auth).toBeDefined();
   });

@@ -54,7 +54,17 @@ function makeClient() {
             );
             return row ? { rows: [row], rowCount: 1 } : { rows: [], rowCount: 0 };
           }
-          // 列表查询（worker 可见范围 OR 条件）
+          // 列表查询（worker 可见范围 OR 条件）——P2-1（独立审查 2026-09-11）：mock 忠实模拟
+          // 可见范围过滤，参数形态对齐真实 SQL：[tid, worker_ref, workerId, assignee?]
+          if (sql.includes("data->>'worker_ref'")) {
+            const items = state.tasks.filter(
+              (t) =>
+                t.tenant_id === p[0] &&
+                (t.data?.worker_ref === p[1] || t.assignee === p[2]) &&
+                (p.length < 4 || t.assignee === p[3]),
+            );
+            return { rows: items, rowCount: items.length };
+          }
           const items = state.tasks.filter((t) => t.tenant_id === p[0]);
           return { rows: items, rowCount: items.length };
         }
@@ -186,6 +196,10 @@ describe('POST /energy/webhook/dispatch —— 收单验签与幂等', () => {
     expect(b.item.data.template_code).toBe('M11');
 
     // worker 只读列表透传：data JSONB 原样返回（mp normEn 从 t.data.template_code 取值）
+    // P2-1 mock 忠实化后的必然修正：真实可见范围过滤下"派了才可见"（P2-2 裁定），
+    // 未派单任务（worker_ref=null 且 assignee=null）对 worker 不可见——先补派单再验透传。
+    const trow = state.tasks.find((t) => t.data.task_ref === 't303c-fix-e02b-ref')!;
+    trow.assignee = 'w-001';
     const nowSec = Math.floor(Date.now() / 1000);
     const token = signJwt(
       { sub: 'w-001', worker_ref: 'youfu:w-001', scope: 'energy_collection', tid: 't-verification', iat: nowSec, exp: nowSec + 900 },

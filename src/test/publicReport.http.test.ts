@@ -259,4 +259,22 @@ describe('GET /public/mp-qrcode（贴码生成 · env_version 通道）', () => 
     expect(p).toBe('pages/index/index?org=t-demo');
     expect(scene).toBe('org=t-demo');
   });
+
+  it('⑭ P3（八件 QA）：org 停用/不存在 → 404 ORG_404，不触微信配额', async () => {
+    const r = await get('/public/mp-qrcode?path=pages/index/index?org=t-nope');
+    expect(r.status).toBe(404);
+    const j = (await r.json()) as any;
+    expect(j.code).toBe('ORG_404');
+    // 产码调用不得发生
+    expect(vi.mocked(genMpCode).mock.calls.some(([p]) => String(p).includes('org=t-nope'))).toBe(false);
+  });
+
+  it('⑮ P3（八件 QA）：org active → registry 校验带 org 参数先于产码', async () => {
+    const r = await get('/public/mp-qrcode?path=pages/index/index?org=t-demo');
+    expect(r.status).toBe(200);
+    // 本用例只打 mp-qrcode：SELECT 1 ... tenant_registry 的调用即 org active 门
+    const regCall = poolQuery.mock.calls.find(([sql]) => /^SELECT 1 FROM tenant_registry/.test(String(sql)));
+    expect(regCall).toBeTruthy();
+    expect((regCall![1] as unknown[])[0]).toBe('t-demo');
+  });
 });
