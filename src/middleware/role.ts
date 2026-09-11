@@ -28,6 +28,13 @@ export const PERMS = [
   // 批次三 卡4：结算三凭证（读列表/详情/导出 = settlement.read；建/改/删/确认 = settlement.edit）
   'settlement.read',
   'settlement.edit',
+  // V1 批次（20260911）：志愿者模块独立权限点（此前蹭 basicdata.edit / requireConfigRole）。
+  //   volunteer.view   = 查看（GET records/people/stats + FE 菜单可见性）
+  //   volunteer.manage = 活动管理（POST activities、PUT /activities/:id/status；发布/关闭/重开不拆分）
+  //   volunteer.audit  = 现场执行（checkin / checkout / approve）
+  'volunteer.view',
+  'volunteer.manage',
+  'volunteer.audit',
 ] as const;
 export type Perm = (typeof PERMS)[number];
 
@@ -37,7 +44,9 @@ export type Perm = (typeof PERMS)[number];
 // 其余角色不给结算权限点（未覆盖存量租户随默认矩阵自动生效，批次二已实证该机制）。
 export const DEFAULT_PERM_MATRIX: Record<Role, readonly Perm[]> = {
   admin: [...PERMS],
-  operator: ['dashboard.view', 'intake.create', 'ticket.manage', 'basicdata.edit', 'dispatch.override', 'inspect.execute', 'asset.scan', 'settlement.read'],
+  // V1 批次（20260911）：operator 补 volunteer.view/manage/audit 三点（与既有现状等效——
+  // 此前 operator 经 basicdata.edit 可写志愿者管理端点、菜单可见；其余角色不授，随默认矩阵 403）。
+  operator: ['dashboard.view', 'intake.create', 'ticket.manage', 'basicdata.edit', 'dispatch.override', 'inspect.execute', 'asset.scan', 'settlement.read', 'volunteer.view', 'volunteer.manage', 'volunteer.audit'],
   dispatcher: ['dashboard.view', 'ticket.manage', 'dispatch.override', 'inspect.execute', 'asset.scan'],
   // worker + intake.create（#942 R15）：陪检登记（#6）等登录态录入复用建单引擎，
   // 入口在工人工作台对全员可见——录入（intake.create）≠ 管理（ticket.manage），

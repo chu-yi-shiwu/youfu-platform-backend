@@ -6,6 +6,8 @@
 //       ④ registered 未签退直 approve → 409（状态机守卫）
 //       ⑤ 全链 signup→checkin→checkout→approve 全 200（正向回归）
 //       ⑥ signup 守卫 SQL 契约：act SELECT 必带 FOR UPDATE（行锁防并发超卖）
+//  V1（20260911）：⑧ 同 (activity_id, user_name) 二次 signup → 409 DUPLICATE（去重守卫，
+//       判重 SQL 契约：含 activity_id + user_name 条件；命中即短路，不产生二次 INSERT，也不再查名额）
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
 import express from 'express';
 import type { Server } from 'node:http';
@@ -185,5 +187,51 @@ describe('审批守卫（approve 状态机校验）', () => {
     const s4 = await post('/volunteer/records/rec-4/approve');
     expect(s4.status).toBe(200);
     expect((s4.body.item as any).status).toBe('approved');
+  });
+});
+
+// V1（20260911）：signup 去重守卫（409 DUPLICATE）
+describe('去重守卫（signup DUPLICATE，V1 新增）', () => {
+  it('⑧ 同 (activity_id, user_name) 二次 signup → 409 DUPLICATE「您已报名过该活动，无需重复报名」，无二次 INSERT', async () => {
+    h.scripted = [
+      { match: /FROM volunteer_activity/, rows: [{ id: 'act-7', status: 'open', slots: 5 }] },
+      { match: /user_name = \$3 LIMIT 1/, rows: [{ id: 'rec-9' }], rowCount: 1 },
+    ];
+    const r = await post('/volunteer/activities/act-7/signup', { user_name: '张三' });
+    expect(r.status).toBe(409);
+    expect(r.body.ok).toBe(false);
+    expect(r.body.code).toBe('DUPLICATE');
+    expect(r.body.message).toContain('您已报名过该活动');
+    // 命中去重即短路：既不 INSERT，也不再走名额统计
+    expect(h.calls.find((c) => c.sql.includes('INSERT INTO volunteer_record'))).toBeUndefined();
+    expect(h.calls.find((c) => c.sql.includes('count(*)::int AS n'))).toBeUndefined();
+  });
+
+  it('⑨ 去重 SQL 契约：判重查询必须含 tenant_id + activity_id + user_name 三条件（LIMIT 1）', async () => {
+    h.scripted = [
+      { match: /FROM volunteer_activity/, rows: [{ id: 'act-8', status: 'open', slots: 5 }] },
+      { match: /user_name = \$3 LIMIT 1/, rows: [], rowCount: 0 },
+      { match: /count\(\*\)::int AS n/, rows: [{ n: 0 }] },
+      { match: /INSERT INTO volunteer_record/, rows: [{ id: 'rec-10', status: 'registered' }] },
+    ];
+    const r = await post('/volunteer/activities/act-8/signup', { user_name: '李四' });
+    expect(r.status).toBe(201); // 无重复 → 正常放行 INSERT
+    const dup = h.calls.find((c) => c.sql.includes('FROM volunteer_record') && c.sql.includes('LIMIT 1'));
+    expect(dup).toBeDefined();
+    expect(dup!.sql).toMatch(/tenant_id = \$1/);
+    expect(dup!.sql).toMatch(/activity_id = \$2/);
+    expect(dup!.sql).toMatch(/user_name = \$3/);
+  });
+
+  it('⑩ 不同 user_name 同活动不触发去重（幂等键是三元组，不是 activity 单键）', async () => {
+    h.scripted = [
+      { match: /FROM volunteer_activity/, rows: [{ id: 'act-9', status: 'open', slots: 5 }] },
+      { match: /user_name = \$3 LIMIT 1/, rows: [], rowCount: 0 },
+      { match: /count\(\*\)::int AS n/, rows: [{ n: 1 }] },
+      { match: /INSERT INTO volunteer_record/, rows: [{ id: 'rec-11', status: 'registered' }] },
+    ];
+    const r = await post('/volunteer/activities/act-9/signup', { user_name: '王五' });
+    expect(r.status).toBe(201);
+    expect(h.calls.find((c) => c.sql.includes('INSERT INTO volunteer_record'))).toBeDefined();
   });
 });

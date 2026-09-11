@@ -1,11 +1,18 @@
 // 志愿者模块（批次 B · PRD §6.5）：活动 + 报名记录（状态机 + 服务时长 + 积分）。
-// 风格对齐 config.ts；写操作 requireConfigRole；签到/签退/审批走状态机。
+// 风格对齐 config.ts；V1 批次（20260911）收口：
+//   ① 守卫迁移：管理/读守卫改 requirePermission（volunteer.view / volunteer.manage / volunteer.audit），
+//      因需查 role_permission 表（async），守卫调用一律在 withTenantClient 闭包内 await（RLS 纪律）；
+//      GET /activities 保持仅登录（mp 报名入口依赖）；
+//   ② signup 新增去重守卫：同 (activity_id, user_name) 命中 → 409 DUPLICATE「您已报名过该活动，无需重复报名」；
+//   ③ GET /activities 补 signup_count（COUNT 子查询，供 mp/FE 展示"已报 X / 名额 Y"）；
+//   ④ serving 死状态移除：报名记录状态机四态 registered → checked_in → checked_out → approved
+//      （无任何 API 可置入 serving；FE/mp 的 serving 映射键保留为只读兼容，历史脏数据展示不炸）。
 // B1 统一事件总线：关键业务动作 emit domain_event（过程挖掘统一数据源）。
 import { Router } from 'express';
 import { z } from 'zod';
 import { withTenantClient } from '../db/pool.js';
 import { AppError } from '../middleware/error.js';
-import { requireConfigRole } from '../middleware/role.js';
+import { requirePermission } from '../middleware/role.js';
 import { emitDomainEvent } from '../db/eventBus.js';
 
 const router = Router();
@@ -23,10 +30,13 @@ const activitySchema = z.object({
 router.get('/activities', async (req, res, next) => {
   try {
     const tenantId = res.locals.auth.tenantId;
+    // V1：补 signup_count 子查询（不暴露 records 明细，仅人数），mp/FE 展示"已报 X / 名额 Y"。
     const items = await withTenantClient(tenantId, (client) =>
       client
         .query(
-          `SELECT id, title, batch, location, start_at, end_at, slots, status, created_at FROM volunteer_activity WHERE tenant_id = $1 ORDER BY created_at DESC`,
+          `SELECT a.id, a.title, a.batch, a.location, a.start_at, a.end_at, a.slots, a.status, a.created_at,
+                  (SELECT COUNT(*)::int FROM volunteer_record vr WHERE vr.tenant_id = a.tenant_id AND vr.activity_id = a.id) AS signup_count
+           FROM volunteer_activity a WHERE a.tenant_id = $1 ORDER BY a.created_at DESC`,
           [tenantId],
         )
         .then((r) => r.rows),
@@ -39,10 +49,11 @@ router.get('/activities', async (req, res, next) => {
 
 router.post('/activities', async (req, res, next) => {
   try {
-    requireConfigRole(req, res);
     const tenantId = res.locals.auth.tenantId;
     const b = activitySchema.parse(req.body);
     const item = await withTenantClient(tenantId, async (client) => {
+      // V1 守卫迁移：requirePermission 需查 role_permission 表（async），必须用闭包内 client。
+      await requirePermission(res.locals.auth, client, 'volunteer.manage');
       const r = await client.query(
         `INSERT INTO volunteer_activity (tenant_id, title, batch, location, start_at, end_at, slots, status)
          VALUES ($1,$2,$3,$4,$5,$6,$7,'open') RETURNING *`,
@@ -63,10 +74,11 @@ router.post('/activities', async (req, res, next) => {
 // 幂等：对同值重放直接 UPDATE 成功（不 409，管理端按钮可重复点）。
 router.put('/activities/:id/status', async (req, res, next) => {
   try {
-    requireConfigRole(req, res);
     const tenantId = res.locals.auth.tenantId;
     const b = z.object({ status: z.enum(['open', 'closed']) }).parse(req.body);
     const item = await withTenantClient(tenantId, async (client) => {
+      // V1 守卫迁移：闭包内权限判定（role_permission 表查询）。
+      await requirePermission(res.locals.auth, client, 'volunteer.manage');
       const r = await client.query(
         `UPDATE volunteer_activity SET status = $3 WHERE id = $1 AND tenant_id = $2 RETURNING id, title, status`,
         [req.params.id, tenantId, b.status],
@@ -90,22 +102,24 @@ router.put('/activities/:id/status', async (req, res, next) => {
 router.get('/activities/:id/records', async (req, res, next) => {
   try {
     const tenantId = res.locals.auth.tenantId;
-    const items = await withTenantClient(tenantId, (client) =>
-      client
+    const items = await withTenantClient(tenantId, async (client) => {
+      // V1：报名明细属管理面数据，收口 volunteer.view（原仅登录）。
+      await requirePermission(res.locals.auth, client, 'volunteer.view');
+      return client
         .query(
           `SELECT id, activity_id, user_name, status, check_in_at, check_out_at, duration_min, points, created_at
            FROM volunteer_record WHERE tenant_id = $1 AND activity_id = $2 ORDER BY created_at ASC`,
           [tenantId, req.params.id],
         )
-        .then((r) => r.rows),
-    );
+        .then((r) => r.rows);
+    });
     return res.json({ ok: true, code: 0, items });
   } catch (e) {
     next(e);
   }
 });
 
-// 报名（普通用户即可，仅登录）
+// 报名（普通用户即可，仅登录；V1 新增去重守卫）
 router.post('/activities/:id/signup', async (req, res, next) => {
   try {
     const tenantId = res.locals.auth.tenantId;
@@ -117,6 +131,15 @@ router.post('/activities/:id/signup', async (req, res, next) => {
       );
       if (act.rowCount === 0) throw new AppError('NOT_FOUND', 'activity not found', 404);
       if (act.rows[0].status !== 'open') throw new AppError('BAD_STATE', '活动已关闭，无法报名', 409);
+      // V1 去重守卫（置于状态检查之后：closed 活动对外永远提示"已截止"，口径唯一；
+      // 已报名者优先收"已报名"语义——比"名额已满"更准确）。判重键 user_name 文本为 V1 接受项（V2 挂 user_id 列）。
+      const dup = await client.query(
+        `SELECT id FROM volunteer_record WHERE tenant_id = $1 AND activity_id = $2 AND user_name = $3 LIMIT 1`,
+        [tenantId, req.params.id, b.user_name],
+      );
+      if (dup.rowCount && dup.rowCount > 0) {
+        throw new AppError('DUPLICATE', '您已报名过该活动，无需重复报名', 409);
+      }
       const cnt = await client.query(
         `SELECT count(*)::int AS n FROM volunteer_record WHERE activity_id = $1 AND tenant_id = $2`,
         [req.params.id, tenantId],
@@ -145,16 +168,18 @@ export function computeCheckout(checkInAt: string | Date, checkOutAt: string | D
 
 router.post('/records/:id/checkin', async (req, res, next) => {
   try {
-    requireConfigRole(req, res);
     const tenantId = res.locals.auth.tenantId;
     const item = await withTenantClient(tenantId, async (client) => {
+      // V1 守卫迁移：现场执行动作收口 volunteer.audit（原 requireConfigRole / basicdata.edit）。
+      await requirePermission(res.locals.auth, client, 'volunteer.audit');
       const cur = await client.query(`SELECT * FROM volunteer_record WHERE id = $1 AND tenant_id = $2`, [
         req.params.id,
         tenantId,
       ]);
       if (cur.rowCount === 0) throw new AppError('NOT_FOUND', 'record not found', 404);
-      if (cur.rows[0].status !== 'registered' && cur.rows[0].status !== 'serving') {
-        throw new AppError('BAD_STATE', '只能对已报名/服务中的记录签到', 409);
+      // V1 serving 死状态移除：状态机仅认 registered（serving 无任何 API 可置入，历史脏数据走数据卫生清洗）。
+      if (cur.rows[0].status !== 'registered') {
+        throw new AppError('BAD_STATE', '只能对已报名的记录签到', 409);
       }
       const r = await client.query(
         `UPDATE volunteer_record SET status = 'checked_in', check_in_at = now() WHERE id = $1 AND tenant_id = $2 RETURNING *`,
@@ -172,9 +197,10 @@ router.post('/records/:id/checkin', async (req, res, next) => {
 
 router.post('/records/:id/checkout', async (req, res, next) => {
   try {
-    requireConfigRole(req, res);
     const tenantId = res.locals.auth.tenantId;
     const item = await withTenantClient(tenantId, async (client) => {
+      // V1 守卫迁移：volunteer.audit（闭包内）。
+      await requirePermission(res.locals.auth, client, 'volunteer.audit');
       const cur = await client.query(`SELECT * FROM volunteer_record WHERE id = $1 AND tenant_id = $2`, [
         req.params.id,
         tenantId,
@@ -200,9 +226,10 @@ router.post('/records/:id/checkout', async (req, res, next) => {
 
 router.post('/records/:id/approve', async (req, res, next) => {
   try {
-    requireConfigRole(req, res);
     const tenantId = res.locals.auth.tenantId;
     const item = await withTenantClient(tenantId, async (client) => {
+      // V1 守卫迁移：volunteer.audit（闭包内）。
+      await requirePermission(res.locals.auth, client, 'volunteer.audit');
       const cur = await client.query(`SELECT * FROM volunteer_record WHERE id = $1 AND tenant_id = $2`, [
         req.params.id,
         tenantId,
@@ -227,11 +254,13 @@ router.post('/records/:id/approve', async (req, res, next) => {
 
 // P1：志愿者人员档案维度（审查报告 P2 项提级）。只读聚合：按 user_name 归并全部报名记录，
 // 产出报名数/审批数/累计时长/累计积分/最近动态——人员级视图，activity 级明细不动、零 DDL。
+// V1：守卫迁移 → volunteer.view（闭包内）。
 router.get('/people', async (req, res, next) => {
   try {
     const tenantId = res.locals.auth.tenantId;
-    const items = await withTenantClient(tenantId, (client) =>
-      client
+    const items = await withTenantClient(tenantId, async (client) => {
+      await requirePermission(res.locals.auth, client, 'volunteer.view');
+      return client
         .query(
           `SELECT user_name,
                   COUNT(*)::int AS signup_count,
@@ -243,8 +272,8 @@ router.get('/people', async (req, res, next) => {
            GROUP BY user_name ORDER BY total_points DESC, user_name ASC`,
           [tenantId],
         )
-        .then((r) => r.rows),
-    );
+        .then((r) => r.rows);
+    });
     return res.json({ ok: true, code: 0, items });
   } catch (e) {
     next(e);
@@ -254,19 +283,22 @@ router.get('/people', async (req, res, next) => {
 router.get('/stats', async (req, res, next) => {
   try {
     const tenantId = res.locals.auth.tenantId;
-    const stats = await withTenantClient(tenantId, (client) =>
-      client
+    const stats = await withTenantClient(tenantId, async (client) => {
+      // V1：守卫迁移 → volunteer.view（闭包内）。
+      await requirePermission(res.locals.auth, client, 'volunteer.view');
+      return client
         .query(
           `SELECT
              COUNT(*) FILTER (WHERE status = 'registered') AS registered_count,
-             COUNT(*) FILTER (WHERE status IN ('checked_in','serving','checked_out','approved')) AS served_count,
+             -- V1 四态口径：serving 死状态已移除，不再参与 served_count 统计
+             COUNT(*) FILTER (WHERE status IN ('checked_in','checked_out','approved')) AS served_count,
              COALESCE(SUM(duration_min), 0) AS total_duration_min,
              COALESCE(SUM(points), 0) AS total_points
            FROM volunteer_record WHERE tenant_id = $1`,
           [tenantId],
         )
-        .then((r) => r.rows[0]),
-    );
+        .then((r) => r.rows[0]);
+    });
     return res.json({ ok: true, code: 0, stats });
   } catch (e) {
     next(e);

@@ -34,7 +34,7 @@ CREATE TABLE IF NOT EXISTS volunteer_record (
   tenant_id     text NOT NULL,
   activity_id   uuid NOT NULL,
   user_name     text NOT NULL,
-  status        text NOT NULL DEFAULT 'registered', -- registered | checked_in | serving | checked_out | approved
+  status        text NOT NULL DEFAULT 'registered', -- 四态（V1 20260911）：registered | checked_in | checked_out | approved；serving 死状态已移除（无 DB CHECK 约束，纯注释级改动，零 DDL；历史脏数据走上线数据卫生 UPDATE → 'checked_in'）
   check_in_at   timestamptz,                -- 签到（到场）时间
   check_out_at  timestamptz,                -- 签退时间
   duration_min  int NOT NULL DEFAULT 0,     -- 服务时长（分钟）

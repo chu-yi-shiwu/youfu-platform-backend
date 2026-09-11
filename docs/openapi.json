@@ -6881,7 +6881,7 @@
           "volunteer"
         ],
         "summary": "GET /api/v1/volunteer/activities",
-        "description": "来源：src/routes/volunteer.ts:23\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/volunteer.ts:23\n\n服务端响应状态码（代码扫描）：200\n\nV1（20260911）：items[] 每项新增 signup_count（integer，该活动已报名人数 COUNT(volunteer_record) 子查询，不暴露 records 明细）；前端展示\"已报 X / 名额 Y\"。守卫：仅登录（报名入口依赖，未收口权限点）。\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -7037,7 +7037,7 @@
           "volunteer"
         ],
         "summary": "报名（普通用户即可，仅登录）",
-        "description": "来源：src/routes/volunteer.ts:109\n\n服务端响应状态码（代码扫描）：201\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/volunteer.ts:109\n\n服务端响应状态码（代码扫描）：201\n\nV1（20260911）：闭包内守卫顺序 = FOR UPDATE 行锁 → 状态（closed → 409 BAD_STATE\"活动已关闭，无法报名\"）→ 去重（409 DUPLICATE\"您已报名过该活动，无需重复报名\"，判重键 tenant_id+activity_id+user_name）→ 名额（409 BAD_STATE\"报名名额已满\"，含 slots=0）→ INSERT。前端对 409 以 code 优先分流（DUPLICATE / BAD_STATE），message 子串兜底。\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -7045,7 +7045,19 @@
         ],
         "responses": {
           "201": {
-            "description": "HTTP 201",
+            "description": "HTTP 201（报名成功，item.status=registered）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "description": "骨架占位：字段以服务端实现为准"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "HTTP 409：BAD_STATE（活动已关闭 / 报名名额已满）或 DUPLICATE（您已报名过该活动，无需重复报名，V1 20260911 新增）。响应形如 { ok:false, code, message }，前端以 code 优先分流。",
             "content": {
               "application/json": {
                 "schema": {
@@ -7075,7 +7087,7 @@
               "schema": {
                 "type": "object",
                 "additionalProperties": true,
-                "description": "骨架占位：请求字段以服务端实现为准"
+                "description": "骨架占位：请求字段以服务端实现为准（user_name: string）"
               }
             }
           }
