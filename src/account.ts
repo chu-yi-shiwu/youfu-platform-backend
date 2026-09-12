@@ -25,6 +25,7 @@ export interface AccountUser {
   role: AccountRole;
   active: boolean;
   wx_openid?: string | null; // v5.0 P0：微信 openid（绑定后非空，toPublic 只暴露 wx_bound）
+  phone?: string | null; // 账号权限一期（082 迁移）：档案手机号，可空
 }
 
 export interface AccountUserPublic {
@@ -35,6 +36,7 @@ export interface AccountUserPublic {
   tenant_id: string;
   active: boolean;
   wx_bound: boolean; // v5.0 P0：是否已绑定微信（不暴露 openid 本身）
+  phone: string | null; // 账号权限一期：档案手机号（无则 null）
 }
 
 function toPublic(u: AccountUser): AccountUserPublic {
@@ -46,6 +48,7 @@ function toPublic(u: AccountUser): AccountUserPublic {
     tenant_id: u.tenant_id,
     active: u.active,
     wx_bound: Boolean(u.wx_openid),
+    phone: u.phone ?? null,
   };
 }
 
@@ -113,7 +116,7 @@ export async function findUserByUsername(
   username: string,
 ): Promise<AccountUser | undefined> {
   const r = await client.query<AccountUser>(
-    `SELECT id, tenant_id, username, password_hash, display_name, role, active, wx_openid
+    `SELECT id, tenant_id, username, password_hash, display_name, role, active, wx_openid, phone
      FROM account_user WHERE tenant_id = $1 AND username = $2`,
     [tenantId, username],
   );
@@ -126,7 +129,7 @@ export async function findUserById(
   id: string,
 ): Promise<AccountUser | undefined> {
   const r = await client.query<AccountUser>(
-    `SELECT id, tenant_id, username, password_hash, display_name, role, active, wx_openid
+    `SELECT id, tenant_id, username, password_hash, display_name, role, active, wx_openid, phone
      FROM account_user WHERE tenant_id = $1 AND id = $2`,
     [tenantId, id],
   );
@@ -149,7 +152,7 @@ export async function updateUserPassword(
 
 export async function listUsers(client: PoolClient, tenantId: string): Promise<AccountUser[]> {
   const r = await client.query<AccountUser>(
-    `SELECT id, tenant_id, username, password_hash, display_name, role, active, wx_openid
+    `SELECT id, tenant_id, username, password_hash, display_name, role, active, wx_openid, phone
      FROM account_user WHERE tenant_id = $1 ORDER BY username`,
     [tenantId],
   );

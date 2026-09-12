@@ -4,7 +4,7 @@
     "title": "优服家 API",
     "version": "0.0.0-generated",
     "description": "多租户物业 SaaS 后端开放规范（M-3 交付）。\n\n**口径**：本文件由 `tools/generate_openapi.mjs` 自动扫描 `src/server.ts` 挂载表与 `src/routes/*.ts`、`src/webhook/routes.ts` 路由声明生成（generated，非手写）。\n\n**诚实边界**：summary/description 取自路由上方中文注释（启发式）；请求/响应 schema 为宽松骨架，字段一律以服务端实现为准，不编造字段。\n\n**鉴权**：租户/管理端 JWT Bearer；开放 API 走 X-App-Key + X-App-Secret（openApiAuth）；公开端点见各操作 security: []。",
-    "x-generated-at": "2026-09-12T09:34:01.106Z",
+    "x-generated-at": "2026-09-12T17:08:15.188Z",
     "x-generator": "tools/generate_openapi.mjs",
     "x-source": "src/server.ts + src/routes/*.ts + src/webhook/routes.ts（代码扫描口径）"
   },
@@ -7100,7 +7100,7 @@
           "volunteer"
         ],
         "summary": "POST /api/v1/volunteer/records/{id}/checkin",
-        "description": "来源：src/routes/volunteer.ts:193\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/volunteer.ts:197\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -7151,7 +7151,7 @@
           "volunteer"
         ],
         "summary": "POST /api/v1/volunteer/records/{id}/checkout",
-        "description": "来源：src/routes/volunteer.ts:222\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/volunteer.ts:245\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -7202,7 +7202,7 @@
           "volunteer"
         ],
         "summary": "POST /api/v1/volunteer/records/{id}/approve",
-        "description": "来源：src/routes/volunteer.ts:251\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/volunteer.ts:274\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -7253,7 +7253,7 @@
           "volunteer"
         ],
         "summary": "P1：志愿者人员档案维度（审查报告 P2 项提级）。只读聚合：按 user_name 归并全部报名记录，",
-        "description": "产出报名数/审批数/累计时长/累计积分/最近动态——人员级视图，activity 级明细不动、零 DDL。\nV1：守卫迁移 → volunteer.view（闭包内）。\n\n来源：src/routes/volunteer.ts:282\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "产出报名数/审批数/累计时长/累计积分/最近动态——人员级视图，activity 级明细不动、零 DDL。\nV1：守卫迁移 → volunteer.view（闭包内）。\n\n来源：src/routes/volunteer.ts:305\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -7281,7 +7281,7 @@
           "volunteer"
         ],
         "summary": "GET /api/v1/volunteer/stats",
-        "description": "来源：src/routes/volunteer.ts:307\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/volunteer.ts:330\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -9987,13 +9987,41 @@
         ]
       }
     },
+    "/api/v1/accounts/roles/perm-catalog": {
+      "get": {
+        "tags": [
+          "accounts"
+        ],
+        "summary": "— G6：权限点全集 + 中文名（role.manage）。",
+        "description": "FE 权限矩阵 tab 以此渲染列头，不再硬编码权限点清单。\n\n来源：src/routes/accounts.ts:73\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "HTTP 200",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "description": "骨架占位：字段以服务端实现为准"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/accounts/roles/permissions": {
       "get": {
         "tags": [
           "accounts"
         ],
-        "summary": "— admin：列出本租户全部 6 角色的权限。",
-        "description": "语义（修正 2026-09-05）：role_permission 表有该租户该角色的行 → **覆盖替换**（只用覆盖集合，非并集）；\n无覆盖行 → 回退官方推荐默认矩阵（overridden:false，随平台升级自动更新）。\n\n来源：src/routes/accounts.ts:38\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "summary": "— 列出本租户全部 6 角色的权限。",
+        "description": "语义（修正 2026-09-05）：role_permission 表有该租户该角色的行 → **覆盖替换**（只用覆盖集合，非并集）；\n无覆盖行 → 回退官方推荐默认矩阵（overridden:false，随平台升级自动更新）。\n账号权限一期：守卫统一切 role.manage（G4）；响应补 default_perms（§3.5，矩阵\"默认值参考列\"）。\n\n来源：src/routes/accounts.ts:94\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -10020,8 +10048,8 @@
         "tags": [
           "accounts"
         ],
-        "summary": "— admin：覆盖某角色的权限点（先删后插，事务）",
-        "description": "来源：src/routes/accounts.ts:64\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "summary": "— 覆盖某角色的权限点（先删后插，事务）。",
+        "description": "G5：perms 逐项白名单校验（∈ PERMS），非法点 400 BAD_PERM 列出全部——禁错字静默落库\n（hasPerm 恒 false 难排查教训）。\n\n来源：src/routes/accounts.ts:120\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -10072,7 +10100,7 @@
           "accounts"
         ],
         "summary": "============ 账户列表（不外泄密码哈希） ============",
-        "description": "R38-R3-F1 修复：GET /accounts 此前无角色守卫，operator/reporter 均可枚举本租户\n全部账号（username/role/active）。前端仅 TrialUsers/FoundationPage 两个 admin 页调用，\n收紧为 admin-only 无断裂风险（assertAdmin 在 dev 模式放行，不影响本地联调）。\n\n来源：src/routes/accounts.ts:94\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "R38-R3-F1 修复：GET /accounts 此前无角色守卫，operator/reporter 均可枚举本租户\n全部账号（username/role/active）。账号权限一期：统一收口 role.manage（G4）——\n租户可显式授予非 admin 管理面；默认矩阵下仅 admin 可读，无默认行为放宽。\n\n来源：src/routes/accounts.ts:154\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -10098,7 +10126,7 @@
           "accounts"
         ],
         "summary": "============ 新建账户 ============",
-        "description": "来源：src/routes/accounts.ts:130\n\n服务端响应状态码（代码扫描）：201\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/accounts.ts:188\n\n服务端响应状态码（代码扫描）：201\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -10138,7 +10166,7 @@
           "accounts"
         ],
         "summary": "============ 账户详情 ============",
-        "description": "来源：src/routes/accounts.ts:111\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/accounts.ts:170\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -10174,8 +10202,8 @@
         "tags": [
           "accounts"
         ],
-        "summary": "============ 更新账户（显示名/角色/启用/可选重置密码） ============",
-        "description": "来源：src/routes/accounts.ts:162\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "summary": "============ 更新账户（显示名/角色/启用/手机号；重置密码走独立端点） ============",
+        "description": "来源：src/routes/accounts.ts:223\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -10224,7 +10252,7 @@
           "accounts"
         ],
         "summary": "============ 删除账户（保护：至少保留一个活跃管理员，避免锁死登录） ============",
-        "description": "来源：src/routes/accounts.ts:216\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/accounts.ts:325\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -10255,6 +10283,57 @@
             "description": "路径参数（原代码声明形如 :param）"
           }
         ]
+      }
+    },
+    "/api/v1/accounts/{id}/reset-password": {
+      "post": {
+        "tags": [
+          "accounts"
+        ],
+        "summary": "POST /api/v1/accounts/{id}/reset-password",
+        "description": "来源：src/routes/accounts.ts:301\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "HTTP 200",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "description": "骨架占位：字段以服务端实现为准"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "路径参数（原代码声明形如 :param）"
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "description": "骨架占位：请求字段以服务端实现为准"
+              }
+            }
+          }
+        }
       }
     },
     "/api/v1/tenant-info": {
