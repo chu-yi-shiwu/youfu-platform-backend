@@ -297,3 +297,76 @@ describe('去重守卫（signup DUPLICATE，V1 新增）', () => {
     expect(h.calls.find((c) => c.sql.includes('INSERT INTO volunteer_record'))).toBeDefined();
   });
 });
+
+// D-2（20260912，P3-4 初一拍板"过期 3 天内可补签"）：checkin 补签守卫。
+// 口径：以活动 end_at（自然过期时刻）起算；过期 ≤3 天 → 200 补签留痕 check_in_late=true；
+// >3 天 → 409 CHECKIN_EXPIRED；end_at 未过/null → 正常签到 late=false（零差别行为不变）。
+describe('补签守卫（checkin 过期 3 天宽限，D-2 新增）', () => {
+  const hoursAgo = (h: number) => new Date(Date.now() - h * 3600 * 1000).toISOString();
+
+  function checkinScripts(endAt: string | null) {
+    return [
+      { match: /SELECT \* FROM volunteer_record/, rows: [{ id: 'rec-l1', status: 'registered', check_in_at: null, activity_id: 'act-l1' }] },
+      // checkin 新增 act 查询（SELECT end_at FROM volunteer_activity）——按用例给 end_at
+      { match: /SELECT end_at FROM volunteer_activity/, rows: endAt === null ? [] : [{ end_at: endAt }], rowCount: endAt === null ? 0 : 1 },
+      { match: /SET status = 'checked_in'/, rows: [{ id: 'rec-l1', status: 'checked_in', check_in_late: true }] },
+    ];
+  }
+
+  it('㉑ end_at 已过 2 天 → 200 补签放行，item.check_in_late=true（留痕）', async () => {
+    h.scripted = checkinScripts(hoursAgo(48));
+    const r = await post('/volunteer/records/rec-l1/checkin');
+    expect(r.status).toBe(200);
+    expect(r.body.ok).toBe(true);
+    expect((r.body.item as any).check_in_late).toBe(true);
+    // 留痕落库契约：UPDATE 必须写 check_in_late 列（不与正常打卡无差别）
+    const upd = h.calls.find((c) => c.sql.includes("SET status = 'checked_in'"));
+    expect(upd).toBeDefined();
+    expect(upd!.sql).toMatch(/check_in_late = \$3/);
+  });
+
+  it('㉒ 边界：过期 72h-1min → 200 补签；72h+1min → 409 CHECKIN_EXPIRED 且无 UPDATE', async () => {
+    // 宽限内（边界含第 3 天末）
+    h.scripted = checkinScripts(hoursAgo(72 - 1 / 60));
+    const ok = await post('/volunteer/records/rec-l1/checkin');
+    expect(ok.status).toBe(200);
+    expect((ok.body.item as any).check_in_late).toBe(true);
+    // 超出宽限 1 分钟即拒（清掉上一段的调用日志，UPDATE 缺席断言才纯净）
+    h.calls.length = 0;
+    h.scripted = checkinScripts(hoursAgo(72 + 1 / 60));
+    const r = await post('/volunteer/records/rec-l1/checkin');
+    expect(r.status).toBe(409);
+    expect(r.body.ok).toBe(false);
+    expect(r.body.code).toBe('CHECKIN_EXPIRED');
+    // 文案逐字锁定（mp 管理页 toast 直接透传 message）
+    expect(r.body.message).toBe('活动已结束超过 3 天，无法补签');
+    expect(h.calls.find((c) => c.sql.includes("SET status = 'checked_in'"))).toBeUndefined();
+  });
+
+  it('㉓ end_at 未过（未来）→ 200 正常签到，check_in_late=false', async () => {
+    h.scripted = [
+      { match: /SELECT \* FROM volunteer_record/, rows: [{ id: 'rec-l1', status: 'registered', check_in_at: null, activity_id: 'act-l1' }] },
+      { match: /SELECT end_at FROM volunteer_activity/, rows: [{ end_at: new Date(Date.now() + 24 * 3600 * 1000).toISOString() }] },
+      { match: /SET status = 'checked_in'/, rows: [{ id: 'rec-l1', status: 'checked_in', check_in_late: false }] },
+    ];
+    const r = await post('/volunteer/records/rec-l1/checkin');
+    expect(r.status).toBe(200);
+    expect((r.body.item as any).check_in_late).toBe(false);
+  });
+
+  it('㉔ end_at=null（存量活动）→ 200 放行 late=false（S7 存量兼容同源口径）', async () => {
+    h.scripted = checkinScripts(null);
+    const r = await post('/volunteer/records/rec-l1/checkin');
+    expect(r.status).toBe(200);
+    expect(r.body.ok).toBe(true);
+  });
+
+  it('㉕ SQL 契约：act 查询带 tenant_id 租户隔离 + record 行取 activity_id 关联', async () => {
+    h.scripted = checkinScripts(hoursAgo(48));
+    await post('/volunteer/records/rec-l1/checkin');
+    const act = h.calls.find((c) => c.sql.includes('SELECT end_at FROM volunteer_activity'));
+    expect(act).toBeDefined();
+    expect(act!.sql).toMatch(/tenant_id = \$2/);
+    expect(act!.params![0]).toBe('act-l1');
+  });
+});

@@ -123,7 +123,7 @@ router.get('/activities/:id/records', async (req, res, next) => {
       await requirePermission(res.locals.auth, client, 'volunteer.view');
       return client
         .query(
-          `SELECT id, activity_id, user_name, status, check_in_at, check_out_at, duration_min, points, created_at
+          `SELECT id, activity_id, user_name, status, check_in_at, check_out_at, duration_min, points, check_in_late, created_at
            FROM volunteer_record WHERE tenant_id = $1 AND activity_id = $2 ORDER BY created_at ASC`,
           [tenantId, req.params.id],
         )
@@ -190,6 +190,10 @@ export function computeCheckout(checkInAt: string | Date, checkOutAt: string | D
   return { duration_min: durationMin, points: Math.floor(durationMin / 60) };
 }
 
+// D-2 补签宽限期（P3-4，初一拍板"过期 3 天内可补签"2026-09-12）：
+// 以活动 end_at（自然过期时刻）起算，≤3 天允许补签但留痕 check_in_late=true；>3 天 409 拒。
+export const CHECKIN_GRACE_MS = 3 * 24 * 60 * 60 * 1000;
+
 router.post('/records/:id/checkin', async (req, res, next) => {
   try {
     const tenantId = res.locals.auth.tenantId;
@@ -205,9 +209,28 @@ router.post('/records/:id/checkin', async (req, res, next) => {
       if (cur.rows[0].status !== 'registered') {
         throw new AppError('BAD_STATE', '只能对已报名的记录签到', 409);
       }
+      // D-2 补签守卫（P3-4）：查活动 end_at，过期 ≤3 天 → 补签留痕（check_in_late=true）；>3 天 → 409。
+      // end_at=null 放行（对齐 signup S7 存量兼容口径：历史活动从未填过结束时间，不误杀）。
+      // 活动行缺失（历史脏数据，表无 FK）防御性沿用既有"不新增拦截"原则放行（late=false），不扩大破坏面。
+      const act = await client.query(
+        `SELECT end_at FROM volunteer_activity WHERE id = $1 AND tenant_id = $2`,
+        [cur.rows[0].activity_id, tenantId],
+      );
+      let checkInLate = false;
+      // rows 兜底空数组（部分 harness/脏环境 rowCount 与 rows 可能不一致，读列前先验行存在）
+      const endAt = act.rows.length > 0 ? act.rows[0].end_at : null;
+      if (endAt !== null && endAt !== undefined) {
+        const overdueMs = Date.now() - new Date(endAt).getTime();
+        if (overdueMs > 0) {
+          if (overdueMs > CHECKIN_GRACE_MS) {
+            throw new AppError('CHECKIN_EXPIRED', '活动已结束超过 3 天，无法补签', 409);
+          }
+          checkInLate = true;
+        }
+      }
       const r = await client.query(
-        `UPDATE volunteer_record SET status = 'checked_in', check_in_at = now() WHERE id = $1 AND tenant_id = $2 RETURNING *`,
-        [req.params.id, tenantId],
+        `UPDATE volunteer_record SET status = 'checked_in', check_in_at = now(), check_in_late = $3 WHERE id = $1 AND tenant_id = $2 RETURNING *`,
+        [req.params.id, tenantId, checkInLate],
       );
       const row = r.rows[0];
       await emitDomainEvent(client, { tenantId, entityType: 'volunteer_record', entityId: row.id, type: 'checkin', actor: 'config_role' });
