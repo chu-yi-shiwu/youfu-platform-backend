@@ -476,7 +476,15 @@ router.post('/:entityType/versions/:version/rollback', async (req, res, next) =>
     const target = await withTenantClient(tenantId, (client) =>
       getWorkflowDefHistoryVersion(client, tenantId, entityType, version),
     );
-    if (!target) throw new AppError('NOT_FOUND', `version ${version} not found in history`, 404);
+    // X-13：404 文案区分「无历史快照」vs「版本不存在」——零历史实体报 NO_HISTORY（提示先过审产生快照），
+    // 有历史但目标版本号越界报 VERSION_NOT_FOUND（提示查历史范围）。
+    if (!target) {
+      const hist = await withTenantClient(tenantId, (client) => listWorkflowDefHistory(client, tenantId, entityType));
+      if (hist.length === 0) {
+        throw new AppError('NO_HISTORY', `该配置无历史快照，无可回滚版本：${entityType}（历史快照在审批通过时产生）`, 404);
+      }
+      throw new AppError('VERSION_NOT_FOUND', `版本 ${version} 不存在于 ${entityType} 的历史中（范围见版本历史接口）`, 404);
+    }
     await withTenantClient(tenantId, async (client) => {
       await requirePermission(auth, client, 'workflow.approve');
       await saveWorkflowDef(client, tenantId, entityType, target, {

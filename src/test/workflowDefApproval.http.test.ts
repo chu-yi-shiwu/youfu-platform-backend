@@ -460,3 +460,30 @@ describe('流程配置「提交→审核」一期（设计 §8 八例）', () =>
     expect(eaDraft.status, 'added=0 不得产生草稿').toBe(404);
   });
 });
+
+// X-13（20260913 E-6 批次）：rollback 404 文案区分——「无历史快照」(NO_HISTORY) vs「版本不存在」(VERSION_NOT_FOUND)。
+// 此前统一 `NOT_FOUND version X not found in history`，运维排障无法区分"从没过审"与"版本号填错"。
+describe('X-13：rollback 404 文案区分（两例锚定）', () => {
+  it('X-13① 零历史快照实体 rollback → 404 NO_HISTORY（live 存在但从未过审）', async () => {
+    seedLive('repair', { initial: 'draft', states: ['draft'], transitions: [], config: { name: '旧名' } });
+    // 不 seedHistory：实体无任何历史快照
+    const admin = makeToken('admin');
+    const r = await api('POST', '/repair/versions/1/rollback', admin);
+    expect(r.status).toBe(404);
+    expect(r.json.ok).toBe(false);
+    expect(r.json.code).toBe('NO_HISTORY');
+    expect(String(r.json.message)).toContain('无历史快照');
+  });
+
+  it('X-13② 有历史但目标版本越界 → 404 VERSION_NOT_FOUND（版本号填错场景）', async () => {
+    const oldDef = { initial: 'draft', states: ['draft'], transitions: [], config: { name: '旧名' } };
+    seedLive('repair', oldDef);
+    seedHistory('repair', 1, oldDef);
+    const admin = makeToken('admin');
+    const r = await api('POST', '/repair/versions/99/rollback', admin);
+    expect(r.status).toBe(404);
+    expect(r.json.code).toBe('VERSION_NOT_FOUND');
+    expect(String(r.json.message)).toContain('99');
+    expect(String(r.json.message)).toContain('不存在');
+  });
+});
