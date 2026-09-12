@@ -370,3 +370,17 @@ describe('补签守卫（checkin 过期 3 天宽限，D-2 新增）', () => {
     expect(act!.params![0]).toBe('act-l1');
   });
 });
+
+// E-6 批次（20260913）P3-3：slots 下界负例。
+// 核实说明：schema `slots: z.number().int().min(0).default(0)` 已带 min(0)（volunteer.ts:27），
+// 本批次补的是**负例测试锚定**（防后人删下界无报警），schema 本体零改动。
+describe('E-6 P3-3：slots 下界负例', () => {
+  it('P3-3 slots=-1 建活动 → 422 VALIDATION_001（zod min(0) 下界负例锚定）', async () => {
+    const r = await post('/volunteer/activities', { title: '负名额活动', slots: -1 });
+    expect(r.status).toBe(422);
+    expect(r.body.ok).toBe(false);
+    expect(r.body.code).toBe('VALIDATION_001');
+    const details = (r.body.details as Array<{ path: string; msg: string }>) ?? [];
+    expect(details.some((d) => d.path === 'slots')).toBe(true);
+  });
+});
