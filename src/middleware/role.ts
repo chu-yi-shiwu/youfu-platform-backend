@@ -19,6 +19,11 @@ export const PERMS = [
   'intake.create',
   'ticket.manage',
   'workflow.edit',
+  // 流程配置审核一期（20260912《优服家_流程配置审核设计》§6）：审批把关点。
+  //   approve / reject / pending / rollback 四端点使用；默认矩阵仅 admin（经 admin 的 [...PERMS] 自动收录），
+  //   租户可经 role_permission 按角色授予（配合 080 迁移六角色 CHECK 后可授 reviewer 等）。
+  //   自审自批禁令不在此层——按账号（submitted_by ≠ 当前 username）在路由层强校验，admin 不豁免。
+  'workflow.approve',
   'basicdata.edit',
   'dispatch.override',
   'role.manage',
@@ -42,6 +47,8 @@ export type Perm = (typeof PERMS)[number];
 // 新角色按最小权限给默认：reviewer 审核工单（看板+工单）；service_desk 接线派单（+派单覆盖）。
 // 批次三：settlement.read（列表/详情/导出）默认 admin/operator；settlement.edit 仅 admin；
 // 其余角色不给结算权限点（未覆盖存量租户随默认矩阵自动生效，批次二已实证该机制）。
+// 流程审核一期：workflow.edit 维持现状不动（operator 默认矩阵本就不含，行为零变化）；
+// workflow.approve 仅 admin（经 admin 的 [...PERMS] 自动收录，勿在其它角色清单里手加）。
 export const DEFAULT_PERM_MATRIX: Record<Role, readonly Perm[]> = {
   admin: [...PERMS],
   // V1 批次（20260911）：operator 补 volunteer.view/manage/audit 三点（与既有现状等效——

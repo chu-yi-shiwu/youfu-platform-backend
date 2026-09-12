@@ -120,7 +120,7 @@
   <!-- 字段级配置（P0） -->
   <section class="panel">
     <h2>业务流字段级配置（自定义字段 / 自定义状态）</h2>
-    <div class="state-sub">按业务流（entityType）独立配置自定义字段与自定义状态，保存后实时生效，工单/业务流表单将按此渲染。</div>
+    <div class="state-sub">按业务流（entityType）独立配置自定义字段与自定义状态。审核制：保存先落草稿，提交审核并由审批人通过后才生效（回滚权限仅 workflow.approve）。</div>
     <div class="bar" style="border:0;padding:10px 0">
       <div>
         <label>业务流</label>
@@ -133,8 +133,10 @@
         </select>
       </div>
       <button class="ghost" onclick="fcLoad()">载入配置</button>
-      <button onclick="fcSave()">保存配置</button>
+      <button onclick="fcSave()">保存草稿</button>
+      <button class="ghost" onclick="fcSubmit()">提交审核</button>
     </div>
+    <div class="note" id="fcStatus" style="color:var(--accent)"></div>
 
     <h3 style="margin:14px 0 6px;font-size:14px">初始状态</h3>
     <input id="fcInitial" placeholder="initial" style="padding:7px 10px;border:1px solid var(--line);border-radius:8px;font-size:13px;width:220px" />
@@ -269,7 +271,26 @@ async function fcLoad() {
     fcRenderStates();
     fcRenderFields();
     document.getElementById('fcPreview').textContent = JSON.stringify(fcDef, null, 2);
+    fcLoadStatus(entity); // 在途变更状态（草稿/待审/驳回意见）
   } catch (e) { err.textContent = '载入失败：' + e.message; }
+}
+
+// 在途变更状态（审核一期）：草稿可改可提；submitted 等审批；draft+reject_comment 展示驳回意见。
+async function fcLoadStatus(entity) {
+  const el = document.getElementById('fcStatus');
+  try {
+    const r = await fetch('/api/v1/workflow-defs/' + entity + '/draft', { headers: authHeaders() });
+    const j = await r.json();
+    if (!r.ok || !j.ok) { el.textContent = '在途变更：无'; return; }
+    const c = j.change || {};
+    if (c.status === 'submitted') {
+      el.textContent = '在途变更：待审核（提交人 ' + (c.submittedBy || '-') + '，锚定 live v' + c.baseVersion + '）';
+    } else if (c.rejectComment) {
+      el.textContent = '在途变更：草稿（上次驳回意见：' + c.rejectComment + '）——可修改后重新提交';
+    } else {
+      el.textContent = '在途变更：草稿（未提交）';
+    }
+  } catch (e) { el.textContent = '在途变更：读取失败'; }
 }
 
 function fcRenderStates() {
@@ -322,12 +343,33 @@ async function fcSave() {
   if (!fcDef.states || fcDef.states.length === 0) { err.textContent = '至少配置一个状态'; return; }
   const payload = { def: { initial: fcDef.initial, states: fcDef.states, transitions: fcDef.transitions || [], config: fcDef.config || {} } };
   try {
-    const r = await fetch('/api/v1/workflow-defs/' + entity, {
+    // 审核一期：保存 = 存草稿（不直接生效），提交审核通过后才写 live。
+    const r = await fetch('/api/v1/workflow-defs/' + entity + '/draft', {
       method: 'PUT', headers: authHeaders(), body: JSON.stringify(payload),
     });
     const j = await r.json();
     if (!j.ok) { err.textContent = '保存失败：' + (j.message || j.code); return; }
-    toast('字段级配置已保存 ✅（实时生效·已持久化）', true);
+    toast('已保存为草稿（尚未生效，需提交审核）', true);
+    fcLoad();
+  } catch (e) { err.textContent = '网络错误：' + e.message; }
+}
+
+async function fcSubmit() {
+  const entity = document.getElementById('fcEntity').value;
+  const err = document.getElementById('fcErr'); err.textContent = '';
+  if (!confirm('确认提交审核？提交后由具备 workflow.approve 权限的审批人通过才生效。')) return;
+  try {
+    const r = await fetch('/api/v1/workflow-defs/' + entity + '/submit', {
+      method: 'POST', headers: authHeaders(), body: '{}',
+    });
+    const j = await r.json();
+    if (!j.ok) {
+      if (r.status === 404) err.textContent = '没有在途草稿，请先保存草稿';
+      else if (r.status === 409) err.textContent = '该流程已在审核中，无需重复提交';
+      else err.textContent = '提交失败：' + (j.message || j.code);
+      return;
+    }
+    toast('已提交审核（锚定 live v' + j.baseVersion + '），等待审批人通过', true);
     fcLoad();
   } catch (e) { err.textContent = '网络错误：' + e.message; }
 }

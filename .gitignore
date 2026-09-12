@@ -26,3 +26,9 @@ a1_dispatch_rules.sql
 tools/coverageAudit.mjs
 tools/routeContract.mjs
 _coverage_stale/
+
+# 流程审核一批（20260912）：本地运行垃圾与仓外产物排除（主理人 E-1 指令）
+vitest.config.ts.timestamp-*.mjs
+.tmp-upload-http-test-*/
+refs/
+_reports/

@@ -1,12 +1,28 @@
 // 业务流程配置中心（整合方案 v2 · 缺口2"下拉生成"的落地）：
 // 运营在界面选业务主题 → 生成 starter 状态机 → 微调 → 落库 workflow_def（零代码配置）。
-// 读接口任意已认证用户可访问；写接口（upsert）需 admin/operator（requireConfigRole）。
+// 读接口任意已认证用户可访问；写接口按权限点校验（requirePermission，租户可经 role_permission 覆盖）。
+//
+// 流程配置审核一期（2026-09-12《优服家_流程配置审核设计》）：
+// 五条写 live 路径收敛为「写草稿 → 提交 → 审核」状态机——
+//   PUT /:entityType、generate-from-theme、import、enable-acceptance(added>0) 一律改产草稿（响应追加 draft:true）；
+//   唯一豁免 rollback（目标版本曾生效 + 急救场景），权限点 workflow.edit → workflow.approve（把关人亲自即时裁量）。
+// live 表仍只被 approve 一条边触碰（saveWorkflowDef reason='approve'），全部读路径零改动。
+// 兼容性：原写路径保留、code/ok 不变，仅新增 draft 字段与行为变化（发版说明标注 breaking）。
 import { Router } from 'express';
 import { z } from 'zod';
 import { withTenantClient } from '../db/pool.js';
 import { AppError } from '../middleware/error.js';
-import { requirePermission } from '../middleware/role.js';
+import { requirePermission, requireAnyPermission } from '../middleware/role.js';
 import { getWorkflowDef, saveWorkflowDef, ensureWorkflowDef, getWorkflowDefVersion, listWorkflowDefHistory, getWorkflowDefHistoryVersion } from '../engine/workflowDef.js';
+import {
+  upsertWorkflowDefDraft,
+  getWorkflowDefChange,
+  submitWorkflowDefChange,
+  rejectWorkflowDefChange,
+  listSubmittedWorkflowDefChanges,
+  deleteWorkflowDefChange,
+  type WorkflowDefChange,
+} from '../engine/workflowDefChange.js';
 import { THEME_TEMPLATES, themeLabel, type ThemeTemplate } from '../engine/themes.js';
 import { ensureAcceptanceEdges } from '../engine/acceptanceEdges.js'; // 批次三：验收边幂等注入
 import type { WorkflowDef } from '../engine/stateMachine.js';
@@ -20,6 +36,32 @@ router.get('/themes', async (_req, res) => {
     name: t.name,
   }));
   return res.json({ ok: true, code: 0, items });
+});
+
+// ============ 流程审核（一期）：在审清单 ============
+// 本租户全部 submitted 变更（workflow.approve）。必须注册在 GET /:entityType 之前，
+// 否则 /pending 会被 :entityType 参数路由吞掉。
+router.get('/pending', async (req, res, next) => {
+  try {
+    const auth = res.locals.auth;
+    const tenantId = auth.tenantId;
+    const items = await withTenantClient(tenantId, async (client) => {
+      await requirePermission(auth, client, 'workflow.approve');
+      const changes = await listSubmittedWorkflowDefChanges(client, tenantId);
+      return changes.map((c: WorkflowDefChange) => ({
+        entityType: c.entityType,
+        name: themeLabel(c.entityType, (c.def.config as any)?.name),
+        status: c.status,
+        submittedBy: c.submittedBy,
+        submittedAt: c.submittedAt,
+        note: c.note,
+        baseVersion: c.baseVersion,
+      }));
+    });
+    return res.json({ ok: true, code: 0, items });
+  } catch (e) {
+    next(e);
+  }
 });
 
 // 列出本租户所有 workflow_def（轻量：不含完整 def，供左侧列表）。
@@ -65,9 +107,10 @@ router.get('/:entityType', async (req, res, next) => {
   }
 });
 
-// upsert 单个 workflow_def（配置中心保存；写操作需 admin/operator）。
+// —— 请求体 schema 与 def 合并（写路径共用）——
 const defSchema = z.object({
   name: z.string().optional(),
+  note: z.string().max(500).optional(), // 变更说明（审核清单/详情展示，提交人填写）
   def: z
     .object({
       initial: z.string().min(1),
@@ -78,33 +121,226 @@ const defSchema = z.object({
     .passthrough(),
 });
 
+function assertEntityType(entityType: string): void {
+  if (!/^[a-z][a-z0-9_]*$/.test(entityType)) {
+    throw new AppError('BAD_PARAM', 'entityType must match ^[a-z][a-z0-9_]*$', 400);
+  }
+}
+
+function mergeDef(b: z.infer<typeof defSchema>): WorkflowDef {
+  return {
+    ...b.def,
+    config: { ...(b.def.config ?? {}), ...(b.name ? { name: b.name } : {}) },
+  } as WorkflowDef;
+}
+
+// def 顶层结构摘要（版本 diff 与 draft-diff 共用，前端做并排对比）。
+function defSummary(d: WorkflowDef) {
+  return {
+    initial: d.initial,
+    states: d.states,
+    transitionCount: (d.transitions ?? []).length,
+    fieldCount: Object.keys((d.config as any)?.fields ?? {}).length,
+    name: (d.config as any)?.name ?? null,
+  };
+}
+
+// ============ 写 live 路径 → 一律改产草稿（审核一期裁决） ============
+
+// upsert 单个 workflow_def（兼容原路径）：现改写为保存/覆盖草稿，不直接触 live。
 router.put('/:entityType', async (req, res, next) => {
   try {
     const auth = res.locals.auth;
     const tenantId = auth.tenantId;
     const { entityType } = req.params;
-    if (!/^[a-z][a-z0-9_]*$/.test(entityType)) {
-      throw new AppError('BAD_PARAM', 'entityType must match ^[a-z][a-z0-9_]*$', 400);
-    }
+    assertEntityType(entityType);
     const b = defSchema.parse(req.body);
-    const merged: WorkflowDef = {
-      ...b.def,
-      config: { ...(b.def.config ?? {}), ...(b.name ? { name: b.name } : {}) },
-    } as WorkflowDef;
     await withTenantClient(tenantId, async (client) => {
       await requirePermission(auth, client, 'workflow.edit');
-      await saveWorkflowDef(client, tenantId, entityType, merged, {
+      await upsertWorkflowDefDraft(client, tenantId, entityType, mergeDef(b), {
         operator: auth.username,
-        reason: 'manual-save',
+        note: b.note,
       });
     });
-    return res.json({ ok: true, code: 0, entityType, version: 'incremented' });
+    return res.json({ ok: true, code: 0, entityType, draft: true, status: 'draft' });
   } catch (e) {
     next(e);
   }
 });
 
-// 从主题模板生成（下拉生成）：用主题 starter def upsert 到该 entity_type。
+// 显式草稿端点（PUT /:entityType/draft）：与上面兼容路径同一语义，供 mp/web 新接线使用。
+router.put('/:entityType/draft', async (req, res, next) => {
+  try {
+    const auth = res.locals.auth;
+    const tenantId = auth.tenantId;
+    const { entityType } = req.params;
+    assertEntityType(entityType);
+    const b = defSchema.parse(req.body);
+    await withTenantClient(tenantId, async (client) => {
+      await requirePermission(auth, client, 'workflow.edit');
+      await upsertWorkflowDefDraft(client, tenantId, entityType, mergeDef(b), {
+        operator: auth.username,
+        note: b.note,
+      });
+    });
+    return res.json({ ok: true, code: 0, entityType, draft: true, status: 'draft' });
+  } catch (e) {
+    next(e);
+  }
+});
+
+// 读在途草稿（workflow.edit 或 workflow.approve）：含 status/note/reject_comment/submitted_by；无则 404。
+router.get('/:entityType/draft', async (req, res, next) => {
+  try {
+    const auth = res.locals.auth;
+    const tenantId = auth.tenantId;
+    const { entityType } = req.params;
+    assertEntityType(entityType);
+    const change = await withTenantClient(tenantId, async (client) => {
+      await requireAnyPermission(auth, client, ['workflow.edit', 'workflow.approve']);
+      return getWorkflowDefChange(client, tenantId, entityType);
+    });
+    if (!change) throw new AppError('NO_DRAFT', `no in-flight change for ${entityType}`, 404);
+    return res.json({ ok: true, code: 0, entityType, change });
+  } catch (e) {
+    next(e);
+  }
+});
+
+// 提交审核（draft→submitted，workflow.edit）：base_version 锚定提交时刻的 live 版本。
+router.post('/:entityType/submit', async (req, res, next) => {
+  try {
+    const auth = res.locals.auth;
+    const tenantId = auth.tenantId;
+    const { entityType } = req.params;
+    assertEntityType(entityType);
+    const submitted = await withTenantClient(tenantId, async (client) => {
+      await requirePermission(auth, client, 'workflow.edit');
+      return submitWorkflowDefChange(client, tenantId, entityType, { submittedBy: auth.username ?? '' });
+    });
+    if (!submitted) {
+      const existing = await withTenantClient(tenantId, (client) =>
+        getWorkflowDefChange(client, tenantId, entityType),
+      );
+      if (!existing) throw new AppError('NO_DRAFT', `no in-flight change for ${entityType}`, 404);
+      throw new AppError('CHANGE_NOT_DRAFT', 'change is already submitted, awaiting review', 409);
+    }
+    return res.json({
+      ok: true,
+      code: 0,
+      entityType,
+      status: 'submitted',
+      baseVersion: submitted.baseVersion,
+    });
+  } catch (e) {
+    next(e);
+  }
+});
+
+// 审核通过（workflow.approve）：三重校验后复用 saveWorkflowDef 生效（版本自增 + history 快照 reason='approve'），
+// 然后删除变更行（审计由 history 承担）。
+//   ① submitted_by ≠ 当前账号（403 SELF_APPROVAL，按账号非按角色，admin 也不例外）
+//   ② base_version = 当前 live 版本（409 DRAFT_STALE：live 已被推进，需重存重提）
+//   ③ 行必须存在且 status=submitted（404 NO_DRAFT / 409 CHANGE_NOT_SUBMITTED）
+router.post('/:entityType/approve', async (req, res, next) => {
+  try {
+    const auth = res.locals.auth;
+    const tenantId = auth.tenantId;
+    const { entityType } = req.params;
+    assertEntityType(entityType);
+    await withTenantClient(tenantId, async (client) => {
+      await requirePermission(auth, client, 'workflow.approve');
+      const change = await getWorkflowDefChange(client, tenantId, entityType);
+      if (!change) throw new AppError('NO_DRAFT', `no in-flight change for ${entityType}`, 404);
+      if (change.status !== 'submitted') {
+        throw new AppError('CHANGE_NOT_SUBMITTED', 'change is not submitted for review', 409);
+      }
+      // 自审自批禁令按账号（submitted_by vs 当前 username）——权限管"能不能审"，状态机管"能不能审这一单"。
+      if (change.submittedBy && change.submittedBy === auth.username) {
+        throw new AppError('SELF_APPROVAL', 'submitter cannot approve own change (self-approval forbidden)', 403);
+      }
+      const liveVersion = await getWorkflowDefVersion(client, tenantId, entityType);
+      if (change.baseVersion !== liveVersion) {
+        throw new AppError(
+          'DRAFT_STALE',
+          `base_version ${change.baseVersion} != live version ${liveVersion}; re-save and re-submit`,
+          409,
+        );
+      }
+      // 生效复用 saveWorkflowDef：版本自增、history 快照（reason='approve'）、审计全免费，不新造写入机制。
+      await saveWorkflowDef(client, tenantId, entityType, change.def, {
+        operator: auth.username,
+        reason: 'approve',
+      });
+      await deleteWorkflowDefChange(client, tenantId, entityType);
+    });
+    return res.json({ ok: true, code: 0, entityType, approved: true, version: 'incremented' });
+  } catch (e) {
+    next(e);
+  }
+});
+
+// 审核驳回（workflow.approve，comment 必填）：status 回 draft + reject_comment；live 不动、不产生新版本。
+router.post('/:entityType/reject', async (req, res, next) => {
+  try {
+    const auth = res.locals.auth;
+    const tenantId = auth.tenantId;
+    const { entityType } = req.params;
+    assertEntityType(entityType);
+    const b = z.object({ comment: z.string().min(1) }).parse(req.body);
+    const rejected = await withTenantClient(tenantId, async (client) => {
+      await requirePermission(auth, client, 'workflow.approve');
+      return rejectWorkflowDefChange(client, tenantId, entityType, b.comment);
+    });
+    if (!rejected) {
+      const existing = await withTenantClient(tenantId, (client) =>
+        getWorkflowDefChange(client, tenantId, entityType),
+      );
+      if (!existing) throw new AppError('NO_DRAFT', `no in-flight change for ${entityType}`, 404);
+      throw new AppError('CHANGE_NOT_SUBMITTED', 'change is not submitted for review', 409);
+    }
+    return res.json({ ok: true, code: 0, entityType, rejected: true, status: 'draft' });
+  } catch (e) {
+    next(e);
+  }
+});
+
+// 草稿 vs live 并排差异（workflow.approve 或 workflow.edit）：复用版本 diff 的 summary 结构。
+router.get('/:entityType/draft-diff', async (req, res, next) => {
+  try {
+    const auth = res.locals.auth;
+    const tenantId = auth.tenantId;
+    const { entityType } = req.params;
+    assertEntityType(entityType);
+    const data = await withTenantClient(tenantId, async (client) => {
+      await requireAnyPermission(auth, client, ['workflow.edit', 'workflow.approve']);
+      const version = await getWorkflowDefVersion(client, tenantId, entityType);
+      const liveDef = await getWorkflowDef(client, tenantId, entityType);
+      const change = await getWorkflowDefChange(client, tenantId, entityType);
+      return { version, liveDef, change };
+    });
+    if (!data.change) throw new AppError('NO_DRAFT', `no in-flight change for ${entityType}`, 404);
+    return res.json({
+      ok: true,
+      code: 0,
+      entityType,
+      live: { version: data.version, def: data.liveDef, summary: defSummary(data.liveDef) },
+      draft: {
+        def: data.change.def,
+        summary: defSummary(data.change.def),
+        status: data.change.status,
+        submittedBy: data.change.submittedBy,
+        submittedAt: data.change.submittedAt,
+        note: data.change.note,
+        rejectComment: data.change.rejectComment,
+      },
+    });
+  } catch (e) {
+    next(e);
+  }
+});
+
+// 从主题模板生成（下拉生成）：改产草稿——模板只是起点，微调后仍需过审。
 router.post('/generate-from-theme', async (req, res, next) => {
   try {
     const auth = res.locals.auth;
@@ -115,40 +351,35 @@ router.post('/generate-from-theme', async (req, res, next) => {
     const merged: WorkflowDef = { ...tpl.def, config: { ...(tpl.def.config ?? {}), name: tpl.name } } as WorkflowDef;
     await withTenantClient(tenantId, async (client) => {
       await requirePermission(auth, client, 'workflow.edit');
-      await saveWorkflowDef(client, tenantId, entityType, merged, {
+      await upsertWorkflowDefDraft(client, tenantId, entityType, merged, {
         operator: auth.username,
-        reason: 'generate-from-theme',
+        note: `从主题模板「${tpl.name}」生成`,
       });
     });
-    return res.json({ ok: true, code: 0, entityType, name: tpl.name });
+    return res.json({ ok: true, code: 0, entityType, name: tpl.name, draft: true });
   } catch (e) {
     next(e);
   }
 });
 
 // ============ 批次三 卡4：老租户自愿升级——给 work_order def 追加验收边 ============
-// POST /api/v1/workflow-defs/:entityType/enable-acceptance（门禁：workflow.edit 权限点，
-// 默认仅 admin；租户可在 role_permission 授予其它角色）
-// 幂等：两条验收边已存在则 added=0 直接 ok；否则追加边（含目标态补入）并写历史快照
-// （saveWorkflowDef 内置「旧版→workflow_def_history」append-only 快照，reason='enable-acceptance'）。
+// POST /api/v1/workflow-defs/:entityType/enable-acceptance（门禁：workflow.edit 权限点）
+// 审核一期裁决：added>0（结构性变更）改产草稿待审；added=0 幂等无操作原样放行（no-op 不产生内容）。
 router.post('/:entityType/enable-acceptance', async (req, res, next) => {
   try {
     const auth = res.locals.auth;
     const tenantId = auth.tenantId;
     const { entityType } = req.params;
-    if (!/^[a-z][a-z0-9_]*$/.test(entityType)) throw new AppError('BAD_PARAM', 'bad entityType', 400);
-    // 审查修复（架构🟡12）：删掉此前的 `auth.role !== 'admin'` 硬编码双保险——
-    // 与紧随其后的 requirePermission('workflow.edit') 语义重复，且租户在 role_permission 里
-    // 显式授予某角色 workflow.edit 时会被这行误杀（权限点才是单一事实源）。
+    assertEntityType(entityType);
     const result = await withTenantClient(tenantId, async (client) => {
       await requirePermission(auth, client, 'workflow.edit');
       // 无 def 行的租户先落引擎默认图（显式落库后再注入，保证升级可追溯）
       const cur = await ensureWorkflowDef(client, tenantId, entityType);
       const { def, added } = ensureAcceptanceEdges(cur);
       if (added.length > 0) {
-        await saveWorkflowDef(client, tenantId, entityType, def, {
+        await upsertWorkflowDefDraft(client, tenantId, entityType, def, {
           operator: auth.username,
-          reason: 'enable-acceptance',
+          note: '开启完工验收（追加验收边）',
         });
       }
       return { added };
@@ -159,7 +390,9 @@ router.post('/:entityType/enable-acceptance', async (req, res, next) => {
       entityType,
       added_count: result.added.length,
       added_edges: result.added,
-      version: 'incremented-if-changed',
+      ...(result.added.length > 0
+        ? { draft: true, version: 'draft-pending-approval' }
+        : { version: 'unchanged' }),
     });
   } catch (e) {
     next(e);
@@ -173,7 +406,7 @@ router.get('/:entityType/versions', async (req, res, next) => {
   try {
     const tenantId = res.locals.auth.tenantId;
     const { entityType } = req.params;
-    if (!/^[a-z][a-z0-9_]*$/.test(entityType)) throw new AppError('BAD_PARAM', 'bad entityType', 400);
+    assertEntityType(entityType);
     const [current, history] = await withTenantClient(tenantId, async (client) => {
       const cur = await getWorkflowDefVersion(client, tenantId, entityType);
       const hist = await listWorkflowDefHistory(client, tenantId, entityType);
@@ -218,19 +451,12 @@ router.get('/:entityType/versions/:a/diff/:b', async (req, res, next) => {
       return [da, db];
     });
     if (!defs[0] || !defs[1]) throw new AppError('NOT_FOUND', 'one of versions not found', 404);
-    const summary = (d: WorkflowDef) => ({
-      initial: d.initial,
-      states: d.states,
-      transitionCount: (d.transitions ?? []).length,
-      fieldCount: Object.keys(d.config?.fields ?? {}).length,
-      name: (d.config as any)?.name ?? null,
-    });
     return res.json({
       ok: true,
       code: 0,
       entityType,
-      from: { version: a, def: defs[0], summary: summary(defs[0]) },
-      to: { version: b, def: defs[1], summary: summary(defs[1]) },
+      from: { version: a, def: defs[0], summary: defSummary(defs[0]) },
+      to: { version: b, def: defs[1], summary: defSummary(defs[1]) },
     });
   } catch (e) {
     next(e);
@@ -238,6 +464,8 @@ router.get('/:entityType/versions/:a/diff/:b', async (req, res, next) => {
 });
 
 // 一键回滚：把指定历史版本存为新版本（版本自增，reason=rollback）。
+// 审核一期裁决：豁免审批（目标版本曾生效 + 急救场景，过审会延误止血），但把关责任不消失——
+// 权限点由 workflow.edit 收紧为 workflow.approve（把关人亲自即时裁量）。
 router.post('/:entityType/versions/:version/rollback', async (req, res, next) => {
   try {
     const auth = res.locals.auth;
@@ -250,7 +478,7 @@ router.post('/:entityType/versions/:version/rollback', async (req, res, next) =>
     );
     if (!target) throw new AppError('NOT_FOUND', `version ${version} not found in history`, 404);
     await withTenantClient(tenantId, async (client) => {
-      await requirePermission(auth, client, 'workflow.edit');
+      await requirePermission(auth, client, 'workflow.approve');
       await saveWorkflowDef(client, tenantId, entityType, target, {
         operator: auth.username,
         reason: `rollback-to-${version}`,
@@ -267,7 +495,7 @@ router.post('/:entityType/export', async (req, res, next) => {
   try {
     const tenantId = res.locals.auth.tenantId;
     const { entityType } = req.params;
-    if (!/^[a-z][a-z0-9_]*$/.test(entityType)) throw new AppError('BAD_PARAM', 'bad entityType', 400);
+    assertEntityType(entityType);
     const [version, def] = await withTenantClient(tenantId, async (client) => {
       const v = await getWorkflowDefVersion(client, tenantId, entityType);
       const d = await getWorkflowDef(client, tenantId, entityType);
@@ -279,26 +507,29 @@ router.post('/:entityType/export', async (req, res, next) => {
   }
 });
 
-// 导入 def（校验后存为新版本，reason=import；来源标记 G5）。
+// 导入 def：改产草稿——外部文件风险最高，最需要人把关（来源标记 G5）。
 router.post('/:entityType/import', async (req, res, next) => {
   try {
     const auth = res.locals.auth;
     const tenantId = auth.tenantId;
     const { entityType } = req.params;
-    if (!/^[a-z][a-z0-9_]*$/.test(entityType)) throw new AppError('BAD_PARAM', 'bad entityType', 400);
+    assertEntityType(entityType);
     const b = defSchema.parse(req.body);
-    const merged: WorkflowDef = {
-      ...b.def,
-      config: { ...(b.def.config ?? {}), ...(b.name ? { name: b.name } : {}) },
-    } as WorkflowDef;
     await withTenantClient(tenantId, async (client) => {
       await requirePermission(auth, client, 'workflow.edit');
-      await saveWorkflowDef(client, tenantId, entityType, merged, {
+      await upsertWorkflowDefDraft(client, tenantId, entityType, mergeDef(b), {
         operator: auth.username,
-        reason: 'import',
+        note: b.note ?? '导入外部文件',
       });
     });
-    return res.json({ ok: true, code: 0, entityType, imported: true, version: 'incremented' });
+    return res.json({
+      ok: true,
+      code: 0,
+      entityType,
+      imported: true,
+      draft: true,
+      version: 'draft-pending-approval',
+    });
   } catch (e) {
     next(e);
   }
