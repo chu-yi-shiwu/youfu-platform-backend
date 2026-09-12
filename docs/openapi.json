@@ -4,7 +4,7 @@
     "title": "优服家 API",
     "version": "0.0.0-generated",
     "description": "多租户物业 SaaS 后端开放规范（M-3 交付）。\n\n**口径**：本文件由 `tools/generate_openapi.mjs` 自动扫描 `src/server.ts` 挂载表与 `src/routes/*.ts`、`src/webhook/routes.ts` 路由声明生成（generated，非手写）。\n\n**诚实边界**：summary/description 取自路由上方中文注释（启发式）；请求/响应 schema 为宽松骨架，字段一律以服务端实现为准，不编造字段。\n\n**鉴权**：租户/管理端 JWT Bearer；开放 API 走 X-App-Key + X-App-Secret（openApiAuth）；公开端点见各操作 security: []。",
-    "x-generated-at": "2026-09-12T17:08:15.188Z",
+    "x-generated-at": "2026-09-12T23:01:31.038Z",
     "x-generator": "tools/generate_openapi.mjs",
     "x-source": "src/server.ts + src/routes/*.ts + src/webhook/routes.ts（代码扫描口径）"
   },
@@ -6893,7 +6893,7 @@
           "volunteer"
         ],
         "summary": "设计口径锁定（修复批次 X-8 审计后声明，防后人误补墙打崩 worker 报名页）：",
-        "description": "GET /activities **有意不挂权限墙**——登录即可读（G1 设计=全角色可报名，volunteerPerm.http.test.ts\n用例「⑤ GET /activities 保持仅登录 → 200」已锚定）。mp worker 报名页（volunteer.js）与\nprofile/workbench 志愿入口依赖此端点，worker 默认矩阵无 volunteer.view，挂墙即 403 断报名。\n管理面（GET stats/people/records + 全部写操作）由 volunteer.view / volunteer.manage /\nvolunteer.audit 三权限点管控（本文件其余路由）。\n\n来源：src/routes/volunteer.ts:44\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "GET /activities **有意不挂权限墙**——登录即可读（G1 设计=全角色可报名，volunteerPerm.http.test.ts\n用例「⑤ GET /activities 保持仅登录 → 200」已锚定）。mp worker 报名页（volunteer.js）与\nprofile/workbench 志愿入口依赖此端点，worker 默认矩阵无 volunteer.view，挂墙即 403 断报名。\n管理面（GET stats/people/records + 全部写操作）由 volunteer.view / volunteer.manage /\nvolunteer.audit 三权限点管控（本文件其余路由）。\n\n来源：src/routes/volunteer.ts:48\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -6919,7 +6919,7 @@
           "volunteer"
         ],
         "summary": "POST /api/v1/volunteer/activities",
-        "description": "来源：src/routes/volunteer.ts:64\n\n服务端响应状态码（代码扫描）：201\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/volunteer.ts:69\n\n服务端响应状态码（代码扫描）：201\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -6959,7 +6959,7 @@
           "volunteer"
         ],
         "summary": "P1：活动关闭/重开端点（审查报告 20260908 P1 项）。status 仅 open|closed 双态；",
-        "description": "关闭后 signup 端点既有守卫（status!=='open' → 409\"活动已关闭\"）自然生效，无需重复校验。\n幂等：对同值重放直接 UPDATE 成功（不 409，管理端按钮可重复点）。\n\n来源：src/routes/volunteer.ts:91\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "关闭后 signup 端点既有守卫（status!=='open' → 409\"活动已关闭\"）自然生效，无需重复校验。\n幂等：对同值重放直接 UPDATE 成功（不 409，管理端按钮可重复点）。\n\n来源：src/routes/volunteer.ts:100\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -7010,7 +7010,7 @@
           "volunteer"
         ],
         "summary": "GET /api/v1/volunteer/activities/{id}/records",
-        "description": "来源：src/routes/volunteer.ts:118\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/volunteer.ts:127\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -7049,7 +7049,7 @@
           "volunteer"
         ],
         "summary": "报名（普通用户即可，仅登录；V1 新增去重守卫）",
-        "description": "来源：src/routes/volunteer.ts:139\n\n服务端响应状态码（代码扫描）：201\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/volunteer.ts:148\n\n服务端响应状态码（代码扫描）：201\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -7100,7 +7100,7 @@
           "volunteer"
         ],
         "summary": "POST /api/v1/volunteer/records/{id}/checkin",
-        "description": "来源：src/routes/volunteer.ts:197\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/volunteer.ts:206\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -7151,7 +7151,7 @@
           "volunteer"
         ],
         "summary": "POST /api/v1/volunteer/records/{id}/checkout",
-        "description": "来源：src/routes/volunteer.ts:245\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/volunteer.ts:254\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -7202,7 +7202,7 @@
           "volunteer"
         ],
         "summary": "POST /api/v1/volunteer/records/{id}/approve",
-        "description": "来源：src/routes/volunteer.ts:274\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/volunteer.ts:283\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -7253,7 +7253,7 @@
           "volunteer"
         ],
         "summary": "P1：志愿者人员档案维度（审查报告 P2 项提级）。只读聚合：按 user_name 归并全部报名记录，",
-        "description": "产出报名数/审批数/累计时长/累计积分/最近动态——人员级视图，activity 级明细不动、零 DDL。\nV1：守卫迁移 → volunteer.view（闭包内）。\n\n来源：src/routes/volunteer.ts:305\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "产出报名数/审批数/累计时长/累计积分/最近动态——人员级视图，activity 级明细不动、零 DDL。\nV1：守卫迁移 → volunteer.view（闭包内）。\n\n来源：src/routes/volunteer.ts:314\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -7281,7 +7281,7 @@
           "volunteer"
         ],
         "summary": "GET /api/v1/volunteer/stats",
-        "description": "来源：src/routes/volunteer.ts:330\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/volunteer.ts:339\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -11179,7 +11179,7 @@
           "workflowDef"
         ],
         "summary": "导出当前 def（带版本与导出时间，供备份/迁移）。",
-        "description": "来源：src/routes/workflowDef.ts:494\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/workflowDef.ts:502\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -11230,7 +11230,7 @@
           "workflowDef"
         ],
         "summary": "导入 def：改产草稿——外部文件风险最高，最需要人把关（来源标记 G5）。",
-        "description": "来源：src/routes/workflowDef.ts:511\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/workflowDef.ts:519\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
