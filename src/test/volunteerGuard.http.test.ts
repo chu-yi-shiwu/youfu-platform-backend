@@ -384,3 +384,47 @@ describe('E-6 P3-3：slots 下界负例', () => {
     expect(details.some((d) => d.path === 'slots')).toBe(true);
   });
 });
+
+// E-6 批次（20260913）V2-D：083 三新列（user_id/signup_deadline/description）写入/读出/契约。
+describe('E-6 V2-D：083 三新列', () => {
+  it('V2-D① 083 新列写入：POST 带三新列 → 201，INSERT SQL 契约含 user_id/signup_deadline/description', async () => {
+    h.scripted = [
+      { match: /INSERT INTO volunteer_activity/, rows: [{ id: 'act-v2d', status: 'open' }] },
+    ];
+    const r = await post('/volunteer/activities', {
+      title: 'V2-D 活动',
+      user_id: '21fecdc5-fb1c-4457-804a-2575ab3eef12',
+      signup_deadline: '2026-09-20T00:00:00Z',
+      description: '活动描述长文案',
+    });
+    expect(r.status).toBe(201);
+    const ins = h.calls.find((c) => c.sql.includes('INSERT INTO volunteer_activity'));
+    expect(ins).toBeDefined();
+    expect(ins!.sql).toMatch(/user_id, signup_deadline, description/);
+    // 参数契约：$8=user_id $9=signup_deadline $10=description（顺序锁定防串位）
+    expect(ins!.params![7]).toBe('21fecdc5-fb1c-4457-804a-2575ab3eef12');
+    expect(ins!.params![8]).toBe('2026-09-20T00:00:00Z');
+    expect(ins!.params![9]).toBe('活动描述长文案');
+  });
+
+  it('V2-D② signup_deadline ≥ end_at 同给 → 422 INVALID_RANGE（报名截止不得晚于活动结束）', async () => {
+    const r = await post('/volunteer/activities', {
+      title: '截止晚于结束',
+      signup_deadline: '2026-09-21T00:00:00Z',
+      end_at: '2026-09-20T00:00:00Z',
+    });
+    expect(r.status).toBe(422);
+    expect(r.body.code).toBe('INVALID_RANGE');
+    expect(r.body.message).toBe('报名截止时间必须早于活动结束时间');
+    // 校验在入库前：不得产生 INSERT
+    expect(h.calls.find((c) => c.sql.includes('INSERT INTO volunteer_activity'))).toBeUndefined();
+  });
+
+  it('V2-D③ 083 新列读出：GET /activities SELECT 显式含三新列（list 读路径透出）', async () => {
+    const r = await fetch(`${base}/volunteer/activities`);
+    expect(r.status).toBe(200);
+    const sel = h.calls.find((c) => c.sql.includes('FROM volunteer_activity a'));
+    expect(sel).toBeDefined();
+    expect(sel!.sql).toMatch(/a\.user_id, a\.signup_deadline, a\.description/);
+  });
+});

@@ -25,6 +25,10 @@ const activitySchema = z.object({
   start_at: z.string().optional(),
   end_at: z.string().optional(),
   slots: z.number().int().min(0).default(0),
+  // E-6/V2-D（083 迁移）：三新列透出。signup_deadline 可选，若与 end_at 同给必须早于 end_at（路由内校验）。
+  user_id: z.string().optional(),
+  signup_deadline: z.string().optional(),
+  description: z.string().optional(),
 });
 
 // V2-UX D8（20260912）：服务端时间区间兜底校验——API 直调可绕过 mp/FE 前端校验，
@@ -49,6 +53,7 @@ router.get('/activities', async (req, res, next) => {
       client
         .query(
           `SELECT a.id, a.title, a.batch, a.location, a.start_at, a.end_at, a.slots, a.status, a.created_at,
+                  a.user_id, a.signup_deadline, a.description,
                   (SELECT COUNT(*)::int FROM volunteer_record vr WHERE vr.tenant_id = a.tenant_id AND vr.activity_id = a.id) AS signup_count
            FROM volunteer_activity a WHERE a.tenant_id = $1 ORDER BY a.created_at DESC`,
           [tenantId],
@@ -67,13 +72,17 @@ router.post('/activities', async (req, res, next) => {
     const b = activitySchema.parse(req.body);
     // V2-UX D8：parse 后、入库前兜底（行为等价 zod refine）
     assertValidRange(b.start_at, b.end_at);
+    // E-6/V2-D：signup_deadline 业务校验——与 end_at 同给时必须早于 end_at（报名截止不能晚于活动结束）
+    if (b.signup_deadline && b.end_at && new Date(b.signup_deadline) >= new Date(b.end_at)) {
+      throw new AppError('INVALID_RANGE', '报名截止时间必须早于活动结束时间', 422);
+    }
     const item = await withTenantClient(tenantId, async (client) => {
       // V1 守卫迁移：requirePermission 需查 role_permission 表（async），必须用闭包内 client。
       await requirePermission(res.locals.auth, client, 'volunteer.manage');
       const r = await client.query(
-        `INSERT INTO volunteer_activity (tenant_id, title, batch, location, start_at, end_at, slots, status)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,'open') RETURNING *`,
-        [tenantId, b.title, b.batch ?? null, b.location ?? null, b.start_at ?? null, b.end_at ?? null, b.slots],
+        `INSERT INTO volunteer_activity (tenant_id, title, batch, location, start_at, end_at, slots, status, user_id, signup_deadline, description)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,'open',$8,$9,$10) RETURNING *`,
+        [tenantId, b.title, b.batch ?? null, b.location ?? null, b.start_at ?? null, b.end_at ?? null, b.slots, b.user_id ?? null, b.signup_deadline ?? null, b.description ?? null],
       );
       const row = r.rows[0];
       await emitDomainEvent(client, { tenantId, entityType: 'volunteer_activity', entityId: row.id, type: 'create', actor: 'config_role' });
