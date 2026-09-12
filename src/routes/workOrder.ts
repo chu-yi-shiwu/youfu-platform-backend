@@ -791,10 +791,19 @@ router.patch('/open/work_order/:id/ext', async (req, res, next) => {
 });
 
 // GET /api/v1/stats —— P6 自动派单率/自动闭环率口径（诚实，不编造演示数据）
+// 权限墙（修复批次 X-8）：挂 dashboard.view——默认矩阵 admin/operator/dispatcher/reviewer/
+// service_desk 均含该权限点，worker 不含（403）。调用方核实：FE Dashboard.tsx:216 /
+// DataScreen.tsx:144 / Statistics.tsx:55（MainLayout.tsx:109,125-126 三页菜单本就按
+// dashboard.view 过滤，挂墙与 FE 既有口径完全对齐）+ mp overview.js:33 / report.js:45
+// 两个 admin 页。worker/未登录端点层零调用 → 挂墙零回归。
 router.get('/stats', async (req, res, next) => {
   try {
     const tenantId = res.locals.auth.tenantId;
-    const stats = await withTenantClient(tenantId, (client) => ticketStats(client, tenantId));
+    const stats = await withTenantClient(tenantId, async (client) => {
+      // 与 :814 asset.scan 同款范式：requirePermission 在 withTenantClient 内调用（租户级覆盖生效）
+      await requirePermission(res.locals.auth, client, 'dashboard.view');
+      return ticketStats(client, tenantId);
+    });
     return res.json({ ok: true, code: 0, ...stats });
   } catch (e) {
     next(e);

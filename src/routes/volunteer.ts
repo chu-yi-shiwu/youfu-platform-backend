@@ -35,6 +35,12 @@ function assertValidRange(startAt?: string, endAt?: string): void {
   }
 }
 
+// 设计口径锁定（修复批次 X-8 审计后声明，防后人误补墙打崩 worker 报名页）：
+// GET /activities **有意不挂权限墙**——登录即可读（G1 设计=全角色可报名，volunteerPerm.http.test.ts
+// 用例「⑤ GET /activities 保持仅登录 → 200」已锚定）。mp worker 报名页（volunteer.js）与
+// profile/workbench 志愿入口依赖此端点，worker 默认矩阵无 volunteer.view，挂墙即 403 断报名。
+// 管理面（GET stats/people/records + 全部写操作）由 volunteer.view / volunteer.manage /
+// volunteer.audit 三权限点管控（本文件其余路由）。
 router.get('/activities', async (req, res, next) => {
   try {
     const tenantId = res.locals.auth.tenantId;

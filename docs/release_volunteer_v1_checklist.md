@@ -17,6 +17,8 @@
 
 ```sql
 -- 1.1 核查 serving 死状态存量（预期 0——全系统无任何 API 可置入该状态）
+-- ⚠️ 必须以表 owner / 超户(postgres)连接执行：volunteer_record 启用 RLS，
+--    若以 youfu_app 连接且未 SET app.tenant_id，本查询恒返回 0 → 假"干净"结论。
 SELECT count(*) FROM volunteer_record WHERE status = 'serving';
 ```
 
