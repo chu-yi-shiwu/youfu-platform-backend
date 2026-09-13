@@ -29,6 +29,8 @@ export interface AcceptanceInput {
   media?: string[];
   actor?: string;
   role?: string;
+  /** JWT sub（account_user.id）——SELF_ACCEPT 守卫用（E-8 BUG-003）。可缺省（缺省=不启用守卫）。 */
+  userId?: string;
 }
 
 export interface AcceptanceOutcome {
@@ -64,8 +66,40 @@ export function assertAcceptanceBackdoorGuard(event: string | undefined | null):
 }
 
 /**
+ * SELF_ACCEPT 守卫（E-8 BUG-003，纯查询判定）：处理工人不得验收本人名下工单。
+ * 口径：验收边 allowedRoles（admin/operator/reviewer）之外，再补「利益冲突」维度——
+ *   调用方若存在 worker 档案且档案 id == 该单 assignee_id（本人就是本单处理工人）→ 403。
+ *   admin/operator/reviewer 若同时挂了该单处理工人档案，同样拦截（自验自收同属利益冲突）。
+ * 降级纪律（与 workOrder.resolveWorkerId 同源）：
+ *   - 无 assignee_id（未派单/抢单大厅来源）→ 不拦截；
+ *   - 调用方无 userId 或查无 worker 档案 → 降级放行（不可因脏数据阻断验收）；
+ *   - worker 档案双路匹配 (account_id=$1 OR id=$1)，与 resolveWorkerId 口径一致（存量脏数据兼容）。
+ */
+export async function assertNotSelfAcceptance(
+  client: PoolClient,
+  tenantId: string,
+  assigneeId: string | null | undefined,
+  userId: string | undefined,
+): Promise<void> {
+  if (!assigneeId || !userId) return;
+  const wr = await client.query<{ id: string }>(
+    'SELECT id FROM worker WHERE tenant_id=$2 AND (account_id=$1 OR id=$1) LIMIT 2',
+    [userId, tenantId],
+  );
+  const myWorkerId: string | undefined = wr.rows[0]?.id;
+  if (myWorkerId && myWorkerId === assigneeId) {
+    throw new AppError(
+      'FORBIDDEN',
+      '处理工人不能验收本人名下工单（自验收禁令），请由管理员/验收人操作',
+      403,
+    );
+  }
+}
+
+/**
  * 验收主流程（单事务，调用方持 withTenantClient 的 client）：
  * ① 行锁查工单，校验存在 + status='completed'（否则 404/409）；
+ * ①b SELF_ACCEPT 守卫：处理工人验收本人名下工单 → 403（E-8 BUG-003）；
  * ② 落 work_acceptance 完工凭证；
  * ③ transition 到目标态，事件钉死为 acceptance_pass / acceptance_reject（eventOverride）；
  * ④ reject 联动：清草稿结算明细（含清空后删草稿单）；
@@ -78,8 +112,9 @@ export async function applyAcceptance(
   input: AcceptanceInput,
 ): Promise<AcceptanceOutcome> {
   // ① 行锁读工单（与 transition() 同款 FOR UPDATE，杜绝并发双验收）
+  // E-8 BUG-003：补 assignee_id 列——SELF_ACCEPT 守卫需比对处理工人归属。
   const cur = await client.query(
-    'SELECT id, status, order_no, sla_minutes FROM work_orders WHERE id = $1 AND tenant_id = $2 FOR UPDATE',
+    'SELECT id, status, order_no, sla_minutes, assignee_id FROM work_orders WHERE id = $1 AND tenant_id = $2 FOR UPDATE',
     [workOrderId, tenantId],
   );
   if (cur.rows.length === 0) {
@@ -88,6 +123,8 @@ export async function applyAcceptance(
   if (cur.rows[0].status !== 'completed') {
     throw new AppError('CONFLICT', `work order not completed (status=${cur.rows[0].status})，仅已完成工单可验收`, 409);
   }
+  // ①b SELF_ACCEPT 守卫（E-8 BUG-003）：处理工人不得验收本人名下工单 → 403。
+  await assertNotSelfAcceptance(client, tenantId, cur.rows[0].assignee_id, input.userId);
   // ①b 老租户自救（QA🔴①连带）：def 缺验收边时给可操作 409，而非 422 illegal transition。
   // 角色门禁不在此处判定——由 transition() 边的 allowedRoles 统一把关（架构🔴2 单一事实源）。
   const def = await getWorkflowDef(client, tenantId, 'work_order');

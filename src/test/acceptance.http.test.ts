@@ -67,6 +67,10 @@ interface AccHandlersOpts {
   /** DELETE settlement s ... RETURNING s.id 的返回行（被整单清空后删掉单头的 settlement_id） */
   emptiedSettlementIds?: string[];
   slaMinutes?: number | null;
+  /** E-8 BUG-003：工单 assignee_id（有值时 SELF_ACCEPT 守卫会反查 worker 档案） */
+  assigneeId?: string | null;
+  /** E-8 BUG-003：调用方 worker 档案反查结果（undefined=查无档案→降级放行） */
+  workerProfileId?: string | null;
 }
 
 function acceptanceHandlers(opts: AccHandlersOpts = {}): Handler[] {
@@ -75,11 +79,16 @@ function acceptanceHandlers(opts: AccHandlersOpts = {}): Handler[] {
   const removed = opts.removedSettlementIds ?? ['st-1'];
   const emptied = opts.emptiedSettlementIds ?? [];
   const slaMinutes = opts.slaMinutes === undefined ? 60 : opts.slaMinutes;
-  return [
-    // ① applyAcceptance 行锁读工单（带 sla_minutes，与 transition 的 SELECT * 区分开）
+  const handlers: Handler[] = [
+    // ① applyAcceptance 行锁读工单（带 sla_minutes / assignee_id，与 transition 的 SELECT * 区分开）
     {
       match: (t) => t.includes('FROM work_orders') && t.includes('FOR UPDATE') && t.includes('sla_minutes'),
-      reply: () => ({ rows: [{ id: WO, status, order_no: 'WO_1', sla_minutes: slaMinutes }] }),
+      reply: () => ({ rows: [{ id: WO, status, order_no: 'WO_1', sla_minutes: slaMinutes, assignee_id: opts.assigneeId ?? null }] }),
+    },
+    // ①b SELF_ACCEPT 守卫：worker 档案反查（E-8 BUG-003；仅 assignee_id 有值时触发）
+    {
+      match: (t) => t.includes('FROM worker WHERE'),
+      reply: () => ({ rows: opts.workerProfileId === undefined ? [] : [{ id: opts.workerProfileId }] }),
     },
     // transition → findOneForUpdate
     {
@@ -115,6 +124,7 @@ function acceptanceHandlers(opts: AccHandlersOpts = {}): Handler[] {
     { match: (t) => t.includes('sla_due_at = NULL'), reply: () => ({ rows: [], rowCount: 1 }) },
     { match: (t) => t.includes("sla_due_at = now() + ($3::int * interval '1 minute')"), reply: () => ({ rows: [], rowCount: 1 }) },
   ];
+  return handlers;
 }
 
 // ---- 真实 express + 真 HTTP ----
@@ -206,6 +216,42 @@ describe('① 验收角色门禁（prod 模式 · 由 workflow_def 边的 allowe
     expect((await accept({ result: 'reject' }, { role: 'worker' })).status).toBe(403);
     h.client = makeClient(acceptanceHandlers(), { strict: true }).client;
     expect((await accept({ result: 'reject' }, { role: 'reviewer' })).status).toBe(200);
+  });
+});
+
+describe('①b SELF_ACCEPT 守卫（E-8 BUG-003：处理工人不得验收本人名下工单）', () => {
+  it('调用方 worker 档案 == assignee_id → 403（即使角色在 allowedRoles 内）', async () => {
+    h.client = makeClient(acceptanceHandlers({ assigneeId: 'wk-1', workerProfileId: 'wk-1' }), { strict: true }).client;
+    const r = await accept({ result: 'pass' });
+    expect(r.status, `期望 403，实际 ${r.status} ${JSON.stringify(r.body)}`).toBe(403);
+    expect(r.body.ok).toBe(false);
+    expect(String(r.body.message)).toContain('自验收');
+  });
+
+  it('worker 档案 != assignee_id → 200（他人验收正常放行）', async () => {
+    h.client = makeClient(acceptanceHandlers({ assigneeId: 'wk-1', workerProfileId: 'wk-2' }), { strict: true }).client;
+    const r = await accept({ result: 'pass' });
+    expect(r.status, `期望 200，实际 ${r.status} ${JSON.stringify(r.body)}`).toBe(200);
+    expect(r.body.status).toBe('closed');
+  });
+
+  it('工单未派单（assignee_id 为空）→ 不拦截 → 200', async () => {
+    h.client = makeClient(acceptanceHandlers({ assigneeId: null, workerProfileId: 'wk-1' }), { strict: true }).client;
+    const r = await accept({ result: 'pass' });
+    expect(r.status).toBe(200);
+  });
+
+  it('调用方查无 worker 档案 → 降级放行 → 200（脏数据不阻断验收）', async () => {
+    h.client = makeClient(acceptanceHandlers({ assigneeId: 'wk-1', workerProfileId: undefined }), { strict: true }).client;
+    const r = await accept({ result: 'pass' });
+    expect(r.status).toBe(200);
+  });
+
+  it('SELF_ACCEPT 403 必须发生在落凭证之前（不得写 work_acceptance）', async () => {
+    const mk = makeClient(acceptanceHandlers({ assigneeId: 'wk-1', workerProfileId: 'wk-1' }), { strict: true });
+    h.client = mk.client;
+    await accept({ result: 'pass' });
+    expect(mk.calls.some((c) => c.text.includes('INSERT INTO work_acceptance'))).toBe(false);
   });
 });
 

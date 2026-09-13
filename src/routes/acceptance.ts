@@ -34,6 +34,8 @@ router.post('/open/work_order/:id/acceptance', async (req, res, next) => {
         media: body.media,
         actor: username ?? role ?? 'system',
         role,
+        // SELF_ACCEPT 守卫入参（E-8 BUG-003）：JWT sub = account_user.id
+        userId: res.locals.auth.userId,
       }),
     );
     return res.json({ ok: true, code: 0, acceptance_id: outcome.acceptanceId, status: outcome.status });
