@@ -32,3 +32,12 @@ vitest.config.ts.timestamp-*.mjs
 .tmp-upload-http-test-*/
 refs/
 _reports/
+
+# --- E-9 卫生（20260914）：部署镜像包/仓备份目录挡在版控外 ---
+# 背景：be_src_e8.tar.gz / e8_src.tar.gz 这类源码镜像包反复出现在工作区，
+# 并在 06df23b 之前被误 staged 进索引（QA-3 报告卫生问题）。此处一次性封口。
+*.tar.gz
+*.tgz
+src.bak*/
+.git.bak*/
+*.old.bak*/

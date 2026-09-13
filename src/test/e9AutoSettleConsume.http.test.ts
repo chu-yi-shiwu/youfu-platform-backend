@@ -38,6 +38,10 @@ import {
   confirmSettlement,
 } from '../repo/settlement.js';
 import { parseArgs, assertStatuses, backfillTenant, BACKFILL_OPERATOR } from '../../scripts/backfill_settlements.js';
+// E-9 P1-3 修复：⑭ 权限收口用例要断言 POST /assets、/assets/import 也 403，故必须把 assetRouter
+// 一并挂到该测试的 app 上——此前只挂 materialRouter，asset 端点根本不在路由表（就算写了也是
+// 404 "not found" 而非 403，属于"标题说谎"的根因之一）。挂载方式与 src/server.ts:189 一致（直挂 /api/v1）。
+import assetRouter from '../routes/asset.js';
 import { DEFAULT_PERM_MATRIX, PERMS } from '../middleware/role.js';
 
 const T = 't-e9';
@@ -176,6 +180,7 @@ beforeAll(async () => {
     next();
   });
   app.use('/api/v1', materialRouter);
+  app.use('/api/v1', assetRouter); // E-9 P1-3：⑭ 需要真路由表才能断言 asset 写端点 403
   app.use((_req, res) => res.status(404).json({ ok: false, code: 'NOT_FOUND', message: 'not found' }));
   app.use(errorMiddleware);
   server = app.listen(0, '127.0.0.1');
@@ -816,17 +821,33 @@ describe('⑭ 权限收口：material.manage / asset.manage 仅 admin（含覆�
     expect(r2.status, JSON.stringify(r2.body)).toBe(201);
   });
 
-  it('operator PUT/DELETE /materials、POST /inventory/in、/inventory/out、POST /assets、/assets/import 全 403（写归口 manage）', async () => {
+  // E-9 P1-3 修复（标题与 cases 一一对应）：原标题宣称 asset 两项也 403，但 cases 里根本没有这两项
+  // （assetRouter 未挂载，写了也只会 404），属"标题说谎"。现补齐 6 项并逐项断言
+  // **403 + code=FORBIDDEN + message 含归属权限点**（requirePermission 抛 `permission denied: <perm>`），
+  // 覆盖「写归口 manage」在两个路由模块上的完整边界：material.manage / asset.manage。
+  //
+  // 前置校验说明（为什么这两个 body 不能是空对象——空了就测不到 403）：
+  //   · POST /assets：`assetSchema.parse(req.body)` 在 requirePermission **之前**执行，
+  //     缺 name 会先抛 422（zod）→ 必须给合法最小体 `{ name }` 才能走到权限门。
+  //   · POST /assets/import：`csv` 缺失先抛 400；且 `rows.length < 2` 会在权限门**之前**
+  //     直接 200 { inserted: 0 } → 必须给「表头+至少 1 数据行」的两行 CSV 才能走到权限门。
+  //   两者都不是 403 之外的旁路，是真实代码顺序；此处如实标注，避免后人误读成"测试凑数"。
+  it('operator PUT/DELETE /materials、POST /inventory/in、POST /inventory/out、POST /assets、POST /assets/import 全 403 FORBIDDEN（写归口 manage）', async () => {
     h.client = makeClient([...BASE], { strict: true }).client;
-    const cases: Array<[string, 'POST' | 'PUT' | 'DELETE', string, unknown]> = [
-      ['PUT', 'PUT', '/materials/m-1', { name: 'x' }],
-      ['DELETE', 'DELETE', '/materials/m-1', undefined],
-      ['POST/in', 'POST', '/inventory/in', { material_id: MID1, qty: 1 }],
-      ['POST/out', 'POST', '/inventory/out', { material_id: MID1, qty: 1 }],
+    // [标签, 方法, 路径, body, 归属权限点]——标签 = 方法+路径，与标题逐项对应
+    const cases: Array<[string, 'POST' | 'PUT' | 'DELETE', string, unknown, string]> = [
+      ['PUT /materials/m-1', 'PUT', '/materials/m-1', { name: 'x' }, 'material.manage'],
+      ['DELETE /materials/m-1', 'DELETE', '/materials/m-1', undefined, 'material.manage'],
+      ['POST /inventory/in', 'POST', '/inventory/in', { material_id: MID1, qty: 1 }, 'material.manage'],
+      ['POST /inventory/out', 'POST', '/inventory/out', { material_id: MID1, qty: 1 }, 'material.manage'],
+      ['POST /assets', 'POST', '/assets', { name: '测试资产' }, 'asset.manage'],
+      ['POST /assets/import', 'POST', '/assets/import', { csv: 'name,model\n空调1,KF-1\n' }, 'asset.manage'],
     ];
-    for (const [label, method, path, body] of cases) {
+    for (const [label, method, path, body, perm] of cases) {
       const r = await call(method, path, { role: 'operator', body });
       expect(r.status, `${label} 期望 403，实际 ${r.status} ${JSON.stringify(r.body)}`).toBe(403);
+      expect(r.body.code, `${label} 期望 code=FORBIDDEN，实际 ${JSON.stringify(r.body)}`).toBe('FORBIDDEN');
+      expect(String(r.body.message), `${label} 期望 message 含归属权限点 ${perm}`).toContain(perm);
     }
   });
 
