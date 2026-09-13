@@ -738,6 +738,31 @@ describe('⑬ 类型修复回归：inventory_log.work_order_id uuid → text（0
     expect(sql084).toMatch(/ADD COLUMN IF NOT EXISTS source text NOT NULL DEFAULT 'service'/);
   });
 
+  it('DB 行为层：service 行撞约束抛 23505 → createSettlementDraft 转 409 CONFLICT（防重兜底真实触发，不静默吞掉）', async () => {
+    // 场景：入口预检与建单之间出现并发写入（预检时该工单尚无明细，服务行 INSERT 时约束已存在）
+    //   → PG 对 uq_settlement_item_tenant_wo_source 抛 23505 → 必须转成与 conflicts 同口径的 409，
+    //   绝不能落 500 / 静默成功。mock 按真 PG 错误形态（code + constraint 字段）抛出。
+    const pgUniqueViolation = Object.assign(
+      new Error('duplicate key value violates unique constraint "uq_settlement_item_tenant_wo_source"'),
+      { code: '23505', constraint: 'uq_settlement_item_tenant_wo_source' },
+    );
+    // 只拦服务行 INSERT（含 category_code / 不含 'material'），其余 SQL 走正常 handler
+    const svcInsertThrows: Handler = {
+      match: (t) => t.includes('INSERT INTO settlement_item') && t.includes('category_code'),
+      reply: () => {
+        throw pgUniqueViolation;
+      },
+    };
+    const mk = makeClient([svcInsertThrows, ...settleHandlers()], { strict: true });
+    await expect(createSettlementDraft(mk.client, T, [WO], 'admin')).rejects.toMatchObject({
+      code: 'CONFLICT',
+      status: 409,
+      message: '工单已被其他结算单占用（并发冲突），请刷新后重试',
+    });
+    // 结构证据：确实执行到了服务行 INSERT（约束位），错误由 catch(23505) 转译——不是被预检短路
+    expect(mk.calls.some((c) => c.text.includes('INSERT INTO settlement_item'))).toBe(true);
+  });
+
   it('非 uuid 形态业务号走 /inventory/out → 200，流水 work_order_id 收下业务号（不再 22P02→500）', async () => {
     const mk = makeClient([
       ...BASE,
