@@ -128,13 +128,19 @@ const READ_HANDLERS: Handler[] = [
 ];
 
 describe('settlement.read（prod 模式 · 真 HTTP 状态码）', () => {
-  it('admin / operator → 200（默认矩阵含 settlement.read）', async () => {
+  it('admin → 200（全量权限点）', async () => {
     h.client = makeClient(READ_HANDLERS, { strict: true }).client;
     const a = await call('GET', '/settlements', { role: 'admin' });
     expect(a.status).toBe(200);
     expect(a.body.ok).toBe(true);
+  });
+
+  it('operator → 403（E-8 BUG-009 收紧：operator 默认矩阵已移除 settlement.read）', async () => {
+    h.client = makeClient(READ_HANDLERS, { strict: true }).client;
     const o = await call('GET', '/settlements', { role: 'operator' });
-    expect(o.status).toBe(200);
+    expect(o.status, `期望 403，实际 ${o.status} ${JSON.stringify(o.body)}`).toBe(403);
+    expect(o.body.ok).toBe(false);
+    expect(String(o.body.message)).toContain('settlement.read');
   });
 
   it('worker / reviewer / dispatcher / service_desk → 403（默认矩阵无结算权限点）', async () => {
@@ -203,7 +209,7 @@ describe('settlement.edit（prod 模式 · 真 HTTP 状态码）', () => {
     expect(r.body.ok).toBe(true);
   });
 
-  it('operator → 403（settlement.edit 仅 admin；operator 只有 read）', async () => {
+  it('operator → 403（settlement.edit 仅 admin；E-8 BUG-009 后 operator 亦无 read）', async () => {
     h.client = makeClient(draftHandlers(), { strict: true }).client;
     const r = await call('POST', '/settlements', { role: 'operator', body: { work_order_ids: ['WO_20260905_0001'] } });
     expect(r.status, `期望 403，实际 ${r.status} ${JSON.stringify(r.body)}`).toBe(403);

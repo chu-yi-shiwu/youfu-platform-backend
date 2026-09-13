@@ -47,13 +47,22 @@ export type Perm = (typeof PERMS)[number];
 // 新角色按最小权限给默认：reviewer 审核工单（看板+工单）；service_desk 接线派单（+派单覆盖）。
 // 批次三：settlement.read（列表/详情/导出）默认 admin/operator；settlement.edit 仅 admin；
 // 其余角色不给结算权限点（未覆盖存量租户随默认矩阵自动生效，批次二已实证该机制）。
+// E-8（BUG-009 收紧，2026-09-14）：外部测试反馈 operator 默认可读结算过宽 → operator 移除
+//   settlement.read（settlement.edit 本就仅 admin）。影响面：
+//   - 无 role_permission 覆盖行的租户：operator 立即失去结算列表/详情/导出（FE 菜单随 /auth/me
+//     permissions 收起，API 403）——行为变化即本次修复目的；
+//   - 有覆盖行的租户：以租户显式授权为准，不受默认矩阵变化影响（租户自治，不做强制清洗）；
+//   - 回滚方式：租户经角色管理授予 settlement.read，或代码还原本矩阵（无 DDL、无数据迁移）。
+//   084 迁移位经核实**无需 DDL**（默认矩阵为代码层事实，role_permission 表无种子行——046/070
+//   只建表/扩 CHECK，从不 INSERT 默认权限），故 084 保持预留不占用。
 // 流程审核一期：workflow.edit 维持现状不动（operator 默认矩阵本就不含，行为零变化）；
 // workflow.approve 仅 admin（经 admin 的 [...PERMS] 自动收录，勿在其它角色清单里手加）。
 export const DEFAULT_PERM_MATRIX: Record<Role, readonly Perm[]> = {
   admin: [...PERMS],
   // V1 批次（20260911）：operator 补 volunteer.view/manage/audit 三点（与既有现状等效——
   // 此前 operator 经 basicdata.edit 可写志愿者管理端点、菜单可见；其余角色不授，随默认矩阵 403）。
-  operator: ['dashboard.view', 'intake.create', 'ticket.manage', 'basicdata.edit', 'dispatch.override', 'inspect.execute', 'asset.scan', 'settlement.read', 'volunteer.view', 'volunteer.manage', 'volunteer.audit'],
+  // E-8（BUG-009）：移除 settlement.read（结算可见性收口 admin；operator 受理台日常不依赖结算页）。
+  operator: ['dashboard.view', 'intake.create', 'ticket.manage', 'basicdata.edit', 'dispatch.override', 'inspect.execute', 'asset.scan', 'volunteer.view', 'volunteer.manage', 'volunteer.audit'],
   dispatcher: ['dashboard.view', 'ticket.manage', 'dispatch.override', 'inspect.execute', 'asset.scan'],
   // worker + intake.create（#942 R15）：陪检登记（#6）等登录态录入复用建单引擎，
   // 入口在工人工作台对全员可见——录入（intake.create）≠ 管理（ticket.manage），

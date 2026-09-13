@@ -530,11 +530,12 @@ describe('权限矩阵（批次三新权限点）', () => {
     expect(PERMS).toContain('settlement.read');
     expect(PERMS).toContain('settlement.edit');
   });
-  it('admin 全量；operator 仅 read；其余角色无结算权限', () => {
+  it('admin 全量；operator/其余角色无结算权限（E-8 BUG-009 收紧：operator 移除 settlement.read）', () => {
     expect(DEFAULT_PERM_MATRIX.admin).toContain('settlement.edit');
-    expect(DEFAULT_PERM_MATRIX.operator).toContain('settlement.read');
+    expect(DEFAULT_PERM_MATRIX.admin).toContain('settlement.read');
+    expect(DEFAULT_PERM_MATRIX.operator).not.toContain('settlement.read');
     expect(DEFAULT_PERM_MATRIX.operator).not.toContain('settlement.edit');
-    for (const role of ['dispatcher', 'worker', 'reviewer', 'service_desk'] as const) {
+    for (const role of ['dispatcher', 'worker', 'reviewer', 'service_desk', 'operator'] as const) {
       expect(DEFAULT_PERM_MATRIX[role]).not.toContain('settlement.read');
       expect(DEFAULT_PERM_MATRIX[role]).not.toContain('settlement.edit');
     }
