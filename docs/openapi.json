@@ -6945,8 +6945,55 @@
             "application/json": {
               "schema": {
                 "type": "object",
-                "additionalProperties": true,
-                "description": "骨架占位：请求字段以服务端实现为准"
+                "description": "对齐 activitySchema（src/routes/volunteer.ts zod 定义，X-16 20260913 手工补齐；generate_openapi.mjs 重建会覆盖为骨架）。signup_deadline 与 end_at 同给时必须早于 end_at（否则 422 INVALID_RANGE）。",
+                "required": [
+                  "title"
+                ],
+                "properties": {
+                  "title": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "活动标题（必填）"
+                  },
+                  "batch": {
+                    "type": "string",
+                    "description": "活动批次（可选）"
+                  },
+                  "location": {
+                    "type": "string",
+                    "description": "活动地点（可选）"
+                  },
+                  "start_at": {
+                    "type": "string",
+                    "format": "date-time",
+                    "description": "开始时间（可选；end_at 同给时须早于 end_at，否则 422 INVALID_RANGE）"
+                  },
+                  "end_at": {
+                    "type": "string",
+                    "format": "date-time",
+                    "description": "结束时间（可选）"
+                  },
+                  "slots": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "default": 0,
+                    "description": "名额（可选，默认 0=不可报名；zod min(0) 下界）"
+                  },
+                  "user_id": {
+                    "type": "string",
+                    "description": "预留关联账号（083 迁移，可空，TEXT NULL）"
+                  },
+                  "signup_deadline": {
+                    "type": "string",
+                    "format": "date-time",
+                    "description": "报名截止（083 迁移，可空；须早于 end_at 若同给）"
+                  },
+                  "description": {
+                    "type": "string",
+                    "description": "活动描述（083 迁移，可空，TEXT NULL）"
+                  }
+                },
+                "additionalProperties": false
               }
             }
           }
