@@ -1039,6 +1039,8 @@ describe('⑮ §13 发现3：单工单多耗材重投影（旧三列唯一约束
   });
 
   it('085 幂等重跑（结构断言）：两条部分唯一索引 + 三列约束显式摘除 + 谓词无 now()', () => {
+    // root 必须在本 it 作用域内定义（此前借用上一 it 的局部 root → TS2304/运行时 ReferenceError）
+    const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
     const sql085 = readFileSync(join(root, '085_settlement_material_row_grain.sql'), 'utf8');
     expect(sql085).toMatch(/DROP CONSTRAINT IF EXISTS uq_settlement_item_tenant_wo_source/);
     expect(sql085).toMatch(
