@@ -193,6 +193,12 @@ function draftHandlers(opts?: { settled?: unknown[]; orderRows?: unknown[] }): H
       reply: (_t, p) => ({ rows: p[1] && (p[1] as string[]).includes('空调维修') ? [{ code: 'AC', name: '空调维修', price: '120.00' }] : [] }),
     },
     { match: (t) => t.includes('INSERT INTO settlement_item'), reply: () => ({ rows: [], rowCount: 1 }) },
+    // E-9：建草稿时追加耗材费行（source='material'）——本文件场景无工单消耗流水 → 聚合 0 行即短路
+    //（rowCount 必须为 0：appendMaterialCostItems 以此短路，rowCount 1 且 rows 空会被当作"有聚合"继续走下去）
+    {
+      match: (t) => t.includes('FROM inventory_log il') && t.includes('JOIN material m'),
+      reply: () => ({ rows: [], rowCount: 0 }),
+    },
     { match: (t) => t.includes('UPDATE settlement SET total'), reply: () => ({ rows: [], rowCount: 1 }) },
     {
       match: (t) => t.includes('SELECT * FROM settlement WHERE id'),

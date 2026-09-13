@@ -66,6 +66,10 @@ const PERM_LABELS: Record<Perm, string> = {
   'volunteer.view': '志愿者查看',
   'volunteer.manage': '志愿者管理',
   'volunteer.audit': '志愿者核销',
+  // E-9（20260914）：耗材/资产维护收口 + 工单耗材消耗三点（G6 单一事实源：新增 PERMS 必须同步登记）
+  'material.manage': '耗材维护',
+  'asset.manage': '资产维护',
+  'consumable.consume': '工单耗材领用',
 };
 
 // GET /api/v1/accounts/roles/perm-catalog —— G6：权限点全集 + 中文名（role.manage）。

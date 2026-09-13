@@ -216,11 +216,154 @@ export async function createSettlementDraft(
     `UPDATE settlement SET total = $1, item_count = $2, updated_at = now() WHERE id = $3 AND tenant_id = $4`,
     [total, itemCount, headerId, tenantId],
   );
+  // ⑤ E-9 耗材费联动（§2.3）：工单耗材消耗追加为 source='material' 明细行（防双计 + 有追加时 recalcHeader）。
+  //    自动结算（autoCreateSettlementForOrder）与人工建单（POST /settlements）**共用本函数**，口径唯一。
+  //    无耗材消耗时本调用只多一条聚合 SELECT 即返回（存量路径行为不变）。
+  await appendMaterialCostItems(client, tenantId, headerId, workOrderIds);
   const header = await client.query(
     'SELECT * FROM settlement WHERE id = $1 AND tenant_id = $2',
     [headerId, tenantId],
   );
   return { ok: true, settlement: header.rows[0] as SettlementRow };
+}
+
+/** 自动结算留痕用 operator（E-9）：写入 settlement.created_by，供 FE 显示「自动生成」标记。 */
+export const AUTO_SETTLEMENT_OPERATOR = 'auto:evaluated';
+
+export interface AutoSettleResult {
+  /** 本次是否真的新建了结算草稿 */
+  created: boolean;
+  /** 是否因「该工单已有结算明细」而幂等跳过（非错误） */
+  skipped: boolean;
+  /** 新建成功时的结算单 id */
+  settlementId: string | null;
+}
+
+/**
+ * 耗材费联动（E-9 §2.3）：把工单的耗材消耗追加为结算明细行（source='material'）。
+ *
+ * 数据来源：inventory_log WHERE work_order_id = ANY($) AND type='out' 按 (工单, 耗材) 聚合，
+ *   join material 取 code/name/price 快照；qty = 该工单该耗材累计消耗量，amount = price × qty。
+ * 防双计：该工单已存在 source='material' 明细 → 跳过（同事务预检；DB 侧 UNIQUE(tenant_id, work_order_id, source) 兜底）。
+ * 表头：有追加时用 recalcHeader 重算 total/item_count；**无追加则一条多余 SQL 都不写**（存量路径零回归）。
+ *
+ * 诚实边界：耗材单价取**当前** material.price（快照落行，物料改价不回写既有结算单，与设计 §9 口径一致）；
+ *   type='adjust'（盘盈亏）不计入消耗。
+ */
+export async function appendMaterialCostItems(
+  client: PoolClient,
+  tenantId: string,
+  settlementId: string,
+  workOrderIds: string[],
+): Promise<{ inserted: number; workOrderIds: string[] }> {
+  if (workOrderIds.length === 0) return { inserted: 0, workOrderIds: [] };
+
+  const agg = await client.query(
+    // work_order_id 列类型 084 起为 text（对齐 work_orders.id）——cast 明确写 ::text[]，防 uuid 误用回归
+    `SELECT il.work_order_id, il.material_id, SUM(il.qty)::numeric(12,2) AS qty,
+            m.code AS material_code, m.name AS material_name, m.price AS material_price
+     FROM inventory_log il
+     JOIN material m ON m.id = il.material_id AND m.tenant_id = il.tenant_id
+     WHERE il.tenant_id = $1 AND il.work_order_id = ANY($2::text[])
+       AND il.type = 'out' AND il.material_id IS NOT NULL
+     GROUP BY il.work_order_id, il.material_id, m.code, m.name, m.price
+     ORDER BY il.work_order_id, m.name`,
+    [tenantId, workOrderIds],
+  );
+  if (agg.rows.length === 0) return { inserted: 0, workOrderIds: [] };
+
+  // 防双计预检：已存在 source='material' 明细的工单不再追加
+  const dup = await client.query(
+    `SELECT DISTINCT work_order_id FROM settlement_item
+     WHERE tenant_id = $1 AND source = 'material' AND work_order_id = ANY($2::text[])`,
+    [tenantId, workOrderIds],
+  );
+  const dupSet = new Set<string>(dup.rows.map((r: { work_order_id: string }) => String(r.work_order_id)));
+
+  const woCol: string[] = [];
+  const matIdCol: Array<string | null> = [];
+  const matCodeCol: Array<string | null> = [];
+  const matNameCol: Array<string | null> = [];
+  const priceCol: number[] = [];
+  const qtyCol: number[] = [];
+  const amountCol: number[] = [];
+  const noteCol: string[] = [];
+  for (const r of agg.rows as Array<Record<string, unknown>>) {
+    const woId = String(r.work_order_id);
+    if (dupSet.has(woId)) continue;
+    const qty = Number(r.qty) || 0;
+    const price = Number(r.material_price) || 0;
+    if (qty <= 0) continue; // 聚合出 0/负数（理论上 out 行 qty 恒正）→ 不落空行
+    woCol.push(woId);
+    matIdCol.push(r.material_id ? String(r.material_id) : null);
+    matCodeCol.push(r.material_code ? String(r.material_code) : null);
+    matNameCol.push(r.material_name ? String(r.material_name) : null);
+    priceCol.push(price);
+    qtyCol.push(qty);
+    amountCol.push(Math.round(price * qty * 100) / 100);
+    noteCol.push('工单耗材');
+  }
+  if (woCol.length === 0) return { inserted: 0, workOrderIds: [] };
+
+  try {
+    await client.query(
+      `INSERT INTO settlement_item
+         (tenant_id, settlement_id, work_order_id, category_code, category_name, price, qty, amount, note, source, material_id)
+       SELECT $1, $2, t.wo_id, t.mat_code, t.mat_name, t.price, t.qty, t.amount, t.note, 'material', t.mat_id
+       FROM unnest($3::text[], $4::uuid[], $5::text[], $6::text[], $7::numeric[], $8::numeric[], $9::numeric[], $10::text[])
+            AS t(wo_id, mat_id, mat_code, mat_name, price, qty, amount, note)`,
+      [tenantId, settlementId, woCol, matIdCol, matCodeCol, matNameCol, priceCol, qtyCol, amountCol, noteCol],
+    );
+  } catch (e: any) {
+    if (e?.code === '23505') {
+      throw new AppError('CONFLICT', '工单耗材明细已存在（并发冲突），请刷新后重试', 409);
+    }
+    throw e;
+  }
+
+  await recalcHeader(client, tenantId, settlementId);
+  return { inserted: woCol.length, workOrderIds: Array.from(new Set(woCol)) };
+}
+
+/**
+ * 自动结算（E-9 §2.1 · BUG-004）：工单流转到 evaluated 时自动生成结算草稿。
+ *
+ * 幂等：入口预检该工单是否已有任何结算明细（**不看 source**）→ 有则跳过（skipped，非错误）。
+ * 复用：完全走 createSettlementDraft（存在性/状态/占用校验、FOR UPDATE、单号生成、价目预填、耗材联动全免费），
+ *       语义与人工 POST /settlements 逐字一致——差别仅 created_by 留痕 'auto:evaluated'。
+ * 初始态：draft（复用既有两态机，**不新增状态**）——「自动创建 ≠ 自动生效」，仍需 admin confirm。
+ * 事务语义：本函数**自身不开 SAVEPOINT**（由调用方 runAutoSettleStep 包裹）；抛错即冒泡给调用方，
+ *          由调用方 ROLLBACK TO SAVEPOINT 隔离，保证「结算故障不拖垮评价流转」。
+ */
+export async function autoCreateSettlementForOrder(
+  client: PoolClient,
+  tenantId: string,
+  workOrderId: string,
+  operator: string = AUTO_SETTLEMENT_OPERATOR,
+): Promise<AutoSettleResult> {
+  const dup = await client.query(
+    `SELECT 1 FROM settlement_item WHERE tenant_id = $1 AND work_order_id = $2 LIMIT 1`,
+    [tenantId, workOrderId],
+  );
+  if ((dup.rowCount ?? 0) > 0) return { created: false, skipped: true, settlementId: null };
+
+  const r = await createSettlementDraft(client, tenantId, [workOrderId], operator);
+  if (!r.ok) {
+    const conflicts = r.conflicts ?? [];
+    // already_settled：并发下可能刚被别的路径占用 → 与入口预检同口径，按幂等跳过
+    if (conflicts.length > 0 && conflicts.every((c) => c.reason === 'already_settled')) {
+      return { created: false, skipped: true, settlementId: null };
+    }
+    const first = conflicts[0];
+    const why =
+      first?.reason === 'not_found'
+        ? '工单不存在'
+        : first?.reason === 'bad_status'
+          ? `工单状态不可入账（${first.status ?? '-'}）`
+          : `冲突（${first?.reason ?? 'unknown'}）`;
+    throw new AppError('CONFLICT', `自动结算失败：${first?.order_no ?? workOrderId} ${why}`, 409);
+  }
+  return { created: true, skipped: false, settlementId: r.settlement?.id ?? null };
 }
 
 /** 改明细（价格/数量/备注）：仅 draft；重算 item.amount 与表头 total/item_count。 */

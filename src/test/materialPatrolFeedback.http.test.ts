@@ -12,6 +12,13 @@ import type { AddressInfo } from 'node:net';
 
 const TENANT = 't-demo';
 let authRole = 'operator';
+/**
+ * E-9：material.ts 写端点（目录增删改 / 手工出入库 / 批量导入）守卫由 requireConfigRole(admin+operator)
+ * 换成 requirePermission('material.manage')（默认仅 admin）。requirePermission 在 authMode:'dev' 下
+ * **短路径放行**（hasPerm 首行 return true），故本文件默认仍走 dev（覆盖正常路径与 SQL 序列），
+ * 只有「角色被拒」类断言显式切 'prod' 才走到真矩阵（照 settlement.http.test.ts 先例）。
+ */
+let authMode: 'dev' | 'prod' = 'dev';
 // material 夹具
 let matFound = true;
 let invExists = false;
@@ -93,7 +100,7 @@ import { errorMiddleware } from '../middleware/error.js';
 const app = express();
 app.use(express.json({ limit: '1mb' }));
 app.use((_req, res, next) => {
-  res.locals.auth = { tenantId: TENANT, role: authRole, userId: 'u-1', requestId: 'r-1', authMode: 'dev' };
+  res.locals.auth = { tenantId: TENANT, role: authRole, userId: 'u-1', requestId: 'r-1', authMode };
   next();
 });
 app.use('/api/v1', materialRouter);
@@ -114,6 +121,7 @@ afterAll(async () => {
 });
 beforeEach(() => {
   authRole = 'operator';
+  authMode = 'dev'; // 归位：②/⑧ 等会把 authMode 切 'prod'，不归位会让后续 dev 用例被权限点挡成 403
   matFound = true; invExists = false; logExists = false; deleteCount = 1; lockQty = 10; lockFound = true; woFound = false;
   pointExists = true; taskFound = true;
   taskRow = { id: 'pt-1', tenant_id: TENANT, title: '夜间巡更', status: 'pending', point_ids: ['p1', 'p2'], checkins: [] };
@@ -145,16 +153,31 @@ describe('material.ts · 材料档案 CRUD', () => {
     expect(sql2).toContain('category = $3');
   });
 
-  it('②POST /materials（operator）→ 201 默认 enabled=true/price=0；（worker）→ 403；缺 code → 422', async () => {
+  // E-9 语义变更（有意的 breaking）：material.ts 写端点守卫由 requireConfigRole(admin+operator)
+  // 换为 requirePermission('material.manage')（默认仅 admin）。本用例升级为 **prod 真矩阵**，
+  // 同时锚定三件事：admin 放行且默认值正确 / operator 被收口 403 / worker 403 / 缺 code 422。
+  it('②POST /materials（admin · prod）→ 201 默认 enabled=true/price=0；（operator/worker · prod）→ 403；缺 code → 422', async () => {
+    authMode = 'prod';
+    authRole = 'admin';
     const r = await req('POST', '/api/v1/materials', { code: 'M-002', name: '密封圈' });
     expect(r.status).toBe(201);
     const p = callParams(0);
     expect(p[0]).toBe(TENANT);
     expect(p[7]).toBe(true); // enabled 默认
     expect(p[6]).toBe(0); // price 默认
-    authRole = 'worker';
-    expect((await req('POST', '/api/v1/materials', { code: 'x', name: 'x' })).status).toBe(403);
+
+    // E-9 收口：operator 不再维护耗材目录（原 201 → 现 403）
     authRole = 'operator';
+    const rOp = await req('POST', '/api/v1/materials', { code: 'x', name: 'x' });
+    expect(rOp.status).toBe(403);
+    expect(String(((await rOp.json()) as any).message)).toContain('material.manage');
+
+    authRole = 'worker';
+    const rWk = await req('POST', '/api/v1/materials', { code: 'x', name: 'x' });
+    expect(rWk.status).toBe(403);
+
+    // 参数校验仍在权限之后（admin 才走到 zod）：缺 code → 422
+    authRole = 'admin';
     expect((await req('POST', '/api/v1/materials', { name: '缺编码' })).status).toBe(422);
   });
 

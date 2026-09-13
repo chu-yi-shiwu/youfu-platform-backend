@@ -31,6 +31,7 @@ import { safeParseJsonb } from '../util/jsonb.js';
 import { validateIntake } from '../services/dataQuality.js';
 import { buildRecommend } from '../services/dispatchRecommend.js';
 import { assertAcceptanceBackdoorGuard } from '../services/acceptance.js'; // 批次三 Y3 防后门守卫
+import { autoCreateSettlementForOrder, AUTO_SETTLEMENT_OPERATOR } from '../repo/settlement.js'; // E-9 自动结算（BUG-004）
 
 const router = Router();
 
@@ -245,6 +246,38 @@ export async function runIncrementalLearnStep(
   }
 }
 
+/**
+ * 评价流转自动结算（E-9 §2.1 · BUG-004）——从 transition handler 抽取为可单测单元（照 runIncrementalLearnStep 先例）。
+ *
+ * 事务语义（本批核心裁决）：
+ *  - SAVEPOINT auto_settle 包裹整段：自动结算内任何 SQL/业务错误 → ROLLBACK TO SAVEPOINT 隔离，
+ *    **评价流转（work_orders.status='evaluated' + 事件）永远成功**，失败降级为响应里的 settle_error 标记；
+ *  - 幂等：该工单已有任何结算明细 → autoCreateSettlementForOrder 入口预检直接跳过（非错误、不写库）；
+ *  - 不吞错：错误信息原样透出 settle_error（照 learn_error 先例），人工可经 POST /settlements 补建。
+ */
+export async function runAutoSettleStep(
+  client: PoolClient,
+  tenantId: string,
+  workOrderId: string,
+  operator: string = AUTO_SETTLEMENT_OPERATOR,
+): Promise<{ created: boolean; skipped: boolean; settlementId: string | null; settleError: string | null }> {
+  await client.query('SAVEPOINT auto_settle');
+  try {
+    const r = await autoCreateSettlementForOrder(client, tenantId, workOrderId, operator);
+    await client.query('RELEASE SAVEPOINT auto_settle');
+    return { created: r.created, skipped: r.skipped, settlementId: r.settlementId, settleError: null };
+  } catch (e) {
+    await client.query('ROLLBACK TO SAVEPOINT auto_settle');
+    const settleError = e instanceof Error ? e.message : String(e);
+    console.error('[BUG-004 autoSettle] FAILED (rolled back to savepoint, transition preserved)', {
+      workOrderId,
+      tenantId,
+      err: e,
+    });
+    return { created: false, skipped: false, settlementId: null, settleError };
+  }
+}
+
 const createSchema = z.object({
   id: z.string().min(1),
   business_type: z.string().min(1),
@@ -393,6 +426,7 @@ router.post('/open/work_order/:id/transition', async (req, res, next) => {
     const fields: Record<string, unknown> = { ...rest };
     if (typeof score === 'number') fields.satisfaction_score = score;
     let learnError: string | null = null;
+    let settleError: string | null = null; // E-9：自动结算失败标记（SAVEPOINT 隔离后透出，不阻断评价）
     const row = await withTenantClient(tenantId, async (client) => {
       const r = await transition(client, tenantId, req.params.id, to as WorkOrderStatus, {
         actor: role ?? 'system',
@@ -436,10 +470,17 @@ router.post('/open/work_order/:id/transition', async (req, res, next) => {
           [score, req.params.id, tenantId],
         );
       }
+      // E-9 BUG-004：评价流转自动生成结算草稿（draft，待 admin 确认）。
+      // SAVEPOINT 隔离——结算故障不拖垮评价流转；幂等（已有明细则跳过）；失败经 settle_error 透出。
+      if (to === 'evaluated') {
+        // created_by 固定留痕 'auto:evaluated'（与人工 POST /settlements 的 username 留痕相区分，FE 据此打「自动生成」标记）
+        const settleStep = await runAutoSettleStep(client, tenantId, req.params.id);
+        settleError = settleStep.settleError;
+      }
       return r;
     });
     void dispatchEvent(tenantId, { type: 'transition', workOrderId: req.params.id, fromStatus: row.from ?? null, toStatus: to, actor: 'system' }).catch(() => {});
-      return res.json({ ok: true, code: 0, status: row.row.status, auto_flow: row.row.auto_flow, assignee: row.row.assignee_id, reason: 'transition ok', learn_error: learnError });
+      return res.json({ ok: true, code: 0, status: row.row.status, auto_flow: row.row.auto_flow, assignee: row.row.assignee_id, reason: 'transition ok', learn_error: learnError, settle_error: settleError });
   } catch (e) {
     next(e);
   }

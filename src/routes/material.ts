@@ -1,15 +1,20 @@
-// 仓库物资模块（批次 C）：材料档案 + 库存台账 + 入库/出库/流水。
-// 风格对齐 config.ts / volunteer.ts：withTenantClient 注入租户/RLS；写操作 requireConfigRole；占位符防注入。
+// 仓库物资模块（批次 C）：材料档案 + 库存台账 + 入库/出库/流水 + 工单耗材消耗（E-9）。
+// 风格对齐 config.ts / volunteer.ts：withTenantClient 注入租户/RLS；写操作 requirePermission；占位符防注入。
 // 出库防超卖靠 SELECT ... FOR UPDATE（事务内），并发正确性【部署后补验：并发出库实测】。
+// E-9 权限收口（20260914）：耗材目录增删改 / 手工出入库 / 批量导入 → material.manage（默认仅 admin）；
+//   工单耗材消耗 → consumable.consume（默认 worker+operator）；**读端点（GET /materials|/inventory|/inventory/logs）
+//   维持「已认证即放」不变**（工人选耗材依赖目录读）。导出（GET /materials/export）按设计未列「读不收」，
+//   维持原 requireConfigRole 管理面口径不动（写归口 manage、读维持现状的原则）。
 import { Router } from 'express';
 import { z } from 'zod';
 import { randomUUID } from 'crypto';
 import { withTenantClient } from '../db/pool.js';
 import { AppError } from '../middleware/error.js';
-import { requireConfigRole } from '../middleware/role.js';
+import { requireConfigRole, requirePermission } from '../middleware/role.js';
 import { applyStockAction } from '../services/inventory.js';
 import { emitDomainEvent } from '../db/eventBus.js';
 import { parseCsv, csvEscape } from '../services/csvUtil.js';
+import { RICH_WORK_ORDER_DEF } from '../engine/stateMachine.js';
 
 const router = Router();
 
@@ -51,18 +56,21 @@ router.get('/materials', async (req, res, next) => {
 
 router.post('/materials', async (req, res, next) => {
   try {
-    requireConfigRole(req, res);
-    const tenantId = res.locals.auth.tenantId;
+    const auth = res.locals.auth;
+    const tenantId = auth.tenantId;
     const b = materialSchema.parse(req.body);
-    const item = await withTenantClient(tenantId, (client) =>
-      client
-        .query(
-          `INSERT INTO material (tenant_id, code, name, category, spec, unit, price, enabled, doc)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`,
-          [tenantId, b.code, b.name, b.category ?? null, b.spec ?? null, b.unit ?? null, b.price ?? 0, b.enabled ?? true, b.doc ?? null],
-        )
-        .then((r) => r.rows[0]),
-    );
+    const item = await withTenantClient(tenantId, (client) => {
+      // E-9：耗材目录维护归口 material.manage（默认仅 admin；租户可经 role_permission 代授）
+      return requirePermission(auth, client, 'material.manage').then(() =>
+        client
+          .query(
+            `INSERT INTO material (tenant_id, code, name, category, spec, unit, price, enabled, doc)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`,
+            [tenantId, b.code, b.name, b.category ?? null, b.spec ?? null, b.unit ?? null, b.price ?? 0, b.enabled ?? true, b.doc ?? null],
+          )
+          .then((r) => r.rows[0]),
+      );
+    });
     return res.status(201).json({ ok: true, code: 0, item });
   } catch (e) {
     next(e);
@@ -71,10 +79,11 @@ router.post('/materials', async (req, res, next) => {
 
 router.put('/materials/:id', async (req, res, next) => {
   try {
-    requireConfigRole(req, res);
-    const tenantId = res.locals.auth.tenantId;
+    const auth = res.locals.auth;
+    const tenantId = auth.tenantId;
     const b = materialSchema.partial().parse(req.body);
     const item = await withTenantClient(tenantId, async (client) => {
+      await requirePermission(auth, client, 'material.manage');
       const cur = await client.query(`SELECT * FROM material WHERE id = $1 AND tenant_id = $2`, [req.params.id, tenantId]);
       if (cur.rowCount === 0) throw new AppError('NOT_FOUND', 'material not found', 404);
       const r = await client.query(
@@ -93,9 +102,10 @@ router.put('/materials/:id', async (req, res, next) => {
 
 router.delete('/materials/:id', async (req, res, next) => {
   try {
-    requireConfigRole(req, res);
-    const tenantId = res.locals.auth.tenantId;
+    const auth = res.locals.auth;
+    const tenantId = auth.tenantId;
     const n = await withTenantClient(tenantId, async (client) => {
+      await requirePermission(auth, client, 'material.manage');
       const inv = await client.query(`SELECT 1 FROM inventory WHERE material_id=$1 AND tenant_id=$2 LIMIT 1`, [req.params.id, tenantId]);
       if (inv.rowCount && inv.rowCount > 0) throw new AppError('CONFLICT', '该材料仍有库存台账，禁止删除', 409);
       const log = await client.query(`SELECT 1 FROM inventory_log WHERE material_id=$1 AND tenant_id=$2 LIMIT 1`, [req.params.id, tenantId]);
@@ -147,11 +157,13 @@ router.get('/inventory', async (req, res, next) => {
 
 router.post('/inventory/in', async (req, res, next) => {
   try {
-    requireConfigRole(req, res);
-    const tenantId = res.locals.auth.tenantId;
+    const auth = res.locals.auth;
+    const tenantId = auth.tenantId;
     const b = stockSchema.parse(req.body);
-    const who = res.locals.auth.userId ?? res.locals.auth.role ?? 'system';
+    const who = auth.userId ?? auth.role ?? 'system';
     const result = await withTenantClient(tenantId, async (client) => {
+      // E-9：手工出入库 = 管理动作（无单出库/入库），归口 material.manage（默认仅 admin）
+      await requirePermission(auth, client, 'material.manage');
       const mat = await client.query(`SELECT id FROM material WHERE id=$1 AND tenant_id=$2`, [b.material_id, tenantId]);
       if (mat.rowCount === 0) throw new AppError('NOT_FOUND', 'material not found', 404);
       const wh = b.warehouse ?? '中心库';
@@ -182,11 +194,13 @@ router.post('/inventory/in', async (req, res, next) => {
 
 router.post('/inventory/out', async (req, res, next) => {
   try {
-    requireConfigRole(req, res);
-    const tenantId = res.locals.auth.tenantId;
+    const auth = res.locals.auth;
+    const tenantId = auth.tenantId;
     const b = stockSchema.parse(req.body);
-    const who = res.locals.auth.userId ?? res.locals.auth.role ?? 'system';
+    const who = auth.userId ?? auth.role ?? 'system';
     const result = await withTenantClient(tenantId, async (client) => {
+      // E-9：手工出库归口 material.manage —— worker 恒 403（无单出库是管理动作，工人消耗必须挂单走 /inventory/consume）
+      await requirePermission(auth, client, 'material.manage');
       const mat = await client.query(`SELECT id FROM material WHERE id=$1 AND tenant_id=$2`, [b.material_id, tenantId]);
       if (mat.rowCount === 0) throw new AppError('NOT_FOUND', 'material not found', 404);
       // 物料×工单 关联：order_no → work_order_id（校验租户；不存在则忽略，不阻断出库）
@@ -222,10 +236,145 @@ router.post('/inventory/out', async (req, res, next) => {
   }
 });
 
+// ============ 工单耗材消耗（E-9 §3.1，工人 / 受理台专用）============
+// 与 /inventory/out 的分界线：工人**不获**手工出库权（无单出库=管理动作=material.manage），
+// 消耗必须挂单走本端点 —— 流水强制带 work_order_id。这是「留」与「收」的边界。
+const consumeSchema = z.object({
+  work_order_id: z.string().min(1),
+  items: z
+    .array(
+      z.object({
+        material_id: z.string().uuid(),
+        qty: z.number().int().positive(),
+        note: z.string().max(200).optional(),
+      }),
+    )
+    .min(1)
+    .max(20), // ≤20 行/次（设计 §3.1）
+});
+
+/** 领料默认仓库：与 /inventory/in、/inventory/out 同口径（'中心库'）——多仓调拨明确砍到二期。 */
+export const CONSUME_WAREHOUSE = '中心库';
+
+/**
+ * 耗材消耗禁入的工单终态（E-9 §3.1 校验链①）：
+ * 与工作流 doneStates 口径对齐（富模板 = completed/closed/evaluated）+ cancelled。
+ * 理由：这些状态下耗材费已（或即将）进入结算快照，再补消耗会造成「结算后补记」。
+ * 导出为常量便于单测锚定（与 SETTLEMENT_ELIGIBLE_STATUSES 同源语义）。
+ */
+export const CONSUME_BLOCKED_STATUSES: readonly string[] = [
+  ...(((RICH_WORK_ORDER_DEF.config?.doneStates as string[] | undefined) ?? ['completed', 'closed', 'evaluated'])),
+  'cancelled',
+];
+
+router.post('/inventory/consume', async (req, res, next) => {
+  try {
+    const auth = res.locals.auth;
+    const tenantId = auth.tenantId;
+    const b = consumeSchema.parse(req.body);
+    const who = auth.userId ?? auth.role ?? 'system';
+    const items = await withTenantClient(tenantId, async (client) => {
+      await requirePermission(auth, client, 'consumable.consume');
+
+      // ① 工单存在且非终态（FOR UPDATE：与流转/结算串行化，防「消耗登记」与「评价结算」并发口径漂移）
+      const wo = await client.query(
+        `SELECT id, order_no, status FROM work_orders WHERE tenant_id = $1 AND id = $2 FOR UPDATE`,
+        [tenantId, b.work_order_id],
+      );
+      if (wo.rowCount === 0) throw new AppError('NOT_FOUND', 'work_order not found', 404);
+      const order = wo.rows[0] as { id: string; order_no: string | null; status: string };
+      if (CONSUME_BLOCKED_STATUSES.includes(order.status)) {
+        throw new AppError(
+          'ORDER_CLOSED',
+          `工单已结束（${order.status}），不可再登记耗材消耗（评价后耗材费已进入结算快照）`,
+          422,
+        );
+      }
+
+      // 入参同一材料重复出现 → 先按 material_id 合并：否则逐行读同一库存行会拿到**未落库的旧 qty**，
+      // 导致「库存够不够」判断失真（重复行各自都判为够，实际合计超卖）。
+      const merged = new Map<string, { material_id: string; qty: number; note: string | null }>();
+      for (const it of b.items) {
+        const prev = merged.get(it.material_id);
+        if (prev) {
+          prev.qty += it.qty;
+          if (it.note) prev.note = prev.note ? `${prev.note}；${it.note}` : it.note;
+        } else {
+          merged.set(it.material_id, { material_id: it.material_id, qty: it.qty, note: it.note ?? null });
+        }
+      }
+
+      // ② 逐材料校验存在性 + FOR UPDATE 锁库存行 + 计算；任一行不足 → 收集缺货明细后整体 422 回滚
+      //    （all-or-nothing：本事务此阶段**零写库**，抛错即回滚，不存在部分扣减）
+      const planned: Array<{ material_id: string; name: string; qty: number; next: number; note: string | null }> = [];
+      const shortages: Array<{ material_id: string; name: string | null; required: number; available: number }> = [];
+      for (const line of merged.values()) {
+        const mat = await client.query(`SELECT id, name FROM material WHERE id = $1 AND tenant_id = $2`, [line.material_id, tenantId]);
+        if (mat.rowCount === 0) throw new AppError('NOT_FOUND', `material not found: ${line.material_id}`, 404);
+        const name = ((mat.rows[0] as { name?: string }).name ?? null) as string | null;
+        const lock = await client.query(
+          `SELECT qty FROM inventory WHERE tenant_id = $1 AND material_id = $2 AND warehouse = $3 FOR UPDATE`,
+          [tenantId, line.material_id, CONSUME_WAREHOUSE],
+        );
+        const current = lock.rowCount && lock.rowCount > 0 ? Number(lock.rows[0].qty) : 0;
+        const calc = applyStockAction(current, { type: 'out', qty: line.qty });
+        if (!calc.ok) {
+          shortages.push({ material_id: line.material_id, name, required: line.qty, available: current });
+          continue;
+        }
+        planned.push({ material_id: line.material_id, name: name ?? line.material_id, qty: line.qty, next: calc.next, note: line.note });
+      }
+      if (shortages.length > 0) {
+        const detail = shortages
+          .map((s) => `${s.name ?? s.material_id}（需 ${s.required} / 可用 ${s.available}）`)
+          .join('；');
+        throw new AppError('INSUFFICIENT_STOCK', `库存不足，无法领料：${detail}`, 422);
+      }
+
+      // ③ 扣减库存 + 写流水（type='out'，work_order_id 强制带单）+ ④ 领域事件
+      const out: Array<{ material_id: string; name: string; remaining_qty: number }> = [];
+      for (const p of planned) {
+        await client.query(
+          `UPDATE inventory SET qty=$3, updated_at=now() WHERE tenant_id=$1 AND material_id=$2 AND warehouse=$4`,
+          [tenantId, p.material_id, p.next, CONSUME_WAREHOUSE],
+        );
+        await client.query(
+          `INSERT INTO inventory_log (tenant_id, material_id, type, qty, ref_no, note, created_by, work_order_id)
+           VALUES ($1,$2,'out',$3,$4,$5,$6,$7)`,
+          [tenantId, p.material_id, p.qty, order.order_no ?? order.id, p.note, who, order.id],
+        );
+        // P0 飞轮：材料领料事件（挂工单 id，供工单上下文特征与归因）；source='consume' 与手工出库区分
+        await emitDomainEvent(client, {
+          tenantId,
+          entityType: 'material',
+          entityId: p.material_id,
+          type: 'material_consumed',
+          actor: who,
+          payload: {
+            qty: p.qty,
+            work_order_id: order.id,
+            order_no: order.order_no,
+            warehouse: CONSUME_WAREHOUSE,
+            source: 'consume',
+          },
+        });
+        out.push({ material_id: p.material_id, name: p.name, remaining_qty: p.next });
+      }
+      return out;
+    });
+    return res.json({ ok: true, code: 0, items });
+  } catch (e) {
+    if (e instanceof z.ZodError) {
+      return next(new AppError('BAD_REQUEST', `invalid body: ${e.issues.map((i) => i.message).join(';')}`, 400));
+    }
+    next(e);
+  }
+});
+
 router.get('/inventory/logs', async (req, res, next) => {
   try {
     const tenantId = res.locals.auth.tenantId;
-    const { material_id, type } = req.query as Record<string, string>;
+    const { material_id, type, work_order_id } = req.query as Record<string, string>;
     const clauses = ['tenant_id = $1'];
     const params: unknown[] = [tenantId];
     const add = (sql: string, v: unknown) => {
@@ -234,6 +383,8 @@ router.get('/inventory/logs', async (req, res, next) => {
     };
     if (material_id) add('material_id = ?', material_id);
     if (type) add('type = ?', type);
+    // E-9：按工单查耗材流水（工人端 task-detail「已消耗清单」只读展示用）
+    if (work_order_id) add('work_order_id = ?', work_order_id);
     const items = await withTenantClient(tenantId, (client) =>
       client
         .query(`SELECT * FROM inventory_log WHERE ${clauses.join(' AND ')} ORDER BY created_at DESC`, params)
@@ -267,8 +418,8 @@ router.get('/materials/export', async (req, res, next) => {
 
 router.post('/materials/import', async (req, res, next) => {
   try {
-    requireConfigRole(req, res);
-    const tenantId = res.locals.auth.tenantId;
+    const auth = res.locals.auth;
+    const tenantId = auth.tenantId;
     const text = typeof req.body === 'string' ? req.body : (req.body as any)?.csv;
     if (!text || typeof text !== 'string') throw new AppError('BAD_INPUT', 'csv text required', 400);
     const rows = parseCsv(text);
@@ -277,6 +428,9 @@ router.post('/materials/import', async (req, res, next) => {
     const dataRows = rows.slice(1);
     let inserted = 0;
     await withTenantClient(tenantId, async (client) => {
+      // E-9：批量导入 = 批量新增耗材目录（设计 §4 第 1 点「增删改」覆盖）→ material.manage
+      // （否则会留下「不能改单条却能整表灌入」的破窗）
+      await requirePermission(auth, client, 'material.manage');
       for (const r of dataRows) {
         const obj: Record<string, unknown> = {};
         headers.forEach((h, i) => { if (MAT_CSV_COLS.includes(h)) obj[h] = r[i] ?? null; });

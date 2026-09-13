@@ -3,7 +3,11 @@
 // stats.ts（报表大屏 4 端点：by-catalog/process/data-quality/overdue）、
 // adminAiChat.ts（管理对话 1 端点：角色白名单门禁 + 双开关 503 降级 + context/result_card 透传）。
 // 模式复用 upload.http.test.ts / publicReport.http.test.ts：vi.mock 重依赖，
-// 真 handler + 真 errorMiddleware + 真 requireConfigRole（按注入角色测 403/放行）+ 真 csvUtil（RFC4180 真解析）。
+// 真 handler + 真 errorMiddleware + 真权限守卫（按注入角色测 403/放行）+ 真 csvUtil（RFC4180 真解析）。
+// E-9 起改注意：asset.ts 写端点守卫由 requireConfigRole(admin/operator) 换成 requirePermission('asset.manage')
+//   （默认仅 admin）。requirePermission 在 **authMode:'dev' 下短路径放行**（hasPerm 首行 return true），
+//   故"角色被拒"用例必须显式切 authMode='prod' 才走到真矩阵（照 settlement.http.test.ts 先例）；
+//   450+ 行的那批 dev 用例只是覆盖正常路径，403 语义由本文件 ⑤ 与 e9AutoSettleConsume.http.test.ts ⑭ 承担。
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
 import express from 'express';
 import type { Server } from 'node:http';
@@ -12,6 +16,8 @@ import type { AddressInfo } from 'node:net';
 // ---- 可变夹具（beforeEach 归位）----
 const TENANT = 't-demo';
 let authRole = 'operator';
+/** E-9：角色拒绝类断言需 prod 模式（dev 会短路径放行权限点）。 */
+let authMode: 'dev' | 'prod' = 'dev';
 let detailRow: any = {
   id: 'a-1', tenant_id: TENANT, asset_no: 'ASSET-AAAA0001', name: '会议室空调', model: 'KF-120',
   location: '一号楼', status: 'in_use', linked_order_ids: ['w1'],
@@ -95,7 +101,7 @@ import { errorMiddleware } from '../middleware/error.js';
 const app = express();
 app.use(express.json({ limit: '1mb' }));
 app.use((_req, res, next) => {
-  res.locals.auth = { tenantId: TENANT, role: authRole, userId: 'u-1', requestId: 'r-1', authMode: 'dev' };
+  res.locals.auth = { tenantId: TENANT, role: authRole, userId: 'u-1', requestId: 'r-1', authMode };
   next();
 });
 app.use('/api/v1', assetRouter);
@@ -116,6 +122,7 @@ afterAll(async () => {
 });
 beforeEach(() => {
   authRole = 'operator';
+  authMode = 'dev'; // 归位：⑤/⑤b 会把 authMode 切成 'prod'，不归位则后续用例全被 asset.manage 挡成 403
   detailRow = { ...detailRow, linked_order_ids: ['w1'] };
   detailFound = true;
   deleteCount = 1;
@@ -177,12 +184,22 @@ describe('asset.ts · 资产档案（GET/POST/PUT + 过滤器）', () => {
     expect(params[2]).toBe('新空调');
   });
 
-  it('⑤POST /assets（worker）→ 403 FORBIDDEN（requireConfigRole 真守卫）', async () => {
+  it('⑤POST /assets（worker）→ 403 FORBIDDEN（E-9 起守卫 = requirePermission(asset.manage)，prod 模式真矩阵）', async () => {
     authRole = 'worker';
+    authMode = 'prod'; // dev 会短路径放行权限点（hasPerm 首行 return true）——403 语义必须走 prod
     const r = await req('POST', '/assets', { name: 'x' });
     expect(r.status).toBe(403);
     const j = (await r.json()) as any;
     expect(j.code).toBe('FORBIDDEN');
+    expect(String(j.message)).toContain('asset.manage');
+  });
+
+  it('⑤bPOST /assets（operator · prod 模式）→ 403（E-9 收口：asset.manage 默认仅 admin）', async () => {
+    authRole = 'operator';
+    authMode = 'prod';
+    const r = await req('POST', '/assets', { name: 'x' });
+    expect(r.status).toBe(403);
+    expect(((await r.json()) as any).code).toBe('FORBIDDEN');
   });
 
   it('⑥POST /assets 缺 name → 422（zod）', async () => {

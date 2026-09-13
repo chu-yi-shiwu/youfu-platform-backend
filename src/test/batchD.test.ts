@@ -489,6 +489,8 @@ describe('mock 收口（SQL 全覆盖 · 防新增/改写 SQL 无感知）', () 
         { match: (t: string) => t.includes('INSERT INTO settlement ('), reply: () => ({ rows: [{ id: 'st-1' }] }) },
         { match: (t: string) => t.includes('FROM product_catalog'), reply: () => ({ rows: [{ code: 'AC', name: '空调维修', price: '120.00' }] }) },
         { match: (t: string) => t.includes('INSERT INTO settlement_item'), reply: () => ({ rows: [], rowCount: 1 }) },
+        // E-9：建草稿步骤 ⑤ 耗材费联动（inventory_log × material 聚合）——本用例无消耗流水 → 0 行短路
+        { match: (t: string) => t.includes('FROM inventory_log il') && t.includes('JOIN material m'), reply: () => ({ rows: [], rowCount: 0 }) },
         { match: (t: string) => t.includes('UPDATE settlement SET total'), reply: () => ({ rows: [], rowCount: 1 }) },
         { match: (t: string) => t.includes('SELECT * FROM settlement WHERE id'), reply: () => ({ rows: [{ id: 'st-1', settlement_no: 'ST202609050001', status: 'draft', total: '120.00', item_count: 1 }] }) },
       ],

@@ -1,13 +1,16 @@
 // 资产管理模块（批次 C）：资产档案 + 扫码绑定 + 故障转工单 + 关联工单历史。
-// 风格对齐批次 B（inspection.ts 转单写法）：withTenantClient 注入租户/RLS；写操作 requireConfigRole。
+// 风格对齐批次 B（inspection.ts 转单写法）：withTenantClient 注入租户/RLS；写操作 requirePermission。
 // 转单复用 services/linkedWorkOrder（资产故障 → 标准维修工单，进入既有派单流）。
 // 契约：DB status 枚举 = in_use/repairing/standby/disabled；前端映射中文，禁止中文入库。
+// E-9 权限收口（20260914）：全部写端点（建档/改档/调拨/故障/维保增改删/批量导入）→ asset.manage（默认仅 admin，
+//   原 requireConfigRole 的 operator 不再维护资产目录）；**读端点（GET /assets、/assets/:id/history|maintenance、
+//   /assets/export）维持现状不动**——写归口 manage、读维持现状。
 import { Router } from 'express';
 import { z } from 'zod';
 import { randomUUID } from 'crypto';
 import { withTenantClient } from '../db/pool.js';
 import { AppError } from '../middleware/error.js';
-import { requireConfigRole } from '../middleware/role.js';
+import { requireConfigRole, requirePermission } from '../middleware/role.js';
 import { createLinkedWorkOrder } from '../services/linkedWorkOrder.js';
 import { summarizeLinkedOrders } from '../services/assetHistory.js';
 import { emitDomainEvent } from '../db/eventBus.js';
@@ -67,12 +70,13 @@ router.get('/assets', async (req, res, next) => {
 
 router.post('/assets', async (req, res, next) => {
   try {
-    requireConfigRole(req, res);
-    const tenantId = res.locals.auth.tenantId;
+    const auth = res.locals.auth;
+    const tenantId = auth.tenantId;
     const b = assetSchema.parse(req.body);
     const id = randomUUID();
-    const item = await withTenantClient(tenantId, (client) =>
-      client
+    const item = await withTenantClient(tenantId, async (client) => {
+      await requirePermission(auth, client, 'asset.manage'); // E-9：资产建档归口 asset.manage（默认仅 admin）
+      return client
         .query(
           `INSERT INTO asset (tenant_id, asset_no, name, model, pinyin, location, status, has_sno, sno, qr_code, financial_category, price, supplier, purchase_date)
            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING *`,
@@ -93,8 +97,8 @@ router.post('/assets', async (req, res, next) => {
             b.purchase_date ?? null,
           ],
         )
-        .then((r) => r.rows[0]),
-    );
+        .then((r) => r.rows[0]);
+    });
     return res.status(201).json({ ok: true, code: 0, item });
   } catch (e) {
     next(e);
@@ -103,10 +107,11 @@ router.post('/assets', async (req, res, next) => {
 
 router.put('/assets/:id', async (req, res, next) => {
   try {
-    requireConfigRole(req, res);
-    const tenantId = res.locals.auth.tenantId;
+    const auth = res.locals.auth;
+    const tenantId = auth.tenantId;
     const b = assetSchema.partial().parse(req.body);
     const item = await withTenantClient(tenantId, async (client) => {
+      await requirePermission(auth, client, 'asset.manage');
       const cur = await client.query(`SELECT * FROM asset WHERE id=$1 AND tenant_id=$2`, [req.params.id, tenantId]);
       if (cur.rowCount === 0) throw new AppError('NOT_FOUND', 'asset not found', 404);
       const sets: string[] = [];
@@ -142,10 +147,11 @@ router.put('/assets/:id', async (req, res, next) => {
 
 router.post('/assets/:id/transfer', async (req, res, next) => {
   try {
-    requireConfigRole(req, res);
-    const tenantId = res.locals.auth.tenantId;
+    const auth = res.locals.auth;
+    const tenantId = auth.tenantId;
     const b = z.object({ location: z.string().min(1) }).parse(req.body);
     const item = await withTenantClient(tenantId, async (client) => {
+      await requirePermission(auth, client, 'asset.manage');
       const cur = await client.query(`SELECT * FROM asset WHERE id=$1 AND tenant_id=$2`, [req.params.id, tenantId]);
       if (cur.rowCount === 0) throw new AppError('NOT_FOUND', 'asset not found', 404);
       const r = await client.query(
@@ -166,8 +172,8 @@ router.post('/assets/:id/transfer', async (req, res, next) => {
 // 故障报修 → 转标准维修工单（进入既有派单流）；同时维护 linked_order_ids 供 history 反查
 router.post('/assets/:id/fault', async (req, res, next) => {
   try {
-    requireConfigRole(req, res);
-    const tenantId = res.locals.auth.tenantId;
+    const auth = res.locals.auth;
+    const tenantId = auth.tenantId;
     const b = z
       .object({
         title: z.string().optional(),
@@ -176,6 +182,7 @@ router.post('/assets/:id/fault', async (req, res, next) => {
       })
       .parse(req.body);
     const result = await withTenantClient(tenantId, async (client) => {
+      await requirePermission(auth, client, 'asset.manage');
       const cur = await client.query(`SELECT * FROM asset WHERE id=$1 AND tenant_id=$2`, [req.params.id, tenantId]);
       if (cur.rowCount === 0) throw new AppError('NOT_FOUND', 'asset not found', 404);
       const a = cur.rows[0];
@@ -256,18 +263,19 @@ router.get('/assets/:id/maintenance', async (req, res, next) => {
 
 router.post('/assets/:id/maintenance', async (req, res, next) => {
   try {
-    requireConfigRole(req, res);
-    const tenantId = res.locals.auth.tenantId;
+    const auth = res.locals.auth;
+    const tenantId = auth.tenantId;
     const b = maintSchema.parse(req.body);
-    const item = await withTenantClient(tenantId, (client) =>
-      client
+    const item = await withTenantClient(tenantId, async (client) => {
+      await requirePermission(auth, client, 'asset.manage');
+      return client
         .query(
           `INSERT INTO asset_maintenance (tenant_id, asset_id, maintain_date, type, cost, vendor, note)
            VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *`,
           [tenantId, req.params.id, b.maintain_date ?? null, b.type ?? null, b.cost ?? null, b.vendor ?? null, b.note ?? null],
         )
-        .then((r) => r.rows[0]),
-    );
+        .then((r) => r.rows[0]);
+    });
     return res.status(201).json({ ok: true, code: 0, item });
   } catch (e) {
     next(e);
@@ -276,10 +284,11 @@ router.post('/assets/:id/maintenance', async (req, res, next) => {
 
 router.put('/assets/maintenance/:mid', async (req, res, next) => {
   try {
-    requireConfigRole(req, res);
-    const tenantId = res.locals.auth.tenantId;
+    const auth = res.locals.auth;
+    const tenantId = auth.tenantId;
     const b = maintSchema.partial().parse(req.body);
     const item = await withTenantClient(tenantId, async (client) => {
+      await requirePermission(auth, client, 'asset.manage');
       const cur = await client.query(`SELECT * FROM asset_maintenance WHERE id=$1 AND tenant_id=$2`, [req.params.mid, tenantId]);
       if (cur.rowCount === 0) throw new AppError('NOT_FOUND', 'maintenance not found', 404);
       const sets: string[] = [];
@@ -306,11 +315,12 @@ router.put('/assets/maintenance/:mid', async (req, res, next) => {
 
 router.delete('/assets/maintenance/:mid', async (req, res, next) => {
   try {
-    requireConfigRole(req, res);
-    const tenantId = res.locals.auth.tenantId;
-    const n = await withTenantClient(tenantId, (client) =>
-      client.query(`DELETE FROM asset_maintenance WHERE id=$1 AND tenant_id=$2`, [req.params.mid, tenantId]).then((r) => r.rowCount ?? 0),
-    );
+    const auth = res.locals.auth;
+    const tenantId = auth.tenantId;
+    const n = await withTenantClient(tenantId, async (client) => {
+      await requirePermission(auth, client, 'asset.manage');
+      return client.query(`DELETE FROM asset_maintenance WHERE id=$1 AND tenant_id=$2`, [req.params.mid, tenantId]).then((r) => r.rowCount ?? 0);
+    });
     if (n === 0) throw new AppError('NOT_FOUND', 'maintenance not found', 404);
     return res.json({ ok: true, code: 0 });
   } catch (e) {
@@ -340,8 +350,8 @@ router.get('/assets/export', async (req, res, next) => {
 
 router.post('/assets/import', async (req, res, next) => {
   try {
-    requireConfigRole(req, res);
-    const tenantId = res.locals.auth.tenantId;
+    const auth = res.locals.auth;
+    const tenantId = auth.tenantId;
     const text = typeof req.body === 'string' ? req.body : (req.body as any)?.csv;
     if (!text || typeof text !== 'string') throw new AppError('BAD_INPUT', 'csv text required', 400);
     const rows = parseCsv(text);
@@ -350,6 +360,8 @@ router.post('/assets/import', async (req, res, next) => {
     const dataRows = rows.slice(1);
     let inserted = 0;
     await withTenantClient(tenantId, async (client) => {
+      // E-9：批量导入 = 批量建档（资产目录「增」）→ asset.manage
+      await requirePermission(auth, client, 'asset.manage');
       for (const r of dataRows) {
         const obj: Record<string, unknown> = {};
         headers.forEach((h, i) => { if (ASSET_CSV_COLS.includes(h)) obj[h] = r[i] ?? null; });

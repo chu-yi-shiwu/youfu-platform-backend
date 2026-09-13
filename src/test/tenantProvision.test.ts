@@ -190,8 +190,9 @@ describe('provisionNewTenantContent 第④步：行业权限基线（注册制�
   });
 
   it('preset = 默认矩阵（集合相等、无序）→ 0 行落库（继承基线，不无谓定格）', async () => {
-    // #942 R15：worker 默认基线 = [inspect.execute, asset.scan, intake.create]（陪检登记录入面）
-    INDUSTRY_PERM_PRESETS.hospital = { worker: ['intake.create', 'asset.scan', 'inspect.execute'] }; // 与默认同集合，顺序不同
+    // #942 R15：worker 默认基线 = [inspect.execute, asset.scan, intake.create, consumable.consume]
+    // （E-9 起 worker 补 consumable.consume：工单耗材消耗是执行侧动作）
+    INDUSTRY_PERM_PRESETS.hospital = { worker: ['intake.create', 'asset.scan', 'inspect.execute', 'consumable.consume'] }; // 与默认同集合，顺序不同
     const { client, calls } = makeClient({ srcCategories: [] });
     const r = await provisionNewTenantContent(client, {
       tenantId: NEW_T, name: '测试医院', sourceTenantId: SRC_T, category: 'hospital',

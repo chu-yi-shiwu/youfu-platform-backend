@@ -40,6 +40,17 @@ export const PERMS = [
   'volunteer.view',
   'volunteer.manage',
   'volunteer.audit',
+  // E-9 批次（20260914《优服家_E9_自动结算与耗材二级库存设计》§4 权限边界清单）：三点。
+  //   material.manage    = 耗材目录增删改（POST/PUT/DELETE /materials）+ 手工出入库（/inventory/in|out）
+  //                        + 批量导入（POST /materials/import）。原 requireConfigRole(admin+operator) → **仅 admin**。
+  //   asset.manage       = 资产目录增删改 + 调拨/故障/维保管理 + 批量导入（asset.ts 全部写端点）。
+  //                        原 requireConfigRole(admin+operator) → **仅 admin**。
+  //   consumable.consume = 工单耗材消耗（新增 POST /inventory/consume，流水强制挂 work_order_id）。
+  //                        默认 worker + operator（执行侧动作，非管理动作）。
+  //   读取不收：GET /materials、/assets、/inventory* 维持「已认证即放」（工人选耗材依赖目录读）。
+  'material.manage',
+  'asset.manage',
+  'consumable.consume',
 ] as const;
 export type Perm = (typeof PERMS)[number];
 
@@ -53,8 +64,9 @@ export type Perm = (typeof PERMS)[number];
 //     permissions 收起，API 403）——行为变化即本次修复目的；
 //   - 有覆盖行的租户：以租户显式授权为准，不受默认矩阵变化影响（租户自治，不做强制清洗）；
 //   - 回滚方式：租户经角色管理授予 settlement.read，或代码还原本矩阵（无 DDL、无数据迁移）。
-//   084 迁移位经核实**无需 DDL**（默认矩阵为代码层事实，role_permission 表无种子行——046/070
-//   只建表/扩 CHECK，从不 INSERT 默认权限），故 084 保持预留不占用。
+//   权限矩阵本身**无需 DDL**（默认矩阵为代码层事实，role_permission 表无种子行——046/070
+//   只建表/扩 CHECK，从不 INSERT 默认权限）；E-9 的 084 迁移位已用于耗材联动
+//   （settlement_item.source/material_id + 唯一约束放宽 + inventory_log.work_order_id uuid→text）。
 // 流程审核一期：workflow.edit 维持现状不动（operator 默认矩阵本就不含，行为零变化）；
 // workflow.approve 仅 admin（经 admin 的 [...PERMS] 自动收录，勿在其它角色清单里手加）。
 export const DEFAULT_PERM_MATRIX: Record<Role, readonly Perm[]> = {
@@ -62,12 +74,14 @@ export const DEFAULT_PERM_MATRIX: Record<Role, readonly Perm[]> = {
   // V1 批次（20260911）：operator 补 volunteer.view/manage/audit 三点（与既有现状等效——
   // 此前 operator 经 basicdata.edit 可写志愿者管理端点、菜单可见；其余角色不授，随默认矩阵 403）。
   // E-8（BUG-009）：移除 settlement.read（结算可见性收口 admin；operator 受理台日常不依赖结算页）。
-  operator: ['dashboard.view', 'intake.create', 'ticket.manage', 'basicdata.edit', 'dispatch.override', 'inspect.execute', 'asset.scan', 'volunteer.view', 'volunteer.manage', 'volunteer.audit'],
+  // E-9（20260914）：operator 加 consumable.consume（与 worker 同为执行侧动作）；material.manage /
+  //   asset.manage 不加（管理动作收口 admin，operator 走覆盖表授权）。
+  operator: ['dashboard.view', 'intake.create', 'ticket.manage', 'basicdata.edit', 'dispatch.override', 'inspect.execute', 'asset.scan', 'volunteer.view', 'volunteer.manage', 'volunteer.audit', 'consumable.consume'],
   dispatcher: ['dashboard.view', 'ticket.manage', 'dispatch.override', 'inspect.execute', 'asset.scan'],
   // worker + intake.create（#942 R15）：陪检登记（#6）等登录态录入复用建单引擎，
   // 入口在工人工作台对全员可见——录入（intake.create）≠ 管理（ticket.manage），
   // worker 仅解锁建单/录入面，管理动作仍 403（最小权限）。
-  worker: ['inspect.execute', 'asset.scan', 'intake.create'],
+  worker: ['inspect.execute', 'asset.scan', 'intake.create', 'consumable.consume'],
   reviewer: ['dashboard.view', 'ticket.manage'],
   service_desk: ['dashboard.view', 'ticket.manage', 'dispatch.override'],
 };

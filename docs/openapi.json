@@ -8083,6 +8083,46 @@
         }
       }
     },
+    "/api/v1/inventory/consume": {
+      "post": {
+        "tags": [
+          "material"
+        ],
+        "summary": "POST /api/v1/inventory/consume",
+        "description": "E-9 工单耗材消耗（工人/受理台专用）。权限点 consumable.consume（默认 worker+operator）；body { work_order_id, items:[{material_id,qty,note?}] }（≤20 行）；流水强制挂 work_order_id；all-or-nothing 扣减；422 INSUFFICIENT_STOCK（缺货明细）/ 422 ORDER_CLOSED（工单已结束）。\n\n来源：src/routes/material.ts\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "HTTP 200",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "description": "骨架占位：字段以服务端实现为准"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "description": "骨架占位：请求字段以服务端实现为准"
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/inventory/logs": {
       "get": {
         "tags": [
