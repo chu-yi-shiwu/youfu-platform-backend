@@ -33,6 +33,12 @@ vitest.config.ts.timestamp-*.mjs
 refs/
 _reports/
 
+# E-9 修复轮（20260914 主理人指令）：部署产物/备份目录挡在 git 外——
+#   镜像包（be_src_*.tar.gz 等）曾被误 staged 进冻结提交；.git.bak.* / src.bak.* 为 .git 修复轮的冷备产物
+*.tar.gz
+.git.bak*/
+src.bak*/
+
 # --- E-9 卫生（20260914）：部署镜像包/仓备份目录挡在版控外 ---
 # 背景：be_src_e8.tar.gz / e8_src.tar.gz 这类源码镜像包反复出现在工作区，
 # 并在 06df23b 之前被误 staged 进索引（QA-3 报告卫生问题）。此处一次性封口。

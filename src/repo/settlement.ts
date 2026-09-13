@@ -216,10 +216,11 @@ export async function createSettlementDraft(
     `UPDATE settlement SET total = $1, item_count = $2, updated_at = now() WHERE id = $3 AND tenant_id = $4`,
     [total, itemCount, headerId, tenantId],
   );
-  // ⑤ E-9 耗材费联动（§2.3）：工单耗材消耗追加为 source='material' 明细行（防双计 + 有追加时 recalcHeader）。
+  // ⑤ E-9 耗材费联动（§2.3 · §13 裁决1 改为 syncMaterialCostRows 全量重投影 UPSERT）：
   //    自动结算（autoCreateSettlementForOrder）与人工建单（POST /settlements）**共用本函数**，口径唯一。
-  //    无耗材消耗时本调用只多一条聚合 SELECT 即返回（存量路径行为不变）。
-  await appendMaterialCostItems(client, tenantId, headerId, workOrderIds);
+  //    新建单头下不可能有残留耗材行 → 不开 pruneStale；无耗材消耗时本调用只多一条聚合 SELECT 即返回
+  //   （存量路径行为不变）。
+  await syncMaterialCostRows(client, tenantId, headerId, workOrderIds);
   const header = await client.query(
     'SELECT * FROM settlement WHERE id = $1 AND tenant_id = $2',
     [headerId, tenantId],
@@ -240,23 +241,31 @@ export interface AutoSettleResult {
 }
 
 /**
- * 耗材费联动（E-9 §2.3）：把工单的耗材消耗追加为结算明细行（source='material'）。
+ * 耗材费联动（E-9 §2.3 · §13 裁决1 重写为全量重投影）：把工单的耗材消耗同步为结算明细行（source='material'）。
  *
- * 数据来源：inventory_log WHERE work_order_id = ANY($) AND type='out' 按 (工单, 耗材) 聚合，
+ * 数据来源（唯一事实源）：inventory_log WHERE work_order_id = ANY($) AND type='out' 按 (工单, 耗材) 聚合，
  *   join material 取 code/name/price 快照；qty = 该工单该耗材累计消耗量，amount = price × qty。
- * 防双计：该工单已存在 source='material' 明细 → 跳过（同事务预检；DB 侧 UNIQUE(tenant_id, work_order_id, source) 兜底）。
- * 表头：有追加时用 recalcHeader 重算 total/item_count；**无追加则一条多余 SQL 都不写**（存量路径零回归）。
  *
- * 诚实边界：耗材单价取**当前** material.price（快照落行，物料改价不回写既有结算单，与设计 §9 口径一致）；
+ * §13 裁决1（替换旧 appendMaterialCostItems 的「整单跳过」防双计）：
+ *   - 旧实现「工单已有任一 material 行 → 整单跳过」在 draft 后补消耗场景漏计（E4b），
+ *     且配合 084 三列唯一约束，≥2 种耗材直接 23505→误报 409（见 085 迁移头注）；
+ *   - 新实现按 (work_order_id, material_id) 对 085 的 uq_sti_material **UPSERT**：
+ *     已有行更新 qty/amount（追加了新消耗），没有则插入——重复调用恒收敛到事实源，天然幂等；
+ *   - opts.pruneStale（默认 false）：全量重投影时把「事实源已无消耗」的残留耗材行删掉。
+ *     createSettlementDraft（新建单，头下不可能有残留行）不开启——保持「无耗材 = 零多余 SQL」的存量路径零回归；
+ *     consume 的 A2 同步段（改既有 draft）开启。
+ *
+ * 诚实边界：耗材单价取**当前** material.price（快照落行，物料改价随重投影刷新，与「事实源重算」语义一致）；
  *   type='adjust'（盘盈亏）不计入消耗。
  */
-export async function appendMaterialCostItems(
+export async function syncMaterialCostRows(
   client: PoolClient,
   tenantId: string,
   settlementId: string,
   workOrderIds: string[],
-): Promise<{ inserted: number; workOrderIds: string[] }> {
-  if (workOrderIds.length === 0) return { inserted: 0, workOrderIds: [] };
+  opts?: { pruneStale?: boolean },
+): Promise<{ upserted: number; removed: number; workOrderIds: string[] }> {
+  if (workOrderIds.length === 0) return { upserted: 0, removed: 0, workOrderIds: [] };
 
   const agg = await client.query(
     // work_order_id 列类型 084 起为 text（对齐 work_orders.id）——cast 明确写 ::text[]，防 uuid 误用回归
@@ -270,15 +279,7 @@ export async function appendMaterialCostItems(
      ORDER BY il.work_order_id, m.name`,
     [tenantId, workOrderIds],
   );
-  if (agg.rows.length === 0) return { inserted: 0, workOrderIds: [] };
-
-  // 防双计预检：已存在 source='material' 明细的工单不再追加
-  const dup = await client.query(
-    `SELECT DISTINCT work_order_id FROM settlement_item
-     WHERE tenant_id = $1 AND source = 'material' AND work_order_id = ANY($2::text[])`,
-    [tenantId, workOrderIds],
-  );
-  const dupSet = new Set<string>(dup.rows.map((r: { work_order_id: string }) => String(r.work_order_id)));
+  if (agg.rows.length === 0 && !opts?.pruneStale) return { upserted: 0, removed: 0, workOrderIds: [] };
 
   const woCol: string[] = [];
   const matIdCol: Array<string | null> = [];
@@ -289,12 +290,10 @@ export async function appendMaterialCostItems(
   const amountCol: number[] = [];
   const noteCol: string[] = [];
   for (const r of agg.rows as Array<Record<string, unknown>>) {
-    const woId = String(r.work_order_id);
-    if (dupSet.has(woId)) continue;
     const qty = Number(r.qty) || 0;
     const price = Number(r.material_price) || 0;
     if (qty <= 0) continue; // 聚合出 0/负数（理论上 out 行 qty 恒正）→ 不落空行
-    woCol.push(woId);
+    woCol.push(String(r.work_order_id));
     matIdCol.push(r.material_id ? String(r.material_id) : null);
     matCodeCol.push(r.material_code ? String(r.material_code) : null);
     matNameCol.push(r.material_name ? String(r.material_name) : null);
@@ -303,26 +302,56 @@ export async function appendMaterialCostItems(
     amountCol.push(Math.round(price * qty * 100) / 100);
     noteCol.push('工单耗材');
   }
-  if (woCol.length === 0) return { inserted: 0, workOrderIds: [] };
 
-  try {
-    await client.query(
-      `INSERT INTO settlement_item
-         (tenant_id, settlement_id, work_order_id, category_code, category_name, price, qty, amount, note, source, material_id)
-       SELECT $1, $2, t.wo_id, t.mat_code, t.mat_name, t.price, t.qty, t.amount, t.note, 'material', t.mat_id
-       FROM unnest($3::text[], $4::uuid[], $5::text[], $6::text[], $7::numeric[], $8::numeric[], $9::numeric[], $10::text[])
-            AS t(wo_id, mat_id, mat_code, mat_name, price, qty, amount, note)`,
-      [tenantId, settlementId, woCol, matIdCol, matCodeCol, matNameCol, priceCol, qtyCol, amountCol, noteCol],
-    );
-  } catch (e: any) {
-    if (e?.code === '23505') {
-      throw new AppError('CONFLICT', '工单耗材明细已存在（并发冲突），请刷新后重试', 409);
+  let upserted = 0;
+  if (woCol.length > 0) {
+    try {
+      // §13 裁决1：按 (工单,耗材) UPSERT——冲突目标 = 085 的部分唯一索引 uq_sti_material。
+      // 无「整单跳过」：draft 期间追加的消耗同样会被重投影进结算单（E4b 反向转正），≥2 种耗材各占一行。
+      const r = await client.query(
+        `INSERT INTO settlement_item
+           (tenant_id, settlement_id, work_order_id, category_code, category_name, price, qty, amount, note, source, material_id)
+         SELECT $1, $2, t.wo_id, t.mat_code, t.mat_name, t.price, t.qty, t.amount, t.note, 'material', t.mat_id
+         FROM unnest($3::text[], $4::uuid[], $5::text[], $6::text[], $7::numeric[], $8::numeric[], $9::numeric[], $10::text[])
+              AS t(wo_id, mat_id, mat_code, mat_name, price, qty, amount, note)
+         ON CONFLICT (tenant_id, work_order_id, material_id) WHERE source = 'material'
+         DO UPDATE SET settlement_id = EXCLUDED.settlement_id,
+                       category_code = EXCLUDED.category_code,
+                       category_name = EXCLUDED.category_name,
+                       price = EXCLUDED.price, qty = EXCLUDED.qty, amount = EXCLUDED.amount, note = EXCLUDED.note`,
+        [tenantId, settlementId, woCol, matIdCol, matCodeCol, matNameCol, priceCol, qtyCol, amountCol, noteCol],
+      );
+      upserted = r.rowCount ?? 0;
+    } catch (e: any) {
+      // 理论上 UPSERT 已消化常规冲突；仍保留 23505→409 兜底（如极端并发下撞 uq_sti_service 形态）
+      if (e?.code === '23505') {
+        throw new AppError('CONFLICT', '工单耗材明细并发冲突，请刷新后重试', 409);
+      }
+      throw e;
     }
-    throw e;
   }
 
-  await recalcHeader(client, tenantId, settlementId);
-  return { inserted: woCol.length, workOrderIds: Array.from(new Set(woCol)) };
+  // 全量重投影的清理半边：事实源已无消耗、但结算单头下仍有残留耗材行 → 删除（仅 A2 路径开启）
+  let removed = 0;
+  if (opts?.pruneStale) {
+    const del = await client.query(
+      `DELETE FROM settlement_item si
+       WHERE si.tenant_id = $1 AND si.source = 'material' AND si.settlement_id = $2
+         AND si.work_order_id = ANY($3::text[])
+         AND NOT EXISTS (
+           SELECT 1 FROM unnest($4::text[], $5::uuid[]) AS t(wo_id, mat_id)
+           WHERE t.wo_id = si.work_order_id AND t.mat_id = si.material_id
+         )`,
+      [tenantId, settlementId, workOrderIds, woCol, matIdCol],
+    );
+    removed = del.rowCount ?? 0;
+  }
+
+  // 表头重算：有 upsert 或清理时才动表头；两者皆无（空转）→ 一条多余 SQL 都不写（幂等空转零成本）
+  if (upserted > 0 || removed > 0 || agg.rows.length > 0) {
+    await recalcHeader(client, tenantId, settlementId);
+  }
+  return { upserted, removed, workOrderIds: Array.from(new Set(woCol)) };
 }
 
 /**

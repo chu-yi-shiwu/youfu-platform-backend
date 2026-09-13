@@ -32,7 +32,7 @@ import { CONSUME_BLOCKED_STATUSES, CONSUME_WAREHOUSE } from '../routes/material.
 import { runAutoSettleStep } from '../routes/workOrder.js';
 import {
   AUTO_SETTLEMENT_OPERATOR,
-  appendMaterialCostItems,
+  syncMaterialCostRows,
   autoCreateSettlementForOrder,
   createSettlementDraft,
   confirmSettlement,
@@ -155,6 +155,8 @@ function settleHandlers(opts?: {
       match: (t) => t.includes('SELECT DISTINCT work_order_id FROM settlement_item'),
       reply: () => ({ rows: (opts?.existingMaterial ?? []).map((id) => ({ work_order_id: id })), rowCount: (opts?.existingMaterial ?? []).length }),
     },
+    // §13 裁决1 pruneStale：全量重投影的清理半边（默认无残留行可删）
+    { match: (t) => t.includes('DELETE FROM settlement_item'), reply: () => ({ rows: [], rowCount: 0 }) },
     { match: (t) => t.includes('COALESCE(SUM(amount)'), reply: () => ({ rows: [opts?.agg ?? { total: '120.00', c: 1 }] }) },
     { match: (t) => t.includes('UPDATE settlement SET total'), reply: () => ({ rows: [], rowCount: 1 }) },
     { match: (t) => t.includes('SELECT * FROM settlement WHERE id'), reply: () => ({ rows: [header] }) },
@@ -220,11 +222,70 @@ function consumeHandlers(opts?: {
   orderFound?: boolean;
   inventoryQty?: number | null;
   perms?: Handler[];
+  /** §13 裁决2：workflow_def 查询返回的 def（缺省 = 无行 → 富模板兜底口径） */
+  workflowDef?: Record<string, unknown> | null;
+  /** §13 裁决1 B 守卫：该工单的 confirmed 结算单（缺省 = 无 → 不拦） */
+  confirmedSettlement?: { id: string; settlement_no: string } | null;
+  /** §13 裁决1 A2：该工单的 draft 结算单（缺省 = 无 → 不联动） */
+  draftSettlement?: { id: string; settlement_no: string } | null;
+  /** A2 联动时 syncMaterialCostRows 的事实源聚合 */
+  syncAgg?: Array<Record<string, unknown>>;
 }): Handler[] {
   const status = opts?.status ?? 'processing';
   const qty = opts?.inventoryQty === undefined ? 10 : opts.inventoryQty;
+  const syncAgg = opts?.syncAgg ?? [];
   return [
     ...(opts?.perms ?? BASE),
+    // —— §13 新增 SQL（先具体后泛化，防被下方泛化 handler 吞掉）——
+    // 终态口径：读租户 workflow_def（无行 → getWorkflowDefOrDefault 回退富模板）
+    {
+      match: (t) => t.includes('FROM workflow_def'),
+      reply: () => (opts?.workflowDef ? { rows: [{ def: opts.workflowDef }], rowCount: 1 } : { rows: [], rowCount: 0 }),
+    },
+    // B 守卫：confirmed 结算单查询
+    {
+      match: (t) => t.includes("s.status = 'confirmed'") && t.includes('FROM settlement s'),
+      reply: () => (opts?.confirmedSettlement ? { rows: [opts.confirmedSettlement], rowCount: 1 } : { rows: [], rowCount: 0 }),
+    },
+    // A2：draft 结算单查询（FOR UPDATE 锁定 + 'draft' 白名单）
+    {
+      match: (t) => t.includes("s.status = 'draft'") && t.includes('FOR UPDATE'),
+      reply: () => (opts?.draftSettlement ? { rows: [opts.draftSettlement], rowCount: 1 } : { rows: [], rowCount: 0 }),
+    },
+    // A2 联动链：syncMaterialCostRows 的聚合 / UPSERT / 清残留 / 表头重算 / 回显取 total
+    {
+      match: (t) => t.includes('FROM inventory_log il') && t.includes('JOIN material m'),
+      reply: () => ({ rows: syncAgg, rowCount: syncAgg.length }),
+    },
+    {
+      match: (t) => t.includes('INSERT INTO settlement_item') && t.includes("'material'"),
+      reply: () => ({ rows: [], rowCount: syncAgg.length }),
+    },
+    {
+      match: (t) => t.includes('DELETE FROM settlement_item') && t.includes("si.source = 'material'"),
+      reply: () => ({ rows: [], rowCount: 0 }),
+    },
+    { match: (t) => t.includes('COALESCE(SUM(amount)'), reply: () => ({ rows: [{ total: '150.00', c: 2 }] }) },
+    { match: (t) => t.includes('UPDATE settlement SET total'), reply: () => ({ rows: [], rowCount: 1 }) },
+    { match: (t) => t.includes('SELECT total FROM settlement WHERE id'), reply: () => ({ rows: [{ total: '150.00' }], rowCount: 1 }) },
+    // recalcHeader 末尾回读表头（syncMaterialCostRows → recalcHeader 必走）——缺它 A2 联动路径必 500
+    {
+      match: (t) => t.includes('SELECT * FROM settlement WHERE id'),
+      reply: () => ({
+        rows: [
+          {
+            id: opts?.draftSettlement?.id ?? 'st-1',
+            tenant_id: T,
+            settlement_no: opts?.draftSettlement?.settlement_no ?? 'ST202609140001',
+            status: 'draft',
+            total: '150.00',
+            item_count: 2,
+          },
+        ],
+        rowCount: 1,
+      }),
+    },
+    // —— 既有泛化 handlers ——
     {
       match: (t) => t.includes('FROM work_orders') && t.includes('FOR UPDATE'),
       reply: () =>
@@ -532,6 +593,10 @@ describe('⑧ 库存不足：422 INSUFFICIENT_STOCK + 事务内零部分扣减',
     // MID1 够（可用 10）；MID2 不够（库存行缺失 = 可用 0）
     const mk = makeClient([
       ...BASE,
+      // §13 新增 SQL（缺了就是 strict 模式炸掉）：终态口径读 workflow_def + B 守卫查 confirmed 结算单
+      // 均返回「无」→ 不拦截，用例仍聚焦缺货判定与零部分扣减
+      { match: (t) => t.includes('FROM workflow_def'), reply: () => ({ rows: [], rowCount: 0 }) },
+      { match: (t) => t.includes("s.status = 'confirmed'"), reply: () => ({ rows: [], rowCount: 0 }) },
       { match: (t) => t.includes('FROM work_orders') && t.includes('FOR UPDATE'), reply: () => ({ rows: [{ id: WO, order_no: WO, status: 'processing' }], rowCount: 1 }) },
       { match: (t) => t.includes('SELECT id, name FROM material'), reply: (_t, p) => ({ rows: [{ id: p[0], name: p[0] === MID2 ? '密封圈' : '滤芯' }], rowCount: 1 }) },
       { match: (t) => t.includes('SELECT qty FROM inventory'), reply: (_t, p) => (p[1] === MID2 ? { rows: [], rowCount: 0 } : { rows: [{ qty: 10 }], rowCount: 1 }) },
@@ -669,29 +734,59 @@ describe('⑪ 结算联动：自动单总额 = 服务价目 + Σ(耗材单价×�
 
   it('无耗材消耗 → 不追加任何行、不触发表头重算（存量路径零回归）', async () => {
     const mk = makeClient(settleHandlers(), { strict: true });
-    const out = await appendMaterialCostItems(mk.client, T, 'st-1', [WO]);
-    expect(out.inserted).toBe(0);
+    const out = await syncMaterialCostRows(mk.client, T, 'st-1', [WO]);
+    expect(out.upserted).toBe(0);
+    expect(out.removed).toBe(0);
     expect(mk.calls.some((c) => c.text.includes('INSERT INTO settlement_item'))).toBe(false);
     expect(mk.calls.some((c) => c.text.includes('COALESCE(SUM(amount)'))).toBe(false);
   });
 });
 
-// ==================== ⑫ 防双计 ====================
-describe('⑫ 防双计：已有 material 明细的工单不再追加耗材行', () => {
-  it('existingMaterial 命中 → 零耗材 INSERT、零表头重算', async () => {
+// ==================== ⑫ 全量重投影的幂等与清理（§13 裁决1 替换旧「整单跳过」防双计）====================
+describe('⑫ 全量重投影：UPSERT 幂等 + pruneStale 清理（不再整单跳过）', () => {
+  it('同 (工单,耗材) 重复同步 → 仍是一条 ON CONFLICT DO UPDATE（不产生第二行、不跳过）', async () => {
+    const aggRow = { work_order_id: WO, material_id: MID1, qty: '3.00', material_code: 'MAT-1', material_name: '滤芯', material_price: '30.00' };
+    const mk = makeClient(settleHandlers({ materialAgg: [aggRow], agg: { total: '210.00', c: 2 } }), { strict: true });
+
+    const first = await syncMaterialCostRows(mk.client, T, 'st-1', [WO]);
+    const second = await syncMaterialCostRows(mk.client, T, 'st-1', [WO]);
+    expect(first.upserted).toBe(1);
+    expect(second.upserted).toBe(1); // 第二次仍然走同一条 UPSERT（幂等收敛），不是"跳过"
+
+    const matCalls = mk.calls.filter((c) => c.text.includes('INSERT INTO settlement_item') && c.text.includes("'material'"));
+    expect(matCalls.length).toBe(2);
+    for (const c of matCalls) {
+      // 关键结构证据：冲突即 UPDATE（qty/price/amount/category_name/note 全量刷新），而非裸 INSERT 撞 23505
+      expect(c.text).toContain("ON CONFLICT (tenant_id, work_order_id, material_id) WHERE source = 'material'");
+      expect(c.text).toContain('DO UPDATE SET');
+      expect(c.text).toContain('qty = EXCLUDED.qty');
+      expect(c.text).toContain('price = EXCLUDED.price');
+      expect(c.text).toContain('amount = EXCLUDED.amount');
+      expect(c.text).toContain('category_name = EXCLUDED.category_name');
+      expect(c.text).toContain('note = EXCLUDED.note');
+      expect(c.params![7]).toEqual([3]); // qty 取聚合值（重投影而非累加）
+    }
+  });
+
+  it('pruneStale=true：事实源已无该耗材的消耗 → 残留 material 行被清理（全量重投影语义）', async () => {
     const mk = makeClient(
       settleHandlers({
-        materialAgg: [
-          { work_order_id: WO, material_id: MID1, qty: '2.00', material_code: 'MAT-1', material_name: '滤芯', material_price: '30.00' },
-        ],
-        existingMaterial: [WO],
+        materialAgg: [{ work_order_id: WO, material_id: MID1, qty: '1.00', material_code: 'MAT-1', material_name: '滤芯', material_price: '30.00' }],
       }),
       { strict: true },
     );
-    const out = await appendMaterialCostItems(mk.client, T, 'st-1', [WO]);
-    expect(out.inserted).toBe(0);
-    expect(mk.calls.some((c) => c.text.includes('INSERT INTO settlement_item') && c.text.includes("'material'"))).toBe(false);
-    expect(mk.calls.some((c) => c.text.includes('COALESCE(SUM(amount)'))).toBe(false);
+    const out = await syncMaterialCostRows(mk.client, T, 'st-1', [WO], { pruneStale: true });
+    expect(out.removed).toBe(0); // handler 默认 rowCount 0 → 无残留需删
+    const del = mk.calls.find((c) => c.text.includes('DELETE FROM settlement_item'));
+    expect(del).toBeTruthy();
+    expect(del!.text).toContain("si.source = 'material'");
+    expect(del!.text).toContain('NOT EXISTS');
+  });
+
+  it('createSettlementDraft 调用不带 pruneStale（新建单头下无残留行 → 零多余 SQL）', async () => {
+    const mk = makeClient(settleHandlers({ materialAgg: [{ work_order_id: WO, material_id: MID1, qty: '1.00', material_code: 'MAT-1', material_name: '滤芯', material_price: '30.00' }] }), { strict: true });
+    await createSettlementDraft(mk.client, T, [WO], 'admin');
+    expect(mk.calls.some((c) => c.text.includes('DELETE FROM settlement_item'))).toBe(false);
   });
 });
 
@@ -774,6 +869,9 @@ describe('⑬ 类型修复回归：inventory_log.work_order_id uuid → text（0
       { match: (t) => t.includes('SELECT id FROM material'), reply: () => ({ rows: [{ id: MID1 }], rowCount: 1 }) },
       // 注意：material.ts 里该 SQL 是 `order_no=$2`（无空格），匹配串必须逐字对齐，否则 strict 模式直接炸出 500
       { match: (t) => t.includes('FROM work_orders') && t.includes('order_no=$2'), reply: (_t, p) => ({ rows: [{ id: p[1] }], rowCount: 1 }) },
+      // §14 复议1：挂单出库新增「draft 结算单」查询——本用例断言未挂单/无 draft 时零回归路径，
+      // 返回「无 draft」→ 不触发重投影，流水照写（列类型断言不受影响）
+      { match: (t) => t.includes('FROM settlement s') && t.includes("s.status = 'draft'"), reply: () => ({ rows: [], rowCount: 0 }) },
       { match: (t) => t.includes('SELECT qty FROM inventory'), reply: () => ({ rows: [{ qty: 10 }], rowCount: 1 }) },
       { match: (t) => t.includes('UPDATE inventory SET qty'), reply: () => ({ rows: [], rowCount: 1 }) },
       { match: (t) => t.includes('INSERT INTO inventory_log'), reply: () => ({ rows: [], rowCount: 1 }) },
@@ -897,6 +995,503 @@ describe('⑭ 权限收口：material.manage / asset.manage 仅 admin（含覆�
       expect(DEFAULT_PERM_MATRIX[role]).not.toContain('consumable.consume');
       expect(DEFAULT_PERM_MATRIX[role]).not.toContain('material.manage');
       expect(DEFAULT_PERM_MATRIX[role]).not.toContain('asset.manage');
+    }
+  });
+});
+
+// ==================== ⑮ §13/§14 收口锚点（多耗材重投影 / A2 即时联动 / 非 draft 拒绝 / 挂单出库）====================
+// 说明（诚实边界）：本组全部为 **mock 层**锚点（脚本化 client 断言 SQL 形态与参数、路由真 HTTP 断言状态码）。
+// 真库验证（085 两条部分唯一索引实际建成、真插两行 source='material' 观察真 23505、086 回填幂等）
+// 本机无可用 PG 凭据（pg_hba=scram-sha-256，无 .pgpass/.env/PG* 变量）→ **挂账到部署窗口**执行，见回执。
+describe('⑮ §13 发现3：单工单多耗材重投影（旧三列唯一约束下必 409 的回归锚点）', () => {
+  const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
+  it('单工单 2 种耗材 → 自动结算 1 service + 2 material 行，total = 服务价 + Σ耗材', async () => {
+    const mk = makeClient(
+      settleHandlers({
+        materialAgg: [
+          { work_order_id: WO, material_id: MID1, qty: '2.00', material_code: 'MAT-1', material_name: '滤芯', material_price: '30.00' },
+          { work_order_id: WO, material_id: MID2, qty: '1.00', material_code: 'MAT-2', material_name: '密封圈', material_price: '10.00' },
+        ],
+        agg: { total: '190.00', c: 3 }, // 120（服务价目）+ 60（30×2）+ 10（10×1）
+      }),
+      { strict: true },
+    );
+    const r = await runAutoSettleStep(mk.client, T, WO);
+    // 旧实现（084 三列唯一 + 整单跳过）：第二种耗材必 23505 → 误报 409 → SAVEPOINT 回滚 → 这里必红
+    expect(r.settleError).toBeNull();
+    expect(r.created).toBe(true);
+
+    const mat = mk.calls.find((c) => c.text.includes('INSERT INTO settlement_item') && c.text.includes("'material'"))!;
+    expect(mat).toBeTruthy();
+    // 两条耗材行走**同一条 UPSERT**（unnest 两元素），冲突目标 = 085 的 uq_sti_material
+    expect(mat.text).toContain("ON CONFLICT (tenant_id, work_order_id, material_id) WHERE source = 'material'");
+    expect(mat.text).toContain('DO UPDATE SET');
+    expect(mat.params![2]).toEqual([WO, WO]); // 同工单两行
+    expect(mat.params![3]).toEqual([MID1, MID2]); // 两种耗材各一行
+    expect(Number(arr0(mat.params![6]))).toBe(30); // price[0]
+    expect(Number(arr0(mat.params![7]))).toBe(2); // qty[0]
+    expect(Number(arr0(mat.params![8]))).toBe(60); // amount[0] = 30×2
+    expect(Number((mat.params![8] as number[])[1])).toBe(10); // amount[1] = 10×1
+    // 表头按「服务行 + 两条耗材行」重算
+    const hdr = mk.calls.filter((c) => c.text.includes('UPDATE settlement SET total'));
+    expect(Number(hdr[hdr.length - 1].params![0])).toBe(190);
+    expect(hdr[hdr.length - 1].params![1]).toBe(3);
+  });
+
+  it('085 幂等重跑（结构断言）：两条部分唯一索引 + 三列约束显式摘除 + 谓词无 now()', () => {
+    const sql085 = readFileSync(join(root, '085_settlement_material_row_grain.sql'), 'utf8');
+    expect(sql085).toMatch(/DROP CONSTRAINT IF EXISTS uq_settlement_item_tenant_wo_source/);
+    expect(sql085).toMatch(
+      /CREATE UNIQUE INDEX IF NOT EXISTS uq_sti_service\s+ON settlement_item \(tenant_id, work_order_id\)\s+WHERE source = 'service'/,
+    );
+    expect(sql085).toMatch(
+      /CREATE UNIQUE INDEX IF NOT EXISTS uq_sti_material\s+ON settlement_item \(tenant_id, work_order_id, material_id\)\s+WHERE source = 'material'/,
+    );
+    expect(sql085).not.toMatch(/now\(\)/); // 077 铁律：索引谓词仅 IMMUTABLE
+    // 反向：不得再出现三列形态的唯一**约束**新建（拆分后由部分唯一索引承载）
+    expect(sql085).not.toMatch(/ADD CONSTRAINT uq_settlement_item_tenant_wo_source/);
+  });
+});
+
+describe('⑮ §13 裁决1：consume 与 draft 结算单的即时联动（A2）', () => {
+  it('consume 后该笔立即体现在 draft 结算单：写库段之后重投影 + recalcHeader + 响应回显 settlement', async () => {
+    const mk = makeClient(
+      consumeHandlers({
+        draftSettlement: { id: 'st-1', settlement_no: 'ST202609140001' },
+        syncAgg: [
+          { work_order_id: WO, material_id: MID1, qty: '2.00', material_code: 'MAT-1', material_name: '滤芯', material_price: '30.00' },
+        ],
+      }),
+      { strict: true },
+    );
+    h.client = mk.client;
+    const r = await call('POST', '/inventory/consume', {
+      role: 'worker',
+      body: { work_order_id: WO, items: [{ material_id: MID1, qty: 2 }] },
+    });
+    expect(r.status, JSON.stringify(r.body)).toBe(200);
+    expect(r.body.settlement).toMatchObject({ id: 'st-1', settlement_no: 'ST202609140001' });
+
+    const texts = mk.calls.map((c) => c.text);
+    const invIdx = texts.findIndex((t) => t.includes('UPDATE inventory SET qty'));
+    const upsIdx = texts.findIndex((t) => t.includes('INSERT INTO settlement_item') && t.includes("'material'"));
+    expect(invIdx).toBeGreaterThan(-1);
+    expect(upsIdx).toBeGreaterThan(invIdx); // §13 指定插入点：④写库段之后
+    expect(texts.some((t) => t.includes('COALESCE(SUM(amount)'))).toBe(true); // recalcHeader 真实被调用
+    expect(texts.some((t) => t.includes('DELETE FROM settlement_item'))).toBe(true); // pruneStale=true
+  });
+
+  it('该工单无 draft 结算单 → 零联动（不写明细、不乱建单），响应 settlement=null', async () => {
+    const mk = makeClient(consumeHandlers(), { strict: true });
+    h.client = mk.client;
+    const r = await call('POST', '/inventory/consume', {
+      role: 'worker',
+      body: { work_order_id: WO, items: [{ material_id: MID1, qty: 1 }] },
+    });
+    expect(r.status, JSON.stringify(r.body)).toBe(200);
+    expect(r.body.settlement).toBeNull();
+    expect(mk.calls.some((c) => c.text.includes('INSERT INTO settlement_item'))).toBe(false);
+    expect(mk.calls.some((c) => c.text.includes('COALESCE(SUM(amount)'))).toBe(false);
+  });
+});
+
+describe('⑮ §13 裁决1 B 守卫：非 draft（已确认锁定）→ 422 SETTLEMENT_LOCKED', () => {
+  it('confirmed 结算单存在 → consume 422 SETTLEMENT_LOCKED，零库存动作（all-or-nothing 不破）', async () => {
+    const mk = makeClient(
+      consumeHandlers({ confirmedSettlement: { id: 'st-9', settlement_no: 'ST202609140009' } }),
+      { strict: true },
+    );
+    h.client = mk.client;
+    const r = await call('POST', '/inventory/consume', {
+      role: 'worker',
+      body: { work_order_id: WO, items: [{ material_id: MID1, qty: 1 }] },
+    });
+    expect(r.status, JSON.stringify(r.body)).toBe(422);
+    expect(r.body.code).toBe('SETTLEMENT_LOCKED');
+    expect(String(r.body.message)).toContain('ST202609140009');
+    expect(mk.calls.some((c) => c.text.includes('UPDATE inventory SET qty'))).toBe(false);
+    expect(mk.calls.some((c) => c.text.includes('INSERT INTO inventory_log'))).toBe(false);
+  });
+});
+
+describe('⑮ §14 复议1：挂单出库同样联动 draft 结算单', () => {
+  const outBase: Handler[] = [
+    { match: (t) => t.includes('SELECT id FROM material'), reply: (_t, p) => ({ rows: [{ id: p[0] }], rowCount: 1 }) },
+    { match: (t) => t.includes('FROM work_orders') && t.includes('order_no=$2'), reply: () => ({ rows: [{ id: WO }], rowCount: 1 }) },
+    { match: (t) => t.includes('SELECT qty FROM inventory'), reply: () => ({ rows: [{ qty: 10 }], rowCount: 1 }) },
+    { match: (t) => t.includes('UPDATE inventory SET qty'), reply: () => ({ rows: [], rowCount: 1 }) },
+    { match: (t) => t.includes('INSERT INTO inventory_log'), reply: () => ({ rows: [], rowCount: 1 }) },
+    { match: (t) => t.includes('INSERT INTO domain_event'), reply: () => ({ rows: [], rowCount: 1 }) },
+  ];
+
+  it('带 work_order_no 且该工单有 draft 单 → 出库后重投影该笔进结算（§14 复议1）', async () => {
+    const mk = makeClient(
+      [
+        ...granted('material.manage'),
+        ...outBase,
+        { match: (t) => t.includes("s.status = 'draft'"), reply: () => ({ rows: [{ id: 'st-1', settlement_no: 'ST202609140001' }], rowCount: 1 }) },
+        { match: (t) => t.includes('FROM inventory_log il'), reply: () => ({ rows: [{ work_order_id: WO, material_id: MID1, qty: '1.00', material_code: 'MAT-1', material_name: '滤芯', material_price: '30.00' }], rowCount: 1 }) },
+        // §13 裁决1 UPSERT：耗材行落库（无此 handler strict 模式必炸）
+        { match: (t) => t.includes('INSERT INTO settlement_item') && t.includes("'material'"), reply: () => ({ rows: [], rowCount: 1 }) },
+        { match: (t) => t.includes('DELETE FROM settlement_item'), reply: () => ({ rows: [], rowCount: 0 }) },
+        { match: (t) => t.includes('COALESCE(SUM(amount)'), reply: () => ({ rows: [{ total: '150.00', c: 2 }] }) },
+        { match: (t) => t.includes('UPDATE settlement SET total'), reply: () => ({ rows: [], rowCount: 1 }) },
+        // recalcHeader 末尾回读表头（sync 联动必经）——缺它本用例必 500
+        { match: (t) => t.includes('SELECT * FROM settlement WHERE id'), reply: () => ({ rows: [{ id: 'st-1', settlement_no: 'ST202609140001', total: '150.00' }], rowCount: 1 }) },
+      ],
+      { strict: true },
+    );
+    h.client = mk.client;
+    const r = await call('POST', '/inventory/out', {
+      role: 'admin',
+      body: { material_id: MID1, qty: 1, work_order_no: WO },
+    });
+    expect(r.status, JSON.stringify(r.body)).toBe(200);
+    const ups = mk.calls.find((c) => c.text.includes('INSERT INTO settlement_item') && c.text.includes("'material'"));
+    expect(ups).toBeTruthy();
+    expect(ups!.text).toContain("ON CONFLICT (tenant_id, work_order_id, material_id)");
+    expect(mk.calls.some((c) => c.text.includes('DELETE FROM settlement_item'))).toBe(true); // pruneStale=true
+    // 顺序证据：库存扣减在前、结算重投影在后
+    const texts = mk.calls.map((c) => c.text);
+    expect(texts.findIndex((t) => t.includes('INSERT INTO settlement_item'))).toBeGreaterThan(
+      texts.findIndex((t) => t.includes('UPDATE inventory SET qty')),
+    );
+  });
+
+  it('不传 work_order_no → 零结算联动（未挂单出库零回归）', async () => {
+    const mk = makeClient([...granted('material.manage'), ...outBase], { strict: true });
+    h.client = mk.client;
+    const r = await call('POST', '/inventory/out', { role: 'admin', body: { material_id: MID1, qty: 1 } });
+    expect(r.status, JSON.stringify(r.body)).toBe(200);
+    expect(mk.calls.some((c) => c.text.includes('FROM settlement s'))).toBe(false);
+    expect(mk.calls.some((c) => c.text.includes('INSERT INTO settlement_item'))).toBe(false);
+  });
+});
+
+describe('⑮ §13 裁决2：终态判定收敛后端（租户自定义终态也拦得住）', () => {
+  const body = { work_order_id: WO, items: [{ material_id: MID1, qty: 1 }] };
+
+  it('租户 workflow_def doneStates=[archived] → archived 单 consume 422 ORDER_CLOSED（前端未预判也拦得住）', async () => {
+    const mk = makeClient(consumeHandlers({ status: 'archived', workflowDef: { config: { doneStates: ['archived'] } } }), {
+      strict: true,
+    });
+    h.client = mk.client;
+    const r = await call('POST', '/inventory/consume', { role: 'worker', body });
+    expect(r.status, JSON.stringify(r.body)).toBe(422);
+    expect(r.body.code).toBe('ORDER_CLOSED');
+    expect(mk.calls.some((c) => c.text.includes('FROM workflow_def'))).toBe(true); // 口径确实来自租户定义
+    expect(mk.calls.some((c) => c.text.includes('UPDATE inventory SET qty'))).toBe(false);
+  });
+
+  it('自定义 doneStates=[archived] 时 completed 仍被拦（终态口径 = doneStates ∪ {completed, cancelled}）', async () => {
+    const mk = makeClient(consumeHandlers({ status: 'completed', workflowDef: { config: { doneStates: ['archived'] } } }), {
+      strict: true,
+    });
+    h.client = mk.client;
+    const r = await call('POST', '/inventory/consume', { role: 'worker', body });
+    expect(r.status, JSON.stringify(r.body)).toBe(422);
+    expect(r.body.code).toBe('ORDER_CLOSED');
+  });
+
+  it('无 workflow_def 行的租户 → 回退富模板口径（completed/closed/evaluated 仍拦，processing 放行）', async () => {
+    const mkBlocked = makeClient(consumeHandlers({ status: 'evaluated' }), { strict: true });
+    h.client = mkBlocked.client;
+    const r1 = await call('POST', '/inventory/consume', { role: 'worker', body });
+    expect(r1.status).toBe(422);
+    expect(r1.body.code).toBe('ORDER_CLOSED');
+
+    const mkOk = makeClient(consumeHandlers({ status: 'processing' }), { strict: true });
+    h.client = mkOk.client;
+    const r2 = await call('POST', '/inventory/consume', { role: 'worker', body });
+    expect(r2.status, JSON.stringify(r2.body)).toBe(200);
+  });
+});
+
+
+// ==================== ⑮ §13 发现3：一单多耗材行粒度（085 拆约束）====================
+describe('⑮ §13 发现3：一单多耗材行粒度（085 拆约束）与真库验证挂账', () => {
+  const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
+  const sql085 = readFileSync(join(root, '085_settlement_material_row_grain.sql'), 'utf8');
+
+  it('单工单 2 种耗材 → 自动结算 = 1 条 service + 2 条 material，表头 = 服务价目 + Σ耗材', async () => {
+    const mk = makeClient(
+      settleHandlers({
+        materialAgg: [
+          { work_order_id: WO, material_id: MID1, qty: '2.00', material_code: 'MAT-1', material_name: '滤芯', material_price: '30.00' },
+          { work_order_id: WO, material_id: MID2, qty: '1.00', material_code: 'MAT-2', material_name: '密封圈', material_price: '20.00' },
+        ],
+        agg: { total: '200.00', c: 3 },
+      }),
+      { strict: true },
+    );
+    const r = await runAutoSettleStep(mk.client, T, WO);
+    // 🔴本批最该锚死的回归：旧实现（084 三列唯一 + 整单跳过）在此 23505→409→SAVEPOINT 回滚，结算单不创建
+    expect(r.settleError).toBeNull();
+    expect(r.created).toBe(true);
+
+    const mat = mk.calls.find((c) => c.text.includes('INSERT INTO settlement_item') && c.text.includes("'material'"))!;
+    expect(mat).toBeTruthy();
+    expect(mat.params![3]).toEqual([MID1, MID2]); // 两种耗材各一行（既不是一行，也不是被整单跳过）
+    expect(mat.params![7]).toEqual([2, 1]); // qty 各取聚合值
+    expect(mat.params![8]).toEqual([60, 20]); // amount = 30×2 / 20×1
+    expect(mat.text).toContain('ON CONFLICT'); // 行粒度由 uq_sti_material 承载，不再撞三列约束
+
+    // service 行仍恰好一条（「一单终身一结算」口径未被放宽）
+    const svc = mk.calls.filter((c) => c.text.includes('INSERT INTO settlement_item') && !c.text.includes("'material'"));
+    expect(svc.length).toBe(1);
+
+    const hdr = mk.calls.filter((c) => c.text.includes('UPDATE settlement SET total'));
+    const last = hdr[hdr.length - 1];
+    expect(Number(last.params![0])).toBe(200); // 120（服务）+ 60 + 20（两种耗材）
+    expect(last.params![1]).toBe(3);
+  });
+
+  it('再补第 3 笔消耗 → 重投影取新聚合值（qty 刷新为 3、行数不增）', async () => {
+    const mk = makeClient(
+      settleHandlers({
+        materialAgg: [
+          { work_order_id: WO, material_id: MID1, qty: '3.00', material_code: 'MAT-1', material_name: '滤芯', material_price: '30.00' },
+        ],
+      }),
+      { strict: true },
+    );
+    const out = await syncMaterialCostRows(mk.client, T, 'st-1', [WO], { pruneStale: true });
+    expect(out.upserted).toBe(1);
+    const matCalls = mk.calls.filter((c) => c.text.includes('INSERT INTO settlement_item') && c.text.includes("'material'"));
+    expect(matCalls.length).toBe(1); // 只有一次语句（行数不增的结构证据）
+    expect(matCalls[0].params![7]).toEqual([3]); // qty 覆盖为新聚合值（不是 2、也不是累加成 5）
+    expect(matCalls[0].params![8]).toEqual([90]); // amount = 30×3
+    expect(matCalls[0].text).toContain('DO UPDATE SET');
+  });
+
+  it('085 迁移：DROP 三列唯一 + 两个部分唯一索引 + 幂等重跑 + 谓词 IMMUTABLE', () => {
+    expect(sql085).toMatch(/ALTER TABLE settlement_item DROP CONSTRAINT IF EXISTS uq_settlement_item_tenant_wo_source;/);
+    expect(sql085).toMatch(/CREATE UNIQUE INDEX IF NOT EXISTS uq_sti_service\s+ON settlement_item \(tenant_id, work_order_id\)\s+WHERE source = 'service';/);
+    expect(sql085).toMatch(/CREATE UNIQUE INDEX IF NOT EXISTS uq_sti_material\s+ON settlement_item \(tenant_id, work_order_id, material_id\)\s+WHERE source = 'material';/);
+    // 幂等：IF EXISTS / IF NOT EXISTS 全覆盖
+    expect((sql085.match(/IF NOT EXISTS/g) ?? []).length).toBeGreaterThanOrEqual(2);
+    expect((sql085.match(/IF EXISTS/g) ?? []).length).toBeGreaterThanOrEqual(1);
+    // 谓词纪律（077 铁律）：**DDL 行**不得含 now()（头注释里"本文件不含 now()"是元说明，先剥注释再判）
+    const ddlOnly = sql085
+      .split('\n')
+      .filter((l) => !l.trim().startsWith('--'))
+      .join('\n');
+    expect(ddlOnly).not.toContain('now()');
+    // 命名变更留痕（收口时按架构师文档 §13 登记名改名）
+    expect(sql085).toContain('085_settlement_material_row_grain.sql');
+    expect(sql085).toContain('085_settlement_item_unique_split.sql');
+  });
+
+  it('真库验证（两条部分索引存在 + 无三列约束残留）—— 本地无凭据，挂部署窗口（如实标注）', () => {
+    // 诚实边界：本机 PG 15 为 scram-sha-256 强制密码，且无 .pgpass / .env / PG* 变量，
+    // 本地无法连真库 → 本条**不拿 mock 冒充真库**，只锚定「部署窗口要跑的自证 SQL 已随迁移固化」。
+    expect(sql085).toContain('pg_indexes'); // ④-1 索引存在性
+    expect(sql085).toContain('contype'); // ④-2 三列约束残留
+    expect(sql085).toContain('array_length(c.conkey, 1) = 3');
+    expect(sql085).toContain('085④-1');
+    expect(sql085).toContain('085④-2');
+  });
+});
+
+// ==================== ⑯ §14 复议1：挂单出库/consume 与 draft 结算联动 ====================
+describe('⑯ §14 复议1：consume 与挂单出库对 draft 结算单的联动（端到端 + 零回归 + 哨兵）', () => {
+  const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
+  const consumeBody = { work_order_id: WO, items: [{ material_id: MID1, qty: 2 }] };
+
+  it('内建返工端到端：completed→建单→acceptance_reject→processing→consume → 该笔消耗立即体现在 draft 结算', async () => {
+    const mk = makeClient(
+      consumeHandlers({
+        status: 'processing',
+        draftSettlement: { id: 'st-1', settlement_no: 'ST202609140001' },
+        syncAgg: [{ work_order_id: WO, material_id: MID1, qty: '2.00', material_code: 'MAT-1', material_name: '滤芯', material_price: '30.00' }],
+      }),
+      { strict: true },
+    );
+    h.client = mk.client;
+    const r = await call('POST', '/inventory/consume', { role: 'worker', body: consumeBody });
+    expect(r.status, JSON.stringify(r.body)).toBe(200);
+    // 响应回显：mp 据此提示「已同步进结算单 STxxx」
+    expect(r.body.settlement).toMatchObject({ id: 'st-1', settlement_no: 'ST202609140001' });
+
+    // 联动结构证据：draft 白名单 + FOR UPDATE 串行化 → 全量重投影 UPSERT → 表头重算
+    const lock = mk.calls.find((c) => c.text.includes("s.status = 'draft'") && c.text.includes('FOR UPDATE'));
+    expect(lock).toBeTruthy();
+    const up = mk.calls.find((c) => c.text.includes('INSERT INTO settlement_item') && c.text.includes("'material'"))!;
+    expect(up).toBeTruthy();
+    expect(up.text).toContain('DO UPDATE SET');
+    expect(mk.calls.some((c) => c.text.includes('COALESCE(SUM(amount)'))).toBe(true);
+  });
+
+  it('挂单出库（带 work_order_no）同样联动 draft 结算单 —— 管理员出库不漏账', async () => {
+    const mk = makeClient(
+      [
+        ...BASE,
+        { match: (t) => t.includes('SELECT id FROM material'), reply: () => ({ rows: [{ id: MID1 }], rowCount: 1 }) },
+        { match: (t) => t.includes('FROM work_orders') && t.includes('order_no=$2'), reply: (_t, p) => ({ rows: [{ id: p[1] }], rowCount: 1 }) },
+        { match: (t) => t.includes('SELECT qty FROM inventory'), reply: () => ({ rows: [{ qty: 10 }], rowCount: 1 }) },
+        { match: (t) => t.includes('UPDATE inventory SET qty'), reply: () => ({ rows: [], rowCount: 1 }) },
+        { match: (t) => t.includes('INSERT INTO inventory_log'), reply: () => ({ rows: [], rowCount: 1 }) },
+        { match: (t) => t.includes('INSERT INTO domain_event'), reply: () => ({ rows: [], rowCount: 1 }) },
+        { match: (t) => t.includes("s.status = 'draft'") && t.includes('FOR UPDATE'), reply: () => ({ rows: [{ id: 'st-1', settlement_no: 'ST202609140001' }], rowCount: 1 }) },
+        { match: (t) => t.includes('FROM inventory_log il') && t.includes('JOIN material m'), reply: () => ({ rows: [{ work_order_id: WO, material_id: MID1, qty: '2.00', material_code: 'MAT-1', material_name: '滤芯', material_price: '30.00' }], rowCount: 1 }) },
+        { match: (t) => t.includes('INSERT INTO settlement_item') && t.includes("'material'"), reply: () => ({ rows: [], rowCount: 1 }) },
+        { match: (t) => t.includes('DELETE FROM settlement_item'), reply: () => ({ rows: [], rowCount: 0 }) },
+        { match: (t) => t.includes('COALESCE(SUM(amount)'), reply: () => ({ rows: [{ total: '150.00', c: 2 }] }) },
+        { match: (t) => t.includes('UPDATE settlement SET total'), reply: () => ({ rows: [], rowCount: 1 }) },
+        // recalcHeader 末尾回读表头（sync 联动必经）
+        { match: (t) => t.includes('SELECT * FROM settlement WHERE id'), reply: () => ({ rows: [{ id: 'st-1', settlement_no: 'ST202609140001', total: '150.00' }], rowCount: 1 }) },
+      ],
+      { strict: true },
+    );
+    h.client = mk.client;
+    const r = await call('POST', '/inventory/out', { role: 'admin', body: { material_id: MID1, qty: 2, work_order_no: WO } });
+    expect(r.status, JSON.stringify(r.body)).toBe(200);
+    expect(mk.calls.some((c) => c.text.includes('INSERT INTO settlement_item') && c.text.includes("'material'"))).toBe(true);
+    expect(mk.calls.some((c) => c.text.includes('COALESCE(SUM(amount)'))).toBe(true);
+  });
+
+  it('未挂单出库（不带 work_order_no）→ 零联动：不查结算单、不写结算明细（零回归）', async () => {
+    const mk = makeClient(
+      [
+        ...BASE,
+        { match: (t) => t.includes('SELECT id FROM material'), reply: () => ({ rows: [{ id: MID1 }], rowCount: 1 }) },
+        { match: (t) => t.includes('SELECT qty FROM inventory'), reply: () => ({ rows: [{ qty: 10 }], rowCount: 1 }) },
+        { match: (t) => t.includes('UPDATE inventory SET qty'), reply: () => ({ rows: [], rowCount: 1 }) },
+        { match: (t) => t.includes('INSERT INTO inventory_log'), reply: () => ({ rows: [], rowCount: 1 }) },
+        { match: (t) => t.includes('INSERT INTO domain_event'), reply: () => ({ rows: [], rowCount: 1 }) },
+      ],
+      { strict: true }, // 未挂单路径若多查一句 → strict 直接炸（结构证据）
+    );
+    h.client = mk.client;
+    const r = await call('POST', '/inventory/out', { role: 'admin', body: { material_id: MID1, qty: 2 } });
+    expect(r.status, JSON.stringify(r.body)).toBe(200);
+    expect(mk.calls.some((c) => c.text.includes('FROM settlement s'))).toBe(false);
+    expect(mk.calls.some((c) => c.text.includes('settlement_item'))).toBe(false);
+  });
+
+  it('哨兵巡检 SQL（material 行 vs inventory_log 聚合，健康应 0 行）——随 scripts 交付且可跑', () => {
+    const sentinel = readFileSync(join(root, 'scripts', 'check_settlement_material_consistency.sql'), 'utf8');
+    expect(sentinel).toContain("si.source = 'material'");
+    expect(sentinel).toContain("il.type = 'out'");
+    expect(sentinel).toContain('HAVING'); // service 行重复判定
+    expect(sentinel).toContain('FULL JOIN'); // 租户级总账对账
+    expect(sentinel).toContain('期望 0 行');
+    // 只读脚本：不得含写操作（避免误在生产执行出意外）
+    expect(sentinel).not.toMatch(/\b(INSERT|UPDATE|DELETE|ALTER|DROP)\b\s/i);
+  });
+});
+
+// ==================== ⑰ §14 复议2：consumable.consume 覆盖行回填（086）====================
+describe('⑰ §14 复议2：consumable.consume 覆盖行回填（086）与覆盖集合语义', () => {
+  const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
+  const sql086 = readFileSync(join(root, '086_consumable_consume_backfill.sql'), 'utf8');
+  const body = { work_order_id: WO, items: [{ material_id: MID1, qty: 1 }] };
+
+  it('086 只回填 consumable.consume：显式不含 material.manage / asset.manage', () => {
+    expect(sql086).toContain("'consumable.consume'");
+    // 收紧方向的两个权限点绝不能被回填（回填=把收紧又放开）
+    expect(sql086).not.toContain("'material.manage'");
+    expect(sql086).not.toContain("'asset.manage'");
+  });
+
+  it('086 只给已有覆盖行的 (tenant, role) 生成行（数据源=role_permission 自身，零凭空造行）', () => {
+    expect(sql086).toMatch(/FROM role_permission rp/);
+    expect(sql086).toMatch(/rp\.role IN \('worker', 'operator'\)/);
+    // 无覆盖行租户零行：不存在任何"从租户表/默认矩阵取租户 id"的 INSERT 源
+    expect(sql086).not.toMatch(/INSERT INTO role_permission[\s\S]*?FROM tenant/i);
+    // 也绝不能出现 VALUES 形态的凭空插入
+    expect(sql086).not.toMatch(/INSERT INTO role_permission \(tenant_id, role, perm\)\s*VALUES/i);
+  });
+
+  it('086 幂等与三段结构：ON CONFLICT DO NOTHING + 盘点/回填/复核（HAVING NOT BOOL_OR）', () => {
+    expect(sql086).toContain('ON CONFLICT (tenant_id, role, perm) DO NOTHING');
+    expect(sql086).toMatch(/HAVING NOT BOOL_OR\(rp\.perm = 'consumable\.consume'\)/);
+    expect(sql086).toContain('086① 盘点');
+    expect(sql086).toContain('086② 回填');
+    expect(sql086).toContain('086③ 复核');
+    expect(sql086).toContain('086④ 红线自证');
+  });
+
+  it('覆盖集合语义：覆盖行只含 dashboard.view 的 operator → consume 仍 403（是覆盖不是并集）', async () => {
+    const mk = makeClient(consumeHandlers({ perms: granted('dashboard.view') }), { strict: true });
+    h.client = mk.client;
+    const r = await call('POST', '/inventory/consume', { role: 'operator', body });
+    expect(r.status, JSON.stringify(r.body)).toBe(403);
+    expect(String(r.body.message)).toContain('consumable.consume');
+  });
+
+  it('086 回填后：覆盖行含 consumable.consume → operator 200；material.manage 仍不在默认矩阵', async () => {
+    const mk = makeClient(consumeHandlers({ perms: granted('consumable.consume') }), { strict: true });
+    h.client = mk.client;
+    const r = await call('POST', '/inventory/consume', { role: 'operator', body });
+    expect(r.status, JSON.stringify(r.body)).toBe(200);
+    // 回填不放松管理动作收口
+    expect(DEFAULT_PERM_MATRIX.operator).not.toContain('material.manage');
+    expect(DEFAULT_PERM_MATRIX.operator).not.toContain('asset.manage');
+  });
+});
+
+// ==================== ⑱ §13 裁决2：终态判定收敛后端 ====================
+describe('⑱ §13 裁决2：终态判定收敛后端（租户 doneStates ∪ {completed, cancelled}）', () => {
+  const body = { work_order_id: WO, items: [{ material_id: MID1, qty: 1 }] };
+  /** 租户自定义状态图：只有 archived 算完成态（前端不会预判到这种口径）。 */
+  const customDef = { config: { doneStates: ['archived'] } };
+
+  it('租户自定义终态 archived → 422 ORDER_CLOSED，零库存动作（前端不预判，后端拦下）', async () => {
+    const mk = makeClient(consumeHandlers({ status: 'archived', workflowDef: customDef }), { strict: true });
+    h.client = mk.client;
+    const r = await call('POST', '/inventory/consume', { role: 'worker', body });
+    expect(r.status, JSON.stringify(r.body)).toBe(422);
+    expect(r.body.code).toBe('ORDER_CLOSED');
+    expect(mk.calls.some((c) => c.text.includes('UPDATE inventory SET qty'))).toBe(false);
+    expect(mk.calls.some((c) => c.text.includes('INSERT INTO inventory_log'))).toBe(false);
+  });
+
+  it('completed 在自定义 doneStates 之外仍被拦（∪{completed, cancelled} 的兜底作用）', async () => {
+    const mk = makeClient(consumeHandlers({ status: 'completed', workflowDef: customDef }), { strict: true });
+    h.client = mk.client;
+    const r = await call('POST', '/inventory/consume', { role: 'worker', body });
+    expect(r.status, JSON.stringify(r.body)).toBe(422);
+    expect(r.body.code).toBe('ORDER_CLOSED');
+  });
+
+  it('默认租户（无 workflow_def 行）回归：evaluated / closed 仍被拦（富模板兜底口径）', async () => {
+    for (const st of ['evaluated', 'closed'] as const) {
+      const mk = makeClient(consumeHandlers({ status: st }), { strict: true });
+      h.client = mk.client;
+      const r = await call('POST', '/inventory/consume', { role: 'worker', body });
+      expect(r.status, `${st} 期望 422`).toBe(422);
+      expect(r.body.code, `${st} 期望 ORDER_CLOSED`).toBe('ORDER_CLOSED');
+    }
+  });
+
+  it('B 守卫：结算单已 confirmed → 422 SETTLEMENT_LOCKED 且零库存动作（all-or-nothing 不破）', async () => {
+    const mk = makeClient(
+      consumeHandlers({ status: 'processing', confirmedSettlement: { id: 'st-9', settlement_no: 'ST202609140009' } }),
+      { strict: true },
+    );
+    h.client = mk.client;
+    const r = await call('POST', '/inventory/consume', { role: 'worker', body });
+    expect(r.status, JSON.stringify(r.body)).toBe(422);
+    expect(r.body.code).toBe('SETTLEMENT_LOCKED');
+    expect(String(r.body.message)).toContain('ST202609140009');
+    expect(mk.calls.some((c) => c.text.includes('UPDATE inventory SET qty'))).toBe(false);
+    expect(mk.calls.some((c) => c.text.includes('INSERT INTO inventory_log'))).toBe(false);
+    // B 守卫在缺货判定之前：根本没走到库存行锁
+    expect(mk.calls.some((c) => c.text.includes('SELECT qty FROM inventory'))).toBe(false);
+  });
+
+  it('错误码契约（mp 唯一判据）：ORDER_CLOSED / SETTLEMENT_LOCKED / INSUFFICIENT_STOCK 均在 body.code', async () => {
+    const cases: Array<[string, Handler[], string]> = [
+      ['ORDER_CLOSED', consumeHandlers({ status: 'evaluated' }), 'ORDER_CLOSED'],
+      ['SETTLEMENT_LOCKED', consumeHandlers({ confirmedSettlement: { id: 'st-9', settlement_no: 'ST202609140009' } }), 'SETTLEMENT_LOCKED'],
+      ['INSUFFICIENT_STOCK', consumeHandlers({ inventoryQty: 0 }), 'INSUFFICIENT_STOCK'],
+    ];
+    for (const [label, handlers, want] of cases) {
+      h.client = makeClient(handlers, { strict: true }).client;
+      const r = await call('POST', '/inventory/consume', { role: 'worker', body });
+      expect(r.body.code, `${label} 期望 code=${want}，实际 ${JSON.stringify(r.body)}`).toBe(want);
+      expect(typeof r.body.message).toBe('string');
     }
   });
 });

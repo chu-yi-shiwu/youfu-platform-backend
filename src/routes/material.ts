@@ -14,7 +14,9 @@ import { requireConfigRole, requirePermission } from '../middleware/role.js';
 import { applyStockAction } from '../services/inventory.js';
 import { emitDomainEvent } from '../db/eventBus.js';
 import { parseCsv, csvEscape } from '../services/csvUtil.js';
-import { RICH_WORK_ORDER_DEF } from '../engine/stateMachine.js';
+import { RICH_WORK_ORDER_DEF, doneStates as wfDoneStates } from '../engine/stateMachine.js';
+import { getWorkflowDefOrDefault } from '../engine/workflowDef.js';
+import { syncMaterialCostRows } from '../repo/settlement.js';
 
 const router = Router();
 
@@ -228,6 +230,25 @@ router.post('/inventory/out', async (req, res, next) => {
       );
       // P0 飞轮：材料领料/换件事件（挂工单 id，供工单上下文特征与归因）
       await emitDomainEvent(client, { tenantId, entityType: 'material', entityId: b.material_id, type: 'material_consumed', actor: who, payload: { qty: b.qty, ref_no: b.ref_no ?? null, warehouse: wh, work_order_id: woId } });
+
+      // §14 复议1：**挂单出库同样联动** draft 结算单——带 work_order_no 命中工单时，与 consume 同口径
+      // 全量重投影（pruneStale=true），否则「管理员挂单出库」的耗材费会漏进结算单。
+      // 不传 work_order_no（woId=null）→ 本段整段跳过，零行为变化（未挂单出库零回归）。
+      if (woId) {
+        const draftHdr = await client.query(
+          `SELECT s.id, s.settlement_no FROM settlement s
+           WHERE s.tenant_id = $1 AND s.status = 'draft'
+             AND s.id IN (SELECT si.settlement_id FROM settlement_item si
+                          WHERE si.tenant_id = $1 AND si.work_order_id = $2)
+           ORDER BY s.created_at DESC
+           LIMIT 1 FOR UPDATE`,
+          [tenantId, woId],
+        );
+        if ((draftHdr.rowCount ?? 0) > 0) {
+          const hdr = draftHdr.rows[0] as { id: string; settlement_no: string };
+          await syncMaterialCostRows(client, tenantId, hdr.id, [woId], { pruneStale: true });
+        }
+      }
       return { qty: calc.next };
     });
     return res.json({ ok: true, code: 0, result });
@@ -257,15 +278,23 @@ const consumeSchema = z.object({
 export const CONSUME_WAREHOUSE = '中心库';
 
 /**
- * 耗材消耗禁入的工单终态（E-9 §3.1 校验链①）：
- * 与工作流 doneStates 口径对齐（富模板 = completed/closed/evaluated）+ cancelled。
- * 理由：这些状态下耗材费已（或即将）进入结算快照，再补消耗会造成「结算后补记」。
- * 导出为常量便于单测锚定（与 SETTLEMENT_ELIGIBLE_STATUSES 同源语义）。
+ * 耗材消耗禁入的工单终态（E-9 §3.1 校验链①）——**静态兜底基准**。
+ * ⚠️ §13 裁决2：运行时终态判定已收敛到后端动态口径 = 租户 workflow_def.config.doneStates
+ *   ∪ {completed, cancelled}（本常量仅保留给单测锚定与 mp UX 预判对齐参考，不再是运行时唯一事实源）。
+ *   修正点：旧静态清单缺 completed（富模板里 completed 是"已完成里程碑"非终态，但耗材费同样进快照），
+ *   会放行完成态补耗材——与设计 §3.1 相悖。
  */
 export const CONSUME_BLOCKED_STATUSES: readonly string[] = [
   ...(((RICH_WORK_ORDER_DEF.config?.doneStates as string[] | undefined) ?? ['completed', 'closed', 'evaluated'])),
   'cancelled',
 ];
+
+/** §13 裁决2：动态终态口径 = 租户 workflow_def 的 doneStates ∪ {completed, cancelled}（单一事实源）。 */
+async function consumeBlockedStatuses(client: import('pg').PoolClient, tenantId: string): Promise<Set<string>> {
+  // 无 workflow_def 行的租户回退富模板（与历史行为一致：completed/closed/evaluated 均拦）
+  const def = await getWorkflowDefOrDefault(client, tenantId, 'work_order', RICH_WORK_ORDER_DEF);
+  return new Set<string>([...wfDoneStates(def), 'completed', 'cancelled']);
+}
 
 router.post('/inventory/consume', async (req, res, next) => {
   try {
@@ -283,10 +312,33 @@ router.post('/inventory/consume', async (req, res, next) => {
       );
       if (wo.rowCount === 0) throw new AppError('NOT_FOUND', 'work_order not found', 404);
       const order = wo.rows[0] as { id: string; order_no: string | null; status: string };
-      if (CONSUME_BLOCKED_STATUSES.includes(order.status)) {
+      // §13 裁决2：终态判定收敛后端——按租户 workflow_def 动态口径（∪{completed,cancelled}），
+      // 修掉旧静态清单漏 completed 的放行漏洞；租户自定义终态（如 archived）同样被拦。
+      const blocked = await consumeBlockedStatuses(client, tenantId);
+      if (blocked.has(order.status)) {
         throw new AppError(
           'ORDER_CLOSED',
           `工单已结束（${order.status}），不可再登记耗材消耗（评价后耗材费已进入结算快照）`,
+          422,
+        );
+      }
+
+      // ①b B 守卫（§13 裁决1）：该工单的结算单若已 confirmed → 拒绝。
+      //    放在零写库阶段（校验链内）——抛错即整事务回滚，不破 all-or-nothing，库存分毫不动。
+      //    错误码 SETTLEMENT_LOCKED 供 mp/FE 透出（区别于 ORDER_CLOSED 的终态语义）。
+      const lockedHdr = await client.query(
+        `SELECT s.id, s.settlement_no FROM settlement s
+         WHERE s.tenant_id = $1 AND s.status = 'confirmed'
+           AND s.id IN (SELECT si.settlement_id FROM settlement_item si
+                        WHERE si.tenant_id = $1 AND si.work_order_id = $2)
+         LIMIT 1`,
+        [tenantId, order.id],
+      );
+      if ((lockedHdr.rowCount ?? 0) > 0) {
+        const lk = lockedHdr.rows[0] as { settlement_no: string };
+        throw new AppError(
+          'SETTLEMENT_LOCKED',
+          `结算单 ${lk.settlement_no} 已确认锁定，不可再登记耗材消耗`,
           422,
         );
       }
@@ -360,9 +412,38 @@ router.post('/inventory/consume', async (req, res, next) => {
         });
         out.push({ material_id: p.material_id, name: p.name, remaining_qty: p.next });
       }
-      return out;
+
+      // ⑤ A2 同步段（§13 裁决1）：该工单存在 **draft** 结算单 → 同事务内全量重投影耗材行 + recalcHeader。
+      //    修掉 E4b「draft 建立后的消耗静默漏计」：白名单 `=== 'draft'`（confirmed 已被 B 守卫拦截，
+      //    其它状态一律不联动）+ FOR UPDATE 与结算侧写串行化；留痕零成本（重投影即最新事实，不新增事件/列）。
+      //    pruneStale=true：事实源已无消耗的残留耗材行同步清掉（全量重投影语义）。
+      let settlementEcho: { id: string; settlement_no: string; total: string | number } | null = null;
+      const draftHdr = await client.query(
+        `SELECT s.id, s.settlement_no FROM settlement s
+         WHERE s.tenant_id = $1 AND s.status = 'draft'
+           AND s.id IN (SELECT si.settlement_id FROM settlement_item si
+                        WHERE si.tenant_id = $1 AND si.work_order_id = $2)
+         ORDER BY s.created_at DESC
+         LIMIT 1 FOR UPDATE`,
+        [tenantId, order.id],
+      );
+      if ((draftHdr.rowCount ?? 0) > 0) {
+        const hdr = draftHdr.rows[0] as { id: string; settlement_no: string };
+        await syncMaterialCostRows(client, tenantId, hdr.id, [order.id], { pruneStale: true });
+        const totalRow = await client.query(`SELECT total FROM settlement WHERE id = $1 AND tenant_id = $2`, [
+          hdr.id,
+          tenantId,
+        ]);
+        settlementEcho = {
+          id: hdr.id,
+          settlement_no: hdr.settlement_no,
+          total: ((totalRow.rows[0] as { total?: unknown } | undefined)?.total ?? 0) as string | number,
+        };
+      }
+      return { out, settlement: settlementEcho };
     });
-    return res.json({ ok: true, code: 0, items });
+    // 响应补 settlement 回显（§13 裁决1）：mp 据此提示「已同步进结算单 STxxx」，null = 无联动。
+    return res.json({ ok: true, code: 0, items: items.out, settlement: items.settlement });
   } catch (e) {
     if (e instanceof z.ZodError) {
       return next(new AppError('BAD_REQUEST', `invalid body: ${e.issues.map((i) => i.message).join(';')}`, 400));
