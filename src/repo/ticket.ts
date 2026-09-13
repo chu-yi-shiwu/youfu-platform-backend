@@ -308,7 +308,9 @@ export async function list(
   // 全部不传时行为与旧版完全一致（零回归）。
   filter: {
     status?: WorkOrderStatus;
-    assignee?: string;
+    // E-8 QA P3-1（双档案）：支持 string[]——师傅角色多 worker 档案时按集合（ANY）过滤；
+    // 单值行为不变（零回归）。
+    assignee?: string | string[];
     limit?: number;
     offset?: number;
     unsettledOnly?: boolean;
@@ -347,8 +349,14 @@ export async function list(
     conds.push(`wo.status = ANY($${params.length}::text[])`);
   }
   if (filter.assignee) {
-    params.push(filter.assignee);
-    conds.push(`wo.assignee_id = $${params.length}`);
+    // E-8 QA P3-1（双档案）：数组 → ANY 精确集合匹配；单值保持 = 等值匹配（既有调用方零回归）。
+    if (Array.isArray(filter.assignee)) {
+      params.push(filter.assignee);
+      conds.push(`wo.assignee_id = ANY($${params.length}::text[])`);
+    } else {
+      params.push(filter.assignee);
+      conds.push(`wo.assignee_id = $${params.length}`);
+    }
   }
   if (filter.department) {
     params.push(filter.department);

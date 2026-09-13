@@ -60,27 +60,30 @@ async function isTicketRequireServiceDesk(client: PoolClient, tenantId: string):
  * 返回 null = 查不到档案 → 调用方一律 **降级放行**（console.warn + 按现状放行），
  * 不可拒绝、不可过滤：一线工人的可用性优先于收口（否则脏数据直接让接单页全空）。
  */
-async function resolveWorkerId(
+async function resolveWorkerIds(
   client: PoolClient,
   tenantId: string,
   authUserId: string | undefined,
-): Promise<string | null> {
+): Promise<string[]> {
   const uid = authUserId ?? '';
-  if (!uid) return null;
+  if (!uid) return [];
+  // E-8 QA P3-1（双档案漏判）：LIMIT 2 → LIMIT 10 并返回【全部】命中行——同人挂多条
+  // worker 档案（脏数据）时，只读 rows[0] 会漏掉第二条，导致可见性/归属判断漏匹配。
+  // 调用方（列表 scopedAssignee / 详情归属校验 / SELF_ACCEPT 守卫）一律按集合判定。
+  // 防御：rowCount 异常（undefined/null）或 rows 空时按"查不到"降级（空数组），
+  // 绝不让降级路径本身变成 500（降级纪律：一线可用性优先）。
   const r = await client.query<{ id: string }>(
-    'SELECT id FROM worker WHERE tenant_id=$2 AND (account_id=$1 OR id=$1) LIMIT 2',
+    'SELECT id FROM worker WHERE tenant_id=$2 AND (account_id=$1 OR id=$1) LIMIT 10',
     [uid, tenantId],
   );
-  // 防御：rowCount 异常（undefined/null）或 rows 空时一律按"查不到"降级，
-  // 绝不让降级路径本身变成 500（降级纪律：一线可用性优先）。
-  if (r.rowCount === 0 || r.rows.length === 0) return null;
+  if (r.rowCount === 0 || r.rows.length === 0) return [];
   if (r.rows.length > 1) {
-    // 多命中：同一身份挂了多份档案（脏数据）。取第一个并告警，由运维按日志清洗。
-    console.warn('[workOrder] worker 档案多命中，取第一个（account_id/id 重复关联，需清洗）', {
+    // 多命中：同一身份挂了多份档案（脏数据）。告警并全部返回（由调用方按集合判定），运维按日志清洗。
+    console.warn('[workOrder] worker 档案多命中，全部返回按集合判定（account_id/id 重复关联，需清洗）', {
       tenantId, authUserId: uid, ids: r.rows.map((x) => x.id),
     });
   }
-  return r.rows[0]?.id ?? null;
+  return r.rows.map((x) => x.id);
 }
 
 /**
@@ -479,11 +482,13 @@ router.get('/open/work_orders', async (req, res, next) => {
     // 矩阵没有，加了会让小程序接单页全空）。
     // JWT sub=account_user.id → 经 worker.account_id 反查真实 worker.id（业务编码）。
     const data = await withTenantClient(tenantId, async (client) => {
-      let scopedAssignee = assignee;
+      // E-8 QA P3-1：师傅角色 scope 现为集合（string[] → repo ANY），类型随其放宽
+      let scopedAssignee: string | string[] | undefined = assignee;
       if (res.locals.auth.role && MASTER_ROLES.includes(res.locals.auth.role)) {
-        const myWorkerId = await resolveWorkerId(client, tenantId, res.locals.auth.userId);
-        if (myWorkerId) {
-          scopedAssignee = myWorkerId; // 覆盖显式传入的 assignee（防越权看别人的单）
+        const myWorkerIds = await resolveWorkerIds(client, tenantId, res.locals.auth.userId);
+        if (myWorkerIds.length > 0) {
+          // E-8 QA P3-1：多档案按集合过滤（list 的 assignee 支持 string[] → ANY），覆盖显式传入的 assignee（防越权看别人的单）
+          scopedAssignee = myWorkerIds;
         } else {
           // 档案查不到（account_id 脏值/为空的老数据）→ 降级放行并告警：宁可漏，不能让一线干不了活。
           console.warn('[workOrder.list] master profile not found, 降级放行全量（不可阻断一线作业）', {
@@ -574,9 +579,11 @@ router.get('/open/work_order/:id', async (req, res, next) => {
       // （assignee_id IS NULL）同样 403 不可见（与列表同口径，唯一可见面=抢单大厅）。
       // 反查不到档案时降级放行（不可阻断一线作业）。
       if (res.locals.auth.role && MASTER_ROLES.includes(res.locals.auth.role)) {
-        const myWorkerId = await resolveWorkerId(client, tenantId, res.locals.auth.userId);
-        if (myWorkerId) {
-          if (ticketRow.assignee_id !== myWorkerId) {
+        const myWorkerIds = await resolveWorkerIds(client, tenantId, res.locals.auth.userId);
+        if (myWorkerIds.length > 0) {
+          // E-8 QA P3-1：多档案任一命中即放行（旧逻辑只比 rows[0]，第二条档案名下的单会误 403）。
+          // assignee_id 为 null（未分派）同样 403：includes(null) 前先收窄。
+          if (ticketRow.assignee_id === null || !myWorkerIds.includes(ticketRow.assignee_id)) {
             throw new AppError('FORBIDDEN', '仅可查看分派给本人名下的工单（未分派工单请到抢单大厅）', 403);
           }
         } else {

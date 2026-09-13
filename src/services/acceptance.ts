@@ -70,10 +70,12 @@ export function assertAcceptanceBackdoorGuard(event: string | undefined | null):
  * 口径：验收边 allowedRoles（admin/operator/reviewer）之外，再补「利益冲突」维度——
  *   调用方若存在 worker 档案且档案 id == 该单 assignee_id（本人就是本单处理工人）→ 403。
  *   admin/operator/reviewer 若同时挂了该单处理工人档案，同样拦截（自验自收同属利益冲突）。
- * 降级纪律（与 workOrder.resolveWorkerId 同源）：
+ * 降级纪律（与 workOrder.resolveWorkerIds 同源）：
  *   - 无 assignee_id（未派单/抢单大厅来源）→ 不拦截；
  *   - 调用方无 userId 或查无 worker 档案 → 降级放行（不可因脏数据阻断验收）；
- *   - worker 档案双路匹配 (account_id=$1 OR id=$1)，与 resolveWorkerId 口径一致（存量脏数据兼容）。
+ *   - worker 档案双路匹配 (account_id=$1 OR id=$1)，与 resolveWorkerId 口径一致（存量脏数据兼容）；
+ *   - E-8 QA P3-1（双档案漏判）：同人挂多条档案时【遍历全部命中行】，任一命中 assignee
+ *     即 403——旧逻辑只读 rows[0]，第二条档案会漏判。LIMIT 10 防脏数据爆炸。
  */
 export async function assertNotSelfAcceptance(
   client: PoolClient,
@@ -83,11 +85,11 @@ export async function assertNotSelfAcceptance(
 ): Promise<void> {
   if (!assigneeId || !userId) return;
   const wr = await client.query<{ id: string }>(
-    'SELECT id FROM worker WHERE tenant_id=$2 AND (account_id=$1 OR id=$1) LIMIT 2',
+    'SELECT id FROM worker WHERE tenant_id=$2 AND (account_id=$1 OR id=$1) LIMIT 10',
     [userId, tenantId],
   );
-  const myWorkerId: string | undefined = wr.rows[0]?.id;
-  if (myWorkerId && myWorkerId === assigneeId) {
+  const myWorkerIds: string[] = wr.rows.map((x) => x.id);
+  if (myWorkerIds.includes(assigneeId)) {
     throw new AppError(
       'FORBIDDEN',
       '处理工人不能验收本人名下工单（自验收禁令），请由管理员/验收人操作',

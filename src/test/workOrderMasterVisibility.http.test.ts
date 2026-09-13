@@ -72,16 +72,16 @@ afterAll(async () => {
   await new Promise<void>((resolve) => server.close(() => resolve()));
 });
 
-const listHandlers = (): Handler[] => [
-  // resolveWorkerId：token userId → worker.id=ME
-  { match: (t) => t.includes('FROM worker WHERE tenant_id=$2 AND (account_id=$1 OR id=$1)'), reply: () => ({ rows: [{ id: ME }] }) },
+const listHandlers = (profiles: string[] = [ME]): Handler[] => [
+  // resolveWorkerIds：token userId → worker.id 列表（E-8 QA P3-1：多档案返回全部行）
+  { match: (t) => t.includes('FROM worker WHERE tenant_id=$2 AND (account_id=$1 OR id=$1)'), reply: () => ({ rows: profiles.map((id) => ({ id })) }) },
   // list()：把收到的 SQL/参数原样放行（断言在 calls 上做）
-  { match: (t) => t.includes('FROM work_orders wo') && (t.includes('COUNT(*)') || t.includes('ORDER BY wo.created_at')), reply: (t, p) => (t.includes('COUNT(*)') ? { rows: [{ c: '1' }] } : { rows: [{ id: 'wo-1', order_no: 'WO_1', status: 'assigned', assignee_id: ME }] }) },
+  { match: (t) => t.includes('FROM work_orders wo') && (t.includes('COUNT(*)') || t.includes('ORDER BY wo.created_at')), reply: (t, p) => (t.includes('COUNT(*)') ? { rows: [{ c: '1' }] } : { rows: [{ id: 'wo-1', order_no: 'WO_1', status: 'assigned', assignee_id: profiles[0] }] }) },
   { match: (t) => t.includes('FROM workflow_def'), reply: () => ({ rows: [] }) },
 ];
 
-const findOneHandlers = (assigneeId: string | null): Handler[] => [
-  { match: (t) => t.includes('FROM worker WHERE tenant_id=$2 AND (account_id=$1 OR id=$1)'), reply: () => ({ rows: [{ id: ME }] }) },
+const findOneHandlers = (assigneeId: string | null, profiles: string[] = [ME]): Handler[] => [
+  { match: (t) => t.includes('FROM worker WHERE tenant_id=$2 AND (account_id=$1 OR id=$1)'), reply: () => ({ rows: profiles.map((id) => ({ id })) }) },
   { match: (t) => t.includes('FROM work_orders') && t.includes('WHERE'), reply: () => ({ rows: [{ id: 'wo-x', order_no: 'WO_X', status: 'assigned', assignee_id: assigneeId }] }) },
   { match: (t) => t.includes('FROM workflow_def'), reply: () => ({ rows: [] }) },
   { match: (t) => t.includes('FROM ticket_event'), reply: () => ({ rows: [] }) },
@@ -101,8 +101,8 @@ describe('P2-2 派了才可见：师傅角色列表按分派关系过滤', () =>
     expect(r.status).toBe(200);
     const listCall = calls.find((c) => c.text.includes('FROM work_orders wo') && c.text.includes('ORDER BY'));
     expect(listCall).toBeTruthy();
-    // scoped assignee 必须是本人 W0001，而不是显式传入的 W9999
-    expect(listCall!.params).toContain(ME);
+    // E-8 QA P3-1：scoped assignee 现为集合参数（ANY($n::text[])），断言数组元素深等
+    expect(listCall!.params).toContainEqual([ME]);
     expect(listCall!.params).not.toContain('W9999');
   });
 
@@ -111,7 +111,7 @@ describe('P2-2 派了才可见：师傅角色列表按分派关系过滤', () =>
     const r = await get('/open/work_orders', 'operator');
     expect(r.status).toBe(200);
     const listCall = calls.find((c) => c.text.includes('FROM work_orders wo') && c.text.includes('ORDER BY'));
-    expect(listCall!.params).toContain(ME);
+    expect(listCall!.params).toContainEqual([ME]);
   });
 
   it('M3 admin 列表：行为零变化（不注入 assignee 过滤）', async () => {
@@ -138,8 +138,20 @@ describe('P2-2 派了才可见：师傅角色列表按分派关系过滤', () =>
     expect(r.status).toBe(200);
     const listCall = calls.find((c) => c.text.includes('FROM work_orders wo') && c.text.includes('ORDER BY'));
     expect(listCall).toBeTruthy();
-    expect(listCall!.params).toContain(ME);
+    expect(listCall!.params).toContainEqual([ME]);
     expect(listCall!.params).not.toContain('W9999');
+  });
+
+  it('M12 双档案列表：多档案按集合过滤（E-8 QA P3-1——任一档案名下的单都可见，SQL 走 ANY）', async () => {
+    const calls = makeClient(listHandlers([ME, 'W0003']));
+    const r = await get('/open/work_orders?assignee=W9999', 'worker');
+    expect(r.status).toBe(200);
+    const listCall = calls.find((c) => c.text.includes('FROM work_orders wo') && c.text.includes('ORDER BY'));
+    expect(listCall).toBeTruthy();
+    // 集合参数完整下发（两条档案都进 ANY），显式 W9999 仍被覆盖
+    expect(listCall!.params).toContainEqual([ME, 'W0003']);
+    expect(listCall!.params).not.toContain('W9999');
+    expect(listCall!.text).toContain('ANY(');
   });
 });
 
@@ -175,6 +187,18 @@ describe('P2-2 派了才可见：详情同口径', () => {
     ]);
     const r = await get('/open/work_order/wo-x', 'operator');
     expect(r.status).toBe(200);
+  });
+
+  it('M13 双档案详情：第一条不命中、第二条命中 → 200（E-8 QA P3-1 漏判锚定——旧逻辑只比 rows[0] 会误 403）', async () => {
+    makeClient(findOneHandlers(OTHER, [ME, OTHER]));
+    const r = await get('/open/work_order/wo-x', 'worker');
+    expect(r.status, `期望 200，实际 ${r.status} ${JSON.stringify(r.body)}`).toBe(200);
+  });
+
+  it('M14 双档案详情：两条档案都不命中 → 403（多档案不放大可见面）', async () => {
+    makeClient(findOneHandlers('W0009', [ME, OTHER]));
+    const r = await get('/open/work_order/wo-x', 'worker');
+    expect(r.status).toBe(403);
   });
 });
 

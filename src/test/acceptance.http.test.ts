@@ -69,8 +69,10 @@ interface AccHandlersOpts {
   slaMinutes?: number | null;
   /** E-8 BUG-003：工单 assignee_id（有值时 SELF_ACCEPT 守卫会反查 worker 档案） */
   assigneeId?: string | null;
-  /** E-8 BUG-003：调用方 worker 档案反查结果（undefined=查无档案→降级放行） */
+  /** E-8 BUG-003：调用方 worker 档案反查结果（undefined=查无档案→降级放行；单值场景） */
   workerProfileId?: string | null;
+  /** E-8 QA P3-1：双档案场景——worker 反查返回多行（任一命中 assignee 即 403） */
+  workerProfileIds?: string[];
 }
 
 function acceptanceHandlers(opts: AccHandlersOpts = {}): Handler[] {
@@ -88,7 +90,12 @@ function acceptanceHandlers(opts: AccHandlersOpts = {}): Handler[] {
     // ①b SELF_ACCEPT 守卫：worker 档案反查（E-8 BUG-003；仅 assignee_id 有值时触发）
     {
       match: (t) => t.includes('FROM worker WHERE'),
-      reply: () => ({ rows: opts.workerProfileId === undefined ? [] : [{ id: opts.workerProfileId }] }),
+      reply: () => {
+        if (opts.workerProfileIds !== undefined) {
+          return { rows: opts.workerProfileIds.map((id) => ({ id })) };
+        }
+        return { rows: opts.workerProfileId === undefined ? [] : [{ id: opts.workerProfileId }] };
+      },
     },
     // transition → findOneForUpdate
     {
@@ -245,6 +252,20 @@ describe('①b SELF_ACCEPT 守卫（E-8 BUG-003：处理工人不得验收本人
     h.client = makeClient(acceptanceHandlers({ assigneeId: 'wk-1', workerProfileId: undefined }), { strict: true }).client;
     const r = await accept({ result: 'pass' });
     expect(r.status).toBe(200);
+  });
+
+  it('双档案：第一条不命中、第二条命中 assignee → 仍 403（E-8 QA P3-1 漏判锚定）', async () => {
+    h.client = makeClient(acceptanceHandlers({ assigneeId: 'wk-1', workerProfileIds: ['wk-9', 'wk-1'] }), { strict: true }).client;
+    const r = await accept({ result: 'pass' });
+    expect(r.status, `期望 403，实际 ${r.status} ${JSON.stringify(r.body)}`).toBe(403);
+    expect(String(r.body.message)).toContain('自验收');
+  });
+
+  it('双档案：两条都不命中 → 200（多档案不误伤他人验收）', async () => {
+    h.client = makeClient(acceptanceHandlers({ assigneeId: 'wk-1', workerProfileIds: ['wk-9', 'wk-8'] }), { strict: true }).client;
+    const r = await accept({ result: 'pass' });
+    expect(r.status).toBe(200);
+    expect(r.body.status).toBe('closed');
   });
 
   it('SELF_ACCEPT 403 必须发生在落凭证之前（不得写 work_acceptance）', async () => {
