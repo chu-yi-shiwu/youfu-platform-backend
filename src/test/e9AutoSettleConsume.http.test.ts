@@ -1039,8 +1039,8 @@ describe('⑮ §13 发现3：单工单多耗材重投影（旧三列唯一约束
   });
 
   it('085 幂等重跑（结构断言）：两条部分唯一索引 + 三列约束显式摘除 + 谓词无 now()', () => {
-    // root 必须在本 it 作用域内定义（此前借用上一 it 的局部 root → TS2304/运行时 ReferenceError）
-    const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
+    // root 取本 describe 作用域内的声明（见本组首个 it 之前）；此处**不得**再声明同名局部变量，
+    // 否则会遮蔽 describe 级 root 使其零引用 → TS6133 被 DoD 孤儿门拦截（826e9a6 实测）。
     const sql085 = readFileSync(join(root, '085_settlement_material_row_grain.sql'), 'utf8');
     expect(sql085).toMatch(/DROP CONSTRAINT IF EXISTS uq_settlement_item_tenant_wo_source/);
     expect(sql085).toMatch(
