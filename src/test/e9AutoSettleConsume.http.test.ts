@@ -706,6 +706,38 @@ describe('⑬ 类型修复回归：inventory_log.work_order_id uuid → text（0
     expect(idxPredicate).not.toMatch(/now\(\)/i);
   });
 
+  // ==================== ⑬b 防重未松的反向证明（team-lead 裁决 2 的强制要求）====================
+  // 疑虑：084 把 UV 从 (tenant_id, work_order_id) 放宽为 (tenant_id, work_order_id, source)，
+  // 会不会把"同一工单被重复建结算"的防线一起放开？——不会，本组两例分别从**应用层**与**DDL 层**双向钉死：
+  //   ① 应用层：createSettlementDraft 的 already_settled 预检仍在，第二笔行在建单 SQL 之前就被拒；
+  //   ② DDL 层：source 列 NOT NULL DEFAULT 'service' ⇒ 两笔"服务行"的 (tenant, wo, source) 三元组完全相同
+  //      ⇒ 必撞 uq_settlement_item_tenant_wo_source。放宽的只是"服务行 vs 耗材行"这一对合法共存，
+  //      不是"同类型两行"。
+  it('同工单第二笔 service 行仍被拒：应用层 already_settled 预检拦在建单 SQL 之前（零写库）', async () => {
+    const mk = makeClient(
+      settleHandlers({ settled: [{ work_order_id: WO, order_no: WO }] }),
+      { strict: true },
+    );
+    const r = await createSettlementDraft(mk.client, T, [WO], 'admin');
+    expect(r.ok).toBe(false);
+    expect(r.conflicts).toHaveLength(1);
+    expect(r.conflicts![0]).toMatchObject({ work_order_id: WO, reason: 'already_settled' });
+    // 关键：被拒发生在**任何插入之前**——没有任何 settlement / settlement_item 写库动作
+    expect(mk.calls.some((c) => c.text.includes('INSERT INTO settlement ('))).toBe(false);
+    expect(mk.calls.some((c) => c.text.includes('INSERT INTO settlement_item'))).toBe(false);
+  });
+
+  it('DDL 层：旧两列唯一约束被显式 DROP，新约束三列含 source（同类型第二行必撞 UNIQUE）', () => {
+    // team-lead 特别要求：对 072 旧约束的处理必须是**显式** DROP，不靠隐式/无操作兜底
+    expect(sql084).toMatch(/ALTER TABLE settlement_item DROP CONSTRAINT IF EXISTS uq_settlement_item_tenant_work_order;/);
+    // 新约束三列（service 与 material 各占一档，重复的 service 行仍在同一档 → 撞约束）
+    expect(sql084).toMatch(/uq_settlement_item_tenant_wo_source UNIQUE \(tenant_id, work_order_id, source\)/);
+    // 反向断言：脚本里**不得**残留两列形态的唯一约束（放宽不等于取消）
+    expect(sql084).not.toMatch(/UNIQUE \(tenant_id, work_order_id\)/);
+    // source 的默认值正是"服务行"档位——存量行迁移后全部落 'service'，故旧防线对存量依然成立
+    expect(sql084).toMatch(/ADD COLUMN IF NOT EXISTS source text NOT NULL DEFAULT 'service'/);
+  });
+
   it('非 uuid 形态业务号走 /inventory/out → 200，流水 work_order_id 收下业务号（不再 22P02→500）', async () => {
     const mk = makeClient([
       ...BASE,
