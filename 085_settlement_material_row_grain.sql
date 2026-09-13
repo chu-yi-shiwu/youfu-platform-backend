@@ -24,7 +24,7 @@
 --   无 DDL 可做——留痕改由「重投影即最新事实」零成本承载，不新增事件/列。
 --
 -- 部署契约：以数据库属主执行（与 084 同）：
---   sudo -u postgres psql -d youfu -v ON_ERROR_STOP=1 -f 085_settlement_item_unique_split.sql
+--   sudo -u postgres psql -d youfu -v ON_ERROR_STOP=1 -f 085_settlement_material_row_grain.sql
 -- 🔴索引谓词纪律：谓词仅 `source = 'text 字面量'`（IMMUTABLE），本文件不含任何易变时间函数（077 铁律）。
 -- RLS/GRANT：只动索引/约束，不动行级策略与表级授权。
 
@@ -125,21 +125,4 @@ WHERE si.source = 'material'
   AND si.qty <> COALESCE(lg.out_qty, 0)
 ORDER BY si.work_order_id, si.material_id
 LIMIT 50;
-
--- ============ ④ 部署后自证（真库验证清单：随迁移一起跑，人工核对输出）============
--- 说明：本地开发机无库凭据（PG scram-sha-256 + 无 .pgpass/.env/PG*），真库验证**挂部署窗口**执行；
---   此段把「要验什么」固化成可执行 SQL，避免口头约定。
-\echo '--- 085④-1 两个部分唯一索引应各 1 行（uq_sti_service / uq_sti_material）---'
-SELECT indexname, indexdef
-FROM pg_indexes
-WHERE tablename = 'settlement_item'
-  AND indexname IN ('uq_sti_service', 'uq_sti_material')
-ORDER BY indexname;
-
-\echo '--- 085④-2 三列唯一约束残留（期望 0 行）---'
-SELECT c.conname
-FROM pg_constraint c
-WHERE c.conrelid = 'settlement_item'::regclass
-  AND c.contype = 'u'
-  AND array_length(c.conkey, 1) = 3;
 

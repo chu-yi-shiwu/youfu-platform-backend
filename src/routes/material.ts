@@ -281,8 +281,12 @@ export const CONSUME_WAREHOUSE = '中心库';
  * 耗材消耗禁入的工单终态（E-9 §3.1 校验链①）——**静态兜底基准**。
  * ⚠️ §13 裁决2：运行时终态判定已收敛到后端动态口径 = 租户 workflow_def.config.doneStates
  *   ∪ {completed, cancelled}（本常量仅保留给单测锚定与 mp UX 预判对齐参考，不再是运行时唯一事实源）。
- *   修正点：旧静态清单缺 completed（富模板里 completed 是"已完成里程碑"非终态，但耗材费同样进快照），
- *   会放行完成态补耗材——与设计 §3.1 相悖。
+ *   真实理由（2026-09-14 注释纠错）：本批修的是「**租户自定义终态漏拦**」——旧实现只按本静态常量拦，
+ *   租户把 workflow_def.config.doneStates 配成 ['archived'] 等自定义终态时，该工单仍可被登记耗材消耗
+ *   （快照口径漂移）。修正方式 = 运行时改读租户 config（consumeBlockedStatuses 见下）。
+ *   澄清（避免伪因留档）：旧静态清单**并不缺 completed**——RICH_WORK_ORDER_DEF.config.doneStates
+ *   本就含 'completed'（src/engine/stateMachine.ts，与 DEFAULT 的 ['completed'] 对齐），本批 diff 中本常量
+ *   是 context 行、未改动；此前注释"旧清单缺 completed 会放行完成态"与事实不符，已更正。
  */
 export const CONSUME_BLOCKED_STATUSES: readonly string[] = [
   ...(((RICH_WORK_ORDER_DEF.config?.doneStates as string[] | undefined) ?? ['completed', 'closed', 'evaluated'])),
@@ -313,7 +317,7 @@ router.post('/inventory/consume', async (req, res, next) => {
       if (wo.rowCount === 0) throw new AppError('NOT_FOUND', 'work_order not found', 404);
       const order = wo.rows[0] as { id: string; order_no: string | null; status: string };
       // §13 裁决2：终态判定收敛后端——按租户 workflow_def 动态口径（∪{completed,cancelled}），
-      // 修掉旧静态清单漏 completed 的放行漏洞；租户自定义终态（如 archived）同样被拦。
+      // 修掉「静态清单只认富模板默认终态」的漏拦：租户自定义终态（如 archived）同样被拦住。
       const blocked = await consumeBlockedStatuses(client, tenantId);
       if (blocked.has(order.status)) {
         throw new AppError(

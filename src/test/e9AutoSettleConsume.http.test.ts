@@ -999,7 +999,7 @@ describe('⑭ 权限收口：material.manage / asset.manage 仅 admin（含覆�
   });
 });
 
-// ==================== ⑮ §13/§14 收口锚点（多耗材重投影 / A2 即时联动 / 非 draft 拒绝 / 挂单出库）====================
+// ==================== E-9 §13/§14 收口锚点（块 ⑮–㉓：多耗材重投影 / A2 即时联动 / 非 draft 拒绝 / 挂单出库 / 终态收敛 / 行粒度 / 086 回填）====================
 // 说明（诚实边界）：本组全部为 **mock 层**锚点（脚本化 client 断言 SQL 形态与参数、路由真 HTTP 断言状态码）。
 // 真库验证（085 两条部分唯一索引实际建成、真插两行 source='material' 观察真 23505、086 回填幂等）
 // 本机无可用 PG 凭据（pg_hba=scram-sha-256，无 .pgpass/.env/PG* 变量）→ **挂账到部署窗口**执行，见回执。
@@ -1055,7 +1055,7 @@ describe('⑮ §13 发现3：单工单多耗材重投影（旧三列唯一约束
   });
 });
 
-describe('⑮ §13 裁决1：consume 与 draft 结算单的即时联动（A2）', () => {
+describe('⑯ §13 裁决1：consume 与 draft 结算单的即时联动（A2）', () => {
   it('consume 后该笔立即体现在 draft 结算单：写库段之后重投影 + recalcHeader + 响应回显 settlement', async () => {
     const mk = makeClient(
       consumeHandlers({
@@ -1097,7 +1097,7 @@ describe('⑮ §13 裁决1：consume 与 draft 结算单的即时联动（A2）'
   });
 });
 
-describe('⑮ §13 裁决1 B 守卫：非 draft（已确认锁定）→ 422 SETTLEMENT_LOCKED', () => {
+describe('⑰ §13 裁决1 B 守卫：非 draft（已确认锁定）→ 422 SETTLEMENT_LOCKED', () => {
   it('confirmed 结算单存在 → consume 422 SETTLEMENT_LOCKED，零库存动作（all-or-nothing 不破）', async () => {
     const mk = makeClient(
       consumeHandlers({ confirmedSettlement: { id: 'st-9', settlement_no: 'ST202609140009' } }),
@@ -1116,7 +1116,7 @@ describe('⑮ §13 裁决1 B 守卫：非 draft（已确认锁定）→ 422 SETT
   });
 });
 
-describe('⑮ §14 复议1：挂单出库同样联动 draft 结算单', () => {
+describe('⑱ §14 复议1：挂单出库同样联动 draft 结算单', () => {
   const outBase: Handler[] = [
     { match: (t) => t.includes('SELECT id FROM material'), reply: (_t, p) => ({ rows: [{ id: p[0] }], rowCount: 1 }) },
     { match: (t) => t.includes('FROM work_orders') && t.includes('order_no=$2'), reply: () => ({ rows: [{ id: WO }], rowCount: 1 }) },
@@ -1170,7 +1170,7 @@ describe('⑮ §14 复议1：挂单出库同样联动 draft 结算单', () => {
   });
 });
 
-describe('⑮ §13 裁决2：终态判定收敛后端（租户自定义终态也拦得住）', () => {
+describe('⑲ §13 裁决2：终态判定收敛后端（租户自定义终态也拦得住）', () => {
   const body = { work_order_id: WO, items: [{ material_id: MID1, qty: 1 }] };
 
   it('租户 workflow_def doneStates=[archived] → archived 单 consume 422 ORDER_CLOSED（前端未预判也拦得住）', async () => {
@@ -1210,8 +1210,8 @@ describe('⑮ §13 裁决2：终态判定收敛后端（租户自定义终态也
 });
 
 
-// ==================== ⑮ §13 发现3：一单多耗材行粒度（085 拆约束）====================
-describe('⑮ §13 发现3：一单多耗材行粒度（085 拆约束）与真库验证挂账', () => {
+// ==================== ⑳ §13 发现3：一单多耗材行粒度（085 拆约束）====================
+describe('⑳ §13 发现3：一单多耗材行粒度（085 拆约束）与真库验证挂账', () => {
   const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
   const sql085 = readFileSync(join(root, '085_settlement_material_row_grain.sql'), 'utf8');
 
@@ -1295,8 +1295,8 @@ describe('⑮ §13 发现3：一单多耗材行粒度（085 拆约束）与真�
   });
 });
 
-// ==================== ⑯ §14 复议1：挂单出库/consume 与 draft 结算联动 ====================
-describe('⑯ §14 复议1：consume 与挂单出库对 draft 结算单的联动（端到端 + 零回归 + 哨兵）', () => {
+// ==================== ㉑ §14 复议1：挂单出库/consume 与 draft 结算联动 ====================
+describe('㉑ §14 复议1：consume 与挂单出库对 draft 结算单的联动（端到端 + 零回归 + 哨兵）', () => {
   const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
   const consumeBody = { work_order_id: WO, items: [{ material_id: MID1, qty: 2 }] };
 
@@ -1383,8 +1383,8 @@ describe('⑯ §14 复议1：consume 与挂单出库对 draft 结算单的联动
   });
 });
 
-// ==================== ⑰ §14 复议2：consumable.consume 覆盖行回填（086）====================
-describe('⑰ §14 复议2：consumable.consume 覆盖行回填（086）与覆盖集合语义', () => {
+// ==================== ㉒ §14 复议2：consumable.consume 覆盖行回填（086）====================
+describe('㉒ §14 复议2：consumable.consume 覆盖行回填（086）与覆盖集合语义', () => {
   const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
   const sql086 = readFileSync(join(root, '086_consumable_consume_backfill.sql'), 'utf8');
   const body = { work_order_id: WO, items: [{ material_id: MID1, qty: 1 }] };
@@ -1433,8 +1433,8 @@ describe('⑰ §14 复议2：consumable.consume 覆盖行回填（086）与覆�
   });
 });
 
-// ==================== ⑱ §13 裁决2：终态判定收敛后端 ====================
-describe('⑱ §13 裁决2：终态判定收敛后端（租户 doneStates ∪ {completed, cancelled}）', () => {
+// ==================== ㉓ §13 裁决2：终态判定收敛后端 ====================
+describe('㉓ §13 裁决2：终态判定收敛后端（租户 doneStates ∪ {completed, cancelled}）', () => {
   const body = { work_order_id: WO, items: [{ material_id: MID1, qty: 1 }] };
   /** 租户自定义状态图：只有 archived 算完成态（前端不会预判到这种口径）。 */
   const customDef = { config: { doneStates: ['archived'] } };

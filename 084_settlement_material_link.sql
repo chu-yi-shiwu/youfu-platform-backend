@@ -22,6 +22,25 @@
 -- RLS/GRANT：settlement_item（071/072 策略）与 inventory_log（016 策略/GRANT）均沿用既有，
 --   新列随行级策略与表级授权自动生效，无需新增策略行。
 
+-- ⚠️ 行粒度权威（E-9 20260914 修正）：settlement_item 唯一性的**权威**自 085 起是「行粒度」部分唯一索引
+--    （uq_sti_service / uq_sti_material，见 085_settlement_material_row_grain.sql）。本文件（084）② 段
+--    所建的 3 列约束在 085 之后即被 DROP，故 084 的职责降级为「兼容历史库：补列 / 补索引 / 修类型」。
+--    ② 段带**重入守卫**：085 已接管、或存量数据已是行粒度形态（同工单同来源 ≥2 行）→ 整段跳过，
+--    保证 084 在任意既有形态下重放恒 exit 0（QA-2 真库复现 exit 3 的修复，详见 ② 段注释）。
+
+-- ============ 修订声明（2026-09-14，首次推送前修订）============
+-- 【修订时点】本文件于 2026-09-14 在**首次推送前**修订：当时本文件尚未推送（远端 main 仍停在
+--   历史 tip，见仓库远端状态），亦**尚未在任何生效环境应用**。迁移"只前进不回改"保护的是已生效环境，
+--   本文件不属该范畴，故就地修订而非另起 087（087 在序上晚于 084，无法阻止 084 自身重放失败）。
+-- 【修订内容】两处，均只改 ② 段，不改任何 DDL 语义方向：
+--   1) DO 段新增两道重入守卫（见 ② 段：守卫1 = 085 已接管则跳过；守卫2 = 存量数据已是行粒度则跳过）；
+--   2) DO 段定界符 `$$` → `$g$`（避免与守卫注释/其它块混读，纯可读性）。
+-- 【修订动机（QA-2 真库复现）】085 落地后重放 084：在"同工单 ≥2 种耗材"（085 明确允许的常规形态）下，
+--   建 3 列唯一约束必撞唯一性 → `ERROR: could not create unique index ... DETAIL: (...) is duplicated`；
+--   且本文件**非单事务**，脚本会在中途 exit 3 并留下部分生效的中间态。守卫使重放恒 exit 0。
+-- 【漂移声明】dev / 验证库可能已执行过**无守卫版** 084；带守卫版是它的**安全超集**——不改数据、
+--   不放宽任何语义，重放行为一致（已应用场景下打印 NOTICE 并跳过 ② 段）。两者可安全混用。
+
 -- ============ ① 结算明细来源标记 + 耗材关联 ============
 ALTER TABLE settlement_item ADD COLUMN IF NOT EXISTS source text NOT NULL DEFAULT 'service';
 ALTER TABLE settlement_item ADD COLUMN IF NOT EXISTS material_id uuid;
@@ -40,10 +59,23 @@ CREATE INDEX IF NOT EXISTS idx_sti_wo_source
 -- 幂等：IF EXISTS；若该约束不存在（理论上不可能，072 必建）则跳过，不影响后续兜底。
 ALTER TABLE settlement_item DROP CONSTRAINT IF EXISTS uq_settlement_item_tenant_work_order;
 
-DO $$
+DO $g$
 DECLARE
   con record;
 BEGIN
+  -- ── 重入守卫 1：085 已接管（其行粒度部分唯一索引已存在）──
+  -- 此时行粒度权威归 085，本段若再建 3 列约束，会在「同工单 ≥2 种耗材」（085 明确允许的常规形态）
+  -- 上直接炸：ERROR: could not create unique index "uq_settlement_item_tenant_wo_source"
+  --          DETAIL: (...) is duplicated  → 脚本 exit 3，且本文件非单事务，留下部分生效中间态。
+  -- 判定 SQL：pg_indexes 里存在 uq_sti_service（085 首建的第 1 条部分唯一索引）。
+  IF EXISTS (
+    SELECT 1 FROM pg_indexes
+    WHERE schemaname = current_schema() AND indexname = 'uq_sti_service'
+  ) THEN
+    RAISE NOTICE '084: skip uq_settlement_item_tenant_wo_source (superseded by 085 row-grain uq_sti_service/uq_sti_material)';
+    RETURN;
+  END IF;
+
   -- 兜底：再按列集摘除「恰好只含 (tenant_id, work_order_id) 两列」的残余唯一约束
   -- （覆盖 071 自动命名形态 / 手工建库等命名不一致场景，列集匹配不写死名字）
   FOR con IN
@@ -61,6 +93,19 @@ BEGIN
     RAISE NOTICE '084: dropped unique constraint % on settlement_item (tenant_id, work_order_id)', con.conname;
   END LOOP;
 
+  -- ── 重入守卫 2：存量数据已是行粒度形态（同 (tenant_id, work_order_id, source) ≥2 行）──
+  -- 085 尚未跑、但库中已存在多耗材行的历史库：建 3 列约束必撞唯一性 → 跳过并显式告知，
+  -- 保持 084 重放 exit 0（这类库应补跑 085 把行粒度接管过去）。
+  -- 判定 SQL：SELECT 1 FROM settlement_item GROUP BY tenant_id, work_order_id, source HAVING COUNT(*) > 1
+  IF EXISTS (
+    SELECT 1 FROM settlement_item
+    GROUP BY tenant_id, work_order_id, source
+    HAVING COUNT(*) > 1
+  ) THEN
+    RAISE NOTICE '084: skip uq_settlement_item_tenant_wo_source (existing rows already exceed 3-col uniqueness = row-grain data; apply 085 to take over)';
+    RETURN;
+  END IF;
+
   -- 建命名约束：工单 × 来源 唯一（一单每来源至多一行）
   IF NOT EXISTS (
     SELECT 1 FROM pg_constraint
@@ -70,7 +115,7 @@ BEGIN
       ADD CONSTRAINT uq_settlement_item_tenant_wo_source UNIQUE (tenant_id, work_order_id, source);
     RAISE NOTICE '084: created constraint uq_settlement_item_tenant_wo_source';
   END IF;
-END $$;
+END $g$;
 
 -- ============ ③ 修 048 类型错位：inventory_log.work_order_id uuid → text ============
 ALTER TABLE inventory_log ALTER COLUMN work_order_id DROP DEFAULT;
