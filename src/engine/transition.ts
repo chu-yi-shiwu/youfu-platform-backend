@@ -66,8 +66,13 @@ export async function transitionEntity(
     throw new AppError('BAD_REQUEST', `table not allowed: ${opts.table}`, 400);
   }
   const idCol = opts.idCol ?? 'id';
+  // 审查修复（横切⑦ B-2）：SELECT 补 FOR UPDATE 行锁。transitionEntity 的「读状态→
+  // 校验转移→写回」是跨语句序列，无行锁时两个并发请求可同时读到同一 status、双双通过
+  // applyEvent 校验、先后 UPDATE 同一目标（竞态：状态机非法转移/事件重复生效）。
+  // 与 ticket.ts findOneForUpdate 同款模式；该锁仅在事务内生效（withTenantClient 事务调用方
+  // 持锁至提交），非事务连接下 FOR UPDATE 退化为普通读、行为不变。
   const cur = await client.query(
-    `SELECT * FROM ${opts.table} WHERE ${idCol} = $1 AND tenant_id = $2`,
+    `SELECT * FROM ${opts.table} WHERE ${idCol} = $1 AND tenant_id = $2 FOR UPDATE`,
     [opts.id, tenantId],
   );
   if (cur.rowCount === 0) throw new AppError('NOT_FOUND', 'entity not found', 404);

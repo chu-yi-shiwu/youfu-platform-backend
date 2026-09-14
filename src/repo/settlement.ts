@@ -26,7 +26,8 @@ export interface SettlementRow {
   id: string;
   tenant_id: string;
   settlement_no: string;
-  status: 'draft' | 'confirmed';
+  // V3-D2（结算纵切 P0-3）：voided 第三态——作废后明细已快照删除，表头金额/确认人原样冻结
+  status: 'draft' | 'confirmed' | 'voided';
   total: string | number;
   item_count: number;
   note: string | null;
@@ -34,6 +35,11 @@ export interface SettlementRow {
   confirmed_at: string | null;
   paid_at: string | null;      // 支付字段预留（只展示不操作）
   payment_ref: string | null;  // 支付字段预留（只展示不操作）
+  // V3-D2 作废留痕四列（088）：快照 = 作废前全部明细
+  voided_by: string | null;
+  voided_at: string | null;
+  voided_reason: string | null;
+  voided_snapshot: unknown;
   created_at: string;
   updated_at: string;
 }
@@ -318,7 +324,11 @@ export async function syncMaterialCostRows(
          DO UPDATE SET settlement_id = EXCLUDED.settlement_id,
                        category_code = EXCLUDED.category_code,
                        category_name = EXCLUDED.category_name,
-                       price = EXCLUDED.price, qty = EXCLUDED.qty, amount = EXCLUDED.amount, note = EXCLUDED.note`,
+                       price = EXCLUDED.price, qty = EXCLUDED.qty, amount = EXCLUDED.amount, note = EXCLUDED.note
+         -- V3-D1（结算纵切 P0-1 人工改价保护，088 加列）：被 manual_edited 行占位时
+         --   不覆盖、不报错、行原地保留——PG 语义：DO UPDATE ... WHERE 条件为假时该行
+         --   跳过更新且 UPSERT 整体仍成功（rowCount 计数随之减少），与全量重投影语义完全兼容。
+         WHERE NOT settlement_item.manual_edited`,
         [tenantId, settlementId, woCol, matIdCol, matCodeCol, matNameCol, priceCol, qtyCol, amountCol, noteCol],
       );
       upserted = r.rowCount ?? 0;
@@ -338,6 +348,8 @@ export async function syncMaterialCostRows(
       `DELETE FROM settlement_item si
        WHERE si.tenant_id = $1 AND si.source = 'material' AND si.settlement_id = $2
          AND si.work_order_id = ANY($3::text[])
+         -- V3-D1：人工行永不自动删（事实源清零也不删——管理员改价是有意为之的口径）
+         AND NOT si.manual_edited
          AND NOT EXISTS (
            SELECT 1 FROM unnest($4::text[], $5::uuid[]) AS t(wo_id, mat_id)
            WHERE t.wo_id = si.work_order_id AND t.mat_id = si.material_id
@@ -395,13 +407,18 @@ export async function autoCreateSettlementForOrder(
   return { created: true, skipped: false, settlementId: r.settlement?.id ?? null };
 }
 
-/** 改明细（价格/数量/备注）：仅 draft；重算 item.amount 与表头 total/item_count。 */
+/** 改明细（价格/数量/备注）：仅 draft；重算 item.amount 与表头 total/item_count。
+ *  V3-D1（结算纵切 P0-1 人工改价保护）：
+ *   - patch 含 price 或 qty → manual_edited=true（重投影永不覆盖，见 syncMaterialCostRows 的 UPSERT WHERE）；
+ *   - 只改 note 不置位（修错别字不应冻结数量口径，manual_edited 保持原值）；
+ *   - 显式传 manual_edited=false（itemPatchSchema 仅允许字面 false）= 管理员主动放弃人工值、交还重投影。
+ *   边际语义：price/qty 与 manual_edited=false 同传属矛盾入参，按冻结处理（安全侧）。 */
 export async function updateSettlementItem(
   client: PoolClient,
   tenantId: string,
   settlementId: string,
   itemId: string,
-  patch: { price?: number; qty?: number; note?: string },
+  patch: { price?: number; qty?: number; note?: string; manual_edited?: boolean },
 ): Promise<SettlementRow> {
   const header = await client.query(
     'SELECT * FROM settlement WHERE id = $1 AND tenant_id = $2 FOR UPDATE',
@@ -423,10 +440,12 @@ export async function updateSettlementItem(
   if (!Number.isFinite(price) || price < 0) throw new AppError('BAD_REQUEST', 'price 必须为非负数字', 400);
   if (!Number.isFinite(qty) || qty <= 0) throw new AppError('BAD_REQUEST', 'qty 必须为正数字', 400);
   const amount = Math.round(price * qty * 100) / 100;
+  const touchesValue = patch.price !== undefined || patch.qty !== undefined;
+  const manualEdited = touchesValue ? true : patch.manual_edited === false ? false : item.manual_edited === true;
   await client.query(
-    `UPDATE settlement_item SET price = $1, qty = $2, amount = $3, note = $4
-     WHERE id = $5 AND settlement_id = $6 AND tenant_id = $7`,
-    [price, qty, amount, note, itemId, settlementId, tenantId],
+    `UPDATE settlement_item SET price = $1, qty = $2, amount = $3, note = $4, manual_edited = $5
+     WHERE id = $6 AND settlement_id = $7 AND tenant_id = $8`,
+    [price, qty, amount, note, manualEdited, itemId, settlementId, tenantId],
   );
   return recalcHeader(client, tenantId, settlementId);
 }
@@ -480,6 +499,54 @@ export async function confirmSettlement(
     [settlementId, tenantId],
   );
   return after.rows[0] as SettlementRow;
+}
+
+/**
+ * 作废结算单（V3-D2 · 结算纵切 P0-3）：confirmed → voided，误确认的唯一合法出口。
+ * 事务语义（调用方 withTenantClient 单事务）：
+ *   FOR UPDATE 锁表头（复用 confirmSettlement 同款锁法）→ 全部明细快照进 voided_snapshot
+ *   → DELETE 明细行（释放 085 uq_sti_service/uq_sti_material 键位——部分唯一索引谓词只看
+ *   settlement_item 行，删行即释放，同工单立即可重建新结算单，零索引手术）→ UPDATE 表头。
+ * total/item_count/confirmed_by/confirmed_at 原样冻结（作废前确认过什么，永久可查）。
+ * 不可逆：无 un-void，重做 = 建新单（与新单语义一致）。
+ * 权限：settlement.edit（与 confirm 同权限，不新增权限点——086 已证新增权限点会被
+ *   role_permission 覆盖行语义坑存量租户）。
+ */
+export async function voidSettlement(
+  client: PoolClient,
+  tenantId: string,
+  settlementId: string,
+  opts: { operator: string; reason: string },
+): Promise<SettlementRow> {
+  const header = await client.query(
+    'SELECT * FROM settlement WHERE id = $1 AND tenant_id = $2 FOR UPDATE',
+    [settlementId, tenantId],
+  );
+  if (header.rows.length === 0) throw new AppError('NOT_FOUND', 'settlement not found', 404);
+  const st = header.rows[0].status as string;
+  if (st === 'draft') {
+    throw new AppError('CONFLICT', '草稿单请直接删除（DELETE /settlements/:id），不可作废', 409);
+  }
+  if (st === 'voided') {
+    throw new AppError('CONFLICT', '结算单已作废，不可重复作废', 409);
+  }
+  // st === 'confirmed'：先快照全部明细，再删行（删行即释放部分唯一索引键位），最后改表头
+  const items = await client.query(
+    'SELECT * FROM settlement_item WHERE settlement_id = $1 AND tenant_id = $2',
+    [settlementId, tenantId],
+  );
+  await client.query(
+    'DELETE FROM settlement_item WHERE settlement_id = $1 AND tenant_id = $2',
+    [settlementId, tenantId],
+  );
+  const upd = await client.query(
+    `UPDATE settlement
+     SET status = 'voided', voided_by = $1, voided_at = now(), voided_reason = $2,
+         voided_snapshot = $3::jsonb, updated_at = now()
+     WHERE id = $4 AND tenant_id = $5 RETURNING *`,
+    [opts.operator, opts.reason, JSON.stringify(items.rows), settlementId, tenantId],
+  );
+  return upd.rows[0] as SettlementRow;
 }
 
 /** 汇总重算表头 total/item_count（改/删明细后调用），返回最新表头。 */

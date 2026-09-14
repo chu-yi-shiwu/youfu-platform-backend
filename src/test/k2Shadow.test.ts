@@ -79,7 +79,7 @@ describe('recordShadowSuggestions', () => {
     expect(backfill!.params).toEqual(['t-verification', 'wo-1', 'wk-a']);
   });
 
-  it('候选全无 assignee → 只落 category 行（dispatch 投票稀疏修正）', async () => {
+  it('候选全无 assignee（冷启动）→ 落 category 行 + suggested=\'\' 的 dispatch 占位行（V2-F5 飞轮解锁）', async () => {
     const client = makeFakeClient({
       'FROM ai_case_embeddings': () => ({
         rows: [
@@ -91,10 +91,20 @@ describe('recordShadowSuggestions', () => {
     await recordShadowSuggestions(client, 't-verification', 'wo-1', [1, 0], '水电维修');
     const calls = (client as never as { calls: RecordedCall[] }).calls;
     const inserts = calls.filter((c) => c.sql.includes('INSERT INTO ai_shadow_suggestions'));
-    expect(inserts.length).toBe(1);
-    expect(inserts[0].sql).toContain("'category'");
-    // 无 dispatch 行 → 也不应触发自愈回填查询
-    expect(calls.some((c) => c.sql.includes("kind = 'dispatch'"))).toBe(false);
+    // V2-F5（P0-12 冷启动）：修复前只落 category 行 → 首单派单回填 UPDATE 扑空 → 配对数据死锁。
+    // 修复后必须落 dispatch 占位行（suggested=''），首单真实派单即可命中回填，飞轮解锁。
+    expect(inserts.length).toBe(2);
+    const cat = inserts.find((c) => c.sql.includes("'category'"))!;
+    expect(cat).toBeDefined();
+    const dis = inserts.find((c) => c.sql.includes("'dispatch'"))!;
+    expect(dis).toBeDefined();
+    // suggested='' 内联在 SQL 占位（"无建议"占位，schema NOT NULL DEFAULT ''），参数仅 [tenant, wo, detail]
+    expect(dis.sql).toContain("'dispatch', ''");
+    expect(dis.params).toHaveLength(3);
+    const detail = JSON.parse(String(dis.params[2]));
+    expect(detail.cold_start).toBe(true); // detail 标记冷启动，供评估口径过滤
+    // 无 workerVote → 不触发自愈回填查询
+    expect(calls.some((c) => c.sql.includes("kind = 'dispatch'") && c.sql.includes('UPDATE'))).toBe(false);
   });
 
   it('无相似候选 → 零影子行', async () => {

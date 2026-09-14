@@ -44,6 +44,7 @@ export interface TicketStats {
   status_distribution: Record<string, number>;       // 各状态计数（UOne 统计绩效：状态分布）
   satisfaction_distribution: { score: string; count: number }[]; // 满意度星级分布（含 unrated 未评价）
   daily_trend: { date: string; created: number; completed: number }[]; // 近30天新建/完成趋势
+  claim_hall_reasons: Record<string, number>; // V2-F3（派单纵切 P0-8）：落大厅原因细分计数（enter_hall 事件聚合）
   note: string;
 }
 
@@ -111,6 +112,20 @@ export async function ticketStats(client: PoolClient, tenantId: string): Promise
   );
   const daily_trend = tr.rows.map((x) => ({ date: x.date, created: Number(x.created), completed: Number(x.completed) }));
 
+  // V2-F3（派单纵切 P0-8 失配观测，2026-09-14）：落大厅原因细分计数——
+  // enter_hall 事件 payload->>'reason' 分组聚合（no_rule_matched=配置/技能失配；
+  // no_available_worker=无在岗工人；unknown=历史旧格式事件，诚实归档不丢弃）。
+  const eh = await client.query<{ reason: string | null; c: string }>(
+    `SELECT COALESCE(payload->>'reason', 'unknown') AS reason, COUNT(*)::text AS c
+     FROM ticket_event WHERE tenant_id = $1 AND type = 'enter_hall' GROUP BY 1`,
+    [tenantId],
+  );
+  const claim_hall_reasons: Record<string, number> = {};
+  for (const x of eh.rows) {
+    const n = Number(x.c);
+    if (Number.isFinite(n)) claim_hall_reasons[x.reason ?? 'unknown'] = n;
+  }
+
   const result: TicketStats = {
     tenant_id: tenantId,
     total,
@@ -126,7 +141,8 @@ export async function ticketStats(client: PoolClient, tenantId: string): Promise
     status_distribution,
     satisfaction_distribution,
     daily_trend,
-    note: 'auto_close_rate 为诚实口径（auto_flow 命中且最终 completed）；非严格无人值守口径，严格口径待接 ticket_event 审计聚合；撤销率=已撤销/总数；满意度均分基于已评价单；daily_trend.completed 基于完成态工单 updated_at 近似完成日',
+    claim_hall_reasons,
+    note: 'auto_close_rate 为诚实口径（auto_flow 命中且最终 completed）；非严格无人值守口径，严格口径待接 ticket_event 审计聚合；撤销率=已撤销/总数；满意度均分基于已评价单；daily_trend.completed 基于完成态工单 updated_at 近似完成日；claim_hall_reasons 按 enter_hall 事件 reason 分组（V2-F3 失配观测）',
   };
   return storeResult(cacheKey, result);
 }
@@ -191,9 +207,15 @@ export async function processMetrics(client: PoolClient, tenantId: string): Prom
      FROM work_orders WHERE tenant_id = $1`,
     [tenantId],
   );
+  // 转派率口径修复（横切⑤⑥ F4）：ticket_event 无 'assign' 类型——转派事实记录在
+  // payload->>'transition_event'（'forward'/'dispatch'，dispatchNotification/转台链路写入）。
+  // 原口径「每单事件数 ≥2」把状态流转/接单/完成等任意第二起事件都误判为转派，
+  // reassign_rate 恒虚高。改为按 transition_event ∈ ('forward','dispatch') 精确计数。
   const reassigned = await client.query<{ c: string }>(
     `SELECT COUNT(*)::text AS c FROM (
-       SELECT work_order_id FROM ticket_event WHERE tenant_id = $1 GROUP BY work_order_id HAVING COUNT(*) >= 2
+       SELECT work_order_id FROM ticket_event
+       WHERE tenant_id = $1 AND payload->>'transition_event' = ANY(ARRAY['forward','dispatch']::text[])
+       GROUP BY work_order_id
      ) t`,
     [tenantId],
   );

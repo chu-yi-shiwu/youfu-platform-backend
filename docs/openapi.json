@@ -8083,6 +8083,46 @@
         }
       }
     },
+    "/api/v1/inventory/return": {
+      "post": {
+        "tags": [
+          "material"
+        ],
+        "summary": "POST /api/v1/inventory/return（V3-D3 退料回冲）",
+        "description": "退料回冲（V3-D3）：body { material_id, qty(正数=退回量), work_order_no, note? }。写 type='out' + 负 qty 流水行（事实源 SUM(type='out') 天然抵消）；库存回补；净消耗守卫（退回量 ≤ 净消耗，400）；SETTLEMENT_LOCKED 422（confirmed 单先作废）；draft 结算单联动全量重投影（pruneStale=true）。权限 material.manage。\n\n来源：src/routes/material.ts\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "HTTP 200",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "description": "骨架占位：字段以服务端实现为准"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "description": "骨架占位：请求字段以服务端实现为准"
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/inventory/consume": {
       "post": {
         "tags": [
@@ -9277,8 +9317,8 @@
         "tags": [
           "optimize"
         ],
-        "summary": "PUT /api/v1/workflow/def",
-        "description": "来源：src/routes/optimize.ts:171\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "summary": "PUT /api/v1/workflow/def（V3-D5：保存为草稿，不再直写 live）",
+        "description": "V3-D5 收敛（2026-09-14）：本端点语义从「生效」改为「存草稿」——body { entity?, def } 经诚实校验后写入 workflow_def_change 草稿（upsert，status='draft'），不触碰 workflow_def live 表；响应 { ok, code, entity_type, draft:true, status:'draft' }（不再返回 version）。后续走 POST /workflow-defs/:entityType/submit → approve 生效。兼容壳：FE/mp 现用主端点 PUT /workflow-defs/:entityType（同语义），本端点为旧调用方保留。\n\n来源：src/routes/optimize.ts:171\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -10771,6 +10811,57 @@
             "description": "路径参数（原代码声明形如 :param）"
           }
         ]
+      }
+    },
+    "/api/v1/workflow-defs/{entityType}/preflight": {
+      "post": {
+        "tags": [
+          "workflowDef"
+        ],
+        "summary": "删态影响面预演（V3-D4，UI 糖非闸门）：body 带新 def，返回 { removed, inflight_total, by_state }。",
+        "description": "V3-D4：FE 在保存前展示删态影响面，与 saveWorkflowDef 硬闸（409 INFLIGHT_STATE_LOSS）构成「提示 + 强制」两层。权限 workflow.edit 或 workflow.approve。\n\n来源：src/routes/workflowDef.ts\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "HTTP 200",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "description": "骨架占位：字段以服务端实现为准"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "entityType",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "路径参数（原代码声明形如 :param）"
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "description": "骨架占位：请求字段以服务端实现为准"
+              }
+            }
+          }
+        }
       }
     },
     "/api/v1/workflow-defs/{entityType}/submit": {
@@ -13001,6 +13092,57 @@
         ],
         "summary": "— 确认锁定（draft→confirmed；0 明细/已确认 → 409）",
         "description": "来源：src/routes/settlement.ts:140\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "HTTP 200",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "description": "骨架占位：字段以服务端实现为准"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "路径参数（原代码声明形如 :param）"
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "description": "骨架占位：请求字段以服务端实现为准"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/settlements/{id}/void": {
+      "post": {
+        "tags": [
+          "settlement"
+        ],
+        "summary": "— 作废（confirmed→voided；V3-D2）",
+        "description": "作废已确认结算单（V3-D2）：明细 DELETE、total/confirmed_* 冻结、快照存 voided_snapshot；draft → 409（请走 DELETE）、voided → 409、空串 void_reason → 400。作废后同工单可重建结算单（键位随明细删除释放）。作废后的结算单不可导出（409 SETTLEMENT_VOIDED）。\n\n来源：src/routes/settlement.ts\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []

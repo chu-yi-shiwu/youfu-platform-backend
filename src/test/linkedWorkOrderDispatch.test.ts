@@ -83,7 +83,21 @@ describe('linkedWorkOrder 派单未命中兜底（纵切② P0-3/P0-4）', () =>
     expect(evt?.text).toContain("'system'");
     expect(evt?.params?.[2]).toBe('draft');
     expect(evt?.params?.[3]).toBe('claim_hall');
-    expect(JSON.parse(String(evt?.params?.[4]))).toEqual({ reason: 'linked order no worker auto-matched' });
+    // V2-F3（派单纵切 P0-8）：无任何工人 → 容量问题口径 no_available_worker
+    expect(JSON.parse(String(evt?.params?.[4]))).toEqual({ reason: 'no_available_worker' });
+  });
+
+  it('V2-F3：有在岗工人但技能失配（规则/兜底都没接住）→ reason=no_rule_matched（P0-8 失配观测口）', async () => {
+    const { client, calls } = makeClient(
+      linkedHandler({ workerRows: [{ id: 'w-linked-2', skill_tags: '["cleaning"]', load: 0, active: true }] }),
+    );
+    const r = await createLinkedWorkOrder(client, basePayload({ skillTags: ['inspection'] }));
+    expect(r.autoFlow).toBe(false);
+    expect(r.assignee).toBeNull();
+    const evt = calls.find((c) => c.text.includes('INSERT INTO ticket_event'));
+    expect(evt?.text).toContain("'enter_hall'");
+    // 有 active 工人却没派出去 → 配置/技能失配口径 no_rule_matched（正是「空调单派给电工」类事故的观测口）
+    expect(JSON.parse(String(evt?.params?.[4]))).toEqual({ reason: 'no_rule_matched' });
   });
 
   it('P0-4：picked=null + 有 active admin → 账号通知落库（文案含「抢单大厅」）', async () => {

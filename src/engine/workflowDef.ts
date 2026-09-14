@@ -2,7 +2,21 @@
 // 状态图存 DB，由可配置状态机引擎消费，实现"流程零代码配置"。
 import type { PoolClient } from 'pg';
 import { DEFAULT_WORK_ORDER_DEF, doneStates, terminalStates, type WorkflowDef } from './stateMachine.js';
+import { ensureClaimHallState } from './claimHallEdges.js';
 import { AppError } from '../middleware/error.js';
+
+/**
+ * V2-F7（2026-09-14）：读路径幂等注入抢单大厅机制态（仅 work_order）。
+ * 抢单大厅是引擎滴滴式兜底：派单未命中直接 UPDATE status='claim_hall'（旁路），
+ * 但最小 4 态/部分租户 def 无此态 ⇒ transition() isKnownState 拒绝，出厅流转
+ * 全 422（合法进、非法出，大厅卡死）。在读路径注入（而非写路径）的原因：
+ * 存量已落库 def 与已落大厅的单无需迁移即修复；claim_hall 属引擎机制态，
+ * 注入是"引擎真实行为空间"的诚实呈现。纯加法幂等，详见 engine/claimHallEdges.ts。
+ */
+function withMechanismStates(entityType: string, def: WorkflowDef): WorkflowDef {
+  if (entityType !== 'work_order') return def;
+  return ensureClaimHallState(def).def;
+}
 
 /**
  * 2026-09-14 纵切③ P0-2：状态图写入口校验收口（纯函数可单测）。
@@ -55,8 +69,8 @@ export async function getWorkflowDefOrDefault(
     [tenantId, entityType],
   );
   const raw = r.rows[0]?.def;
-  if (!raw) return cloneDef(fallback);
-  return normalizeDef(typeof raw === 'string' ? JSON.parse(raw) : raw);
+  if (!raw) return withMechanismStates(entityType, cloneDef(fallback));
+  return withMechanismStates(entityType, normalizeDef(typeof raw === 'string' ? JSON.parse(raw) : raw));
 }
 
 /** 读状态图；租户无定义时回退默认（不写库，避免只读操作产生副作用）。 */
@@ -80,9 +94,9 @@ export async function ensureWorkflowDef(
   );
   if (existing.rows[0]) {
     const raw = existing.rows[0].def;
-    return normalizeDef(typeof raw === 'string' ? JSON.parse(raw) : raw);
+    return withMechanismStates(entityType, normalizeDef(typeof raw === 'string' ? JSON.parse(raw) : raw));
   }
-  const def = cloneDef(DEFAULT_WORK_ORDER_DEF);
+  const def = withMechanismStates(entityType, cloneDef(DEFAULT_WORK_ORDER_DEF));
   await client.query(
     `INSERT INTO workflow_def (tenant_id, entity_type, def, version) VALUES ($1,$2,$3,1)`,
     [tenantId, entityType, JSON.stringify(def)],
@@ -92,14 +106,66 @@ export async function ensureWorkflowDef(
 
 /** upsert 状态图（版本自增，记录变更历史）。
  *  S2：保存前把「当前旧版」快照写入 workflow_def_history（append-only，S3 版本回滚地基）；
- *  reason 为来源标记（手工保存/模板应用/回滚，G5：模板应用与自优化不互斥）。 */
+ *  reason 为来源标记（手工保存/模板应用/回滚，G5：模板应用与自优化不互斥）。
+ *
+ *  V3-D5（2026-09-14）：opts 从可选改必填——TS 编译期强制所有直写调用点留痕
+ *  （operator/reason 缺失或空串运行期 422，防 `?? null` 式静默）。live 写边收敛为五条：
+ *  approve / rollback / template / auto-tune / provision，全部可归因。
+ *
+ *  V3-D4（2026-09-14）：删态硬闸——removed = 旧 states − 新 states 非空时，
+ *  先按实体表映射清点在途单；有在途且未显式 allowInflightLoss → 409 INFLIGHT_STATE_LOSS
+ *  （改 def 不触碰业务表 status，删掉有在途单的状态即永久 422 失联，默认必须拒绝）。
+ *  逃生口 allowInflightLoss 仅供 approve/rollback 端点在显式二次确认参数下传入。 */
+export interface SaveWorkflowDefOpts {
+  /** 留痕：操作者（审计 history.operator），必填非空。 */
+  operator: string;
+  /** 留痕：写入原因（审计 history.reason），必填非空。 */
+  reason: string;
+  /** V3-D4 逃生口：仅 approve/rollback 在请求体显式二次确认（confirm_inflight_loss:true）下传入。 */
+  allowInflightLoss?: boolean;
+}
+
+/** 在途单按状态清点（V3-D4 纯查询函数）：扫描面按 entity_type 映射（与 transition.ts ALLOWED_TABLES 同源思想）。 */
+const ENTITY_STATE_TABLE: Record<string, string> = {
+  work_order: 'work_orders',
+  inspection_task: 'inspection_task',
+  transport_task: 'transport_order',
+};
+
+export async function countInflightByStates(
+  client: PoolClient,
+  tenantId: string,
+  entityType: string,
+  states: string[],
+): Promise<{ total: number; byState: Record<string, number> }> {
+  const byState: Record<string, number> = {};
+  let total = 0;
+  if (states.length === 0) return { total, byState };
+  const table = ENTITY_STATE_TABLE[entityType];
+  const sql =
+    table !== undefined
+      ? `SELECT status, COUNT(*)::int AS n FROM ${table} WHERE tenant_id = $1 AND status = ANY($2) GROUP BY status`
+      : `SELECT status, COUNT(*)::int AS n FROM business_flow_tasks WHERE tenant_id = $1 AND entity_type = $2 AND status = ANY($3) GROUP BY status`;
+  const params = table !== undefined ? [tenantId, states] : [tenantId, entityType, states];
+  const r = await client.query<{ status: string; n: number }>(sql, params);
+  for (const row of r.rows) {
+    byState[row.status] = Number(row.n);
+    total += Number(row.n);
+  }
+  return { total, byState };
+}
+
 export async function saveWorkflowDef(
   client: PoolClient,
   tenantId: string,
   entityType: string,
   def: WorkflowDef,
-  opts?: { operator?: string; reason?: string },
+  opts: SaveWorkflowDefOpts,
 ): Promise<void> {
+  // V3-D5：operator/reason 必填非空（运行期兜底，防调用点传空串静默丢审计）。
+  if (!opts?.operator?.trim() || !opts?.reason?.trim()) {
+    throw new AppError('BAD_REQUEST', 'saveWorkflowDef requires non-empty operator and reason (audit trail)', 422);
+  }
   // 2026-09-14 纵切③ P0-2：写入口统一校验收口（initial/transition 拓扑/autoRoutes 目标态非终态）。
   // 违例 422，坏 def 不落库、不产生 history 快照。开通注入（tenantProvision.ts 直 INSERT 内置 def）
   // 不经本函数、不动；optimize.ts 内联校验保留（幂等冗余，减少 diff）。
@@ -108,6 +174,25 @@ export async function saveWorkflowDef(
     'SELECT version, def FROM workflow_def WHERE tenant_id = $1 AND entity_type = $2',
     [tenantId, entityType],
   );
+  // V3-D4 删态硬闸：旧 def 存在且新 def 删掉了状态 → 清点在途单（escape hatch 见 opts.allowInflightLoss）。
+  if (cur.rows[0]) {
+    const oldRaw = cur.rows[0].def;
+    const oldDef = normalizeDef(typeof oldRaw === 'string' ? JSON.parse(oldRaw) : oldRaw);
+    const removed = (oldDef.states ?? []).filter((s: string) => !def.states.includes(s));
+    if (removed.length > 0 && !opts.allowInflightLoss) {
+      const hits = await countInflightByStates(client, tenantId, entityType, removed);
+      if (hits.total > 0) {
+        const detail = Object.entries(hits.byState)
+          .map(([st, n]) => `${st}:${n}`)
+          .join(',');
+        throw new AppError(
+          'INFLIGHT_STATE_LOSS',
+          `删除状态 [${removed.join(',')}] 将使 ${hits.total} 张在途单失联（${detail}）；确认请走审批流并显式 allowInflightLoss`,
+          409,
+        );
+      }
+    }
+  }
   if (cur.rows[0]) {
     await client.query(
       `INSERT INTO workflow_def_history (tenant_id, entity_type, version, def, operator, reason)

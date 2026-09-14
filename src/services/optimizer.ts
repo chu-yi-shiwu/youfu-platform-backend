@@ -477,7 +477,12 @@ export async function applyWorkflowOptimizations(
       reason: '',
     };
     const newDef = applyRecommendationToDef(def, decision);
-    await saveWorkflowDef(client, tenantId, entityType, newDef);
+    // V3-D5：saveWorkflowDef opts 必填——飞轮直写强制留痕（operator='auto-tune'，reason='model-optimization'），
+    // AUTO_TUNE 闸后的写入在 history 可归因（原调用不传 opts 会编译失败，本行即修复点）。
+    await saveWorkflowDef(client, tenantId, entityType, newDef, {
+      operator: 'auto-tune',
+      reason: 'model-optimization',
+    });
     await client.query(
       `UPDATE optimization_feedback SET status = 'applied', applied_at = now() WHERE id = $1`,
       [row.id],

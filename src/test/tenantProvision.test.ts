@@ -20,6 +20,7 @@ interface FakeSpec {
   srcCategories: any[];      // 模板源 fault_category 行
   srcDef?: unknown;          // 模板源 work_order workflow_def（缺省 = 无）
   insertRowCounts?: Record<string, number>; // 按 SQL 关键字模拟受影响行数
+  dictCounts?: { loc: string; rep: string }; // V2-F1：新租户位置字典/报修人实测行数（缺省 = 空表 0/0）
 }
 
 function makeClient(spec: FakeSpec) {
@@ -35,6 +36,10 @@ function makeClient(spec: FakeSpec) {
       }
       if (text.includes('INSERT INTO fault_category')) {
         return { rows: [], rowCount: spec.insertRowCounts?.fault_category ?? 1 };
+      }
+      // V2-F1（租户纵切 P0-3）：开通末尾「最后一公里」字典实测（COUNT 查询）
+      if (text.includes('FROM location_dict')) {
+        return { rows: [spec.dictCounts ?? { loc: '0', rep: '0' }] };
       }
       return { rows: [], rowCount: 1 };
     }) as QueryFn,
@@ -96,6 +101,38 @@ describe('provisionNewTenantContent（SaaS 前置开通补全护栏）', () => {
     expect(accIns.params![1]).toBe('admin');
     expect(accIns.params![2]).toMatch(/^scrypt\$/);
     expect(accIns.params![4]).toBe('admin');
+  });
+
+  // V2-F1（租户纵切 P0-3）：开通「最后一公里」待办检测——reporter_dict/location_dict
+  // 属机构私有数据不跨租户复制，新租户天然为空 → 开通结果必须诚实透出待办提示。
+  it('V2-F1：新租户位置字典/报修人为空 → onboardingHints 非空（含两类待办与实测行数）', async () => {
+    const { client } = makeClient({ srcCategories: [], srcDef: undefined });
+    const r = await provisionNewTenantContent(client, {
+      tenantId: NEW_T, name: '测试医院', sourceTenantId: SRC_T,
+    });
+    expect(r.onboardingHints).toHaveLength(1);
+    expect(r.onboardingHints[0]).toContain('位置字典');
+    expect(r.onboardingHints[0]).toContain('报修人名单');
+    expect(r.onboardingHints[0]).toContain('0 条');
+  });
+
+  it('V2-F1：字典已有数据（如仅位置字典非空）→ 只提示缺失侧，不误报', async () => {
+    const { client } = makeClient({ srcCategories: [], dictCounts: { loc: '12', rep: '0' } });
+    const r = await provisionNewTenantContent(client, {
+      tenantId: NEW_T, name: '测试医院', sourceTenantId: SRC_T,
+    });
+    expect(r.onboardingHints).toHaveLength(1);
+    expect(r.onboardingHints[0]).not.toContain('位置字典与');
+    expect(r.onboardingHints[0]).toContain('报修人名单');
+    expect(r.onboardingHints[0]).toContain('12 条');
+  });
+
+  it('V2-F1：两张字典都有数据 → onboardingHints 为空（不噪音）', async () => {
+    const { client } = makeClient({ srcCategories: [], dictCounts: { loc: '12', rep: '30' } });
+    const r = await provisionNewTenantContent(client, {
+      tenantId: NEW_T, name: '测试医院', sourceTenantId: SRC_T,
+    });
+    expect(r.onboardingHints).toEqual([]);
   });
 
   it('模板源无 def → 落引擎默认 4 态图（与 getWorkflowDef 兜底同口径）', async () => {

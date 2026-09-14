@@ -29,6 +29,77 @@ export interface SlaHit {
   dueAt: Date;
 }
 
+/** V2-F2（派单纵切 P0-5，2026-09-14）：抢单大厅超时命中记录。 */
+export interface ClaimHallHit {
+  workOrderId: string;
+  orderNo: string;
+  waitMinutes: number;
+}
+
+/**
+ * V2-F2（派单纵切 P0-5）：抢单大厅停留超时扫描——此前 claim_hall 单无任何专属超时，
+ * 只能等 SLA 到期（到期也仅打标记），工单可在大厅静置到被遗忘。
+ * 口径：
+ *   - 阈值 = env CLAIM_HALL_TIMEOUT_MIN（缺省 30；非法/非正数降级回默认，不抛错）；
+ *   - 命中 = status='claim_hall' 且 updated_at 早于阈值（落大厅的 UPDATE 会刷新 updated_at，
+ *     故以它作进入大厅时刻的保守近似）且尚无 'claim_hall_timeout' 事件（结构性防重，
+ *     60s 一轮的 cron 不会对同一单重复轰炸）；
+ *   - 动作 = 写 ticket_event(type='claim_hall_timeout'，沿用 ticket_event 既有约定)
+ *     + 通知全部 active admin/dispatcher。只通知不自动改派（改派是人工裁量）。
+ */
+export function claimHallTimeoutMinutes(): number {
+  const raw = Number(process.env.CLAIM_HALL_TIMEOUT_MIN);
+  if (!Number.isFinite(raw) || raw <= 0) return 30;
+  return raw;
+}
+
+export async function runClaimHallTimeoutScanForTenant(tenantId: string): Promise<ClaimHallHit[]> {
+  const timeoutMin = claimHallTimeoutMinutes();
+  return withTenantClient(tenantId, async (client) => {
+    const rows = await client.query<{ id: string; order_no: string; updated_at: string }>(
+      `SELECT w.id, w.order_no, w.updated_at FROM work_orders w
+       WHERE w.tenant_id = $1 AND w.status = 'claim_hall'
+         AND w.updated_at < now() - make_interval(mins => $2::int)
+         AND NOT EXISTS (
+           SELECT 1 FROM ticket_event e
+           WHERE e.tenant_id = w.tenant_id AND e.work_order_id = w.id AND e.type = 'claim_hall_timeout'
+         )
+       LIMIT 200`,
+      [tenantId, timeoutMin],
+    );
+    const hits: ClaimHallHit[] = [];
+    if (rows.rows.length === 0) return hits;
+    // 通知面：admin + dispatcher（V2-F2 扩展——SLA 线只通知 admin，大厅积压是调度职责）
+    const staff = await client.query<{ id: string }>(
+      `SELECT id FROM account_user WHERE tenant_id=$1 AND role IN ('admin','dispatcher') AND active=true`,
+      [tenantId],
+    );
+    for (const r of rows.rows) {
+      const waitedMin = Math.max(0, Math.round((Date.now() - new Date(r.updated_at).getTime()) / 60_000));
+      await client.query(
+        `INSERT INTO ticket_event (tenant_id, work_order_id, type, from_status, to_status, actor, payload)
+         VALUES ($1,$2,'claim_hall_timeout',$3,$3,'system',$4)`,
+        [tenantId, r.id, 'claim_hall', JSON.stringify({ wait_minutes: waitedMin, threshold_minutes: timeoutMin })],
+      );
+      await emitDomainEvent(client, {
+        tenantId, entityType: 'work_order', entityId: r.id, type: 'claim_hall_timeout', actor: 'system',
+        payload: { wait_minutes: waitedMin, threshold_minutes: timeoutMin },
+      });
+      const title = '抢单大厅工单超时';
+      const body = `工单 ${r.order_no} 在抢单大厅已等待 ${waitedMin} 分钟无人接单（阈值 ${timeoutMin} 分钟），请关注或人工派单`;
+      for (const s of staff.rows) {
+        await insertNotification(client, {
+          tenantId, recipient: s.id, recipientKind: 'account', type: 'claim_hall_timeout',
+          workOrderId: r.id, title, body,
+          payload: { order_no: r.order_no, wait_minutes: waitedMin, threshold_minutes: timeoutMin },
+        });
+      }
+      hits.push({ workOrderId: r.id, orderNo: r.order_no, waitMinutes: waitedMin });
+    }
+    return hits;
+  });
+}
+
 /** P1（B2 补 SLA）：运送线 SLA 命中记录（与工单线 SlaHit 分离，字段语义不同）。 */
 export interface TransportSlaHit {
   transportOrderId: string;
@@ -209,6 +280,15 @@ export async function runSlaSchedulerOnce(): Promise<number> {
         }
       } catch (e) {
         console.error('[scheduler] tenant', r.tenant_id, 'transport sla scan failed:', e);
+      }
+      try {
+        // V2-F2（派单纵切 P0-5）：抢单大厅停留超时扫描；失败只记日志不阻断其余扫描线。
+        const chHits = await runClaimHallTimeoutScanForTenant(r.tenant_id);
+        for (const h of chHits) {
+          console.warn(`[scheduler] claim_hall timeout tenant=${r.tenant_id} wo=${h.workOrderId} waited=${h.waitMinutes}min`);
+        }
+      } catch (e) {
+        console.error('[scheduler] tenant', r.tenant_id, 'claim_hall timeout scan failed:', e);
       }
     }
     if (total > 0) console.log(`[scheduler] sla escalated ${total} work orders`);

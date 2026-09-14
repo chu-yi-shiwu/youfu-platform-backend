@@ -211,6 +211,11 @@ router.post('/inventory/out', async (req, res, next) => {
         const wo = await client.query('SELECT id FROM work_orders WHERE tenant_id=$1 AND order_no=$2 LIMIT 1', [tenantId, b.work_order_no.trim()]);
         if (wo.rows.length > 0) woId = wo.rows[0].id;
       }
+      // V3-D3（结算纵切 P1-1 顺手项）：挂单出库补 SETTLEMENT_LOCKED 守卫——
+      //   此前缺口：确认锁定的结算单可被挂单出库静默改动事实源。与 consume/退料同款共享守卫。
+      if (woId) {
+        await assertSettlementNotConfirmed(client, tenantId, woId);
+      }
       const wh = b.warehouse ?? '中心库';
       const lock = await client.query(
         `SELECT qty FROM inventory WHERE tenant_id=$1 AND material_id=$2 AND warehouse=$3 FOR UPDATE`,
@@ -253,6 +258,97 @@ router.post('/inventory/out', async (req, res, next) => {
     });
     return res.json({ ok: true, code: 0, result });
   } catch (e) {
+    next(e);
+  }
+});
+
+// ============ 退料回冲（V3-D3 · 结算纵切 P0-2）============
+// 设计裁决：不新增 type（016 CHECK 迁移三处口径各改一遍），写 **type='out' + 负 qty** 流水行——
+// 事实源聚合 = SUM(il.qty) WHERE type='out'（repo/settlement.ts），对负 qty 行天然抵消；
+// 聚合 ≤0 时重投影跳过落行 + pruneStale 清残留行 → 净归零 = 结算行消失，语义正确。
+// 请求 qty 恒为正数（语义 = 退回量），服务端落库存负值。
+const returnSchema = z.object({
+  material_id: z.string().uuid(),
+  qty: z.number().int().positive(), // 退回量（正数）
+  // 退料必须挂单——否则无法回冲结算明细（无单退料请走 /inventory/in 补货入库，语义不同）
+  work_order_no: z.string().min(1),
+  note: z.string().max(200).optional(),
+});
+
+router.post('/inventory/return', async (req, res, next) => {
+  try {
+    const auth = res.locals.auth;
+    const tenantId = auth.tenantId;
+    const b = returnSchema.parse(req.body);
+    const who = auth.userId ?? auth.role ?? 'system';
+    const result = await withTenantClient(tenantId, async (client) => {
+      // 归口 material.manage（与手工出入库一致——退料是管理动作，工人不可自退）
+      await requirePermission(auth, client, 'material.manage');
+      const mat = await client.query(`SELECT id FROM material WHERE id=$1 AND tenant_id=$2`, [b.material_id, tenantId]);
+      if (mat.rowCount === 0) throw new AppError('NOT_FOUND', 'material not found', 404);
+      // ① 解析工单（与 /inventory/out 同款解析；退料必须命中，未命中无法回冲 → 400）
+      const wo = await client.query(
+        'SELECT id, order_no FROM work_orders WHERE tenant_id=$1 AND order_no=$2 LIMIT 1',
+        [tenantId, b.work_order_no.trim()],
+      );
+      if (wo.rows.length === 0) throw new AppError('BAD_REQUEST', `工单不存在: ${b.work_order_no}`, 400);
+      const order = wo.rows[0] as { id: string; order_no: string | null };
+      // ② SETTLEMENT_LOCKED 共享守卫（与 consume/挂单出库同款）：confirmed 单要退先作废（D2 闭环）
+      await assertSettlementNotConfirmed(client, tenantId, order.id);
+      // ③ 净消耗守卫：该 (工单,耗材) 的 SUM(qty) WHERE type='out' 必须 ≥ 本次退回量——
+      //    防凭空造退料把结算金额打成负数（聚合对负 qty 天然抵消，但负余额是口径事故）。
+      const netRow = await client.query(
+        `SELECT COALESCE(SUM(qty), 0)::numeric(12,2) AS net FROM inventory_log
+         WHERE tenant_id = $1 AND work_order_id = $2 AND material_id = $3 AND type = 'out'`,
+        [tenantId, order.id, b.material_id],
+      );
+      const netConsumed = Number(netRow.rows[0]?.net ?? 0);
+      if (netConsumed < b.qty) {
+        throw new AppError(
+          'BAD_REQUEST',
+          `退料量超过净消耗：该工单此耗材净消耗 ${netConsumed}，本次退回 ${b.qty}`,
+          400,
+        );
+      }
+      // ④ 库存回补：退料是入库方向，无需库存充足检查；ON CONFLICT 原子 upsert（复用 /inventory/in 形态）
+      const wh = '中心库'; // 领料默认仓库同口径（consume 均写 中心库，退回同一台账）
+      const ups = await client.query(
+        `INSERT INTO inventory (tenant_id, material_id, warehouse, qty, updated_at)
+         VALUES ($1,$2,$3,$4,now())
+         ON CONFLICT (tenant_id, material_id, warehouse)
+         DO UPDATE SET qty = inventory.qty + EXCLUDED.qty, updated_at = now()
+         RETURNING qty`,
+        [tenantId, b.material_id, wh, b.qty],
+      );
+      const nextQty = Number(ups.rows[0].qty);
+      // ⑤ 写流水：type='out' + qty 负值（流水存负值，让 SUM(type='out') 唯一口径自动消化）
+      await client.query(
+        `INSERT INTO inventory_log (tenant_id, material_id, type, qty, ref_no, note, created_by, work_order_id)
+         VALUES ($1,$2,'out',$3,$4,$5,$6,$7)`,
+        [tenantId, b.material_id, -b.qty, order.order_no ?? order.id, `退料${b.note ? `：${b.note}` : ''}`, who, order.id],
+      );
+      // ⑥ draft 结算单联动（与 /inventory/out 挂单段/consume A2 同款）：净消耗下降自动反映到明细
+      //    （pruneStale=true：净归零的行被清除）；manual_edited 行由重投影 WHERE 守护不覆盖（V3-D1）
+      const draftHdr = await client.query(
+        `SELECT s.id, s.settlement_no FROM settlement s
+         WHERE s.tenant_id = $1 AND s.status = 'draft'
+           AND s.id IN (SELECT si.settlement_id FROM settlement_item si
+                        WHERE si.tenant_id = $1 AND si.work_order_id = $2)
+         ORDER BY s.created_at DESC
+         LIMIT 1 FOR UPDATE`,
+        [tenantId, order.id],
+      );
+      if ((draftHdr.rowCount ?? 0) > 0) {
+        const hdr = draftHdr.rows[0] as { id: string; settlement_no: string };
+        await syncMaterialCostRows(client, tenantId, hdr.id, [order.id], { pruneStale: true });
+      }
+      return { qty: nextQty, returned: b.qty, net_consumed: netConsumed - b.qty };
+    });
+    return res.json({ ok: true, code: 0, result });
+  } catch (e) {
+    if (e instanceof z.ZodError) {
+      return next(new AppError('BAD_REQUEST', `invalid body: ${e.issues.map((i) => i.message).join(';')}`, 400));
+    }
     next(e);
   }
 });
@@ -300,6 +396,37 @@ async function consumeBlockedStatuses(client: import('pg').PoolClient, tenantId:
   return new Set<string>([...wfDoneStates(def), 'completed', 'cancelled']);
 }
 
+/**
+ * V3-D3（结算纵切 P0-2 配套 + P1-1 顺手项）：SETTLEMENT_LOCKED 共享守卫——
+ *   该工单的结算单若已 confirmed → 422 拒绝。三个挂单写路径共用：
+ *   /inventory/consume（既有）、/inventory/out 挂单出库（本批补上——此前缺口：挂单出库
+ *   可绕过确认锁定改动事实源）、/inventory/return 退料（本批新增）。
+ *   要改动确认后的口径 → 先作废结算单（POST /settlements/:id/void，与 D2 闭环）。
+ * 查询只认 status='confirmed'：voided/draft 天然放行（voided 单明细已删，键位已释放）。
+ */
+async function assertSettlementNotConfirmed(
+  client: import('pg').PoolClient,
+  tenantId: string,
+  workOrderId: string,
+): Promise<void> {
+  const lockedHdr = await client.query(
+    `SELECT s.id, s.settlement_no FROM settlement s
+     WHERE s.tenant_id = $1 AND s.status = 'confirmed'
+       AND s.id IN (SELECT si.settlement_id FROM settlement_item si
+                    WHERE si.tenant_id = $1 AND si.work_order_id = $2)
+     LIMIT 1`,
+    [tenantId, workOrderId],
+  );
+  if ((lockedHdr.rowCount ?? 0) > 0) {
+    const lk = lockedHdr.rows[0] as { settlement_no: string };
+    throw new AppError(
+      'SETTLEMENT_LOCKED',
+      `结算单 ${lk.settlement_no} 已确认锁定，不可再改动该工单的耗材口径`,
+      422,
+    );
+  }
+}
+
 router.post('/inventory/consume', async (req, res, next) => {
   try {
     const auth = res.locals.auth;
@@ -327,25 +454,10 @@ router.post('/inventory/consume', async (req, res, next) => {
         );
       }
 
-      // ①b B 守卫（§13 裁决1）：该工单的结算单若已 confirmed → 拒绝。
+      // ①b B 守卫（§13 裁决1 / V3-D3 收敛为共享守卫）：该工单的结算单若已 confirmed → 拒绝。
       //    放在零写库阶段（校验链内）——抛错即整事务回滚，不破 all-or-nothing，库存分毫不动。
       //    错误码 SETTLEMENT_LOCKED 供 mp/FE 透出（区别于 ORDER_CLOSED 的终态语义）。
-      const lockedHdr = await client.query(
-        `SELECT s.id, s.settlement_no FROM settlement s
-         WHERE s.tenant_id = $1 AND s.status = 'confirmed'
-           AND s.id IN (SELECT si.settlement_id FROM settlement_item si
-                        WHERE si.tenant_id = $1 AND si.work_order_id = $2)
-         LIMIT 1`,
-        [tenantId, order.id],
-      );
-      if ((lockedHdr.rowCount ?? 0) > 0) {
-        const lk = lockedHdr.rows[0] as { settlement_no: string };
-        throw new AppError(
-          'SETTLEMENT_LOCKED',
-          `结算单 ${lk.settlement_no} 已确认锁定，不可再登记耗材消耗`,
-          422,
-        );
-      }
+      await assertSettlementNotConfirmed(client, tenantId, order.id);
 
       // 入参同一材料重复出现 → 先按 material_id 合并：否则逐行读同一库存行会拿到**未落库的旧 qty**，
       // 导致「库存够不够」判断失真（重复行各自都判为够，实际合计超卖）。

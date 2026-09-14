@@ -42,14 +42,24 @@ export async function setAutoTune(tenantId: string, enabled: boolean): Promise<A
   return withTenantClient(tenantId, (client) => setAutoTuneWithClient(client, tenantId, enabled));
 }
 
-// 计算"自动改流程"是否实际生效（实时，无需重启）：
-//  - 环境变量 MODEL_AUTO_TUNE=false 为全局紧急熔断（强制关，连界面开关也压不住，fail-safe）；
+// 计算"自动改流程"是否实际生效（实时，无需重启）—— V2-F4（派单纵切 P0-10/11）后的
+// **唯一判定来源**：全仓所有 autoTune 决策点必须经本函数（不再散读 env）。
+//  - 环境变量 MODEL_AUTO_TUNE=false 为全局紧急熔断（强制关，连界面开关也压不住，fail-safe；
+//    ECS .env=false ⇒ 生产行为不变）；
 //  - 环境变量 MODEL_AUTO_TUNE=true 为全局强制开（兼容试点临时实例，覆盖租户设置）；
-//  - 其余情况 = 租户持久化开关（界面控制）。
-export async function isAutoTuneEffective(tenantId: string): Promise<boolean> {
+//  - env 未设 → 以租户持久化开关为准（修复此前 unset 恒 false ⇒ 界面开关 409 不可恢复的死开关）。
+// @param client 可选：调用方已在租户事务内时传入，复用同连接读租户开关（避免二次连接）。
+export async function isAutoTuneEffective(tenantId: string, client?: PoolClient): Promise<boolean> {
   const env = process.env.MODEL_AUTO_TUNE;
   if (env === 'false') return false;
   if (env === 'true') return true;
+  if (client) {
+    const r = await client.query(
+      `SELECT auto_tune FROM tenant_settings WHERE tenant_id = $1`,
+      [tenantId],
+    );
+    return r.rows[0]?.auto_tune === true;
+  }
   const { enabled } = await getAutoTune(tenantId);
   return enabled;
 }

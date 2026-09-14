@@ -109,6 +109,19 @@ export async function recordShadowSuggestions(
        VALUES ($1, $2, 'dispatch', $3, $4)`,
       [tenantId, String(workOrderId), workerVote, JSON.stringify({ top_k: withAsg.map(({ assigneeId, ...rest }) => ({ ...rest, has_assignee: !!assigneeId })) })],
     );
+  } else if (scored.length > 0) {
+    // V2-F5（派单纵切 P0-12 冷启动）：修复前「候选全无 assignee → 不落 dispatch 行」，
+    // 导致首单派单时 resolveDispatchShadow UPDATE 扑空（0 行命中），actual 永远无处回填，
+    // 「建议 vs 实际」配对数据永远空转 = 飞轮死锁。
+    // 修法：仍有相似候选但无人可投票（冷启动）时，落一条 suggested=''（"无建议"占位，
+    // schema 允许 NOT NULL DEFAULT ''，065_ai_shadow_suggestions.sql）的 dispatch 行，
+    // 并在 detail 标记 cold_start 供后续评估口径过滤。此后首单真实派单回填 actual 时
+    // UPDATE 即可命中本行 → 配对数据闭环，飞轮得以启动。
+    await client.query(
+      `INSERT INTO ai_shadow_suggestions (tenant_id, work_order_id, kind, suggested, detail)
+       VALUES ($1, $2, 'dispatch', '', $3)`,
+      [tenantId, String(workOrderId), JSON.stringify({ cold_start: true, top_k: scored.slice(0, TOP_K).map(({ assigneeId, ...rest }) => ({ ...rest, has_assignee: !!assigneeId })) })],
+    );
   }
 
   // R12-F1 补强（自愈回填）：建单自动派单（同步）先于本函数（嵌入异步后）执行，

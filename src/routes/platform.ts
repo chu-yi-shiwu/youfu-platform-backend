@@ -175,6 +175,9 @@ router.post('/tenants', async (req, res, next) => {
       const permNote = provision.permBaseline === 'snapshot'
         ? `权限=行业基线（已定格 ${provision.permRolesSnapshotted.length} 个角色：${provision.permRolesSnapshotted.join('、')}）`
         : '权限=官方推荐基线（继承，随平台升级自动更新）';
+      // V2-F1（租户纵切 P0-3）：开通「最后一公里」待办提示——位置字典/报修人为空时显式告知，
+      // 否则客户首次建单即卡（reporter_dict/location_dict 属机构私有数据，刻意不复制）。
+      const hintsNote = provision.onboardingHints.length > 0 ? `；待办：${provision.onboardingHints.join('；')}` : '';
       await audit(admin.username, 'tenant.create', b.tenant_id, b.tenant_id, {
         category: b.category,
         status: b.status ?? 'active',
@@ -183,6 +186,7 @@ router.post('/tenants', async (req, res, next) => {
         admin_username: provision.adminUsername,
         perm_baseline: provision.permBaseline,
         perm_roles_snapshotted: provision.permRolesSnapshotted,
+        onboarding_hints: provision.onboardingHints,
       });
       return res.status(201).json({
         ok: true, code: 0, item: { tenant_id: b.tenant_id, name: b.name, category: b.category, status: b.status ?? 'active' },
@@ -191,7 +195,7 @@ router.post('/tenants', async (req, res, next) => {
           // 自动生成时明文仅本次返回；调用方自带密码则不回显
           ...(b.admin_password ? {} : { password: provision.adminPassword }),
         },
-        note: `机构已登记：按${b.category}行业模板初始化分类 ${provision.categoriesCopied} 条、业务流状态图 1 套（${provision.workflowDefSource === 'template' ? '行业模板' : '默认 4 态'}）、管理员账号 1 个；${permNote}`,
+        note: `机构已登记：按${b.category}行业模板初始化分类 ${provision.categoriesCopied} 条、业务流状态图 1 套（${provision.workflowDefSource === 'template' ? '行业模板' : '默认 4 态'}）、管理员账号 1 个；${permNote}${hintsNote}`,
       });
     } catch (e) {
       await client.query('ROLLBACK').catch(() => undefined);

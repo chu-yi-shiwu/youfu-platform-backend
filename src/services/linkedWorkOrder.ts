@@ -130,6 +130,11 @@ export async function createLinkedWorkOrder(
     // 2026-09-14 纵切② P0-3：联动单派单未命中此前无 else 分支——工单无声卡死在 draft，
     // 无人可见、无人派发（断链）。逐行对齐 routes/workOrder.ts 的抢单大厅样板：
     // 落 claim_hall + enter_hall 事件（from_status 用本函数的初始态 initial）。
+    // V2-F3（派单纵切 P0-8 失配观测，2026-09-14）：与 workOrder.ts 同口径细分落大厅原因
+    //（no_available_worker / no_rule_matched），计数经 GET /stats 的 claim_hall_reasons 聚合。
+    const hallReason = workers.rows.some((w: { active: boolean }) => w.active)
+      ? 'no_rule_matched'
+      : 'no_available_worker';
     await client.query(
       'UPDATE work_orders SET status = $1, auto_flow = false, updated_at = now() WHERE id = $2',
       ['claim_hall', row.id],
@@ -137,7 +142,7 @@ export async function createLinkedWorkOrder(
     await client.query(
       `INSERT INTO ticket_event (tenant_id, work_order_id, type, from_status, to_status, actor, payload)
        VALUES ($1,$2,'enter_hall',$3,$4,'system',$5)`,
-      [p.tenantId, row.id, initial, 'claim_hall', JSON.stringify({ reason: 'linked order no worker auto-matched' })],
+      [p.tenantId, row.id, initial, 'claim_hall', JSON.stringify({ reason: hallReason })],
     );
     // 2026-09-14 纵切② P0-4：派单未命中通知管理员（镜像 slaScheduler.ts admin fan-out 模式）。
     // QA-P1 修正（2026-09-14）：withTenantClient 是 BEGIN→fn→COMMIT（db/pool.ts），通知段 SQL

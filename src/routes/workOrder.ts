@@ -18,6 +18,8 @@ import { runSlaScanForTenant } from '../scheduler/slaScheduler.js';
 import { dispatchEvent } from '../webhook/dispatch.js';
 import { StatsModelBackend, type ModelBackend } from '../engine/model/ModelBackend.js';
 import { incrementalLearn } from '../services/modelTrainer.js';
+// V2-F4（派单纵切 P0-10/11）：学习写回开关判定唯一来源（租户开关 + env 熔断/强制）
+import { isAutoTuneEffective } from '../repo/tenantSettings.js';
 import { emitDomainEvent } from '../db/eventBus.js';
 import { resolveDispatchShadow } from '../services/k2Shadow.js'; // R12-F1：自动派单/抢单也回填 dispatch 影子
 import { insertNotification, wechatSelfTest } from '../services/notify.js';
@@ -189,10 +191,19 @@ export async function autoDispatchAfterCreate(
       'UPDATE work_orders SET status = $1, auto_flow = false, updated_at = now() WHERE id = $2',
       ['claim_hall', row.id],
     );
+    // V2-F3（派单纵切 P0-8 失配观测，2026-09-14）：落大厅原因细分——
+    //   no_available_worker = 本租户根本没有 active 工人（容量问题）；
+    //   no_rule_matched      = 有在岗工人但规则/兜底都没接住（配置/技能失配问题，正是
+    //                          §A-2「空调单派给电工」类历史事故的观测口）。
+    //   计数经 GET /stats 的 claim_hall_reasons 聚合（repo/stats.ts 按 enter_hall 事件
+    //   payload->>'reason' 分组），管理员可从 stats 面板直接看到两种失配的量级。
+    const hallReason = workerRows.some((w: { active: boolean }) => w.active)
+      ? 'no_rule_matched'
+      : 'no_available_worker';
     await client.query(
       `INSERT INTO ticket_event (tenant_id, work_order_id, type, from_status, to_status, actor, payload)
        VALUES ($1,$2,'enter_hall',$3,$3,'system', $4)`,
-      [tenantId, row.id, 'claim_hall', JSON.stringify({ reason: 'no worker auto-matched' })],
+      [tenantId, row.id, 'claim_hall', JSON.stringify({ reason: hallReason })],
     );
     // 2026-09-14 纵切② P0-4：自动派单未命中此前无任何管理员感知（断链）——镜像
     // slaScheduler.ts admin fan-out 模式，通知本租户全部 active admin。
@@ -261,7 +272,11 @@ export async function runIncrementalLearnStep(
   // 返回锁内内存值谎报成功。SAVEPOINT 隔离：学习失败仅回滚学习段，主流转（状态+事件）保真。
   await client.query('SAVEPOINT incremental_learn_sp');
   try {
-    await incrementalLearn(client, tenantId, workOrderId, process.env.MODEL_AUTO_TUNE === 'true');
+    // V2-F4（派单纵切 P0-10/11）：学习写回开关判定统一收敛到 isAutoTuneEffective 单一来源
+    //（复用同事务 client 读租户开关，不再散读 env——此前 unset 恒 false ⇒ 租户开关对学习写回免疫）。
+    // env=false 全局熔断语义保持：fail-safe 覆盖租户开关（生产行为不变）。
+    const autoTune = await isAutoTuneEffective(tenantId, client);
+    await incrementalLearn(client, tenantId, workOrderId, autoTune);
     await client.query('RELEASE SAVEPOINT incremental_learn_sp');
     return { triggered: true, learnError: null };
   } catch (e) {
@@ -777,20 +792,41 @@ router.get('/open/notifications', async (req, res, next) => {
   }
 });
 
-// POST /api/v1/open/notifications/read —— 标记已读（body { ids?: string[] }；缺省=全部已读）
+// POST /api/v1/open/notifications/read —— 标记已读（body { ids?: string[] }；缺省=本人收件箱全部已读）
+// 审查修复（横切⑦ B-1）：原实现两条路径均只按 tenant_id 限定——任意登录账号可把
+// **全租户**（含他人）的通知置已读（缺省路径），或按 id 把**他人**的通知置已读
+// （ids 路径无 recipient 校验）。已读不可逆（读态覆盖未读提醒），必须收口到本人收件箱。
+// 口径：当前登录身份集合 = auth.userId ∪ resolveWorkerIds 结果（worker 通知 recipient=
+// worker.id、账号通知 recipient=account_user.id，双路身份覆盖两种 recipient_kind）。
+// 身份解析不出（空集合）→ 422 拒绝：置已读不可逆，绝不做"全租户"降级放行。
 router.post('/open/notifications/read', async (req, res, next) => {
   try {
-    const tenantId = res.locals.auth.tenantId;
+    const auth = res.locals.auth;
+    const tenantId = auth.tenantId;
     const body = z.object({ ids: z.array(z.string()).optional() }).parse(req.body ?? {});
     const result = await withTenantClient(tenantId, async (client) => {
+      // 本人身份集合（recipient 可能是 worker.id 或 account_user.id，双路并集）
+      const identity = new Set<string>([auth.userId || '']);
+      for (const wid of await resolveWorkerIds(client, tenantId, auth.userId)) identity.add(wid);
+      identity.delete('');
+      if (identity.size === 0) {
+        throw new AppError('IDENTITY_UNRESOLVED', '无法解析当前账号收件身份，拒绝批量置已读', 422);
+      }
+      const recipients = Array.from(identity);
       if (body.ids && body.ids.length > 0) {
         const r = await client.query(
-          `UPDATE notification SET read = true WHERE tenant_id = $1 AND id = ANY($2::text[]) AND read = false RETURNING id`,
-          [tenantId, body.ids],
+          `UPDATE notification SET read = true
+           WHERE tenant_id = $1 AND id = ANY($2::text[]) AND recipient = ANY($3::text[]) AND read = false
+           RETURNING id`,
+          [tenantId, body.ids, recipients],
         );
         return r.rowCount ?? 0;
       }
-      const r = await client.query(`UPDATE notification SET read = true WHERE tenant_id = $1 AND read = false`, [tenantId]);
+      // 缺省路径收窄为「本人收件箱全部已读」，禁止全租户
+      const r = await client.query(
+        `UPDATE notification SET read = true WHERE tenant_id = $1 AND recipient = ANY($2::text[]) AND read = false`,
+        [tenantId, recipients],
+      );
       return r.rowCount ?? 0;
     });
     return res.json({ ok: true, code: 0, marked: result });
@@ -841,20 +877,59 @@ router.post('/open/notify/selftest', async (req, res, next) => {
 
 // PATCH /api/v1/open/work_order/:id/ext —— P0 字段级配置：合并自定义字段值到 ext（租户隔离）
 // 用于把业务流程配置的自定义字段（config.fields）在工单/业务流表单上填写后落库。
+// 审查修复（横切⑤⑥ F2）三件套：
+//   ① 权限守卫：ticket.manage（FE TicketDetail 管理端唯一调用方，worker/mp 零调用）；
+//   ② 白名单：patch 键 ⊆ 租户 workflow_def(work_order).config.fields 键集（与 FE TicketDetail
+//      数据源同源，FE :213 即按该数组渲染自定义字段表单）——防止任意登录角色借本端点
+//      篡改 ext 任意键；租户未配置 fields 时按"无可改字段"拒绝非空 patch；
+//   ③ 保留键硬拒：public_view_token / attachments / voice（uploads.ts 依赖 ext.attachments
+//      做公开查看鉴权，public_view_token 是凭证本体，voice 有专属端点）即使出现在白名单
+//      也 403 拒绝；
+//   + audit 留痕：ticket_event(type='ext_patch') 记录变更键与前后值，actor 取登录账号名。
 const extPatchSchema = z.object({ patch: z.record(z.string(), z.unknown()) });
+const EXT_RESERVED_KEYS: readonly string[] = ['public_view_token', 'attachments', 'voice'];
 router.patch('/open/work_order/:id/ext', async (req, res, next) => {
   try {
-    const tenantId = res.locals.auth.tenantId;
+    const auth = res.locals.auth;
+    const tenantId = auth.tenantId;
     const { patch } = extPatchSchema.parse(req.body);
+    const patchKeys = Object.keys(patch);
+    const reservedHit = patchKeys.filter((k) => EXT_RESERVED_KEYS.includes(k));
+    if (reservedHit.length > 0) {
+      throw new AppError('EXT_RESERVED_KEY', `保留键不可经本端点修改: ${reservedHit.join(', ')}`, 403);
+    }
     const result = await withTenantClient(tenantId, async (client) => {
+      await requirePermission(auth, client, 'ticket.manage');
+      // 白名单口径：与 FE TicketDetail 同源——租户 workflow_def(work_order).config.fields 键集
+      const def = await getWorkflowDef(client, tenantId, 'work_order');
+      const rawFields = def.config?.fields;
+      const allowed = Array.isArray(rawFields)
+        ? rawFields
+            .map((f: unknown) => (f && typeof f === 'object' && 'key' in (f as Record<string, unknown>) ? String((f as Record<string, unknown>).key) : ''))
+            .filter((k) => k !== '')
+        : [];
+      const illegal = patchKeys.filter((k) => !allowed.includes(k));
+      if (illegal.length > 0) {
+        throw new AppError('EXT_FIELD_NOT_ALLOWED', `字段不在流程自定义字段白名单内: ${illegal.join(', ')}`, 422);
+      }
       const row = await findOneForUpdate(client, tenantId, req.params.id);
       if (!row) return null;
       const ext: Record<string, unknown> = row.ext && typeof row.ext === 'object' ? { ...row.ext } : {};
+      const before: Record<string, unknown> = {};
+      for (const k of patchKeys) before[k] = ext[k] ?? null;
       Object.assign(ext, patch);
       await client.query(
         'UPDATE work_orders SET ext = $1::jsonb, updated_at = now() WHERE id = $2 AND tenant_id = $3',
         [JSON.stringify(ext), req.params.id, tenantId],
       );
+      // audit 留痕：仅在有实际变更键时写（空 patch 不产生事件噪音）
+      if (patchKeys.length > 0) {
+        await client.query(
+          `INSERT INTO ticket_event (tenant_id, work_order_id, type, from_status, to_status, actor, payload)
+           VALUES ($1,$2,'ext_patch',$3,$3,$4,$5)`,
+          [tenantId, req.params.id, row.status, auth.username ?? 'user', JSON.stringify({ fields: patchKeys, before, after: patch })],
+        );
+      }
       return ext;
     });
     if (!result) return res.status(404).json({ ok: false, code: 'NOT_FOUND', message: 'work order not found' });

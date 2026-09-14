@@ -7,7 +7,8 @@
 //
 // 覆盖（设计 §8）：
 //   ① 双权限分离：operator（租户覆盖授 workflow.edit、无 approve）可存草稿/提交，approve/reject/pending 均 403
-//   ② 自审自批 403（SELF_APPROVAL）：同一账号提交后自己 approve 被拒，admin 也不例外
+//   ② 自审自批 403（SELF_APPROVAL）：同一账号提交后自己 approve 被拒——多 admin 租户 admin 也不例外；
+//   ②b F16 单 admin 自批豁免：active admin=1 放行，selfApproved=true + platform_audit 强制留痕
 //   ③ 通过后：live version 自增、GET /:entityType 立即可见新 def、history 出现 reason='approve'、change 行已删
 //   ④ 驳回后：live def 与 version 均不变，草稿保留且带 reject_comment，可改再提
 //   ⑤ DRAFT_STALE：提交后 live 被另一路径（rollback）推进版本，approve 返回 409
@@ -74,6 +75,7 @@ interface ChangeRow {
   note: string | null;
   status: string;
   base_version: number;
+  rev: number; // V3-D6：草稿修订号
   created_by: string | null;
   submitted_by: string | null;
   submitted_at: string | null;
@@ -86,6 +88,8 @@ function makeWfDb() {
     history: [] as Array<{ key: string; version: number; def: any; operator: string | null; reason: string | null }>,
     changes: new Map<string, ChangeRow>(), // key: `${tenant}|${entityType}`（UNIQUE(tenant_id, entity_type)）
     permRows: [] as Array<{ perm: string }>, // requirePermission 租户覆盖行
+    adminCount: 2, // F16：本租户 active admin 计数（默认 2=多 admin，自批硬禁；单 admin 场景显式改 1）
+    auditLog: [] as Array<{ actor: string; action: string; resource: string; payload: any }>, // F16：platform_audit 落库留痕
   };
 }
 type WfDb = ReturnType<typeof makeWfDb>;
@@ -98,12 +102,33 @@ function makeClient(db: WfDb, _tenant: string) {
       if (text.includes('FROM role_permission')) {
         return { rows: db.permRows, rowCount: db.permRows.length };
       }
+      // F16：单 admin 自批豁免——活跃 admin 计数（approve 端点自批分支）
+      if (text.includes('FROM account_user')) {
+        return { rows: [{ c: db.adminCount }], rowCount: 1 };
+      }
+      // F16：强制留痕——platform_audit 同事务 INSERT
+      if (text.includes('INSERT INTO platform_audit')) {
+        db.auditLog.push({
+          actor: params[0],
+          action: params[1],
+          resource: params[2],
+          payload: params[4] ? JSON.parse(params[4]) : null,
+        });
+        return { rows: [], rowCount: 1 };
+      }
       // ---- workflow_def_change（change 仓储 SQL 全集，必须先于 workflow_def 判定）----
       if (text.includes('workflow_def_change')) {
         const key = `${params[0]}|${params[1]}`;
         if (text.startsWith('INSERT INTO workflow_def_change')) {
-          // upsert 草稿：params = [tenant, entity, def, note, baseVersion, createdBy]
+          // upsert 草稿：params = [tenant, entity, def, note, baseVersion, createdBy(, baseRev)]
+          const key = `${params[0]}|${params[1]}`;
           const prev = db.changes.get(key);
+          // V3-D6 乐观锁：带 WHERE workflow_def_change.rev = $7 → 原子比对；未命中 0 行（仓储层抛 409）
+          const lockRev = /WHERE workflow_def_change\.rev = \$7/.test(text) ? Number(params[6]) : null;
+          if (lockRev !== null && (prev?.rev ?? 1) !== lockRev) {
+            return { rows: [], rowCount: 0 };
+          }
+          const newRev = prev ? prev.rev + 1 : 1;
           db.changes.set(key, {
             id: prev?.id ?? ++changeSeq,
             tenant_id: params[0],
@@ -112,12 +137,13 @@ function makeClient(db: WfDb, _tenant: string) {
             note: params[3],
             status: 'draft',
             base_version: params[4],
+            rev: newRev,
             created_by: params[5],
             submitted_by: prev?.submitted_by ?? null,
             submitted_at: prev?.submitted_at ?? null,
             reject_comment: prev?.reject_comment ?? null,
           });
-          return { rows: [], rowCount: 1 };
+          return { rows: [{ rev: newRev }], rowCount: 1 };
         }
         if (text.includes("SET status = 'submitted'") || /SET status\s*=\s*'submitted'/.test(text)) {
           // 提交：params = [tenant, entity, submittedBy, baseVersion]；仅 draft 行
@@ -310,7 +336,8 @@ describe('流程配置「提交→审核」一期（设计 §8 八例）', () =>
     expect(pending.status).toBe(403);
   });
 
-  it('② 自审自批 403（SELF_APPROVAL）：admin 提交后自己 approve 被拒，admin 不豁免', async () => {
+  it('② 自审自批 403（SELF_APPROVAL）：admin 提交后自己 approve 被拒——多 admin 租户 admin 也不豁免', async () => {
+    db.adminCount = 2; // 多 admin 租户：审批人池另有他人，维持硬禁
     const adminA = makeToken('admin', 'admin-a');
     await api('PUT', '/repair/draft', adminA, draftBody('维修流程'));
     await api('POST', '/repair/submit', adminA);
@@ -319,6 +346,34 @@ describe('流程配置「提交→审核」一期（设计 §8 八例）', () =>
     expect(approve.json.code).toBe('SELF_APPROVAL');
     // live 不被自批触碰：无 change 行被消费（approve 前置校验先于 saveWorkflowDef）
     expect(db.defs.has(`${T}|repair`)).toBe(false);
+    // 多 admin 硬禁路径不走豁免留痕
+    expect(db.auditLog.length).toBe(0);
+  });
+
+  it('②b F16 单 admin 自批豁免：active admin=1 时自批放行，selfApproved=true + platform_audit 强制留痕', async () => {
+    db.adminCount = 1; // 单 admin 租户：提交人=唯一审批人，硬禁=死锁（横切③④ 实证）
+    seedLive('repair', { initial: 'draft', states: ['draft'], transitions: [], config: { name: '旧名' } });
+    const adminA = makeToken('admin', 'admin-a');
+    await api('PUT', '/repair/draft', adminA, draftBody('新名'));
+    await api('POST', '/repair/submit', adminA);
+    const approve = await api('POST', '/repair/approve', adminA);
+    expect(approve.status, `期望 200，实际 ${approve.status}`).toBe(200);
+    expect(approve.json.approved).toBe(true);
+    expect(approve.json.selfApproved).toBe(true);
+
+    // live 已生效 + history 快照照常（update 路径：version 1→2 + reason='approve' 快照）
+    const versions = await api('GET', '/repair/versions', adminA);
+    expect(versions.json.currentVersion).toBe(2);
+    expect(versions.json.history[0].reason).toBe('approve');
+    expect(versions.json.history[0].operator).toBe('admin-a');
+
+    // 强制留痕：platform_audit 出现 self_approve 行，self_approved=true
+    expect(db.auditLog.length).toBe(1);
+    expect(db.auditLog[0].action).toBe('workflow_def.self_approve');
+    expect(db.auditLog[0].actor).toBe('admin-a');
+    expect(db.auditLog[0].resource).toBe('repair');
+    expect(db.auditLog[0].payload?.self_approved).toBe(true);
+    expect(db.auditLog[0].payload?.submitted_by).toBe('admin-a');
   });
 
   it('③ 通过后：live version 自增、新 def 立即可见、history 出现 reason=approve 快照、change 行已删', async () => {

@@ -15,6 +15,7 @@ import crypto from 'node:crypto';
 import { hashPassword } from '../account.js';
 import { DEFAULT_WORK_ORDER_DEF } from '../engine/stateMachine.js';
 import { ensureAcceptanceEdges } from '../engine/acceptanceEdges.js'; // 批次三 卡4：验收边幂等注入
+import { ensureClaimHallState } from '../engine/claimHallEdges.js'; // V2-F7：抢单大厅机制态幂等注入
 import { ROLES, DEFAULT_PERM_MATRIX, type Role } from '../middleware/role.js';
 
 // 行业取值与 platform.ts 注册向导 category 枚举一致（z.enum 为事实源，此处保持同步）
@@ -45,6 +46,7 @@ export interface ProvisionResult {
   adminPassword: string; // 明文仅经由本次返回值透出，调用方决定是否回显；DB 只存 scrypt 哈希
   permBaseline: 'inherited' | 'snapshot'; // ④：inherited=继承官方推荐基线（0 行落库）；snapshot=行业基线已定格
   permRolesSnapshotted: string[];         // snapshot 时为落库定格的角色清单；inherited 时为空数组
+  onboardingHints: string[];              // V2-F1（租户纵切 P0-3）：开通「最后一公里」待办提示（位置字典/报修人为空）
 }
 
 export function generateAdminPassword(): string {
@@ -122,9 +124,13 @@ export async function provisionNewTenantContent(
   //   work_order def 行已存在（重跑/重试开租户），本条被静默跳过，已有 def **不会被**补验收边。
   //   即"开通即具备验收能力"只对首次落库成立；重跑场景由 enable-acceptance 端点兜底（幂等）。
   const wfDefRaw = templateDef ?? DEFAULT_WORK_ORDER_DEF;
-  const wfDef = typeof wfDefRaw === 'string'
+  // V2-F7（2026-09-14）：落库前再幂等注入抢单大厅机制态（claim_hall + 三条出边）——
+  //   引擎派单未命中兜底会把单直落 claim_hall，4 态 def 租户若缺此态，出厅流转 422 卡死。
+  //   开通落库即含机制态，与运行时读路径注入（workflowDef.withMechanismStates）双保险同构。
+  const wfDefInjected = typeof wfDefRaw === 'string'
     ? ensureAcceptanceEdges(JSON.parse(wfDefRaw) as import('../engine/stateMachine.js').WorkflowDef).def
     : ensureAcceptanceEdges(wfDefRaw as import('../engine/stateMachine.js').WorkflowDef).def;
+  const wfDef = ensureClaimHallState(wfDefInjected).def;
   if (templateDef) workflowDefSource = 'template';
   await client.query(
     `INSERT INTO workflow_def (tenant_id, entity_type, def, version) VALUES ($1, 'work_order', $2, 1)
@@ -167,6 +173,29 @@ export async function provisionNewTenantContent(
     }
   }
 
+  // ⑤ V2-F1（租户纵切 P0-3，2026-09-14）：开通「最后一公里」待办检测。
+  //   四件套保证「能登录/能流转/有分类」，但 reporter_dict / location_dict 属机构私有数据
+  //   （DMR 红线：含 PII，绝不跨租户复制）→ 新租户天然为空 → 报修流程实际走不通。
+  //   此处在新租户 RLS 上下文内实测两张字典行数，为空则产出待办提示，由调用方
+  //   （platform.ts POST /tenants）拼进响应 note——把「开通完成」与「客户能用」之间的
+  //   gap 显式透出，而不是让客户第一次建单时才卡住。
+  const dictCounts = await client.query<{ loc: string; rep: string }>(
+    `SELECT (SELECT COUNT(*) FROM location_dict WHERE tenant_id = $1)::text AS loc,
+            (SELECT COUNT(*) FROM reporter_dict WHERE tenant_id = $1)::text AS rep`,
+    [input.tenantId],
+  );
+  const locCount = Number(dictCounts.rows[0]?.loc ?? 0);
+  const repCount = Number(dictCounts.rows[0]?.rep ?? 0);
+  const onboardingHints: string[] = [];
+  if (locCount === 0 || repCount === 0) {
+    const missing: string[] = [];
+    if (locCount === 0) missing.push('位置字典');
+    if (repCount === 0) missing.push('报修人名单');
+    onboardingHints.push(
+      `请先维护${missing.join('与')}（当前 位置字典 ${locCount} 条 / 报修人 ${repCount} 条），否则建单缺少必填关联`,
+    );
+  }
+
   return {
     categoriesCopied,
     workflowDefSource,
@@ -174,5 +203,6 @@ export async function provisionNewTenantContent(
     adminPassword,
     permBaseline,
     permRolesSnapshotted,
+    onboardingHints,
   };
 }

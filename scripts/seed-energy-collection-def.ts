@@ -21,7 +21,11 @@ const def: WorkflowDef = JSON.parse(JSON.stringify(ENERGY_COLLECTION_DEF));
 async function main() {
   const label = RESET ? '重置(内置镜像态)' : '内置镜像态(能源派单)';
   await withTenantClient(TENANT, async (client) => {
-    await saveWorkflowDef(client, TENANT, ENTITY, def, { reason: RESET ? 't303a-reset' : 't303a-seed' });
+    // V3-D5：operator/reason 必填（原调用缺 operator，补齐留痕）。
+    await saveWorkflowDef(client, TENANT, ENTITY, def, {
+      operator: 'seed',
+      reason: RESET ? 't303a-reset' : 't303a-seed',
+    });
     const r = await client.query<{ version: number }>(
       `SELECT version FROM workflow_def WHERE tenant_id = $1 AND entity_type = $2`,
       [TENANT, ENTITY],
