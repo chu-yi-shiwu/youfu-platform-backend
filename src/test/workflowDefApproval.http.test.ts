@@ -74,6 +74,7 @@ interface ChangeRow {
   note: string | null;
   status: string;
   base_version: number;
+  rev: number; // V3-D6：草稿修订号
   created_by: string | null;
   submitted_by: string | null;
   submitted_at: string | null;
@@ -102,8 +103,15 @@ function makeClient(db: WfDb, _tenant: string) {
       if (text.includes('workflow_def_change')) {
         const key = `${params[0]}|${params[1]}`;
         if (text.startsWith('INSERT INTO workflow_def_change')) {
-          // upsert 草稿：params = [tenant, entity, def, note, baseVersion, createdBy]
+          // upsert 草稿：params = [tenant, entity, def, note, baseVersion, createdBy(, baseRev)]
+          const key = `${params[0]}|${params[1]}`;
           const prev = db.changes.get(key);
+          // V3-D6 乐观锁：带 WHERE workflow_def_change.rev = $7 → 原子比对；未命中 0 行（仓储层抛 409）
+          const lockRev = /WHERE workflow_def_change\.rev = \$7/.test(text) ? Number(params[6]) : null;
+          if (lockRev !== null && (prev?.rev ?? 1) !== lockRev) {
+            return { rows: [], rowCount: 0 };
+          }
+          const newRev = prev ? prev.rev + 1 : 1;
           db.changes.set(key, {
             id: prev?.id ?? ++changeSeq,
             tenant_id: params[0],
@@ -112,12 +120,13 @@ function makeClient(db: WfDb, _tenant: string) {
             note: params[3],
             status: 'draft',
             base_version: params[4],
+            rev: newRev,
             created_by: params[5],
             submitted_by: prev?.submitted_by ?? null,
             submitted_at: prev?.submitted_at ?? null,
             reject_comment: prev?.reject_comment ?? null,
           });
-          return { rows: [], rowCount: 1 };
+          return { rows: [{ rev: newRev }], rowCount: 1 };
         }
         if (text.includes("SET status = 'submitted'") || /SET status\s*=\s*'submitted'/.test(text)) {
           // 提交：params = [tenant, entity, submittedBy, baseVersion]；仅 draft 行

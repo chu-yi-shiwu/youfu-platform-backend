@@ -13,7 +13,7 @@ import { z } from 'zod';
 import { withTenantClient } from '../db/pool.js';
 import { AppError } from '../middleware/error.js';
 import { requirePermission, requireAnyPermission } from '../middleware/role.js';
-import { getWorkflowDef, saveWorkflowDef, ensureWorkflowDef, getWorkflowDefVersion, listWorkflowDefHistory, getWorkflowDefHistoryVersion } from '../engine/workflowDef.js';
+import { getWorkflowDef, saveWorkflowDef, ensureWorkflowDef, getWorkflowDefVersion, listWorkflowDefHistory, getWorkflowDefHistoryVersion, countInflightByStates } from '../engine/workflowDef.js';
 import {
   upsertWorkflowDefDraft,
   getWorkflowDefChange,
@@ -56,6 +56,7 @@ router.get('/pending', async (req, res, next) => {
         submittedAt: c.submittedAt,
         note: c.note,
         baseVersion: c.baseVersion,
+        rev: c.rev, // V3-D6：草稿修订号随在审清单透出
       }));
     });
     return res.json({ ok: true, code: 0, items });
@@ -111,6 +112,9 @@ router.get('/:entityType', async (req, res, next) => {
 const defSchema = z.object({
   name: z.string().optional(),
   note: z.string().max(500).optional(), // 变更说明（审核清单/详情展示，提交人填写）
+  // V3-D6 乐观锁：带 base_rev（草稿当前 rev）→ 原子比对，他人已先保存 → 409 DRAFT_REV_CONFLICT；
+  // 不带 → 无条件覆盖（与旧行为一致，FE/mp 零破坏）。
+  base_rev: z.number().int().positive().optional(),
   def: z
     .object({
       initial: z.string().min(1),
@@ -155,14 +159,15 @@ router.put('/:entityType', async (req, res, next) => {
     const { entityType } = req.params;
     assertEntityType(entityType);
     const b = defSchema.parse(req.body);
-    await withTenantClient(tenantId, async (client) => {
+    const { rev } = await withTenantClient(tenantId, async (client) => {
       await requirePermission(auth, client, 'workflow.edit');
-      await upsertWorkflowDefDraft(client, tenantId, entityType, mergeDef(b), {
+      return upsertWorkflowDefDraft(client, tenantId, entityType, mergeDef(b), {
         operator: auth.username,
         note: b.note,
+        baseRev: b.base_rev,
       });
     });
-    return res.json({ ok: true, code: 0, entityType, draft: true, status: 'draft' });
+    return res.json({ ok: true, code: 0, entityType, draft: true, status: 'draft', rev });
   } catch (e) {
     next(e);
   }
@@ -176,14 +181,15 @@ router.put('/:entityType/draft', async (req, res, next) => {
     const { entityType } = req.params;
     assertEntityType(entityType);
     const b = defSchema.parse(req.body);
-    await withTenantClient(tenantId, async (client) => {
+    const { rev } = await withTenantClient(tenantId, async (client) => {
       await requirePermission(auth, client, 'workflow.edit');
-      await upsertWorkflowDefDraft(client, tenantId, entityType, mergeDef(b), {
+      return upsertWorkflowDefDraft(client, tenantId, entityType, mergeDef(b), {
         operator: auth.username,
         note: b.note,
+        baseRev: b.base_rev,
       });
     });
-    return res.json({ ok: true, code: 0, entityType, draft: true, status: 'draft' });
+    return res.json({ ok: true, code: 0, entityType, draft: true, status: 'draft', rev });
   } catch (e) {
     next(e);
   }
@@ -242,12 +248,15 @@ router.post('/:entityType/submit', async (req, res, next) => {
 //   ① submitted_by ≠ 当前账号（403 SELF_APPROVAL，按账号非按角色，admin 也不例外）
 //   ② base_version = 当前 live 版本（409 DRAFT_STALE：live 已被推进，需重存重提）
 //   ③ 行必须存在且 status=submitted（404 NO_DRAFT / 409 CHANGE_NOT_SUBMITTED）
+// V3-D4 逃生口：body.confirm_inflight_loss:true → saveWorkflowDef(allowInflightLoss)——
+//   显式二次确认删态在途损失（把关人知情裁量），留痕走 history operator/reason。
 router.post('/:entityType/approve', async (req, res, next) => {
   try {
     const auth = res.locals.auth;
     const tenantId = auth.tenantId;
     const { entityType } = req.params;
     assertEntityType(entityType);
+    const b = z.object({ confirm_inflight_loss: z.literal(true).optional() }).parse(req.body ?? {});
     await withTenantClient(tenantId, async (client) => {
       await requirePermission(auth, client, 'workflow.approve');
       const change = await getWorkflowDefChange(client, tenantId, entityType);
@@ -269,8 +278,9 @@ router.post('/:entityType/approve', async (req, res, next) => {
       }
       // 生效复用 saveWorkflowDef：版本自增、history 快照（reason='approve'）、审计全免费，不新造写入机制。
       await saveWorkflowDef(client, tenantId, entityType, change.def, {
-        operator: auth.username,
+        operator: auth.username ?? '', // username 缺失时由 saveWorkflowDef 运行期 422 兜底（留痕不为空）
         reason: 'approve',
+        allowInflightLoss: b.confirm_inflight_loss === true,
       });
       await deleteWorkflowDefChange(client, tenantId, entityType);
     });
@@ -334,6 +344,35 @@ router.get('/:entityType/draft-diff', async (req, res, next) => {
         note: data.change.note,
         rejectComment: data.change.rejectComment,
       },
+    });
+  } catch (e) {
+    next(e);
+  }
+});
+
+// V3-D4 预演端点（UI 糖，非闸门）：POST /:entityType/preflight——body 带新 def，
+// 返回 { removed, inflight_total, by_state }：FE 在保存前展示删态影响面，与硬闸构成"提示 + 强制"两层。
+router.post('/:entityType/preflight', async (req, res, next) => {
+  try {
+    const tenantId = res.locals.auth.tenantId;
+    const { entityType } = req.params;
+    assertEntityType(entityType);
+    const b = defSchema.parse(req.body);
+    const data = await withTenantClient(tenantId, async (client) => {
+      await requireAnyPermission(res.locals.auth, client, ['workflow.edit', 'workflow.approve']);
+      const liveDef = await getWorkflowDef(client, tenantId, entityType);
+      const newDef = mergeDef(b);
+      const removed = (liveDef.states ?? []).filter((s) => !newDef.states.includes(s));
+      const inflight = removed.length > 0 ? await countInflightByStates(client, tenantId, entityType, removed) : { total: 0, byState: {} };
+      return { removed, inflight };
+    });
+    return res.json({
+      ok: true,
+      code: 0,
+      entityType,
+      removed: data.removed,
+      inflight_total: data.inflight.total,
+      by_state: data.inflight.byState,
     });
   } catch (e) {
     next(e);
@@ -466,6 +505,7 @@ router.get('/:entityType/versions/:a/diff/:b', async (req, res, next) => {
 // 一键回滚：把指定历史版本存为新版本（版本自增，reason=rollback）。
 // 审核一期裁决：豁免审批（目标版本曾生效 + 急救场景，过审会延误止血），但把关责任不消失——
 // 权限点由 workflow.edit 收紧为 workflow.approve（把关人亲自即时裁量）。
+// V3-D4 逃生口：body.confirm_inflight_loss:true → allowInflightLoss（与 approve 同款显式二次确认）。
 router.post('/:entityType/versions/:version/rollback', async (req, res, next) => {
   try {
     const auth = res.locals.auth;
@@ -473,6 +513,7 @@ router.post('/:entityType/versions/:version/rollback', async (req, res, next) =>
     const { entityType } = req.params;
     const version = Number(req.params.version);
     if (!Number.isInteger(version) || version < 1) throw new AppError('BAD_PARAM', 'bad version', 400);
+    const b = z.object({ confirm_inflight_loss: z.literal(true).optional() }).parse(req.body ?? {});
     const target = await withTenantClient(tenantId, (client) =>
       getWorkflowDefHistoryVersion(client, tenantId, entityType, version),
     );
@@ -488,8 +529,9 @@ router.post('/:entityType/versions/:version/rollback', async (req, res, next) =>
     await withTenantClient(tenantId, async (client) => {
       await requirePermission(auth, client, 'workflow.approve');
       await saveWorkflowDef(client, tenantId, entityType, target, {
-        operator: auth.username,
+        operator: auth.username ?? '', // username 缺失时由 saveWorkflowDef 运行期 422 兜底（留痕不为空）
         reason: `rollback-to-${version}`,
+        allowInflightLoss: b.confirm_inflight_loss === true,
       });
     });
     return res.json({ ok: true, code: 0, entityType, rolledBackTo: version, version: 'incremented' });

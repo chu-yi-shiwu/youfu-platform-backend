@@ -19,7 +19,8 @@ import {
   recordWorkflowRecommendations,
   applyWorkflowOptimizations,
 } from '../services/optimizer.js';
-import { getWorkflowDef, saveWorkflowDef } from '../engine/workflowDef.js';
+import { getWorkflowDef } from '../engine/workflowDef.js';
+import { upsertWorkflowDefDraft } from '../engine/workflowDefChange.js';
 import { isAutoTuneEffective } from '../repo/tenantSettings.js';
 import { DEFAULT_WORK_ORDER_DEF, RICH_WORK_ORDER_DEF, type WorkflowDef } from '../engine/stateMachine.js';
 import { requirePermission } from '../middleware/role.js';
@@ -190,16 +191,17 @@ router.put('/workflow/def', async (req, res, next) => {
       transitions: def.transitions,
       config: def.config ?? {},
     };
-    const version = await withTenantClient(tenantId, async (client) => {
+    // V3-D5（2026-09-14）：本端点从「直写 live」收敛为「存草稿」——workflow.edit 持有者
+    // 不再能单人绕过提交→审核改 live（审批状态机的自审禁令/版本锚/权限分离重新闭合）。
+    // 端点保留不删（兼容旧调用方），语义从「生效」变「存草稿」（FE/mp 现用主端点，零感知）。
+    await withTenantClient(tenantId, async (client) => {
       await requirePermission(res.locals.auth, client, 'workflow.edit');
-      await saveWorkflowDef(client, tenantId, entityType, cleanDef);
-      const r = await client.query<{ version: number }>(
-        `SELECT version FROM workflow_def WHERE tenant_id = $1 AND entity_type = $2`,
-        [tenantId, entityType],
-      );
-      return r.rows[0]?.version ?? 1;
+      await upsertWorkflowDefDraft(client, tenantId, entityType, cleanDef, {
+        operator: res.locals.auth.username,
+        note: 'optimize PUT /workflow/def（V3-D5 收敛为草稿）',
+      });
     });
-    return res.json({ ok: true, code: 0, entity_type: entityType, version, def: cleanDef });
+    return res.json({ ok: true, code: 0, entity_type: entityType, draft: true, status: 'draft' });
   } catch (e) {
     next(e);
   }

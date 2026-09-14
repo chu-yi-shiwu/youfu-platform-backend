@@ -22,7 +22,11 @@ const def: WorkflowDef = JSON.parse(JSON.stringify(source));
 async function main() {
   const label = RESET ? 'DEFAULT(最小4态)' : 'RICH(富13态·UOne颗粒度)';
   await withTenantClient(TENANT, async (client) => {
-    await saveWorkflowDef(client, TENANT, ENTITY, def);
+    // V3-D5：saveWorkflowDef opts 必填——种子直写同样强制留痕。
+    await saveWorkflowDef(client, TENANT, ENTITY, def, {
+      operator: 'seed',
+      reason: RESET ? 'seed-workflow-def-reset' : 'seed-workflow-def',
+    });
     const r = await client.query<{ version: number }>(
       `SELECT version FROM workflow_def WHERE tenant_id = $1 AND entity_type = $2`,
       [TENANT, ENTITY],
