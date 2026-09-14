@@ -17,7 +17,7 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import crypto from 'node:crypto';
-import { withTenantClient } from '../db/pool.js';
+import pool, { withTenantClient } from '../db/pool.js';
 import { AppError } from '../middleware/error.js';
 import { ROLES, PERMS, DEFAULT_PERM_MATRIX, canAssignRole, requirePermission, type Role, type Perm } from '../middleware/role.js';
 import type { AuthLocals } from '../middleware/auth.js';
@@ -25,6 +25,28 @@ import { hashPassword, toPublic } from '../account.js';
 import { samePermSet } from '../repo/tenantProvision.js'; // 纵切① P0-1：保存默认矩阵=解除定格 判定
 
 const router = Router();
+
+// ---- 审计（横切⑤⑥ F5：append-only platform_audit；失败不阻断主流程，invite.ts 同口径） ----
+// 覆盖五类权限/账号变更：角色权限覆盖、建号、改号（角色/停用/档案）、重置密码、删号。
+// actor 取登录账号名；target_tenant 恒为本租户；payload 记 before/after（永不落密码/哈希明文）。
+async function audit(
+  actor: string,
+  action: string,
+  resource?: string | null,
+  targetTenant?: string | null,
+  payload?: unknown,
+): Promise<void> {
+  try {
+    await pool.query(
+      `INSERT INTO platform_audit (actor, action, resource, target_tenant, payload) VALUES ($1,$2,$3,$4,$5)`,
+      [actor, action, resource ?? null, targetTenant ?? null, payload ? JSON.stringify(payload) : null],
+    );
+  } catch (e) {
+    console.warn('[accounts] platform_audit 写入失败（不阻断主流程）', {
+      actor, action, resource, targetTenant, err: e instanceof Error ? e.message : String(e),
+    });
+  }
+}
 
 const COLS = 'id, tenant_id, username, display_name, role, active, phone';
 
@@ -153,6 +175,8 @@ router.put('/accounts/roles/:role/permissions', async (req, res, next) => {
         }
       }
     });
+    // F5 audit：角色权限覆盖（含"保存默认矩阵=解除定格"路径，perms 原样留痕）
+    await audit(auth.username ?? 'unknown', 'role.perm.override', role, auth.tenantId, { perms: body.perms });
     return res.json({ ok: true, code: 0 });
   } catch (e) {
     next(e);
@@ -225,6 +249,11 @@ router.post('/accounts', async (req, res, next) => {
       );
       return toPublic(r.rows[0]);
     });
+    // F5 audit：建号（只记 username/role，不记密码）
+    await audit(auth.username ?? 'unknown', 'account.create', (item as { id?: string })?.id ?? null, tenantId, {
+      username: b.username,
+      role: b.role ?? 'operator',
+    });
     return res.status(201).json({ ok: true, code: 0, item });
   } catch (e) {
     next(e);
@@ -242,12 +271,15 @@ router.put('/accounts/:id', async (req, res, next) => {
       throw new AppError('BAD_PARAM', '手机号格式无效（需 1 开头的 11 位大陆手机号，空串=清空）', 400);
     }
     const callerRole = auth.role as Role;
+    // F5 audit：捕获变更前快照（闭包内查询到的原行；无变更/404 时为 null）
+    let beforeRow: Record<string, unknown> | null = null;
     const item = await withTenantClient(tenantId, async (client) => {
       // G4：管理守卫统一 role.manage（async，闭包内查 role_permission）。
       await requirePermission(auth, client, 'role.manage');
       const cur = await client.query(`SELECT ${COLS} FROM account_user WHERE id=$1 AND tenant_id=$2`, [req.params.id, tenantId]);
       if (cur.rowCount === 0) throw new AppError('NOT_FOUND', 'account not found', 404);
       const target = cur.rows[0];
+      beforeRow = target;
       const roleChange = b.role !== undefined && b.role !== target.role;
       const isSelf = String(req.params.id) === String(auth.userId);
       // canAssignRole（R15-005）：角色变更先过越级/铸 admin 门禁（设计稿状态机 C 层）
@@ -291,6 +323,11 @@ router.put('/accounts/:id', async (req, res, next) => {
       );
       return toPublic(r.rows[0]);
     });
+    // F5 audit：改号（before 原行快照 + changes 本次请求字段；schema 不含密码，无敏感外泄）
+    await audit(auth.username ?? 'unknown', 'account.update', req.params.id, tenantId, {
+      before: beforeRow ? toPublic(beforeRow as Parameters<typeof toPublic>[0]) : null,
+      changes: b,
+    });
     return res.json({ ok: true, code: 0, item });
   } catch (e) {
     next(e);
@@ -327,6 +364,8 @@ router.post('/accounts/:id/reset-password', async (req, res, next) => {
         [hashPassword(temp), req.params.id, tenantId],
       );
     });
+    // F5 audit：重置密码（绝不落临时密码明文/哈希——明文仅在本次响应返回一次）
+    await audit(auth.username ?? 'unknown', 'account.password.reset', req.params.id, tenantId, null);
     return res.json({ ok: true, code: 0, temp_password: temp, once: true });
   } catch (e) {
     next(e);
@@ -339,11 +378,13 @@ router.delete('/accounts/:id', async (req, res, next) => {
     const auth = res.locals.auth as AuthLocals;
     const tenantId = auth.tenantId;
     // SELF_GUARD 同 PUT 口径：不能删除自己（防误操作自伤，G3 语义延伸）
+    let deleteTarget: { role: string; active: boolean } | null = null;
     const n = await withTenantClient(tenantId, async (client) => {
       await requirePermission(auth, client, 'role.manage');
       const cur = await client.query(`SELECT id, role, active FROM account_user WHERE id=$1 AND tenant_id=$2`, [req.params.id, tenantId]);
       if (cur.rowCount === 0) throw new AppError('NOT_FOUND', 'account not found', 404);
       const target = cur.rows[0];
+      deleteTarget = { role: target.role, active: target.active };
       if (String(req.params.id) === String(auth.userId)) {
         throw new AppError('SELF_GUARD', '不能删除自己的账号——请由其他管理员操作', 403);
       }
@@ -361,6 +402,9 @@ router.delete('/accounts/:id', async (req, res, next) => {
       return r.rowCount ?? 0;
     });
     if (n === 0) throw new AppError('NOT_FOUND', 'account not found', 404);
+    // F5 audit：删号（记被删账号角色/活跃态快照，便于事后追溯 last-admin 类误删）
+    const t = deleteTarget as { role: string; active: boolean } | null;
+    await audit(auth.username ?? 'unknown', 'account.delete', req.params.id, tenantId, t);
     return res.json({ ok: true, code: 0 });
   } catch (e) {
     next(e);
