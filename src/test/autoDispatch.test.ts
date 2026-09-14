@@ -104,6 +104,22 @@ describe('autoDispatchAfterCreate（R31-F2 回归护栏）', () => {
     const r = await autoDispatchAfterCreate(client, 't-verification', row, need);
     expect(r.autoFlow).toBe(false);
     expect(calls.find((c) => c.text.includes('UPDATE work_orders SET status'))?.params?.[0]).toBe('claim_hall');
+    // V2-F3：worker 全 inactive → 同口径 no_available_worker
+    const evt0 = calls.find((c) => c.text.includes('INSERT INTO ticket_event'));
+    expect(JSON.parse(String(evt0?.params?.[3]))).toEqual({ reason: 'no_available_worker' });
+  });
+
+  it('V2-F3：有在岗工人但技能失配（规则/兜底都没接住）→ reason=no_rule_matched（P0-8 失配观测口）', async () => {
+    const { client, calls } = makeClient(
+      dispatchHandler({ workerRows: [{ id: WORKER_ID, skill_tags: '["electrical"]', load: 0, active: true }] }),
+    );
+    const r = await autoDispatchAfterCreate(client, 't-verification', row, { ...need, skill_tags: ['plumbing'] });
+    expect(r.autoFlow).toBe(false);
+    expect(r.assignee).toBeNull();
+    const evt = calls.find((c) => c.text.includes('INSERT INTO ticket_event'));
+    expect(evt?.text).toContain("'enter_hall'");
+    // 有 active 工人却没派出去 → 配置/技能失配口径 no_rule_matched
+    expect(JSON.parse(String(evt?.params?.[3]))).toEqual({ reason: 'no_rule_matched' });
   });
 
   // 2026-09-14 纵切② P0-1：strategy:'least_load' 不再短路规则匹配。
