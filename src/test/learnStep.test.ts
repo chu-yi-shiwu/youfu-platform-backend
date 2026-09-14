@@ -16,12 +16,16 @@ const { runIncrementalLearnStep } = await import('../routes/workOrder.js');
 const { incrementalLearn } = await import('../services/modelTrainer.js');
 const learnMock = incrementalLearn as unknown as ReturnType<typeof vi.fn>;
 
-function makeClient(opts: { guardRowCount?: number } = {}) {
+function makeClient(opts: { guardRowCount?: number; autoTuneRow?: any } = {}) {
   const calls: Array<{ text: string; params?: any[] }> = [];
   const client = {
     query: vi.fn(async (text: string, params?: any[]) => {
       calls.push({ text, params });
       if (text.includes('SELECT def FROM workflow_def')) return { rows: [] }; // 无自定义 def → DEFAULT（learningTriggers 缺省 = doneStates = completed）
+      // V2-F4（派单纵切 P0-10/11）：isAutoTuneEffective(client) 走同连接读租户持久化开关
+      if (text.includes('SELECT auto_tune FROM tenant_settings')) {
+        return { rows: opts.autoTuneRow !== undefined ? [opts.autoTuneRow] : [] };
+      }
       if (text.includes('INSERT INTO ticket_learn_log')) return { rows: [], rowCount: opts.guardRowCount ?? 1 };
       return { rows: [] }; // SAVEPOINT / RELEASE / ROLLBACK 等
     }),
@@ -78,5 +82,27 @@ describe('runIncrementalLearnStep（SAVEPOINT 学习段回归护栏）', () => {
     expect(r.learnError).toBeNull();
     expect(learnMock).not.toHaveBeenCalled();
     expect(calls.find((c) => c.text.includes('INSERT INTO ticket_learn_log'))).toBeUndefined();
+  });
+
+  // V2-F4（派单纵切 P0-10/11）：写回开关判定统一收敛到 isAutoTuneEffective——
+  // env 未设（生产常态）时以租户持久化开关为准，修复「unset 恒 false ⇒ 界面开关死开关」。
+  it('V2-F4：env 未设 + 租户开关 auto_tune=true → 学习写回开启（界面开关可恢复生效）', async () => {
+    learnMock.mockResolvedValueOnce(undefined);
+    const { client, calls } = makeClient({ guardRowCount: 1, autoTuneRow: { auto_tune: true } });
+    const r = await runIncrementalLearnStep(client, TENANT, WO, 'completed', 'processing');
+    expect(r.triggered).toBe(true);
+    expect(r.learnError).toBeNull();
+    expect(learnMock).toHaveBeenCalledTimes(1);
+    expect(learnMock.mock.calls[0][3]).toBe(true); // 租户持久化开关=true → 写回开启
+    expect(calls.find((c) => c.text.includes('RELEASE SAVEPOINT incremental_learn_sp'))).toBeTruthy();
+  });
+
+  it('V2-F4：env=false 为紧急熔断——即使租户开关=true 也强制关闭（fail-safe，生产行为不变）', async () => {
+    process.env.MODEL_AUTO_TUNE = 'false';
+    learnMock.mockResolvedValueOnce(undefined);
+    const { client } = makeClient({ guardRowCount: 1, autoTuneRow: { auto_tune: true } });
+    await runIncrementalLearnStep(client, TENANT, WO, 'completed', 'processing');
+    expect(learnMock).toHaveBeenCalledTimes(1);
+    expect(learnMock.mock.calls[0][3]).toBe(false); // env 熔断压过租户开关
   });
 });

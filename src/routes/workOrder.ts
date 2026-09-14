@@ -18,6 +18,8 @@ import { runSlaScanForTenant } from '../scheduler/slaScheduler.js';
 import { dispatchEvent } from '../webhook/dispatch.js';
 import { StatsModelBackend, type ModelBackend } from '../engine/model/ModelBackend.js';
 import { incrementalLearn } from '../services/modelTrainer.js';
+// V2-F4（派单纵切 P0-10/11）：学习写回开关判定唯一来源（租户开关 + env 熔断/强制）
+import { isAutoTuneEffective } from '../repo/tenantSettings.js';
 import { emitDomainEvent } from '../db/eventBus.js';
 import { resolveDispatchShadow } from '../services/k2Shadow.js'; // R12-F1：自动派单/抢单也回填 dispatch 影子
 import { insertNotification, wechatSelfTest } from '../services/notify.js';
@@ -189,10 +191,19 @@ export async function autoDispatchAfterCreate(
       'UPDATE work_orders SET status = $1, auto_flow = false, updated_at = now() WHERE id = $2',
       ['claim_hall', row.id],
     );
+    // V2-F3（派单纵切 P0-8 失配观测，2026-09-14）：落大厅原因细分——
+    //   no_available_worker = 本租户根本没有 active 工人（容量问题）；
+    //   no_rule_matched      = 有在岗工人但规则/兜底都没接住（配置/技能失配问题，正是
+    //                          §A-2「空调单派给电工」类历史事故的观测口）。
+    //   计数经 GET /stats 的 claim_hall_reasons 聚合（repo/stats.ts 按 enter_hall 事件
+    //   payload->>'reason' 分组），管理员可从 stats 面板直接看到两种失配的量级。
+    const hallReason = workerRows.some((w: { active: boolean }) => w.active)
+      ? 'no_rule_matched'
+      : 'no_available_worker';
     await client.query(
       `INSERT INTO ticket_event (tenant_id, work_order_id, type, from_status, to_status, actor, payload)
        VALUES ($1,$2,'enter_hall',$3,$3,'system', $4)`,
-      [tenantId, row.id, 'claim_hall', JSON.stringify({ reason: 'no worker auto-matched' })],
+      [tenantId, row.id, 'claim_hall', JSON.stringify({ reason: hallReason })],
     );
     // 2026-09-14 纵切② P0-4：自动派单未命中此前无任何管理员感知（断链）——镜像
     // slaScheduler.ts admin fan-out 模式，通知本租户全部 active admin。
@@ -261,7 +272,11 @@ export async function runIncrementalLearnStep(
   // 返回锁内内存值谎报成功。SAVEPOINT 隔离：学习失败仅回滚学习段，主流转（状态+事件）保真。
   await client.query('SAVEPOINT incremental_learn_sp');
   try {
-    await incrementalLearn(client, tenantId, workOrderId, process.env.MODEL_AUTO_TUNE === 'true');
+    // V2-F4（派单纵切 P0-10/11）：学习写回开关判定统一收敛到 isAutoTuneEffective 单一来源
+    //（复用同事务 client 读租户开关，不再散读 env——此前 unset 恒 false ⇒ 租户开关对学习写回免疫）。
+    // env=false 全局熔断语义保持：fail-safe 覆盖租户开关（生产行为不变）。
+    const autoTune = await isAutoTuneEffective(tenantId, client);
+    await incrementalLearn(client, tenantId, workOrderId, autoTune);
     await client.query('RELEASE SAVEPOINT incremental_learn_sp');
     return { triggered: true, learnError: null };
   } catch (e) {

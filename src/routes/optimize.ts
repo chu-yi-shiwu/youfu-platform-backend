@@ -26,11 +26,14 @@ import { requirePermission } from '../middleware/role.js';
 
 const router = Router();
 
-// 生成优化决策：dev 下仅记录 pending 建议；AUTO_TUNE=true 时应用 dispatch 写回 + 记录 workflow 建议。
+// 生成优化决策：dev 下仅记录 pending 建议；AUTO_TUNE 生效时应用 dispatch 写回 + 记录 workflow 建议。
+// V2-F4（派单纵切 P0-10/11）：autoTune 判定统一收敛到 isAutoTuneEffective 单一来源——
+// 此前本端点读 env（unset 恒 false），租户界面开关对它无效（死开关）；现在 env unset/true
+// 均尊重租户开关，仅 env=false 全局熔断保持 fail-safe 覆盖（生产行为不变）。
 router.post('/optimize/generate', async (req, res, next) => {
   try {
     const tenantId = res.locals.auth.tenantId;
-    const autoTune = process.env.MODEL_AUTO_TUNE === 'true';
+    const autoTune = await isAutoTuneEffective(tenantId);
     const decisions = await withTenantClient(tenantId, async (client) => {
       const params = await getModelParams(client, tenantId);
       const metrics = await processMetrics(client, tenantId);
