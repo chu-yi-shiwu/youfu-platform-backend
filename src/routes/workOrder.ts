@@ -195,8 +195,12 @@ export async function autoDispatchAfterCreate(
       [tenantId, row.id, 'claim_hall', JSON.stringify({ reason: 'no worker auto-matched' })],
     );
     // 2026-09-14 纵切② P0-4：自动派单未命中此前无任何管理员感知（断链）——镜像
-    // slaScheduler.ts admin fan-out 模式，通知本租户全部 active admin。通知失败不得阻断
-    // 建单主流程：best-effort，try/catch 吞错仅告警（insertNotification 本身不吞错）。
+    // slaScheduler.ts admin fan-out 模式，通知本租户全部 active admin。
+    // QA-P1 修正（2026-09-14）：withTenantClient 是 BEGIN→fn→COMMIT（db/pool.ts），通知段 SQL
+    // 一旦真出错，整个 PG 事务进入 aborted 态——单纯 try/catch 吞错后外层 COMMIT 实为 ROLLBACK，
+    // 工单创建静默消失但 API 谎报成功。故用 SAVEPOINT 隔离通知段（同 runIncrementalLearnStep 的
+    // incremental_learn_sp 模式）：失败仅回滚通知段，事务恢复可用，claim_hall 主流程保真。
+    await client.query('SAVEPOINT dispatch_notify_sp');
     try {
       const admins = await client.query<{ id: string }>(
         `SELECT id FROM account_user WHERE tenant_id=$1 AND role='admin' AND active=true`,
@@ -209,7 +213,9 @@ export async function autoDispatchAfterCreate(
           payload: { order_no: row.order_no, from_status: initial },
         });
       }
+      await client.query('RELEASE SAVEPOINT dispatch_notify_sp');
     } catch (notifyErr) {
+      await client.query('ROLLBACK TO SAVEPOINT dispatch_notify_sp');
       console.error('[autoDispatch] admin notification failed (non-blocking)', { workOrderId: row.id, err: notifyErr });
     }
   }

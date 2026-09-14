@@ -140,7 +140,11 @@ export async function createLinkedWorkOrder(
       [p.tenantId, row.id, initial, 'claim_hall', JSON.stringify({ reason: 'linked order no worker auto-matched' })],
     );
     // 2026-09-14 纵切② P0-4：派单未命中通知管理员（镜像 slaScheduler.ts admin fan-out 模式）。
-    // 通知失败不得阻断转单主流程：best-effort，try/catch 吞错仅告警。
+    // QA-P1 修正（2026-09-14）：withTenantClient 是 BEGIN→fn→COMMIT（db/pool.ts），通知段 SQL
+    // 一旦真出错，整个 PG 事务进入 aborted 态——单纯 try/catch 吞错后外层 COMMIT 实为 ROLLBACK，
+    // 转单静默消失但 API 谎报成功。故用 SAVEPOINT 隔离通知段（同 runIncrementalLearnStep 的
+    // incremental_learn_sp 模式）：失败仅回滚通知段，事务恢复可用，claim_hall 主流程保真。
+    await client.query('SAVEPOINT dispatch_notify_sp');
     try {
       const admins = await client.query<{ id: string }>(
         `SELECT id FROM account_user WHERE tenant_id=$1 AND role='admin' AND active=true`,
@@ -153,7 +157,9 @@ export async function createLinkedWorkOrder(
           payload: { order_no: row.order_no, from_status: initial, source: 'linked_order' },
         });
       }
+      await client.query('RELEASE SAVEPOINT dispatch_notify_sp');
     } catch (notifyErr) {
+      await client.query('ROLLBACK TO SAVEPOINT dispatch_notify_sp');
       console.error('[linkedWorkOrder] admin notification failed (non-blocking)', { workOrderId: row.id, err: notifyErr });
     }
   }

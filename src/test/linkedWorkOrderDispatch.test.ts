@@ -98,6 +98,10 @@ describe('linkedWorkOrder 派单未命中兜底（纵切② P0-3/P0-4）', () =>
     expect(allParams).toContain('u-admin-2');
     expect(allParams).toContain('抢单大厅');
     expect(allParams).toContain(ORDER_NO);
+    // QA-P1：成功路径——SAVEPOINT 建立并 RELEASE，事务干净提交
+    expect(calls.find((c) => c.text.includes('SAVEPOINT dispatch_notify_sp'))).toBeTruthy();
+    expect(calls.find((c) => c.text.includes('RELEASE SAVEPOINT dispatch_notify_sp'))).toBeTruthy();
+    expect(calls.find((c) => c.text.includes('ROLLBACK TO SAVEPOINT dispatch_notify_sp'))).toBeUndefined();
   });
 
   it('P0-4：管理员通知失败不阻断主流程（best-effort 吞错，claim_hall 照常落）', async () => {
@@ -111,6 +115,10 @@ describe('linkedWorkOrder 派单未命中兜底（纵切② P0-3/P0-4）', () =>
     expect(r.created).toBe(true); // 主流程未被通知故障阻断
     expect(calls.find((c) => c.text.includes('UPDATE work_orders SET status'))?.params?.[0]).toBe('claim_hall');
     expect(calls.filter((c) => c.text.includes('INSERT INTO notification')).length).toBe(0);
+    // QA-P1：SAVEPOINT 隔离——失败段被 ROLLBACK TO 回滚（事务恢复可用），且不误发 RELEASE
+    expect(calls.find((c) => c.text.includes('SAVEPOINT dispatch_notify_sp'))).toBeTruthy();
+    expect(calls.find((c) => c.text.includes('ROLLBACK TO SAVEPOINT dispatch_notify_sp'))).toBeTruthy();
+    expect(calls.find((c) => c.text.includes('RELEASE SAVEPOINT dispatch_notify_sp'))).toBeUndefined();
   });
 
   it('回归：有可用工人 → 照常自动派单（不走 claim_hall 分支）', async () => {
