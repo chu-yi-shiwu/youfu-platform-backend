@@ -877,20 +877,59 @@ router.post('/open/notify/selftest', async (req, res, next) => {
 
 // PATCH /api/v1/open/work_order/:id/ext —— P0 字段级配置：合并自定义字段值到 ext（租户隔离）
 // 用于把业务流程配置的自定义字段（config.fields）在工单/业务流表单上填写后落库。
+// 审查修复（横切⑤⑥ F2）三件套：
+//   ① 权限守卫：ticket.manage（FE TicketDetail 管理端唯一调用方，worker/mp 零调用）；
+//   ② 白名单：patch 键 ⊆ 租户 workflow_def(work_order).config.fields 键集（与 FE TicketDetail
+//      数据源同源，FE :213 即按该数组渲染自定义字段表单）——防止任意登录角色借本端点
+//      篡改 ext 任意键；租户未配置 fields 时按"无可改字段"拒绝非空 patch；
+//   ③ 保留键硬拒：public_view_token / attachments / voice（uploads.ts 依赖 ext.attachments
+//      做公开查看鉴权，public_view_token 是凭证本体，voice 有专属端点）即使出现在白名单
+//      也 403 拒绝；
+//   + audit 留痕：ticket_event(type='ext_patch') 记录变更键与前后值，actor 取登录账号名。
 const extPatchSchema = z.object({ patch: z.record(z.string(), z.unknown()) });
+const EXT_RESERVED_KEYS: readonly string[] = ['public_view_token', 'attachments', 'voice'];
 router.patch('/open/work_order/:id/ext', async (req, res, next) => {
   try {
-    const tenantId = res.locals.auth.tenantId;
+    const auth = res.locals.auth;
+    const tenantId = auth.tenantId;
     const { patch } = extPatchSchema.parse(req.body);
+    const patchKeys = Object.keys(patch);
+    const reservedHit = patchKeys.filter((k) => EXT_RESERVED_KEYS.includes(k));
+    if (reservedHit.length > 0) {
+      throw new AppError('EXT_RESERVED_KEY', `保留键不可经本端点修改: ${reservedHit.join(', ')}`, 403);
+    }
     const result = await withTenantClient(tenantId, async (client) => {
+      await requirePermission(auth, client, 'ticket.manage');
+      // 白名单口径：与 FE TicketDetail 同源——租户 workflow_def(work_order).config.fields 键集
+      const def = await getWorkflowDef(client, tenantId, 'work_order');
+      const rawFields = def.config?.fields;
+      const allowed = Array.isArray(rawFields)
+        ? rawFields
+            .map((f: unknown) => (f && typeof f === 'object' && 'key' in (f as Record<string, unknown>) ? String((f as Record<string, unknown>).key) : ''))
+            .filter((k) => k !== '')
+        : [];
+      const illegal = patchKeys.filter((k) => !allowed.includes(k));
+      if (illegal.length > 0) {
+        throw new AppError('EXT_FIELD_NOT_ALLOWED', `字段不在流程自定义字段白名单内: ${illegal.join(', ')}`, 422);
+      }
       const row = await findOneForUpdate(client, tenantId, req.params.id);
       if (!row) return null;
       const ext: Record<string, unknown> = row.ext && typeof row.ext === 'object' ? { ...row.ext } : {};
+      const before: Record<string, unknown> = {};
+      for (const k of patchKeys) before[k] = ext[k] ?? null;
       Object.assign(ext, patch);
       await client.query(
         'UPDATE work_orders SET ext = $1::jsonb, updated_at = now() WHERE id = $2 AND tenant_id = $3',
         [JSON.stringify(ext), req.params.id, tenantId],
       );
+      // audit 留痕：仅在有实际变更键时写（空 patch 不产生事件噪音）
+      if (patchKeys.length > 0) {
+        await client.query(
+          `INSERT INTO ticket_event (tenant_id, work_order_id, type, from_status, to_status, actor, payload)
+           VALUES ($1,$2,'ext_patch',$3,$3,$4,$5)`,
+          [tenantId, req.params.id, row.status, auth.username ?? 'user', JSON.stringify({ fields: patchKeys, before, after: patch })],
+        );
+      }
       return ext;
     });
     if (!result) return res.status(404).json({ ok: false, code: 'NOT_FOUND', message: 'work order not found' });
