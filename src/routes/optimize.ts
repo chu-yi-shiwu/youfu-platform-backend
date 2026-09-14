@@ -31,11 +31,18 @@ const router = Router();
 // V2-F4（派单纵切 P0-10/11）：autoTune 判定统一收敛到 isAutoTuneEffective 单一来源——
 // 此前本端点读 env（unset 恒 false），租户界面开关对它无效（死开关）；现在 env unset/true
 // 均尊重租户开关，仅 env=false 全局熔断保持 fail-safe 覆盖（生产行为不变）。
+// 审查修复（横切⑤⑥ F3）：本文件三个写/读敏感端点原零守卫——任意登录角色（含 worker）
+// 可触发生成优化建议、读全租户过程挖掘、AUTO_TUNE 开启时触发流程改写。补齐：
+//   POST /optimize/generate        → optimize.tune（改 dispatch_rule/写建议，调优语义）
+//   POST /optimize/generate-mining → dashboard.view（只读挖掘+落 pending 建议，不直接改 live）
+//   POST /optimize/apply-workflow  → optimize.tune（AUTO_TUNE 生效时改写 workflow_def）
+// 与 workOrder.ts /stats 同款范式：requirePermission 在 withTenantClient 内调用（admin 恒放行）。
 router.post('/optimize/generate', async (req, res, next) => {
   try {
     const tenantId = res.locals.auth.tenantId;
     const autoTune = await isAutoTuneEffective(tenantId);
     const decisions = await withTenantClient(tenantId, async (client) => {
+      await requirePermission(res.locals.auth, client, 'optimize.tune');
       const params = await getModelParams(client, tenantId);
       const metrics = await processMetrics(client, tenantId);
       const dec = generateOptimizations(params, metrics);
@@ -87,6 +94,7 @@ router.post('/optimize/generate-mining', async (req, res, next) => {
       return res.status(400).json({ ok: false, code: 'BAD_PARAM', message: 'days must be a finite number' });
     }
     const decisions = await withTenantClient(tenantId, async (client) => {
+      await requirePermission(res.locals.auth, client, 'dashboard.view');
       const result = await processMining(client, tenantId, { entityType, days: daysRaw });
       const dec = generateMiningOptimizations(result);
       for (const d of dec) {
@@ -221,7 +229,10 @@ router.post('/optimize/apply-workflow', async (req, res, next) => {
         reason: '自动改流程未开启（租户开关关闭或全局熔断），仅记录建议不应用；在 /workflow-admin 开启开关后调用本接口才改写流程定义',
       });
     }
-    const result = await withTenantClient(tenantId, (client) => applyWorkflowOptimizations(client, tenantId));
+    const result = await withTenantClient(tenantId, async (client) => {
+      await requirePermission(res.locals.auth, client, 'optimize.tune');
+      return applyWorkflowOptimizations(client, tenantId);
+    });
     return res.json({ ok: true, code: 0, ...result });
   } catch (e) {
     next(e);
