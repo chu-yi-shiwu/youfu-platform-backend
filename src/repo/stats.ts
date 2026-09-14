@@ -207,9 +207,15 @@ export async function processMetrics(client: PoolClient, tenantId: string): Prom
      FROM work_orders WHERE tenant_id = $1`,
     [tenantId],
   );
+  // 转派率口径修复（横切⑤⑥ F4）：ticket_event 无 'assign' 类型——转派事实记录在
+  // payload->>'transition_event'（'forward'/'dispatch'，dispatchNotification/转台链路写入）。
+  // 原口径「每单事件数 ≥2」把状态流转/接单/完成等任意第二起事件都误判为转派，
+  // reassign_rate 恒虚高。改为按 transition_event ∈ ('forward','dispatch') 精确计数。
   const reassigned = await client.query<{ c: string }>(
     `SELECT COUNT(*)::text AS c FROM (
-       SELECT work_order_id FROM ticket_event WHERE tenant_id = $1 GROUP BY work_order_id HAVING COUNT(*) >= 2
+       SELECT work_order_id FROM ticket_event
+       WHERE tenant_id = $1 AND payload->>'transition_event' = ANY(ARRAY['forward','dispatch']::text[])
+       GROUP BY work_order_id
      ) t`,
     [tenantId],
   );
