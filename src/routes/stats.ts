@@ -7,6 +7,7 @@ import { processMetrics } from '../repo/stats.js';
 import { qualityReport } from '../services/dataQuality.js';
 import { getWorkflowDef } from '../engine/workflowDef.js';
 import { doneStates } from '../engine/stateMachine.js';
+import { requirePermission } from '../middleware/role.js';
 
 const router = Router();
 
@@ -14,17 +15,22 @@ const router = Router();
 // 按挂载序（server.ts:152 workOrderRouter 先于 :168 statsRouter）workOrder 版生效，此处原为永久死代码。
 // 本文件的 /stats/by-catalog、/stats/process、/stats/data-quality、/stats/overdue 为独有端点，保持不变。
 
+// 审查修复（横切⑤⑥ F1）：原四端点零守卫——任意登录角色（含 worker）可拉全租户报表聚合
+// （工单分布/过程度量/数据质量/超时预警）。统一挂 dashboard.view，与 workOrder.ts GET /stats
+// 同款范式（requirePermission 在 withTenantClient 内调用，租户级覆盖生效；admin 恒放行）。
+// 调用面核实：四端点均为 FE 大屏/统计页消费，FE 菜单本就按 dashboard.view 过滤，挂墙零回归。
 router.get('/stats/by-catalog', async (req, res, next) => {
   try {
     const tenantId = res.locals.auth.tenantId;
-    const items = await withTenantClient(tenantId, (client) =>
-      client
+    const items = await withTenantClient(tenantId, async (client) => {
+      await requirePermission(res.locals.auth, client, 'dashboard.view');
+      return client
         .query(
           `SELECT catalog, COUNT(*)::int AS count FROM work_orders WHERE tenant_id=$1 GROUP BY catalog ORDER BY count DESC`,
           [tenantId],
         )
-        .then((r) => r.rows),
-    );
+        .then((r) => r.rows);
+    });
     return res.json({ ok: true, code: 0, items });
   } catch (e) {
     next(e);
@@ -35,7 +41,10 @@ router.get('/stats/by-catalog', async (req, res, next) => {
 router.get('/stats/process', async (req, res, next) => {
   try {
     const tenantId = res.locals.auth.tenantId;
-    const metrics = await withTenantClient(tenantId, (client) => processMetrics(client, tenantId));
+    const metrics = await withTenantClient(tenantId, async (client) => {
+      await requirePermission(res.locals.auth, client, 'dashboard.view');
+      return processMetrics(client, tenantId);
+    });
     return res.json({ ok: true, code: 0, metrics });
   } catch (e) {
     next(e);
@@ -46,7 +55,10 @@ router.get('/stats/process', async (req, res, next) => {
 router.get('/stats/data-quality', async (req, res, next) => {
   try {
     const tenantId = res.locals.auth.tenantId;
-    const report = await withTenantClient(tenantId, (client) => qualityReport(client, tenantId));
+    const report = await withTenantClient(tenantId, async (client) => {
+      await requirePermission(res.locals.auth, client, 'dashboard.view');
+      return qualityReport(client, tenantId);
+    });
     return res.json({ ok: true, code: 0, quality: report });
   } catch (e) {
     next(e);
@@ -59,6 +71,7 @@ router.get('/stats/overdue', async (req, res, next) => {
   try {
     const tenantId = res.locals.auth.tenantId;
     const out = await withTenantClient(tenantId, async (client) => {
+      await requirePermission(res.locals.auth, client, 'dashboard.view');
       const def = await getWorkflowDef(client, tenantId, 'work_order');
       const done = doneStates(def);
       const r = await client.query(
