@@ -2,7 +2,21 @@
 // 状态图存 DB，由可配置状态机引擎消费，实现"流程零代码配置"。
 import type { PoolClient } from 'pg';
 import { DEFAULT_WORK_ORDER_DEF, doneStates, terminalStates, type WorkflowDef } from './stateMachine.js';
+import { ensureClaimHallState } from './claimHallEdges.js';
 import { AppError } from '../middleware/error.js';
+
+/**
+ * V2-F7（2026-09-14）：读路径幂等注入抢单大厅机制态（仅 work_order）。
+ * 抢单大厅是引擎滴滴式兜底：派单未命中直接 UPDATE status='claim_hall'（旁路），
+ * 但最小 4 态/部分租户 def 无此态 ⇒ transition() isKnownState 拒绝，出厅流转
+ * 全 422（合法进、非法出，大厅卡死）。在读路径注入（而非写路径）的原因：
+ * 存量已落库 def 与已落大厅的单无需迁移即修复；claim_hall 属引擎机制态，
+ * 注入是"引擎真实行为空间"的诚实呈现。纯加法幂等，详见 engine/claimHallEdges.ts。
+ */
+function withMechanismStates(entityType: string, def: WorkflowDef): WorkflowDef {
+  if (entityType !== 'work_order') return def;
+  return ensureClaimHallState(def).def;
+}
 
 /**
  * 2026-09-14 纵切③ P0-2：状态图写入口校验收口（纯函数可单测）。
@@ -55,8 +69,8 @@ export async function getWorkflowDefOrDefault(
     [tenantId, entityType],
   );
   const raw = r.rows[0]?.def;
-  if (!raw) return cloneDef(fallback);
-  return normalizeDef(typeof raw === 'string' ? JSON.parse(raw) : raw);
+  if (!raw) return withMechanismStates(entityType, cloneDef(fallback));
+  return withMechanismStates(entityType, normalizeDef(typeof raw === 'string' ? JSON.parse(raw) : raw));
 }
 
 /** 读状态图；租户无定义时回退默认（不写库，避免只读操作产生副作用）。 */
@@ -80,9 +94,9 @@ export async function ensureWorkflowDef(
   );
   if (existing.rows[0]) {
     const raw = existing.rows[0].def;
-    return normalizeDef(typeof raw === 'string' ? JSON.parse(raw) : raw);
+    return withMechanismStates(entityType, normalizeDef(typeof raw === 'string' ? JSON.parse(raw) : raw));
   }
-  const def = cloneDef(DEFAULT_WORK_ORDER_DEF);
+  const def = withMechanismStates(entityType, cloneDef(DEFAULT_WORK_ORDER_DEF));
   await client.query(
     `INSERT INTO workflow_def (tenant_id, entity_type, def, version) VALUES ($1,$2,$3,1)`,
     [tenantId, entityType, JSON.stringify(def)],

@@ -15,6 +15,7 @@ import crypto from 'node:crypto';
 import { hashPassword } from '../account.js';
 import { DEFAULT_WORK_ORDER_DEF } from '../engine/stateMachine.js';
 import { ensureAcceptanceEdges } from '../engine/acceptanceEdges.js'; // 批次三 卡4：验收边幂等注入
+import { ensureClaimHallState } from '../engine/claimHallEdges.js'; // V2-F7：抢单大厅机制态幂等注入
 import { ROLES, DEFAULT_PERM_MATRIX, type Role } from '../middleware/role.js';
 
 // 行业取值与 platform.ts 注册向导 category 枚举一致（z.enum 为事实源，此处保持同步）
@@ -123,9 +124,13 @@ export async function provisionNewTenantContent(
   //   work_order def 行已存在（重跑/重试开租户），本条被静默跳过，已有 def **不会被**补验收边。
   //   即"开通即具备验收能力"只对首次落库成立；重跑场景由 enable-acceptance 端点兜底（幂等）。
   const wfDefRaw = templateDef ?? DEFAULT_WORK_ORDER_DEF;
-  const wfDef = typeof wfDefRaw === 'string'
+  // V2-F7（2026-09-14）：落库前再幂等注入抢单大厅机制态（claim_hall + 三条出边）——
+  //   引擎派单未命中兜底会把单直落 claim_hall，4 态 def 租户若缺此态，出厅流转 422 卡死。
+  //   开通落库即含机制态，与运行时读路径注入（workflowDef.withMechanismStates）双保险同构。
+  const wfDefInjected = typeof wfDefRaw === 'string'
     ? ensureAcceptanceEdges(JSON.parse(wfDefRaw) as import('../engine/stateMachine.js').WorkflowDef).def
     : ensureAcceptanceEdges(wfDefRaw as import('../engine/stateMachine.js').WorkflowDef).def;
+  const wfDef = ensureClaimHallState(wfDefInjected).def;
   if (templateDef) workflowDefSource = 'template';
   await client.query(
     `INSERT INTO workflow_def (tenant_id, entity_type, def, version) VALUES ($1, 'work_order', $2, 1)

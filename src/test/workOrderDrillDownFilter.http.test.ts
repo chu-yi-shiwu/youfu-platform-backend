@@ -25,12 +25,16 @@ vi.mock('../db/pool.js', () => ({
 
 import workOrderRouter from '../routes/workOrder.js';
 import { DEFAULT_WORK_ORDER_DEF, doneStates, terminalStates } from '../engine/stateMachine.js';
+import { ensureClaimHallState } from '../engine/claimHallEdges.js';
 
 // 期望排除集与 repo list() 同式现算（复用 SLA 扫描口径 doneStates+terminalStates）：
-// mock getWorkflowDef 回退 DEFAULT def（4 态）→ 排除集 = ['completed']；
+// mock getWorkflowDef 回退 DEFAULT def（4 态）→ V2-F7 起读路径幂等注入大厅机制态
+// （ensureClaimHallState：claim_hall + 出边含 to='cancelled'——cancelled 须入 states
+// 否则 isKnownState(to) 拒绝 cancel 出厅边）→ 排除集 = ['cancelled','completed']；
 // RICH 模板租户运行时会自动扩展为 completed/closed/evaluated/cancelled（def 驱动，不写死）。
+const INJECTED_DEFAULT_DEF = ensureClaimHallState(DEFAULT_WORK_ORDER_DEF).def;
 const EXPECTED_EXCLUDE = Array.from(
-  new Set([...doneStates(DEFAULT_WORK_ORDER_DEF), ...terminalStates(DEFAULT_WORK_ORDER_DEF)]),
+  new Set([...doneStates(INJECTED_DEFAULT_DEF), ...terminalStates(INJECTED_DEFAULT_DEF)]),
 ).sort();
 
 interface Handler {
