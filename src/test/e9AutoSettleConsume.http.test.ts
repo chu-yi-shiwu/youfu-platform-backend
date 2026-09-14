@@ -872,6 +872,8 @@ describe('⑬ 类型修复回归：inventory_log.work_order_id uuid → text（0
       // §14 复议1：挂单出库新增「draft 结算单」查询——本用例断言未挂单/无 draft 时零回归路径，
       // 返回「无 draft」→ 不触发重投影，流水照写（列类型断言不受影响）
       { match: (t) => t.includes('FROM settlement s') && t.includes("s.status = 'draft'"), reply: () => ({ rows: [], rowCount: 0 }) },
+      // V3-D3：挂单出库补 SETTLEMENT_LOCKED 守卫（confirmed 单 → 422）——本用例无 confirmed 单 → 放行
+      { match: (t) => t.includes('FROM settlement s') && t.includes("s.status = 'confirmed'"), reply: () => ({ rows: [], rowCount: 0 }) },
       { match: (t) => t.includes('SELECT qty FROM inventory'), reply: () => ({ rows: [{ qty: 10 }], rowCount: 1 }) },
       { match: (t) => t.includes('UPDATE inventory SET qty'), reply: () => ({ rows: [], rowCount: 1 }) },
       { match: (t) => t.includes('INSERT INTO inventory_log'), reply: () => ({ rows: [], rowCount: 1 }) },
@@ -1120,6 +1122,9 @@ describe('⑱ §14 复议1：挂单出库同样联动 draft 结算单', () => {
   const outBase: Handler[] = [
     { match: (t) => t.includes('SELECT id FROM material'), reply: (_t, p) => ({ rows: [{ id: p[0] }], rowCount: 1 }) },
     { match: (t) => t.includes('FROM work_orders') && t.includes('order_no=$2'), reply: () => ({ rows: [{ id: WO }], rowCount: 1 }) },
+    // V3-D3：挂单出库 SETTLEMENT_LOCKED 守卫（confirmed 查询）——默认无 confirmed 单 → 放行；
+    // 未挂单路径不触发本查询（零回归用例的「不查结算单」断言不受影响）
+    { match: (t) => t.includes('FROM settlement s') && t.includes("s.status = 'confirmed'"), reply: () => ({ rows: [], rowCount: 0 }) },
     { match: (t) => t.includes('SELECT qty FROM inventory'), reply: () => ({ rows: [{ qty: 10 }], rowCount: 1 }) },
     { match: (t) => t.includes('UPDATE inventory SET qty'), reply: () => ({ rows: [], rowCount: 1 }) },
     { match: (t) => t.includes('INSERT INTO inventory_log'), reply: () => ({ rows: [], rowCount: 1 }) },
@@ -1330,6 +1335,8 @@ describe('㉑ §14 复议1：consume 与挂单出库对 draft 结算单的联动
         ...BASE,
         { match: (t) => t.includes('SELECT id FROM material'), reply: () => ({ rows: [{ id: MID1 }], rowCount: 1 }) },
         { match: (t) => t.includes('FROM work_orders') && t.includes('order_no=$2'), reply: (_t, p) => ({ rows: [{ id: p[1] }], rowCount: 1 }) },
+        // V3-D3：挂单出库 SETTLEMENT_LOCKED 守卫（confirmed 查询）——本用例无 confirmed 单 → 放行
+        { match: (t) => t.includes('FROM settlement s') && t.includes("s.status = 'confirmed'"), reply: () => ({ rows: [], rowCount: 0 }) },
         { match: (t) => t.includes('SELECT qty FROM inventory'), reply: () => ({ rows: [{ qty: 10 }], rowCount: 1 }) },
         { match: (t) => t.includes('UPDATE inventory SET qty'), reply: () => ({ rows: [], rowCount: 1 }) },
         { match: (t) => t.includes('INSERT INTO inventory_log'), reply: () => ({ rows: [], rowCount: 1 }) },

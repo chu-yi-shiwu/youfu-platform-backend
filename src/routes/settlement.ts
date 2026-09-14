@@ -11,6 +11,7 @@ import {
   updateSettlementItem,
   deleteSettlement,
   confirmSettlement,
+  voidSettlement,
   listSettlements,
   getSettlementDetail,
   buildSettlementCsv,
@@ -28,9 +29,17 @@ const itemPatchSchema = z.object({
   price: z.number().nonnegative().optional(),
   qty: z.number().positive().optional(),
   note: z.string().max(500).optional(),
+  // V3-D1 解锁逃生口：仅允许显式传 false = 管理员主动放弃人工值、交还重投影（不允许远程置 true——
+  // 冻结只能由真实的 price/qty 修改动作触发，杜绝"只解冻不放手"的含混态）。
+  manual_edited: z.literal(false).optional(),
 });
 
-const LIST_STATUSES = ['draft', 'confirmed'] as const;
+const voidSchema = z.object({
+  // 作废理由必填（审计留痕；空串 → 400）
+  void_reason: z.string().min(1).max(500),
+});
+
+const LIST_STATUSES = ['draft', 'confirmed', 'voided'] as const;
 
 // GET /api/v1/settlements?status=&limit=&offset= —— 列表（含明细数/总额）
 router.get('/settlements', async (req, res, next) => {
@@ -151,6 +160,28 @@ router.post('/settlements/:id/confirm', async (req, res, next) => {
   }
 });
 
+// POST /api/v1/settlements/:id/void —— 作废（V3-D2）：仅 confirmed 可作废；明细快照后删除，表头冻结留痕。
+router.post('/settlements/:id/void', async (req, res, next) => {
+  try {
+    const auth = res.locals.auth;
+    const tenantId = auth.tenantId;
+    const b = voidSchema.parse(req.body);
+    const settlement = await withTenantClient(tenantId, async (client) => {
+      await requirePermission(auth, client, 'settlement.edit');
+      return voidSettlement(client, tenantId, req.params.id, {
+        operator: auth.username ?? 'system',
+        reason: b.void_reason,
+      });
+    });
+    return res.json({ ok: true, code: 0, settlement });
+  } catch (e) {
+    if (e instanceof z.ZodError) {
+      return next(new AppError('BAD_REQUEST', `invalid body: ${e.issues.map((i) => i.message).join(';')}`, 400));
+    }
+    next(e);
+  }
+});
+
 // GET /api/v1/settlements/:id/export —— CSV 导出（BOM+UTF-8；confirmed 与 draft 均可导）
 router.get('/settlements/:id/export', async (req, res, next) => {
   try {
@@ -161,6 +192,10 @@ router.get('/settlements/:id/export', async (req, res, next) => {
       return getSettlementDetail(client, tenantId, req.params.id);
     });
     if (!detail) throw new AppError('NOT_FOUND', 'settlement not found', 404);
+    // V3-D2：voided 单不可导出——导出凭证必须来自有效单（作废单明细已删，可导出的只有快照，属另一口径）
+    if (detail.settlement.status === 'voided') {
+      throw new AppError('SETTLEMENT_VOIDED', `结算单 ${detail.settlement.settlement_no} 已作废，不可导出`, 409);
+    }
     const csv = buildSettlementCsv(
       detail.items.map((it: any) => ({
         settlement_no: detail.settlement.settlement_no,
