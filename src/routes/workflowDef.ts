@@ -245,7 +245,10 @@ router.post('/:entityType/submit', async (req, res, next) => {
 
 // 审核通过（workflow.approve）：三重校验后复用 saveWorkflowDef 生效（版本自增 + history 快照 reason='approve'），
 // 然后删除变更行（审计由 history 承担）。
-//   ① submitted_by ≠ 当前账号（403 SELF_APPROVAL，按账号非按角色，admin 也不例外）
+//   ① submitted_by ≠ 当前账号（403 SELF_APPROVAL，按账号非按角色，admin 也不例外）；
+//      F16 豁免（初一裁决 2026-09-14）：单 admin 租户（active admin 计数=1）允许自批——
+//      审批人池只有自己，硬禁=流程永久死锁；豁免强制同事务写 platform_audit（self_approved=true，
+//      留痕失败即整个审批回滚）；多 admin 租户仍硬禁不变
 //   ② base_version = 当前 live 版本（409 DRAFT_STALE：live 已被推进，需重存重提）
 //   ③ 行必须存在且 status=submitted（404 NO_DRAFT / 409 CHANGE_NOT_SUBMITTED）
 // V3-D4 逃生口：body.confirm_inflight_loss:true → saveWorkflowDef(allowInflightLoss)——
@@ -257,6 +260,7 @@ router.post('/:entityType/approve', async (req, res, next) => {
     const { entityType } = req.params;
     assertEntityType(entityType);
     const b = z.object({ confirm_inflight_loss: z.literal(true).optional() }).parse(req.body ?? {});
+    let selfApproved = false; // F16：单 admin 自批豁免标记（响应透出 + audit 已强制留痕）
     await withTenantClient(tenantId, async (client) => {
       await requirePermission(auth, client, 'workflow.approve');
       const change = await getWorkflowDefChange(client, tenantId, entityType);
@@ -265,8 +269,36 @@ router.post('/:entityType/approve', async (req, res, next) => {
         throw new AppError('CHANGE_NOT_SUBMITTED', 'change is not submitted for review', 409);
       }
       // 自审自批禁令按账号（submitted_by vs 当前 username）——权限管"能不能审"，状态机管"能不能审这一单"。
+      // F16（初一裁决 2026-09-14）：单 admin 租户豁免——active admin 仅 1 人时审批人池只有自己，
+      // 硬禁=提交人即唯一审批人，SELF_APPROVAL 403 后流程永久死锁（横切③④ 实证）。
+      // 豁免伴随强制留痕：同事务写 platform_audit（self_approved=true），audit 失败 → 整个审批回滚；
+      // 多 admin 租户（计数>1）维持硬禁不变，防止借豁免绕过双人制。
       if (change.submittedBy && change.submittedBy === auth.username) {
-        throw new AppError('SELF_APPROVAL', 'submitter cannot approve own change (self-approval forbidden)', 403);
+        const admins = await client.query<{ c: number }>(
+          `SELECT COUNT(*)::int AS c FROM account_user WHERE tenant_id = $1 AND role = 'admin' AND active = true`,
+          [tenantId],
+        );
+        const adminCount = Number(admins.rows[0]?.c ?? 0);
+        if (adminCount > 1) {
+          throw new AppError('SELF_APPROVAL', 'submitter cannot approve own change (self-approval forbidden)', 403);
+        }
+        selfApproved = true;
+        // 强制留痕（fail-closed）：platform_audit 与审批同事务，INSERT 失败即整体回滚
+        await client.query(
+          `INSERT INTO platform_audit (actor, action, resource, target_tenant, payload) VALUES ($1,$2,$3,$4,$5)`,
+          [
+            auth.username ?? '',
+            'workflow_def.self_approve',
+            entityType,
+            tenantId,
+            JSON.stringify({
+              self_approved: true,
+              submitted_by: change.submittedBy,
+              base_version: change.baseVersion,
+              note: '单 admin 租户自批豁免（初一裁决 2026-09-14）',
+            }),
+          ],
+        );
       }
       const liveVersion = await getWorkflowDefVersion(client, tenantId, entityType);
       if (change.baseVersion !== liveVersion) {
@@ -284,7 +316,7 @@ router.post('/:entityType/approve', async (req, res, next) => {
       });
       await deleteWorkflowDefChange(client, tenantId, entityType);
     });
-    return res.json({ ok: true, code: 0, entityType, approved: true, version: 'incremented' });
+    return res.json({ ok: true, code: 0, entityType, approved: true, selfApproved, version: 'incremented' });
   } catch (e) {
     next(e);
   }
