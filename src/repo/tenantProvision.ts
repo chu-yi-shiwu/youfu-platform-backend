@@ -51,8 +51,15 @@ export function generateAdminPassword(): string {
   return crypto.randomBytes(9).toString('base64url');
 }
 
-/** 集合相等比较（无序）：判定行业 preset 是否与官方默认矩阵一致 */
-function samePermSet(a: readonly string[], b: readonly string[]): boolean {
+/**
+ * 集合相等比较（无序）：判定行业 preset 是否与官方默认矩阵一致。
+ * 2026-09-14 纵切① P0-1 复用：PUT /accounts/roles/:role/permissions 判定
+ * 「保存值 == 默认矩阵」→ 只 DELETE 不 INSERT（保存默认值 = 删除覆盖行 = 解除定格）。
+ * 生产实证：不改权限直接点保存会落 2 条与默认矩阵逐字相同的僵尸覆盖行，成因即缺少此判定。
+ * 注意：本实现含长度短路（a.length !== b.length → false），调用方传入含重复项的数组时
+ * 会判为"不等"而正常落行——INSERT 侧有 ON CONFLICT DO NOTHING 兜底，不会产生脏数据。
+ */
+export function samePermSet(a: readonly string[], b: readonly string[]): boolean {
   if (a.length !== b.length) return false;
   const set = new Set(a);
   return b.every((p) => set.has(p));

@@ -208,12 +208,28 @@ export async function transition(
   }
   // A+：若流转携带 assignee（dispatch 等需必填 assignee 的转移），同步落库 assignee_id，使人工派单真正生效。
   const assignee = typeof fields.assignee === 'string' && fields.assignee ? fields.assignee : null;
+  // 2026-09-14 纵切② P0-5：assignee 存在性校验——此前携带不存在的 worker id 会静默落库
+  // assignee_id，工单派给"幽灵工人"永无人接。调用方契约（已全量排查）：assignee 一律为 worker.id ——
+  //   routes/workOrder.ts 通用 transition 端点（dispatch/forward/claim-hall 派单，客户端传 worker id）；
+  //   services/acceptance.ts（fields={} 不带 assignee）；抢单/自动派单/联动单为旁路 UPDATE 不走本函数。
+  if (assignee) {
+    const w = await client.query(
+      'SELECT 1 FROM worker WHERE id = $1 AND tenant_id = $2 AND active = true',
+      [assignee, tenantId],
+    );
+    if (w.rowCount === 0) {
+      throw new AppError('BAD_PARAM', `assignee 不存在或未启用: ${assignee}`, 422);
+    }
+  }
   // 074 里程碑回填（2026-09-06）：按目标状态回填对应生命周期时间列（映射单一事实源在
   // stateMachine.STATUS_TIMESTAMP_COLUMNS），transition 是工单流转唯一收口写路径，此处回填
   // 即覆盖人工/接口全部流转；自动派单与抢单旁路在 workOrder.ts / linkedWorkOrder.ts 各自同步回填。
   const milestoneCol = timestampColumnFor(to);
   const upd = await client.query<WorkOrderRow>(
-    `UPDATE work_orders SET status = $1, updated_at = now()${assignee ? ', assignee_id = $4' : ''}${milestoneCol ? `, ${milestoneCol} = now()` : ''} WHERE id = $2 AND tenant_id = $3 RETURNING *`,
+    // 2026-09-14 纵切② P0-6（口径修正）：显式携带 assignee 的流转必为人工动作（dispatch/forward/
+    // claim-hall 派单；依据下方 :225-226 注释——自动派单/抢单不走 transition，此处 assignee 必为
+    // 人工行为），故追加 auto_flow = false——人工派单不再冒充自动派单（过程挖掘口径失真根因）。
+    `UPDATE work_orders SET status = $1, updated_at = now()${assignee ? ', assignee_id = $4, auto_flow = false' : ''}${milestoneCol ? `, ${milestoneCol} = now()` : ''} WHERE id = $2 AND tenant_id = $3 RETURNING *`,
     assignee ? [to, id, tenantId, assignee] : [to, id, tenantId],
   );
   // R32 load 对称回收（2026-08-31 拆雷三件套①）：transition 是工单流转唯一写路径，

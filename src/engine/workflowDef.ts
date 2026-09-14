@@ -1,7 +1,47 @@
 // workflow_def 仓储（T-①）：读/确保/保存每租户每业务流的状态图定义。
 // 状态图存 DB，由可配置状态机引擎消费，实现"流程零代码配置"。
 import type { PoolClient } from 'pg';
-import { DEFAULT_WORK_ORDER_DEF, type WorkflowDef } from './stateMachine.js';
+import { DEFAULT_WORK_ORDER_DEF, doneStates, terminalStates, type WorkflowDef } from './stateMachine.js';
+import { AppError } from '../middleware/error.js';
+
+/**
+ * 2026-09-14 纵切③ P0-2：状态图写入口校验收口（纯函数可单测）。
+ * 此前 PUT /workflow/def 的校验只做 ①initial∈states ②transitions from/to∈states（optimize.ts 内联），
+ * 漏掉第三项：autoRoutes.to 允许指向 doneStates/terminalStates——自动派单直达终态，
+ * 绕过处理/验收全链路（派单目标态禁止是终态）。校验三违例均抛 422 BAD_REQUEST：
+ *   ① initial ∈ states；
+ *   ② 所有 transitions 的 from/to ∈ states；
+ *   ③ def.config?.autoRoutes（若存在）：每个 route.to ∈ states 且不在 doneStates/terminalStates 中。
+ */
+export function validateWorkflowDef(def: WorkflowDef): void {
+  if (!def.states.includes(def.initial)) {
+    throw new AppError('BAD_REQUEST', `initial "${def.initial}" not in states`, 422);
+  }
+  const transitions = Array.isArray(def.transitions) ? def.transitions : [];
+  const unknown = transitions.filter((t) => !def.states.includes(t.from) || !def.states.includes(t.to));
+  if (unknown.length > 0) {
+    throw new AppError('BAD_REQUEST', `transition references unknown state: ${JSON.stringify(unknown[0])}`, 422);
+  }
+  const routes = def.config?.autoRoutes;
+  if (routes) {
+    // 禁止自动派发直达的目标态 = 完成态 ∪ 终态（completed/closed/evaluated 等必须由显式事件驱动，
+    // 与引擎红线一致："绝不自动把状态推进到终态"）。
+    const forbidden = new Set<string>([...doneStates(def), ...terminalStates(def)]);
+    for (const [fromState, route] of Object.entries(routes)) {
+      const toState = route?.to;
+      if (typeof toState !== 'string' || !def.states.includes(toState)) {
+        throw new AppError('BAD_REQUEST', `autoRoutes.${fromState}.to "${String(toState)}" not in states`, 422);
+      }
+      if (forbidden.has(toState)) {
+        throw new AppError(
+          'BAD_REQUEST',
+          `autoRoutes.${fromState}.to "${toState}" 是完成态/终态，禁止作为自动派单目标（派单目标态禁止直达终态）`,
+          422,
+        );
+      }
+    }
+  }
+}
 
 /** 读状态图；租户无定义时回退指定兜底（不写库，避免只读操作产生副作用）。 */
 export async function getWorkflowDefOrDefault(
@@ -60,6 +100,10 @@ export async function saveWorkflowDef(
   def: WorkflowDef,
   opts?: { operator?: string; reason?: string },
 ): Promise<void> {
+  // 2026-09-14 纵切③ P0-2：写入口统一校验收口（initial/transition 拓扑/autoRoutes 目标态非终态）。
+  // 违例 422，坏 def 不落库、不产生 history 快照。开通注入（tenantProvision.ts 直 INSERT 内置 def）
+  // 不经本函数、不动；optimize.ts 内联校验保留（幂等冗余，减少 diff）。
+  validateWorkflowDef(def);
   const cur = await client.query<{ version: number; def: unknown }>(
     'SELECT version, def FROM workflow_def WHERE tenant_id = $1 AND entity_type = $2',
     [tenantId, entityType],

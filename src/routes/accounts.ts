@@ -22,6 +22,7 @@ import { AppError } from '../middleware/error.js';
 import { ROLES, PERMS, DEFAULT_PERM_MATRIX, canAssignRole, requirePermission, type Role, type Perm } from '../middleware/role.js';
 import type { AuthLocals } from '../middleware/auth.js';
 import { hashPassword, toPublic } from '../account.js';
+import { samePermSet } from '../repo/tenantProvision.js'; // 纵切① P0-1：保存默认矩阵=解除定格 判定
 
 const router = Router();
 
@@ -138,11 +139,18 @@ router.put('/accounts/roles/:role/permissions', async (req, res, next) => {
     await withTenantClient(auth.tenantId, async (client) => {
       await requirePermission(auth, client, 'role.manage');
       await client.query(`DELETE FROM role_permission WHERE tenant_id=$1 AND role=$2`, [auth.tenantId, role]);
-      for (const p of body.perms) {
-        await client.query(
-          `INSERT INTO role_permission (tenant_id, role, perm) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING`,
-          [auth.tenantId, role, p],
-        );
+      // 2026-09-14 纵切① P0-1：保存默认矩阵 = 解除定格。
+      // 语义：role_permission 行即"覆盖快照"，落库后不再随平台升级自动更新（GET 端点 overridden:true）。
+      // 生产已出现 2 条与默认矩阵逐字相同的僵尸覆盖行，成因即用户"不改直接保存"——
+      // 本判定让 保存值 == DEFAULT_PERM_MATRIX[role] 时只 DELETE 不 INSERT，删覆盖行 = 回归继承基线。
+      // body.perms 含重复项时 samePermSet 因长度短路判为不等 → 走正常落行（INSERT ON CONFLICT DO NOTHING 兜底）。
+      if (!samePermSet(body.perms, DEFAULT_PERM_MATRIX[role])) {
+        for (const p of body.perms) {
+          await client.query(
+            `INSERT INTO role_permission (tenant_id, role, perm) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING`,
+            [auth.tenantId, role, p],
+          );
+        }
       }
     });
     return res.json({ ok: true, code: 0 });

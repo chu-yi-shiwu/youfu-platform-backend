@@ -38,7 +38,7 @@ vi.mock('../db/pool.js', () => ({
 }));
 
 import accountsRouter from '../routes/accounts.js';
-import { PERMS } from '../middleware/role.js';
+import { PERMS, DEFAULT_PERM_MATRIX } from '../middleware/role.js';
 
 const T = 't-acct-guard';
 let server: Server;
@@ -280,6 +280,26 @@ describe('perm-catalog 与权限矩阵（⑩⑪ G5/G6）', () => {
     const r = await call('PUT', '/accounts/roles/admin/permissions', { perms: ['dashboard.view'] });
     expect(r.status).toBe(400);
     expect(h.calls.find((c) => c.sql.includes('DELETE FROM role_permission'))).toBeUndefined();
+  });
+});
+
+describe('保存默认矩阵=解除定格（纵切① P0-1，2026-09-14）', () => {
+  it('⑪d PUT perms 与默认矩阵逐字相同 → 只 DELETE 不 INSERT（0 行落库 = 删覆盖行解除定格）', async () => {
+    h.scripted = [];
+    // 生产实证：不改权限直接保存会落与默认矩阵逐字相同的僵尸覆盖行——现在应只删不插。
+    const r = await call('PUT', '/accounts/roles/worker/permissions', { perms: [...DEFAULT_PERM_MATRIX.worker] });
+    expect(r.status).toBe(200);
+    expect(h.calls.find((c) => c.sql.includes('DELETE FROM role_permission'))).toBeDefined();
+    expect(h.calls.filter((c) => c.sql.includes('INSERT INTO role_permission')).length).toBe(0);
+  });
+
+  it('⑪e PUT perms 与默认矩阵不同 → 先删后插正常落行（覆盖快照语义保持）', async () => {
+    h.scripted = [];
+    const perms = ['dashboard.view', 'ticket.manage', 'inspect.execute'];
+    const r = await call('PUT', '/accounts/roles/worker/permissions', { perms });
+    expect(r.status).toBe(200);
+    expect(h.calls.find((c) => c.sql.includes('DELETE FROM role_permission'))).toBeDefined();
+    expect(h.calls.filter((c) => c.sql.includes('INSERT INTO role_permission')).length).toBe(perms.length);
   });
 });
 

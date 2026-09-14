@@ -141,7 +141,9 @@ export async function autoDispatchAfterCreate(
   const initial = def.initial;
   const route = autoRouteFor(def, initial);
   const dispatchTarget = route?.to ?? 'assigned';
-  const useLeastLoadOnly = route?.strategy === 'least_load';
+  // 2026-09-14 纵切② P0-1：strategy:'least_load' 不再短路规则匹配（t-phasea 实证规则被静默废掉；
+  // 规则未命中时 resolveDispatch 返回 null，自然落 pickWorker 兜底，无规则租户行为不变）。
+  // dispatchTarget（route?.to）逻辑不动：目标态仍由 autoRoutes 决定。
   // 派单自适应：加载租户模型（无则默认新模型），用模型评分参与候选排序
   const modelParams = await client.query<{ params: any }>(
     'SELECT params FROM model_state WHERE tenant_id = $1 AND model_key = $2',
@@ -149,7 +151,7 @@ export async function autoDispatchAfterCreate(
   );
   const loadedParams = safeParseJsonb(modelParams.rows[0]?.params) ?? undefined;
   const model: ModelBackend = new StatsModelBackend(loadedParams);
-  const resolved = useLeastLoadOnly ? null : resolveDispatch(workerRows, rules, needPayload, model);
+  const resolved = resolveDispatch(workerRows, rules, needPayload, model);
   const picked = resolved ? resolved.worker : pickWorker(workerRows, { skillTags: need.skill_tags ?? undefined });
   let autoFlow = false;
   let assignee: string | null = null;
@@ -192,6 +194,30 @@ export async function autoDispatchAfterCreate(
        VALUES ($1,$2,'enter_hall',$3,$3,'system', $4)`,
       [tenantId, row.id, 'claim_hall', JSON.stringify({ reason: 'no worker auto-matched' })],
     );
+    // 2026-09-14 纵切② P0-4：自动派单未命中此前无任何管理员感知（断链）——镜像
+    // slaScheduler.ts admin fan-out 模式，通知本租户全部 active admin。
+    // QA-P1 修正（2026-09-14）：withTenantClient 是 BEGIN→fn→COMMIT（db/pool.ts），通知段 SQL
+    // 一旦真出错，整个 PG 事务进入 aborted 态——单纯 try/catch 吞错后外层 COMMIT 实为 ROLLBACK，
+    // 工单创建静默消失但 API 谎报成功。故用 SAVEPOINT 隔离通知段（同 runIncrementalLearnStep 的
+    // incremental_learn_sp 模式）：失败仅回滚通知段，事务恢复可用，claim_hall 主流程保真。
+    await client.query('SAVEPOINT dispatch_notify_sp');
+    try {
+      const admins = await client.query<{ id: string }>(
+        `SELECT id FROM account_user WHERE tenant_id=$1 AND role='admin' AND active=true`,
+        [tenantId],
+      );
+      for (const a of admins.rows) {
+        await insertNotification(client, {
+          tenantId, recipient: a.id, recipientKind: 'account', type: 'dispatch', workOrderId: row.id,
+          title: '工单进入抢单大厅', body: `工单 ${row.order_no} 自动派单未命中，已转入抢单大厅，请关注`,
+          payload: { order_no: row.order_no, from_status: initial },
+        });
+      }
+      await client.query('RELEASE SAVEPOINT dispatch_notify_sp');
+    } catch (notifyErr) {
+      await client.query('ROLLBACK TO SAVEPOINT dispatch_notify_sp');
+      console.error('[autoDispatch] admin notification failed (non-blocking)', { workOrderId: row.id, err: notifyErr });
+    }
   }
   return { autoFlow, assignee, reason, dispatchTarget };
 }
