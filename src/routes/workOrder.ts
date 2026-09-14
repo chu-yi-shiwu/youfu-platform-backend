@@ -792,20 +792,41 @@ router.get('/open/notifications', async (req, res, next) => {
   }
 });
 
-// POST /api/v1/open/notifications/read —— 标记已读（body { ids?: string[] }；缺省=全部已读）
+// POST /api/v1/open/notifications/read —— 标记已读（body { ids?: string[] }；缺省=本人收件箱全部已读）
+// 审查修复（横切⑦ B-1）：原实现两条路径均只按 tenant_id 限定——任意登录账号可把
+// **全租户**（含他人）的通知置已读（缺省路径），或按 id 把**他人**的通知置已读
+// （ids 路径无 recipient 校验）。已读不可逆（读态覆盖未读提醒），必须收口到本人收件箱。
+// 口径：当前登录身份集合 = auth.userId ∪ resolveWorkerIds 结果（worker 通知 recipient=
+// worker.id、账号通知 recipient=account_user.id，双路身份覆盖两种 recipient_kind）。
+// 身份解析不出（空集合）→ 422 拒绝：置已读不可逆，绝不做"全租户"降级放行。
 router.post('/open/notifications/read', async (req, res, next) => {
   try {
-    const tenantId = res.locals.auth.tenantId;
+    const auth = res.locals.auth;
+    const tenantId = auth.tenantId;
     const body = z.object({ ids: z.array(z.string()).optional() }).parse(req.body ?? {});
     const result = await withTenantClient(tenantId, async (client) => {
+      // 本人身份集合（recipient 可能是 worker.id 或 account_user.id，双路并集）
+      const identity = new Set<string>([auth.userId || '']);
+      for (const wid of await resolveWorkerIds(client, tenantId, auth.userId)) identity.add(wid);
+      identity.delete('');
+      if (identity.size === 0) {
+        throw new AppError('IDENTITY_UNRESOLVED', '无法解析当前账号收件身份，拒绝批量置已读', 422);
+      }
+      const recipients = Array.from(identity);
       if (body.ids && body.ids.length > 0) {
         const r = await client.query(
-          `UPDATE notification SET read = true WHERE tenant_id = $1 AND id = ANY($2::text[]) AND read = false RETURNING id`,
-          [tenantId, body.ids],
+          `UPDATE notification SET read = true
+           WHERE tenant_id = $1 AND id = ANY($2::text[]) AND recipient = ANY($3::text[]) AND read = false
+           RETURNING id`,
+          [tenantId, body.ids, recipients],
         );
         return r.rowCount ?? 0;
       }
-      const r = await client.query(`UPDATE notification SET read = true WHERE tenant_id = $1 AND read = false`, [tenantId]);
+      // 缺省路径收窄为「本人收件箱全部已读」，禁止全租户
+      const r = await client.query(
+        `UPDATE notification SET read = true WHERE tenant_id = $1 AND recipient = ANY($2::text[]) AND read = false`,
+        [tenantId, recipients],
+      );
       return r.rowCount ?? 0;
     });
     return res.json({ ok: true, code: 0, marked: result });
