@@ -15,6 +15,8 @@ import { emitDomainEvent } from '../db/eventBus.js';
 // R12-F1（十轮审查）：K2 dispatch 影子回填——自动派单也是"人工实际"信号源（模型建议 vs 实际派单），
 // 此前仅 transition() 人工派单回填，导致 dispatch 影子 actual 永远空置（R12 live 查证 7/7 NULL）。
 import { resolveDispatchShadow } from './k2Shadow.js';
+// 2026-09-14 纵切② P0-4：派单未命中通知管理员（与 workOrder.ts / slaScheduler.ts 同源 notify 抽象层）
+import { insertNotification } from './notify.js';
 
 export interface LinkedWoPayload {
   id: string;
@@ -92,8 +94,10 @@ export async function createLinkedWorkOrder(
   const initial = def.initial;
   const route = autoRouteFor(def, initial);
   const dispatchTarget = route?.to ?? 'assigned';
-  const useLeastLoadOnly = route?.strategy === 'least_load';
-  const resolved = useLeastLoadOnly ? null : resolveDispatch(workers.rows, rules, need);
+  // 2026-09-14 纵切② P0-1：strategy:'least_load' 不再短路规则匹配（t-phasea 实证规则被静默废掉；
+  // 规则未命中时 resolveDispatch 返回 null，自然落 pickWorker 兜底，无规则租户行为不变）。
+  // dispatchTarget（route?.to）逻辑不动：目标态仍由 autoRoutes 决定。
+  const resolved = resolveDispatch(workers.rows, rules, need);
   const picked = resolved ? resolved.worker : pickWorker(workers.rows, { skillTags: p.skillTags });
   let autoFlow = false;
   let assignee: string | null = null;
@@ -122,6 +126,36 @@ export async function createLinkedWorkOrder(
     await emitDomainEvent(client, { tenantId: p.tenantId, entityType: 'work_order', entityId: row.id, type: dispatchTarget, actor: 'auto_dispatch', payload: { worker_id: picked.id } });
     // R12-F1：自动派单回填 dispatch 影子 actual（best-effort，内部吞错不影响主链路）
     await resolveDispatchShadow(client, p.tenantId, String(row.id), String(picked.id));
+  } else {
+    // 2026-09-14 纵切② P0-3：联动单派单未命中此前无 else 分支——工单无声卡死在 draft，
+    // 无人可见、无人派发（断链）。逐行对齐 routes/workOrder.ts 的抢单大厅样板：
+    // 落 claim_hall + enter_hall 事件（from_status 用本函数的初始态 initial）。
+    await client.query(
+      'UPDATE work_orders SET status = $1, auto_flow = false, updated_at = now() WHERE id = $2',
+      ['claim_hall', row.id],
+    );
+    await client.query(
+      `INSERT INTO ticket_event (tenant_id, work_order_id, type, from_status, to_status, actor, payload)
+       VALUES ($1,$2,'enter_hall',$3,$4,'system',$5)`,
+      [p.tenantId, row.id, initial, 'claim_hall', JSON.stringify({ reason: 'linked order no worker auto-matched' })],
+    );
+    // 2026-09-14 纵切② P0-4：派单未命中通知管理员（镜像 slaScheduler.ts admin fan-out 模式）。
+    // 通知失败不得阻断转单主流程：best-effort，try/catch 吞错仅告警。
+    try {
+      const admins = await client.query<{ id: string }>(
+        `SELECT id FROM account_user WHERE tenant_id=$1 AND role='admin' AND active=true`,
+        [p.tenantId],
+      );
+      for (const a of admins.rows) {
+        await insertNotification(client, {
+          tenantId: p.tenantId, recipient: a.id, recipientKind: 'account', type: 'dispatch', workOrderId: row.id,
+          title: '工单进入抢单大厅', body: `工单 ${row.order_no} 自动派单未命中，已转入抢单大厅，请关注`,
+          payload: { order_no: row.order_no, from_status: initial, source: 'linked_order' },
+        });
+      }
+    } catch (notifyErr) {
+      console.error('[linkedWorkOrder] admin notification failed (non-blocking)', { workOrderId: row.id, err: notifyErr });
+    }
   }
   return { id: row.id, orderNo: row.order_no, autoFlow, assignee, reason, created: true };
 }

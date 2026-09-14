@@ -26,6 +26,8 @@ function makeClient(cur: { status: string; assignee_id: string | null }) {
       calls.push({ text, params });
       if (text.includes('FOR UPDATE')) return { rows: [woRow] };
       if (text.includes('SELECT def FROM workflow_def')) return { rows: [] }; // 无自定义 def → DEFAULT（4 态 3 转移）
+      // 纵切② P0-5：transition 现在会对携带 assignee 的流转做 worker 存在性校验——mock 视为存在
+      if (text.includes('SELECT 1 FROM worker')) return { rows: [{ '?column?': 1 }], rowCount: 1 };
       if (text.includes('UPDATE work_orders')) return { rows: [{ ...woRow, status: params?.[0] }] };
       return { rows: [] }; // ticket_event / domain_event / worker UPDATE 等
     }) as QueryFn,

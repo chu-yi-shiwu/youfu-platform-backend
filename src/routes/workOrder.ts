@@ -141,7 +141,9 @@ export async function autoDispatchAfterCreate(
   const initial = def.initial;
   const route = autoRouteFor(def, initial);
   const dispatchTarget = route?.to ?? 'assigned';
-  const useLeastLoadOnly = route?.strategy === 'least_load';
+  // 2026-09-14 纵切② P0-1：strategy:'least_load' 不再短路规则匹配（t-phasea 实证规则被静默废掉；
+  // 规则未命中时 resolveDispatch 返回 null，自然落 pickWorker 兜底，无规则租户行为不变）。
+  // dispatchTarget（route?.to）逻辑不动：目标态仍由 autoRoutes 决定。
   // 派单自适应：加载租户模型（无则默认新模型），用模型评分参与候选排序
   const modelParams = await client.query<{ params: any }>(
     'SELECT params FROM model_state WHERE tenant_id = $1 AND model_key = $2',
@@ -149,7 +151,7 @@ export async function autoDispatchAfterCreate(
   );
   const loadedParams = safeParseJsonb(modelParams.rows[0]?.params) ?? undefined;
   const model: ModelBackend = new StatsModelBackend(loadedParams);
-  const resolved = useLeastLoadOnly ? null : resolveDispatch(workerRows, rules, needPayload, model);
+  const resolved = resolveDispatch(workerRows, rules, needPayload, model);
   const picked = resolved ? resolved.worker : pickWorker(workerRows, { skillTags: need.skill_tags ?? undefined });
   let autoFlow = false;
   let assignee: string | null = null;
@@ -192,6 +194,24 @@ export async function autoDispatchAfterCreate(
        VALUES ($1,$2,'enter_hall',$3,$3,'system', $4)`,
       [tenantId, row.id, 'claim_hall', JSON.stringify({ reason: 'no worker auto-matched' })],
     );
+    // 2026-09-14 纵切② P0-4：自动派单未命中此前无任何管理员感知（断链）——镜像
+    // slaScheduler.ts admin fan-out 模式，通知本租户全部 active admin。通知失败不得阻断
+    // 建单主流程：best-effort，try/catch 吞错仅告警（insertNotification 本身不吞错）。
+    try {
+      const admins = await client.query<{ id: string }>(
+        `SELECT id FROM account_user WHERE tenant_id=$1 AND role='admin' AND active=true`,
+        [tenantId],
+      );
+      for (const a of admins.rows) {
+        await insertNotification(client, {
+          tenantId, recipient: a.id, recipientKind: 'account', type: 'dispatch', workOrderId: row.id,
+          title: '工单进入抢单大厅', body: `工单 ${row.order_no} 自动派单未命中，已转入抢单大厅，请关注`,
+          payload: { order_no: row.order_no, from_status: initial },
+        });
+      }
+    } catch (notifyErr) {
+      console.error('[autoDispatch] admin notification failed (non-blocking)', { workOrderId: row.id, err: notifyErr });
+    }
   }
   return { autoFlow, assignee, reason, dispatchTarget };
 }
