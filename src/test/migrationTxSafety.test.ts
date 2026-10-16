@@ -93,4 +93,17 @@ describe('迁移事务安全（防半截）', () => {
     expect(cdIdx, '必须有一条非注释的 cd 到 /tmp（或 $RUN_DIR，默认 /tmp）').toBeGreaterThanOrEqual(0);
     expect(psqlIdx).toBeGreaterThan(cdIdx);
   });
+
+  it('⑧ BEGIN 探测必须用绝对路径 —— 切到 RUN_DIR 后相对路径会失效', () => {
+    // 真事故（2026-10-17 02:57 ECS）：⑦ 修法引入 cd "$RUN_DIR" 后，探测仍写相对路径 "$f"，
+    //   psql 报 "grep: 087_xxx.sql: No such file or directory"，探测分支恒走 else，
+    //   对自带 BEGIN 的迁移（059）会被 --single-transaction 双层包裹而报错。
+    const sh = readFileSync(join(ROOT, 'scripts', 'migrate-as-owner.sh'), 'utf8');
+    const g = sh.split('\n').filter((l) => /grep\s+.*BEGIN/.test(l) && !/^\s*#/.test(l));
+    expect(g.length).toBeGreaterThan(0);
+    expect(
+      g.every((l) => /\$BACKEND_DIR\//.test(l)),
+      'BEGIN 探测的文件参数必须是 $BACKEND_DIR/$f（绝对路径）',
+    ).toBe(true);
+  });
 });

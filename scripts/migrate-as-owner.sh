@@ -30,7 +30,9 @@ for f in $FILES; do
     # 用 --single-transaction 让「整个文件」成为原子单元：要么全成，要么全滚。
     # 例外：自带 BEGIN/COMMIT 的迁移（实测 059_idempotency_tenant_scoped.sql）不能再套一层，
     # 否则事务会在文件内部提前 COMMIT，外层再 COMMIT 报 "no transaction in progress"。
-    if grep -qiE '^[[:space:]]*BEGIN[[:space:]]*;' "$f"; then
+    # 注意：$f 必须用绝对路径 —— 上面已 cd 到 RUN_DIR，相对路径会 "No such file or directory"，
+    # 使探测恒失败、自带事务的迁移（059）被双层包裹。
+    if grep -qiE '^[[:space:]]*BEGIN[[:space:]]*;' "$BACKEND_DIR/$f"; then
       sudo -u postgres psql -d youfu -v ON_ERROR_STOP=1 -f "$BACKEND_DIR/$f"
     else
       sudo -u postgres psql -d youfu --single-transaction -v ON_ERROR_STOP=1 -f "$BACKEND_DIR/$f"
