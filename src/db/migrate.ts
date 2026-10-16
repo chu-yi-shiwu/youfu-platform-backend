@@ -70,7 +70,20 @@ async function main() {
           `[migrate] WARN ${file}: 剥离 ${stripped.length} 行 psql 元命令（psql -f 下仍会打印，此处仅为适配 pg 协议）`,
         );
       }
-      await pool.query(sql);
+      // 与 scripts/migrate-as-owner.sh 同口径：整个文件跑在一个事务里（防半截）。
+      // pg 协议的 pool.query(sql) 同样是多语句逐条提交，一旦中途失败就会留下半截状态。
+      // 自带 BEGIN/COMMIT 的迁移（实测 059）不套外层事务，避免事务被文件内部提前提交。
+      const selfTx = /^\s*BEGIN\s*;/im.test(sql);
+      if (!selfTx) await pool.query('BEGIN');
+      try {
+        await pool.query(sql);
+      } catch (e) {
+        if (!selfTx) await pool.query('ROLLBACK').catch(() => undefined);
+        throw e;
+      }
+      // 记账口径与 shell 通道一致：放在事务提交之后（两通道都可能出现"已应用未记账"这一
+      // 既有风险，先保证行为一致，不在此处引入第二种语义）。
+      if (!selfTx) await pool.query('COMMIT');
       await pool.query('INSERT INTO _migrations(name) VALUES ($1) ON CONFLICT DO NOTHING', [file]);
       applied.add(file);
       ran += 1;
