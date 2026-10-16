@@ -3,7 +3,7 @@
 import { Router } from 'express';
 import z from 'zod';
 import { AUTH_MODE, DEFAULT_TENANT_ID, loginRateLimit, requireRole, type AuthLocals } from '../middleware/auth.js';
-import { listPerms, ROLES } from '../middleware/role.js';
+import { listPerms, ROLE_CODE_RE } from '../middleware/role.js';
 import { code2Session } from '../services/wechatMp.js';
 import {
   createUser,
@@ -169,8 +169,8 @@ const createUserSchema = z.object({
   username: z.string().min(1).max(64),
   password: z.string().min(6).max(200),
   display_name: z.string().max(64).optional(),
-  // AL-002：枚举改引 ROLES 单一事实源（含 reviewer/service_desk）
-  role: z.enum(ROLES).optional(),
+  // 地基第二步：放宽为 code 形状校验（内置 6 角色 + 租户自建 role_def 岗位）
+  role: z.string().regex(ROLE_CODE_RE, 'invalid role code').optional(),
 });
 
 // POST /api/v1/auth/users —— admin：创建账户（同租户）

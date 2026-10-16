@@ -472,6 +472,8 @@ router.post('/open/work_order/:id/transition', async (req, res, next) => {
       const r = await transition(client, tenantId, req.params.id, to as WorkOrderStatus, {
         actor: role ?? 'system',
         role,
+        // 地基第二步：allowedPerms 门禁由 transition() 内部惰性取权限点（仅声明 allowedPerms
+        // 的转移才查库），调用方无需透传——存量路径零额外查询、零行为变化。
         fields,
       });
       // 审查修复（架构🔴1）：本端点**不加** ticket.manage 权限点——

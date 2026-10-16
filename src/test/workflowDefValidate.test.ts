@@ -123,3 +123,79 @@ describe('validateWorkflowDef（纵切③ P0-2 校验收口）', () => {
     expect(() => validateWorkflowDef(RICH_WORK_ORDER_DEF)).not.toThrow();
   });
 });
+
+// ============ 地基第二步补漏：角色/权限 ↔ 流程 的联动校验 ============
+// 用户要求"角色、权限的非代码级写入与可配置 + 业务流程可配置"，两者必须闭环：
+// 租户在流程里填写的角色名/权限点若无人校验，写错即**永久门死该条流转且零提示**。
+describe('流程配置的角色/权限引用校验（地基第二步补漏）', () => {
+  const withEdge = (over: Record<string, unknown>) => ({
+    ...BASE_DEF,
+    transitions: [{ from: 'draft', to: 'assigned', event: 'assign', ...over }],
+  });
+
+  it('allowedPerms 引用未登记的权限点 → 422（拼错/臆造一律挡住）', () => {
+    expect(() => validateWorkflowDef(withEdge({ allowedPerms: ['workflow.aprove'] }) as never)).toThrow(/未登记的权限点/);
+  });
+
+  it('allowedPerms 引用合法权限点（workflow.approve）→ 放行', () => {
+    expect(() => validateWorkflowDef(withEdge({ allowedPerms: ['workflow.approve'] }) as never)).not.toThrow();
+  });
+
+  it('allowedRoles 引用内置角色 → 放行（同步层不查库）', () => {
+    expect(() => validateWorkflowDef(withEdge({ allowedRoles: ['admin', 'worker'] }) as never)).not.toThrow();
+  });
+
+  it('改造前的漏洞（对照）：同形状但不存在的角色，同步层不该挡（由异步 assertWorkflowDefRolesUsable 挡）', () => {
+    // 同步层只管形状与权限点；存在性需查 role_def，交给异步校验（见下组）
+    expect(() => validateWorkflowDef(withEdge({ allowedRoles: ['repair_lead'] }) as never)).not.toThrow();
+  });
+});
+
+describe('assertWorkflowDefRolesUsable（异步角色存在性 · 只拦增量错字）', () => {
+  const mkClient = (existing: string[]) => ({
+    query: async (_sql: string, _p: unknown[]) => ({ rows: existing.map((code) => ({ code })), rowCount: existing.length }),
+  });
+
+  const edge = (roles: string[]) => ({
+    ...BASE_DEF,
+    transitions: [{ from: 'draft', to: 'assigned', event: 'assign', allowedRoles: roles }],
+  });
+
+  it('allowedRoles 形状非法（大写/连字符）→ 422（脏名字不得进流程）', async () => {
+    const { assertWorkflowDefRolesUsable } = await import('../engine/workflowDef.js');
+    await expect(
+      assertWorkflowDefRolesUsable(mkClient(['Repair-Lead']) as never, 't1', edge(['Repair-Lead']) as never),
+    ).rejects.toThrow(/形状非法的角色名/);
+  });
+
+  it('引用已创建的自定义角色 → 放行（建了就能用，闭环成立）', async () => {
+    const { assertWorkflowDefRolesUsable } = await import('../engine/workflowDef.js');
+    await expect(assertWorkflowDefRolesUsable(mkClient(['repair_lead']) as never, 't1', edge(['repair_lead']) as never)).resolves.toBeUndefined();
+  });
+
+  it('引用未创建的角色 → 422（挡住"永久门死"的配置事故）', async () => {
+    const { assertWorkflowDefRolesUsable } = await import('../engine/workflowDef.js');
+    await expect(assertWorkflowDefRolesUsable(mkClient([]) as never, 't1', edge(['repair_lead']) as never)).rejects.toThrow(/不存在的角色/);
+  });
+
+  it('内置角色无需在 role_def 里 → 放行', async () => {
+    const { assertWorkflowDefRolesUsable } = await import('../engine/workflowDef.js');
+    await expect(assertWorkflowDefRolesUsable(mkClient([]) as never, 't1', edge(['admin', 'worker']) as never)).resolves.toBeUndefined();
+  });
+
+  it('存量豁免：oldDef 里已有的角色名即便已不在 role_def，也不拦（防存量保存被挡=生产事故）', async () => {
+    const { assertWorkflowDefRolesUsable } = await import('../engine/workflowDef.js');
+    const oldDef = edge(['ghost_role']);
+    await expect(
+      assertWorkflowDefRolesUsable(mkClient([]) as never, 't1', edge(['ghost_role']) as never, oldDef as never),
+    ).resolves.toBeUndefined();
+  });
+
+  it('存量豁免只赦旧不赦新：同一个旧角色 + 一个新错字 → 仍挡', async () => {
+    const { assertWorkflowDefRolesUsable } = await import('../engine/workflowDef.js');
+    const oldDef = edge(['ghost_role']);
+    await expect(
+      assertWorkflowDefRolesUsable(mkClient([]) as never, 't1', edge(['ghost_role', 'typo_role']) as never, oldDef as never),
+    ).rejects.toThrow(/不存在的角色/);
+  });
+});

@@ -3,8 +3,12 @@
 import type { PoolClient } from 'pg';
 import { randomBytes } from 'crypto';
 import { AppError } from '../middleware/error.js';
-import { isKnownState, doneStates, terminalStates, timestampColumnFor, type WorkOrderStatus, type WorkflowTransition } from '../engine/stateMachine.js';
+import { listPerms } from '../middleware/role.js';
+import type { AuthLocals } from '../middleware/auth.js';
+import { isKnownState, doneStates, terminalStates, timestampColumnFor, isTransitionAllowed, type WorkOrderStatus, type WorkflowTransition, type WorkflowDef } from '../engine/stateMachine.js';
 import { getWorkflowDef } from '../engine/workflowDef.js';
+import { pickAutoRule, TERMINAL_STATES } from '../engine/autoRules.js'; // 地基④：自动审核
+import { listEnabledAutoRules } from '../repo/autoRule.js';
 import { emitDomainEvent } from '../db/eventBus.js';
 import { embedText, embeddingConfigured, embeddingModel } from '../services/llm.js';
 import { recordShadowSuggestions, resolveDispatchShadow } from '../services/k2Shadow.js';
@@ -149,6 +153,11 @@ export interface TransitionResult {
   transition: WorkflowTransition | null;
   /** 更新前的状态（锁内读取，权威）。供调用方做"首次进入触发态"等判定，避免事务外快照并发双触发。 */
   from: string;
+  /**
+   * 地基④：本次流转**之后**被自动审核规则接走的情况（无自动推进时恒 undefined）。
+   * 有值意味着 row.status 已是自动推进后的状态（比调用方传入的 to 更靠后一步）。
+   */
+  autoAdvanced?: { event: string; to: string; ruleId?: string };
 }
 
 /** 状态流转：校验合法跳转（拓扑 + 角色门禁 + 必填），更新状态 + 审计 + 副作用。 */
@@ -160,7 +169,13 @@ export async function transition(
   // 批次三纯加法：eventOverride（可选）——按 from+event 精确钉死事件解析转移（缺省不传 = 原 from+to 行为不变）。
   // 场景：同一 from→to 存在多条边（如 completed→closed 同时有 close / acceptance_pass）时，
   // 专用验收端点用 eventOverride='acceptance_pass' 钉死走验收边，通用路径仍按 from+to 解析。
-  opts?: { actor?: string; role?: string; fields?: Record<string, unknown>; eventOverride?: string },
+  // perms（地基第二步）：执行者实际生效的权限点集合，供 allowedPerms 门禁判定。
+  // 不传则仅有 allowedRoles 生效（存量调用行为逐字不变）。
+  // auto（地基④）：由自动审核规则触发的推进，用于防止"自动推进再触发自动推进"的链式失控。
+  // systemAuto（地基④）：系统按租户显式启用并过红线的规则执行，**跳过人类角色门禁**——
+  //   这不是越权：规则必须由持 workflow.approve 的把关人显式启用，且目标态必过终态红线，
+  //   且全程以 actor='system:auto' 写入 ticket_event 留痕可审计。仅 tryAutoAdvance 内部使用。
+  opts?: { actor?: string; role?: string; perms?: readonly string[]; fields?: Record<string, unknown>; eventOverride?: string; auto?: boolean; systemAuto?: boolean },
 ): Promise<TransitionResult> {
   // 行锁：并发流转同一工单时串行化（A 提交释放锁后 B 才拿到锁，此时 cur.status 为最新），
   // 同时让下方"首次进入触发态"判定基于锁内权威快照，杜绝 READ COMMITTED 下双触发增量学习。
@@ -193,8 +208,25 @@ export async function transition(
   const role = opts?.role;
   // R9-003 修复：角色门禁缺失 role（如生产 JWT 未带 role 声明）应视为"不在白名单"→ 拒。
   // 原 `&& role &&` 会在 role 缺失时短路放行，造成越权门禁失效。
-  if (tdef.allowedRoles && tdef.allowedRoles.length > 0 && !tdef.allowedRoles.includes(role ?? '')) {
-    throw new AppError('FORBIDDEN', `role ${role ?? '(none)'} not allowed for ${cur.status}->${to}`, 403);
+  // 地基第二步：门禁 = allowedRoles ∪ allowedPerms（并集），判定单一事实源 isTransitionAllowed。
+  //
+  // 【惰性取权限点】仅当该转移**声明了 allowedPerms** 时才查库：
+  //   ① 存量转移（无 allowedPerms）→ 零额外查询、零行为变化（与改造前逐字等价）；
+  //   ② 调用方不必各自透传权限集合（避免 N 处散落 + 严格 mock 测试被新查询打断）；
+  //   ③ 调用方显式传 opts.perms 时以其为准（跳过查库，便于单测）。
+  const deny = () =>
+    new AppError('FORBIDDEN', `role ${role ?? '(none)'} not allowed for ${cur.status}->${to}`, 403);
+  // 地基④：systemAuto = 系统按租户已启用且过红线的规则执行，无人类执行者 → 跳过角色/权限门禁。
+  // 安全性由三重前置保证（规则须把关人启用 + 目标态非终态 + 事件白名单），详见 tryAutoAdvance。
+  if (!opts?.systemAuto) {
+    if (tdef.allowedPerms && tdef.allowedPerms.length > 0) {
+      const perms =
+        opts?.perms ??
+        (await listPerms({ tenantId, requestId: '', role, authMode: 'prod' } as AuthLocals, client));
+      if (!isTransitionAllowed(tdef, { role, perms })) throw deny();
+    } else if (!isTransitionAllowed(tdef, { role })) {
+      throw deny();
+    }
   }
   // A+ 必填校验：缺失任一 requiredFields → 422
   const fields = opts?.fields ?? {};
@@ -283,7 +315,75 @@ export async function transition(
       payload: { sideEffects: se.filter((x) => x.startsWith('notify_')) },
     });
   }
+  // —— 地基④：自动审核（惰性触发；无启用规则时零行为，与改造前逐字等价）——
+  const advanced = await tryAutoAdvance(client, tenantId, id, def, to, upd.rows[0], opts);
+  if (advanced) return advanced;
   return { row: upd.rows[0], transition: tdef, from: cur.status };
+}
+
+/**
+ * 地基④：自动审核执行器——工单**刚落到的状态**若命中一条启用规则，就按规则再推一步。
+ *
+ * 【为什么放在这里】transition 是工单流转的唯一收口写路径，放在这里才能真正做到
+ * "进入待审核态就自动审"，而不是只在某一个端点生效。
+ *
+ * 【四道闸（缺一不可）——"引擎绝不自动推进到终态"红线】
+ *   ① 惰性：先查启用中的规则，为空（含 094 未应用）→ 立刻返回 null，零额外行为；
+ *   ② 白名单：规则 event 只能是 approve / reject（schema + DB CHECK + 此处 resolveAutoRuleEdge 三重）；
+ *   ③ 终态红线：解析出的 target state 命中 TERMINAL_STATES → 放弃自动（双保险，保存时已挡一次）；
+ *   ④ 单级：opts.auto 标记已自动推进过的流转不再触发，杜绝链式失控（自动→自动→…）。
+ *   另：目标边若声明了 requiredFields（需人工填内容）→ 放弃自动，不硬推。
+ *
+ * 【留痕】每次自动推进额外写一条 ticket_event(type='auto_rule', actor='system:auto')，
+ *   谁配的、按哪条规则、从哪个态到哪个态，事后可审计。
+ */
+async function tryAutoAdvance(
+  client: PoolClient,
+  tenantId: string,
+  id: string,
+  def: WorkflowDef,
+  currentState: string,
+  row: WorkOrderRow,
+  opts?: { auto?: boolean },
+): Promise<TransitionResult | null> {
+  // ④ 单级：本身就是自动推进 → 不再连锁
+  if (opts?.auto) return null;
+  let rules: Awaited<ReturnType<typeof listEnabledAutoRules>>;
+  try {
+    rules = await listEnabledAutoRules(client, tenantId, 'work_order');
+  } catch {
+    return null; // ① 表缺失（094 未应用）→ 零自动行为，绝不影响存量流转
+  }
+  if (rules.length === 0) return null;
+
+  const ext = (row.ext ?? {}) as Record<string, unknown>;
+  const rule = pickAutoRule(rules, currentState, {
+    priority: row.priority ?? null,
+    category: row.catalog ?? null,
+    hasException: ext.has_exception === true,
+  });
+  if (!rule) return null;
+
+  const edge = def.transitions.find((t) => t.from === currentState && t.event === rule.event);
+  if (!edge) return null;
+  // ③ 终态红线（双保险：保存时 assertAutoRuleSavable 已挡一次，这里再挡运行期的数据漂移）
+  if ((TERMINAL_STATES as readonly string[]).includes(edge.to)) return null;
+  // 需人工填字段的边不自动推（自动填不出来，硬推只会 422）
+  if (edge.requiredFields && edge.requiredFields.length > 0) return null;
+
+  const next = await transition(client, tenantId, id, edge.to, {
+    actor: 'system:auto',
+    auto: true,
+    systemAuto: true,
+    eventOverride: rule.event,
+  });
+  // 留痕：自动审核是"系统替人做决定"，必须可追溯
+  await client.query(
+    `INSERT INTO ticket_event (tenant_id, work_order_id, type, from_status, to_status, actor, payload)
+     VALUES ($1,$2,'auto_rule',$3,$4,'system:auto',$5)`,
+    [tenantId, id, currentState, edge.to, JSON.stringify({ event: rule.event, rule_id: rule.id ?? null })],
+  );
+  return { ...next, autoAdvanced: { event: rule.event, to: edge.to, ruleId: rule.id } };
 }
 
 export async function findOne(

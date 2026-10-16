@@ -69,9 +69,11 @@ export async function runClaimHallTimeoutScanForTenant(tenantId: string): Promis
     );
     const hits: ClaimHallHit[] = [];
     if (rows.rows.length === 0) return hits;
-    // 通知面：admin + dispatcher（V2-F2 扩展——SLA 线只通知 admin，大厅积压是调度职责）
+    // 通知面：admin + operator（V2-F2 扩展——SLA 线只通知 admin，大厅积压是调度职责）。
+    // 【用户要求①】dispatcher 退场 → 调度职责落到 operator（默认矩阵含 dispatch.override）。
+    // 存量 dispatcher 账号仍在 IN 列表内照常收通知（只加不删，避免存量账号突然失联）。
     const staff = await client.query<{ id: string }>(
-      `SELECT id FROM account_user WHERE tenant_id=$1 AND role IN ('admin','dispatcher') AND active=true`,
+      `SELECT id FROM account_user WHERE tenant_id=$1 AND role IN ('admin','operator','dispatcher') AND active=true`,
       [tenantId],
     );
     for (const r of rows.rows) {

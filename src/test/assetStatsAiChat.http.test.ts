@@ -399,15 +399,20 @@ describe('adminAiChat.ts · 管理对话端点（建议卡，绝不写库）', (
     expect(((await r2.json()) as any).code).toBe('FORBIDDEN');
   });
 
-  it('㉕breview/service_desk → 200（智能体批次一角色扩容：只读问答放行，工具收窄在 runAdminTurn 执行层）', async () => {
+  it('㉕breviewer → 200（智能体批次一角色扩容：只读问答放行，工具收窄在 runAdminTurn 执行层）', async () => {
     authRole = 'reviewer';
     const r1 = await req('POST', '/admin/ai-chat', { message: '今天有多少待处理工单' });
     expect(r1.status).toBe(200);
     expect(runAdminTurn).toHaveBeenCalledWith(TENANT, '今天有多少待处理工单', expect.objectContaining({ role: 'reviewer' }));
+  });
+
+  // 【用户要求①】service_desk 退场 → 不再出现在 AI 对话角色门里。
+  // 语义变更说明：AI 对话是"权限属性"而非"某一岗位"，需要开放给自建岗位时由租户
+  // 经 role_permission 授予对应权限点，不再靠内置角色名单扩容。
+  it('㉕b-2 退场角色 service_desk → 403（拿掉已生效；出路 = 授予权限点，不是加回角色）', async () => {
     authRole = 'service_desk';
-    const r2 = await req('POST', '/admin/ai-chat', { message: '查一下处理中的单' });
-    expect(r2.status).toBe(200);
-    expect(runAdminTurn).toHaveBeenCalledWith(TENANT, '查一下处理中的单', expect.objectContaining({ role: 'service_desk' }));
+    const r = await req('POST', '/admin/ai-chat', { message: '查一下处理中的单' });
+    expect(r.status).toBe(403);
   });
 
   it('㉖schema：空 message → 422；conversation_id 非 uuid → 422；超 1000 字 → 422', async () => {

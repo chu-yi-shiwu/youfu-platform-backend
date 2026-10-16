@@ -19,10 +19,20 @@ import { z } from 'zod';
 import crypto from 'node:crypto';
 import pool, { withTenantClient } from '../db/pool.js';
 import { AppError } from '../middleware/error.js';
-import { ROLES, PERMS, DEFAULT_PERM_MATRIX, canAssignRole, requirePermission, type Role, type Perm } from '../middleware/role.js';
+// ROLES 已不再直接引用：下拉改走 ASSIGNABLE_BUILTIN_ROLES（退场角色不可新建/分配）。
+import { PERMS, DEFAULT_PERM_MATRIX, canAssignRole, requirePermission, ROLE_CODE_RE, ASSIGNABLE_BUILTIN_ROLES, RETIRED_ROLES, isRetiredRole, type Role, type Perm } from '../middleware/role.js';
 import type { AuthLocals } from '../middleware/auth.js';
 import { hashPassword, toPublic } from '../account.js';
 import { samePermSet } from '../repo/tenantProvision.js'; // 纵切① P0-1：保存默认矩阵=解除定格 判定
+import { isBuiltinRole, isRoleUsable, listAllRoles } from '../repo/roleDef.js'; // 地基第二步：自定义角色
+
+/**
+ * 角色字段 schema（地基第二步）：由 `z.enum(ROLES)` 放宽为"code 形状校验"。
+ * 为什么不继续用枚举：枚举把角色锁死在内置 6 个，租户自建岗位（如"维修组长"）连建号都过不了 schema。
+ * 形状与 090 role_def.code 的 CHECK 同口径（ROLE_CODE_RE）；**存在性**另行在事务内查 role_def
+ * （schema 是同步的，查不了库），两层校验缺一不可：形状挡脏数据，存在性挡越权造岗。
+ */
+const roleCodeField = z.string().regex(ROLE_CODE_RE, 'invalid role code').optional();
 
 const router = Router();
 
@@ -54,8 +64,8 @@ const accountCreateSchema = z.object({
   username: z.string().min(2),
   password: z.string().min(6),
   display_name: z.string().optional(),
-  // AL-002：枚举改引 ROLES 单一事实源（含 reviewer/service_desk，与 stateMachine 对齐）
-  role: z.enum(ROLES).optional(),
+  // 地基第二步：放宽为 code 形状校验（内置 6 角色 + 租户自建 role_def 岗位均合法）
+  role: roleCodeField,
 });
 
 // G7/G8：PUT 不再收 password（重置走 POST /:id/reset-password，管理员不经手密码）；
@@ -63,7 +73,8 @@ const accountCreateSchema = z.object({
 // 抛 400 BAD_PARAM（设计稿口径；zod 解析失败会被 errorMiddleware 统一映成 422，语义不符）。
 const accountUpdateSchema = z.object({
   display_name: z.string().optional(),
-  role: z.enum(ROLES).optional(),
+  // 地基第二步：同 create，放宽为 code 形状校验
+  role: roleCodeField,
   active: z.boolean().optional(),
   phone: z.string().max(11).optional(),
 });
@@ -128,10 +139,13 @@ router.get('/accounts/roles/permissions', async (req, res, next) => {
       for (const r of rows.rows) {
         (overrides[r.role] ??= new Set()).add(r.perm);
       }
-      return ROLES.map((role: Role) => ({
+      // 地基第二步：角色清单 = 内置 6 + 租户自建 role_def 岗位（不再只有内置）。
+      // 自定义角色无默认矩阵 → 默认权限为 []（最小权限：须由租户显式授权，不继承任何内置岗）。
+      const allRoles = await listAllRoles(client, auth.tenantId);
+      return allRoles.map((role) => ({
         role,
-        perms: [...(overrides[role] ?? DEFAULT_PERM_MATRIX[role])].sort(),
-        default_perms: [...DEFAULT_PERM_MATRIX[role]].sort(),
+        perms: [...(overrides[role] ?? DEFAULT_PERM_MATRIX[role as Role] ?? [])].sort(),
+        default_perms: [...(DEFAULT_PERM_MATRIX[role as Role] ?? [])].sort(),
         overridden: overrides[role] != null,
       }));
     });
@@ -147,8 +161,9 @@ router.get('/accounts/roles/permissions', async (req, res, next) => {
 router.put('/accounts/roles/:role/permissions', async (req, res, next) => {
   try {
     const auth = res.locals.auth as AuthLocals;
-    const role = req.params.role as Role;
-    if (!ROLES.includes(role)) throw new AppError('BAD_PARAM', `unknown role: ${role}`, 400);
+    const role = req.params.role;
+    // 地基第二步：形状校验同步做（防脏 code 进库），存在性校验移到事务内查 role_def。
+    if (!ROLE_CODE_RE.test(role)) throw new AppError('BAD_PARAM', `invalid role code: ${role}`, 400);
     const body = z.object({ perms: z.array(z.string().min(1).max(64)) }).parse(req.body);
     const permSet = new Set<string>(PERMS);
     const illegal = body.perms.filter((p) => !permSet.has(p));
@@ -160,13 +175,18 @@ router.put('/accounts/roles/:role/permissions', async (req, res, next) => {
     }
     await withTenantClient(auth.tenantId, async (client) => {
       await requirePermission(auth, client, 'role.manage');
+      // 地基第二步：自定义岗位同样可配权限——存在性 = 内置 OR 本租户 role_def 启用中。
+      if (!(await isRoleUsable(client, auth.tenantId, role))) {
+        throw new AppError('BAD_PARAM', `unknown role: ${role}`, 400);
+      }
       await client.query(`DELETE FROM role_permission WHERE tenant_id=$1 AND role=$2`, [auth.tenantId, role]);
       // 2026-09-14 纵切① P0-1：保存默认矩阵 = 解除定格。
       // 语义：role_permission 行即"覆盖快照"，落库后不再随平台升级自动更新（GET 端点 overridden:true）。
       // 生产已出现 2 条与默认矩阵逐字相同的僵尸覆盖行，成因即用户"不改直接保存"——
       // 本判定让 保存值 == DEFAULT_PERM_MATRIX[role] 时只 DELETE 不 INSERT，删覆盖行 = 回归继承基线。
       // body.perms 含重复项时 samePermSet 因长度短路判为不等 → 走正常落行（INSERT ON CONFLICT DO NOTHING 兜底）。
-      if (!samePermSet(body.perms, DEFAULT_PERM_MATRIX[role])) {
+      // 自定义角色无默认矩阵 → 按空集比对（保存空集 = 只 DELETE 不 INSERT，即解除定格）。
+      if (!samePermSet(body.perms, DEFAULT_PERM_MATRIX[role as Role] ?? [])) {
         for (const p of body.perms) {
           await client.query(
             `INSERT INTO role_permission (tenant_id, role, perm) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING`,
@@ -177,6 +197,171 @@ router.put('/accounts/roles/:role/permissions', async (req, res, next) => {
     });
     // F5 audit：角色权限覆盖（含"保存默认矩阵=解除定格"路径，perms 原样留痕）
     await audit(auth.username ?? 'unknown', 'role.perm.override', role, auth.tenantId, { perms: body.perms });
+    return res.json({ ok: true, code: 0 });
+  } catch (e) {
+    next(e);
+  }
+});
+
+// ============ 地基第二步补漏：自定义角色（role_def）CRUD ============
+/**
+ * 为什么必须有这组端点（审查发现，2026-10-16）：
+ *   090 已建 role_def 表、account_user.role 的枚举 CHECK 也已放宽，
+ *   但**全仓没有任何写入 role_def 的入口**（INSERT INTO role_def 命中数 0）→ 自定义角色建不出来
+ *   → 建号时 isRoleUsable 恒 false → "角色可配置"只做了一半（能配权限、不能生成角色）。
+ *   本组端点补上"生成 / 停用 / 删除"，与既有 PUT .../:role/permissions（配权限）合成闭环。
+ *
+ * 【停用语义（产品未定，此处取安全默认，可改）】
+ *   enabled=false → isRoleUsable 返回 false → **不能再把该角色分配给新账号或改号时选它**；
+ *   已持有该角色的存量账号**保持原角色不变**（不自动改派，避免生产事故），由管理员自行迁移。
+ *
+ * 【删除前置】已有账号仍在使用该角色 → 409 拒绝（防止留下无角色定义的孤儿账号）；
+ *   删除时级联清理该角色的 role_permission 覆盖行（否则留下取不回的僵尸权限行——087 清理的就是这类）。
+ */
+const roleCreateSchema = z.object({
+  code: z.string().regex(ROLE_CODE_RE, 'invalid role code'),
+  name: z.string().min(1).max(32),
+  description: z.string().max(200).optional(),
+  sort: z.number().int().optional(),
+});
+
+const roleUpdateSchema = z.object({
+  name: z.string().min(1).max(32).optional(),
+  description: z.string().max(200).nullable().optional(),
+  enabled: z.boolean().optional(),
+  sort: z.number().int().optional(),
+});
+
+/** GET /api/v1/accounts/roles —— 本租户全部**可选**角色（内置剔除已退场 + 自建），带来源与启用态。 */
+router.get('/accounts/roles', async (req, res, next) => {
+  try {
+    const auth = res.locals.auth as AuthLocals;
+    const { items, retired } = await withTenantClient(auth.tenantId, async (client) => {
+      await requirePermission(auth, client, 'role.manage');
+      const r = await client.query(
+        `SELECT code, name, description, enabled, sort FROM role_def WHERE tenant_id=$1 ORDER BY sort ASC, code ASC`,
+        [auth.tenantId],
+      );
+      // 退场角色的存量账号数：管理员据此决策改派（系统绝不自动改存量数据）。
+      // 表缺失（老库）时降级为 0，不得拖垮整个请求。
+      let usage: Array<{ role: string; n: number }> = [];
+      try {
+        const u = await client.query(
+          `SELECT role, COUNT(*)::int AS n FROM account_user WHERE tenant_id=$1 AND role = ANY($2::text[]) GROUP BY role`,
+          [auth.tenantId, [...RETIRED_ROLES]],
+        );
+        usage = u.rows as Array<{ role: string; n: number }>;
+      } catch {
+        usage = [];
+      }
+      return {
+        items: [
+          // 内置角色（已剔除退场的 dispatcher/service_desk）：显示名改叫法属 PRD 术语配置范畴（090 注释），本步不开放改名
+          ...ASSIGNABLE_BUILTIN_ROLES.map((code) => ({ code, name: code, description: null, enabled: true, builtin: true, sort: null })),
+          ...r.rows.map((x: { code: string; name: string; description: string | null; enabled: boolean; sort: number }) => ({
+            code: x.code, name: x.name, description: x.description ?? null, enabled: x.enabled, builtin: false, sort: x.sort,
+          })),
+        ],
+        retired: RETIRED_ROLES.map((code) => ({
+          code,
+          accounts: usage.find((x) => x.role === code)?.n ?? 0,
+        })),
+      };
+    });
+    return res.json({ ok: true, code: 0, items, retired });
+  } catch (e) {
+    next(e);
+  }
+});
+
+/** POST /api/v1/accounts/roles —— 新建自定义岗位。 */
+router.post('/accounts/roles', async (req, res, next) => {
+  try {
+    const auth = res.locals.auth as AuthLocals;
+    const b = roleCreateSchema.parse(req.body);
+    // 内置角色由代码常量 ROLES 提供，禁止租户建同名行覆盖其语义（与 090 的 role_def_code_reserved 同口径）
+    if (isBuiltinRole(b.code)) {
+      // 退场角色（dispatcher/service_desk）额外说清"此路不通"的原因，避免租户以为是 bug
+      throw new AppError(
+        'BAD_PARAM',
+        isRetiredRole(b.code) ? `角色已退场，不可新建：${b.code}` : `内置角色不可新建：${b.code}`,
+        400,
+      );
+    }
+    const item = await withTenantClient(auth.tenantId, async (client) => {
+      await requirePermission(auth, client, 'role.manage');
+      const r = await client.query(
+        `INSERT INTO role_def (tenant_id, code, name, description, sort)
+         VALUES ($1,$2,$3,$4,$5)
+         ON CONFLICT (tenant_id, code) DO NOTHING
+         RETURNING id, code, name, description, enabled, sort`,
+        [auth.tenantId, b.code, b.name, b.description ?? null, b.sort ?? 100],
+      );
+      // ON CONFLICT DO NOTHING → rowCount 0 = 已存在（比唯一约束 23505 更可控，且不会污染事务）
+      if (r.rowCount === 0) throw new AppError('CONFLICT', `角色已存在：${b.code}`, 409);
+      return r.rows[0];
+    });
+    await audit(auth.username ?? 'unknown', 'role.create', b.code, auth.tenantId, { name: b.name });
+    return res.json({ ok: true, code: 0, item });
+  } catch (e) {
+    next(e);
+  }
+});
+
+/** PATCH /api/v1/accounts/roles/:role —— 改自定义岗位的显示名/说明/启用态/排序。 */
+router.patch('/accounts/roles/:role', async (req, res, next) => {
+  try {
+    const auth = res.locals.auth as AuthLocals;
+    const role = req.params.role;
+    if (!ROLE_CODE_RE.test(role)) throw new AppError('BAD_PARAM', `invalid role code: ${role}`, 400);
+    if (isBuiltinRole(role)) throw new AppError('BAD_PARAM', `内置角色不可修改：${role}`, 400);
+    const b = roleUpdateSchema.parse(req.body ?? {});
+    const item = await withTenantClient(auth.tenantId, async (client) => {
+      await requirePermission(auth, client, 'role.manage');
+      // 只改传了的字段：$4::boolean 区分"没传 description"与"显式传 null 清空"
+      const r = await client.query(
+        `UPDATE role_def SET
+           name        = COALESCE($3, name),
+           description = CASE WHEN $4::boolean THEN $5 ELSE description END,
+           enabled     = COALESCE($6, enabled),
+           sort        = COALESCE($7, sort),
+           updated_at  = now()
+         WHERE tenant_id=$1 AND code=$2
+         RETURNING id, code, name, description, enabled, sort`,
+        [auth.tenantId, role, b.name ?? null, b.description !== undefined, b.description ?? null, b.enabled ?? null, b.sort ?? null],
+      );
+      if (r.rowCount === 0) throw new AppError('NOT_FOUND', `unknown role: ${role}`, 404);
+      return r.rows[0];
+    });
+    await audit(auth.username ?? 'unknown', 'role.update', role, auth.tenantId, b);
+    return res.json({ ok: true, code: 0, item });
+  } catch (e) {
+    next(e);
+  }
+});
+
+/** DELETE /api/v1/accounts/roles/:role —— 删除自定义岗位（有账号在用则 409）。 */
+router.delete('/accounts/roles/:role', async (req, res, next) => {
+  try {
+    const auth = res.locals.auth as AuthLocals;
+    const role = req.params.role;
+    if (!ROLE_CODE_RE.test(role)) throw new AppError('BAD_PARAM', `invalid role code: ${role}`, 400);
+    if (isBuiltinRole(role)) throw new AppError('BAD_PARAM', `内置角色不可删除：${role}`, 400);
+    await withTenantClient(auth.tenantId, async (client) => {
+      await requirePermission(auth, client, 'role.manage');
+      const used = await client.query(
+        `SELECT 1 FROM account_user WHERE tenant_id=$1 AND role=$2 LIMIT 1`,
+        [auth.tenantId, role],
+      );
+      if ((used.rowCount ?? 0) > 0) {
+        throw new AppError('CONFLICT', `角色仍被账号使用，不可删除：${role}（请先改派这些账号）`, 409);
+      }
+      // 级联清权限覆盖行：否则留下取不回的僵尸行（087 迁移清理的就是这类脏数据）
+      await client.query(`DELETE FROM role_permission WHERE tenant_id=$1 AND role=$2`, [auth.tenantId, role]);
+      const r = await client.query(`DELETE FROM role_def WHERE tenant_id=$1 AND code=$2`, [auth.tenantId, role]);
+      if (r.rowCount === 0) throw new AppError('NOT_FOUND', `unknown role: ${role}`, 404);
+    });
+    await audit(auth.username ?? 'unknown', 'role.delete', role, auth.tenantId, null);
     return res.json({ ok: true, code: 0 });
   } catch (e) {
     next(e);
@@ -235,6 +420,11 @@ router.post('/accounts', async (req, res, next) => {
       // G4/H1：建号守卫统一切 role.manage（默认矩阵仅 admin；operator 需租户显式授予——
       // breaking 已报备初一，存量依赖 operator 建号的租户由平台代授 role_permission）。
       await requirePermission(auth, client, 'role.manage');
+      // 地基第二步：角色存在性（内置 OR 本租户 role_def 启用中）。
+      // schema 已挡住形状非法；此处挡"租户凭空造岗"——否则能建出 role_def 里不存在的角色。
+      if (b.role && !(await isRoleUsable(client, tenantId, b.role))) {
+        throw new AppError('BAD_PARAM', `unknown role: ${b.role}`, 400);
+      }
       const dup = await client.query(
         `SELECT 1 FROM account_user WHERE tenant_id=$1 AND username=$2 LIMIT 1`,
         [tenantId, b.username],
@@ -276,6 +466,10 @@ router.put('/accounts/:id', async (req, res, next) => {
     const item = await withTenantClient(tenantId, async (client) => {
       // G4：管理守卫统一 role.manage（async，闭包内查 role_permission）。
       await requirePermission(auth, client, 'role.manage');
+      // 地基第二步：角色存在性（同建号口径）
+      if (b.role && !(await isRoleUsable(client, tenantId, b.role))) {
+        throw new AppError('BAD_PARAM', `unknown role: ${b.role}`, 400);
+      }
       const cur = await client.query(`SELECT ${COLS} FROM account_user WHERE id=$1 AND tenant_id=$2`, [req.params.id, tenantId]);
       if (cur.rowCount === 0) throw new AppError('NOT_FOUND', 'account not found', 404);
       const target = cur.rows[0];

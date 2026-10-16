@@ -23,7 +23,8 @@ export const TRANSPORT_DEF: WorkflowDef = {
   initial: 'pending',
   states: ['pending', 'assigned', 'transporting', 'done', 'exception', 'cancelled'],
   transitions: [
-    { from: 'pending', to: 'assigned', event: 'dispatch', requiredFields: ['assignee'], allowedRoles: ['admin', 'operator', 'dispatcher'] },
+    // 【用户要求①】摘除退场的 dispatcher：operator 本就有 dispatch.override，此处补挂权限点保证零损失。
+    { from: 'pending', to: 'assigned', event: 'dispatch', requiredFields: ['assignee'], allowedRoles: ['admin', 'operator'], allowedPerms: ['dispatch.override'] },
     { from: 'assigned', to: 'transporting', event: 'receive', allowedRoles: ['admin', 'worker'] },
     { from: 'transporting', to: 'done', event: 'complete', allowedRoles: ['admin', 'worker'] },
     { from: 'transporting', to: 'exception', event: 'exception', requiredFields: ['note'] },

@@ -14,7 +14,9 @@
 import { readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { randomBytes } from 'node:crypto';
 import { Pool } from 'pg';
+import { stripPsqlMeta } from '../src/db/psqlMeta';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 // 迁移/种子 SQL 与本脚本同在 backend/ 下；__dirname = backend/scripts，上一级即 backend 根。
@@ -28,7 +30,7 @@ const ADMIN = process.env.PGADMINUSER ?? 'postgres';
 const ADMIN_PWD = process.env.PGADMINPASSWORD ?? process.env.PG_ADMIN_PWD ?? '';
 const APP_ROLE = 'youfu_app';
 // 兼容 YOUFU_APP_PASSWORD / YOUFU_APP_PWD；缺省自动生成并打印
-const APP_PWD = process.env.YOUFU_APP_PASSWORD ?? process.env.YOUFU_APP_PWD ?? crypto.randomBytes(24).toString('hex');
+const APP_PWD = process.env.YOUFU_APP_PASSWORD ?? process.env.YOUFU_APP_PWD ?? randomBytes(24).toString('hex');
 // SSL 模式可配：本地 Docker PG 用 disable；腾讯云 PG 用 require
 const SSLMODE = process.env.PGSSLMODE ?? 'require';
 
@@ -80,7 +82,12 @@ async function main() {
   const migPool = new Pool({ connectionString: adminConn(DBNAME) });
   try {
     for (const file of migrationFiles) {
-      const sql = readFileSync(join(backendRoot, file), 'utf8');
+      // psql 元命令（\echo 等，085 起引入）不是 SQL，pg 协议下发会 syntax error。
+      // 085 是首个引入者 → 修复前全新库初始化必卡在 084 之后。此处做等价清洗（保行号）。
+      const { sql, stripped } = stripPsqlMeta(readFileSync(join(backendRoot, file), 'utf8'));
+      if (stripped.length > 0) {
+        console.warn(`[init-db] WARN ${file}: 剥离 ${stripped.length} 行 psql 元命令（psql -f 下不受影响）`);
+      }
       await migPool.query(sql);
       console.log(`[init-db] migration ok: ${file}`);
     }
@@ -102,7 +109,8 @@ async function main() {
   console.log(`[init-db] ${APP_ROLE} 表/序列/函数权限已补齐`);
 
   // 5) 灌演示 worker 种子（以管理员身份，绕过 RLS 直接写入 t-verification）
-  await runOnce(adminConn(DBNAME), readFileSync(join(backendRoot, '003_seed_workers.sql'), 'utf8'));
+  const seed = stripPsqlMeta(readFileSync(join(backendRoot, '003_seed_workers.sql'), 'utf8'));
+  await runOnce(adminConn(DBNAME), seed.sql);
   console.log('[init-db] worker 种子已写入');
 
   console.log('\n=== 初始化完成 ===');

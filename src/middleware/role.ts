@@ -11,8 +11,41 @@ import type { AuthLocals } from './auth.js';
 // service_desk；approve/reject 用 reviewer）早已引用这两角色，workOrder 抢单门禁也含
 // service_desk，但账号层（z.enum / AccountRole / DB CHECK）建不出 → 审核支线实际仅 admin
 // 可做。此处 ROLES 为角色单一事实源，account.ts/accounts.ts/auth.ts 均派生自本清单。
+// 【用户要求①】dispatcher（派单员）/ service_desk（服务台角色）退场。
+//
+// ⚠️ 为什么**不从 ROLES 里删除这两个 code**（零破坏的唯一正确做法）：
+//   1. 存量 account_user.role 里已有 'dispatcher'/'service_desk' 的行。一旦从 ROLES 移除，
+//      它们立刻变成"自定义角色" → roleRank 由 2 暴跌到 CUSTOM_ROLE_RANK(=worker 的 1)，
+//      存量账号权限当场缩水；ROLE_RANK/DEFAULT_PERM_MATRIX 按 Record<Role> 索引也会缺键。
+//   2. DB CHECK（069/070 迁移）同样以这 6 个 code 为合法值，删常量等于让存量行变非法。
+//   ⇒ 正确做法：**值保留（存量照常登录、照常有权限），但标记为"已退场"**——
+//     退场角色不可新建、不可再分配给新账号、不出现在角色下拉里。
+//     存量账号由管理员自行改派，系统不自动改数据（改数据是破坏性动作，需人决策）。
+//
+// ⚠️ 名字撞车警告：'service_desk' 既是角色 code，**也是业务表名**（018_service_desk.sql）
+//   与业务模块（src/routes/serviceDesk.ts，服务台管理 + 来电弹屏代申告，挂 server.ts:190）。
+//   本退场**只针对角色**，绝不触碰表与模块——删角色 ≠ 删服务台业务。
 export const ROLES = ['admin', 'operator', 'dispatcher', 'worker', 'reviewer', 'service_desk'] as const;
 export type Role = (typeof ROLES)[number];
+
+/**
+ * 已退场角色（用户要求①）：不再作为可选项参与任何"新建 / 分配 / 下拉列表"。
+ * 存量账号保留其角色值与既有权限，直到管理员手动改派。
+ */
+export const RETIRED_ROLES: readonly Role[] = ['dispatcher', 'service_desk'];
+
+/** 是否为已退场角色（不查库，纯常量判定）。 */
+export function isRetiredRole(role: string | undefined | null): boolean {
+  return !!role && (RETIRED_ROLES as readonly string[]).includes(role);
+}
+
+/**
+ * 可新建/可分配的角色（内置 − 退场）：角色下拉、分配校验、GET /accounts/roles 的统一口径。
+ * 自定义角色不在本常量内（租户级，需查 role_def）。
+ */
+export const ASSIGNABLE_BUILTIN_ROLES: readonly Role[] = ROLES.filter(
+  (r) => !(RETIRED_ROLES as readonly string[]).includes(r),
+);
 
 export const PERMS = [
   'dashboard.view',
@@ -98,13 +131,45 @@ export const ROLE_RANK: Record<Role, number> = {
   admin: 4,
 };
 
+// —— 自定义角色（地基第二步）——
+// 090 迁移已建租户级 role_def 表，并放宽 account_user.role / role_permission.role 的枚举 CHECK。
+// 代码层同步：合法角色不再只有内置 6 个，租户自建岗位（如"维修组长" repair_lead）同为合法角色。
+//
+// ⚠️ 为什么要改：改造前 `ROLE_RANK[自定义角色]` 恒为 undefined，
+//   canAssignRole 里 `undefined <= callerRank` 恒 false → **自定义岗位根本分配不出去**
+//   （090 放宽了 DB CHECK，但代码层仍把门关着）。此处给自定义角色一个确定层级。
+
+/** 角色 code 形状（与 090 role_def.code 的 CHECK 同口径，内外一致，避免双标）。 */
+export const ROLE_CODE_RE = /^[a-z][a-z0-9_]{1,31}$/;
+
+/** 自定义角色的兜底层级：与 worker 同层（最低）——自建岗位不得天然高于既有执行岗。 */
+export const CUSTOM_ROLE_RANK: number = ROLE_RANK.worker;
+
+/**
+ * 角色层级解析（单一事实源）：内置角色查 ROLE_RANK，自定义角色取 CUSTOM_ROLE_RANK。
+ * 缺失/空 → 0（fail-closed，与 isAdmin 的 `?? 0` 同口径）。
+ */
+export function roleRank(role: string | undefined): number {
+  if (!role) return 0;
+  return ROLE_RANK[role as Role] ?? CUSTOM_ROLE_RANK;
+}
+
+/** 角色 code 形状校验（内置与自定义同口径）。 */
+export function isValidRoleCode(code: string): boolean {
+  return ROLE_CODE_RE.test(code);
+}
+
 // —— 角色分组（单一事实源，架构🟡12）——
 // 此前 'admin'/'operator' 这类角色名以字面量散落在 config.ts / llmUsage.ts / accounts.ts /
 // workOrder.ts 等处，新增角色要改 N 处。集中到这里，各处只引用分组常量与判定函数。
 /** 管理配置类资源（派单规则 / 术语 / 系统配置 / 账户写）的角色：admin 全权 + operator 业务配置。 */
 export const CONFIG_ROLES: readonly Role[] = ['admin', 'operator'];
-/** 运维类后台动作（SLA 扫描 / 通知自检 / 巡检报表导出）的角色：一线 worker / reviewer 不参与。 */
-export const OPS_ROLES: readonly Role[] = ['admin', 'operator', 'dispatcher'];
+/**
+ * 运维类后台动作（SLA 扫描 / 通知自检 / 巡检报表导出）的角色：一线 worker / reviewer 不参与。
+ * 【用户要求①】摘除退场的 dispatcher；运维职责落到 admin/operator（operator 默认矩阵含
+ * dispatch.override，SLA 扫描/通知自检这类调度运维动作能力零损失）。
+ */
+export const OPS_ROLES: readonly Role[] = ['admin', 'operator'];
 
 /** admin 判定：按 ROLE_RANK 取最高层级（admin=4 且唯一），避免 role === 'admin' 字面量散落。 */
 export function isAdmin(role: string | undefined): boolean {
@@ -146,11 +211,13 @@ export function assertOpsRole(auth: AuthLocals): void {
  * 说明：账户管理写接口本身由 requireConfigRole 限定为 admin/operator，
  * 本门禁进一步收窄 operator 的授权边界，消除"operator 自提权 / 铸造 admin"的内鬼路径。
  */
-export function canAssignRole(caller: Role | undefined, target: Role): boolean {
+export function canAssignRole(caller: string | undefined, target: string): boolean {
   if (caller === 'admin') return true;
-  const callerRank = ROLE_RANK[caller ?? 'worker'];
-  const targetRank = ROLE_RANK[target];
+  // caller 缺失沿用原语义（按 worker 层计，而非 0），避免收紧既有行为。
+  const callerRank = roleRank(caller ?? 'worker');
+  const targetRank = roleRank(target);
   // 非 admin 既不能分配高于自身的角色，也绝不可分配 admin。
+  // 自定义角色取 CUSTOM_ROLE_RANK → operator/worker 均可分配（090 已允许建，此处放行分配）。
   return target !== 'admin' && targetRank <= callerRank;
 }
 

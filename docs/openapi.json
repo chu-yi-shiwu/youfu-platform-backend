@@ -13391,6 +13391,293 @@
           }
         }
       }
+    },
+    "/api/v1/accounts/roles": {
+      "get": {
+        "tags": [
+          "accounts"
+        ],
+        "summary": "— 列出本租户全部可用角色（内置 6 + 自建岗位）。",
+        "description": "地基第二步补漏（2026-10-16）：090 建了 role_def 表但此前无写入入口，角色实际被锁死为内置 6 个。\n本组端点补上生成/停用/删除，与 PUT /accounts/roles/{role}/permissions（配权限）合成闭环。\n\n响应每项含 code / name / description / enabled / builtin / sort；builtin:true 为内置角色（不可改不可删）。\n守卫：role.manage。\n\n来源：src/routes/accounts.ts（GET /accounts/roles）\n\n服务端响应状态码（代码扫描）：200\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "HTTP 200",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "description": "骨架占位：字段以服务端实现为准"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "accounts"
+        ],
+        "summary": "— 新建自定义岗位（角色可配置的\"生成\"入口）。",
+        "description": "校验：code 形状 ^[a-z][a-z0-9_]{1,31}$（与 090 role_def_code_format CHECK 同口径）；\n内置 6 角色禁止同名（role_def_code_reserved）；租户内 code 唯一（重复 → 409）。\n新建角色默认权限为 []（最小权限，须由租户显式授权，不继承任何内置岗）。\n守卫：role.manage。\n\n来源：src/routes/accounts.ts（POST /accounts/roles）\n\n服务端响应状态码（代码扫描）：200\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "description": "骨架占位：字段以服务端实现为准"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "HTTP 200",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "description": "骨架占位：字段以服务端实现为准"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/accounts/roles/{role}": {
+      "patch": {
+        "tags": [
+          "accounts"
+        ],
+        "summary": "— 修改自定义岗位（显示名/说明/启用态/排序）。",
+        "description": "内置角色不可修改（400）。\n停用语义（产品未定，取安全默认）：enabled=false → isRoleUsable 返回 false，\n不能再分配给新账号或改号时选它；已持有该角色的存量账号保持原角色不变（不自动改派）。\n守卫：role.manage。\n\n来源：src/routes/accounts.ts（PATCH /accounts/roles/:role）\n\n服务端响应状态码（代码扫描）：200\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "role",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "路径参数（原代码声明形如 :param）"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "description": "骨架占位：字段以服务端实现为准"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "HTTP 200",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "description": "骨架占位：字段以服务端实现为准"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "accounts"
+        ],
+        "summary": "— 删除自定义岗位。",
+        "description": "前置校验：仍有账号使用该角色 → 409 拒绝（防留下无角色定义的孤儿账号）。\n删除时级联清理该角色的 role_permission 覆盖行（防留下取不回的僵尸权限行）。\n内置角色不可删除（400）。\n守卫：role.manage。\n\n来源：src/routes/accounts.ts（DELETE /accounts/roles/:role）\n\n服务端响应状态码（代码扫描）：200\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "role",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "路径参数（原代码声明形如 :param）"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "HTTP 200",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "description": "骨架占位：字段以服务端实现为准"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/workflow-defs/{entityType}/auto-rules": {
+      "get": {
+        "tags": [
+          "workflowDef"
+        ],
+        "summary": "自动审核规则列表（含未启用）。",
+        "description": "来源：src/routes/workflowDef.ts:677\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "HTTP 200",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "description": "骨架占位：字段以服务端实现为准"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "entityType",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "路径参数（原代码声明形如 :param）"
+          }
+        ]
+      },
+      "put": {
+        "tags": [
+          "workflowDef"
+        ],
+        "summary": "新建或更新一条自动审核规则。enabled 为必填且不默认 true；启用需 workflow.approve；目标态命中终态（closed/cancelled/evaluated）→ 422 拒绝保存。",
+        "description": "来源：src/routes/workflowDef.ts:694\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "HTTP 200",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "description": "骨架占位：字段以服务端实现为准"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "entityType",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "路径参数（原代码声明形如 :param）"
+          }
+        ]
+      }
+    },
+    "/api/v1/workflow-defs/{entityType}/auto-rules/{fromState}/{event}": {
+      "delete": {
+        "tags": [
+          "workflowDef"
+        ],
+        "summary": "删除一条自动审核规则。",
+        "description": "来源：src/routes/workflowDef.ts:733\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "HTTP 200",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "description": "骨架占位：字段以服务端实现为准"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "entityType",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "路径参数（原代码声明形如 :param）"
+          },
+          {
+            "name": "fromState",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "路径参数（原代码声明形如 :param）"
+          },
+          {
+            "name": "event",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "路径参数（原代码声明形如 :param）"
+          }
+        ]
+      }
     }
   },
   "components": {

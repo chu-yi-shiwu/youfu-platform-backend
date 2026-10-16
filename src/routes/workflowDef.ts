@@ -10,7 +10,7 @@
 // 兼容性：原写路径保留、code/ok 不变，仅新增 draft 字段与行为变化（发版说明标注 breaking）。
 import { Router } from 'express';
 import { z } from 'zod';
-import { withTenantClient } from '../db/pool.js';
+import pool, { withTenantClient } from '../db/pool.js';
 import { AppError } from '../middleware/error.js';
 import { requirePermission, requireAnyPermission } from '../middleware/role.js';
 import { getWorkflowDef, saveWorkflowDef, ensureWorkflowDef, getWorkflowDefVersion, listWorkflowDefHistory, getWorkflowDefHistoryVersion, countInflightByStates } from '../engine/workflowDef.js';
@@ -25,9 +25,32 @@ import {
 } from '../engine/workflowDefChange.js';
 import { THEME_TEMPLATES, themeLabel, type ThemeTemplate } from '../engine/themes.js';
 import { ensureAcceptanceEdges } from '../engine/acceptanceEdges.js'; // 批次三：验收边幂等注入
+import { assertAutoRuleSavable } from '../engine/autoRules.js'; // 地基④：自动审核规则红线校验
+import { listAutoRules, upsertAutoRule, deleteAutoRule } from '../repo/autoRule.js';
 import type { WorkflowDef } from '../engine/stateMachine.js';
 
 const router = Router();
+
+// ---- 审计（与 accounts.ts 同口径：append-only platform_audit；失败不阻断主流程）----
+// 自动审核规则的建/改/删属"会真实改变工单走向"的高风险配置，必须留痕可追溯。
+async function audit(
+  actor: string,
+  action: string,
+  resource?: string | null,
+  targetTenant?: string | null,
+  payload?: unknown,
+): Promise<void> {
+  try {
+    await pool.query(
+      `INSERT INTO platform_audit (actor, action, resource, target_tenant, payload) VALUES ($1,$2,$3,$4,$5)`,
+      [actor, action, resource ?? null, targetTenant ?? null, payload ? JSON.stringify(payload) : null],
+    );
+  } catch (e) {
+    console.warn('[workflowDef] platform_audit 写入失败（不阻断主流程）', {
+      actor, action, resource, targetTenant, err: e instanceof Error ? e.message : String(e),
+    });
+  }
+}
 
 // 业务主题模板清单（下拉生成数据源）。
 router.get('/themes', async (_req, res) => {
@@ -612,6 +635,114 @@ router.post('/:entityType/import', async (req, res, next) => {
       draft: true,
       version: 'draft-pending-approval',
     });
+  } catch (e) {
+    next(e);
+  }
+});
+
+// ============ 自动审核规则（地基④：租户可配，**默认关闭**） ============
+// 用户原意（stateMachine.ts:22 原文）：「审核员不是单独一个人，是一个权限属性，
+//   它可以加给谁一个审核权限，或者配置自动审核规则。」
+// 前半句（审核 = 可叠加权限属性）由 allowedPerms 落地；这组分端点是后半句。
+//
+// 🔴 红线（stateMachine.ts:5-6）：引擎绝不自动推进到终态。
+//   自动审核只能推到中间态（pending_review → review_passed / processing），
+//   绝不能自动 close / cancel / satisfy。守线三道闸：
+//     ① schema 层 z.enum 只收 approve / reject；
+//     ② engine/autoRules.ts 的 assertAutoRuleSavable：按本租户 def 解析真实 to_state，
+//        命中终态 → 422 拒绝保存（写库前就挡住，不等运行期出事）；
+//     ③ 094 迁移 DB CHECK 同款白名单。
+//   另：`enabled` 为必填且不默认 true —— 建规则 ≠ 启用，杜绝"配了就自动跑"误伤存量。
+//   启用（enabled=true）额外要 workflow.approve：开自动审核是把关人级别的决定。
+
+const autoRuleSchema = z.object({
+  from_state: z.string().regex(/^[a-z][a-z0-9_]{0,31}$/, 'from_state 形状非法'),
+  event: z.enum(['approve', 'reject']),
+  // 维度严格对应 work_orders 真实列（priority / catalog / ext.has_exception）；
+  // 本表无金额列，故不提供金额条件——不实现取不到数的假条件。
+  conditions: z
+    .object({
+      priority_in: z.array(z.string()).optional(),
+      categories: z.array(z.string()).optional(),
+      no_exception: z.boolean().nullable().optional(),
+    })
+    .optional()
+    .default({}),
+  // 必填：不允许"不传就默认启用"。默认启用 = 配了就自动跑，属误伤风险。
+  enabled: z.boolean(),
+  note: z.string().max(200).nullable().optional(),
+});
+
+/** GET /api/v1/workflow/def/:entityType/auto-rules —— 列出本租户全部自动审核规则（含未启用）。 */
+router.get('/:entityType/auto-rules', async (req, res, next) => {
+  try {
+    const auth = res.locals.auth;
+    const tenantId = auth.tenantId;
+    const { entityType } = req.params;
+    assertEntityType(entityType);
+    const items = await withTenantClient(tenantId, async (client) => {
+      await requireAnyPermission(auth, client, ['workflow.edit', 'workflow.approve']);
+      return listAutoRules(client, tenantId, entityType);
+    });
+    return res.json({ ok: true, code: 0, entityType, items });
+  } catch (e) {
+    next(e);
+  }
+});
+
+/** PUT /api/v1/workflow/def/:entityType/auto-rules —— 新建或更新一条自动审核规则。 */
+router.put('/:entityType/auto-rules', async (req, res, next) => {
+  try {
+    const auth = res.locals.auth;
+    const tenantId = auth.tenantId;
+    const { entityType } = req.params;
+    assertEntityType(entityType);
+    const b = autoRuleSchema.parse(req.body);
+    const item = await withTenantClient(tenantId, async (client) => {
+      await requirePermission(auth, client, 'workflow.edit');
+      // 启用自动审核是把关人级别的决定：额外要 workflow.approve（关掉只需 workflow.edit）
+      if (b.enabled) await requirePermission(auth, client, 'workflow.approve');
+      const def = await getWorkflowDef(client, tenantId, entityType as never);
+      // 红线闸②：按本租户真实流程解析目标态，指向终态直接 422 拒绝保存
+      const { to } = assertAutoRuleSavable(def, { fromState: b.from_state, event: b.event });
+      const saved = await upsertAutoRule(client, tenantId, {
+        entityType,
+        fromState: b.from_state,
+        event: b.event,
+        conditions: {
+          priorityIn: b.conditions.priority_in ?? null,
+          categories: b.conditions.categories ?? null,
+          noException: b.conditions.no_exception ?? null,
+        },
+        enabled: b.enabled,
+        note: b.note ?? null,
+      });
+      return { ...saved, to_state: to };
+    });
+    await audit(auth.username ?? 'unknown', 'workflow.autorule.upsert', `${entityType}/${b.from_state}/${b.event}`, tenantId, {
+      enabled: b.enabled,
+      conditions: b.conditions,
+    });
+    return res.json({ ok: true, code: 0, entityType, item });
+  } catch (e) {
+    next(e);
+  }
+});
+
+/** DELETE /api/v1/workflow/def/:entityType/auto-rules/:fromState/:event —— 删除一条规则。 */
+router.delete('/:entityType/auto-rules/:fromState/:event', async (req, res, next) => {
+  try {
+    const auth = res.locals.auth;
+    const tenantId = auth.tenantId;
+    const { entityType, fromState, event } = req.params;
+    assertEntityType(entityType);
+    const ok = await withTenantClient(tenantId, async (client) => {
+      await requirePermission(auth, client, 'workflow.edit');
+      return deleteAutoRule(client, tenantId, entityType, fromState, event);
+    });
+    if (!ok) throw new AppError('NOT_FOUND', `auto rule not found: ${fromState}/${event}`, 404);
+    await audit(auth.username ?? 'unknown', 'workflow.autorule.delete', `${entityType}/${fromState}/${event}`, tenantId, {});
+    return res.json({ ok: true, code: 0, entityType, deleted: true });
   } catch (e) {
     next(e);
   }

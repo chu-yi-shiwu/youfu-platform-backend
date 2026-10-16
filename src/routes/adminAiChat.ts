@@ -24,7 +24,9 @@ const adminChatSchema = z.object({
 });
 
 // AI 助理可见角色（worker 不开放——移动端自有对话通道，最小权限）
-const AI_CHAT_ROLES: readonly string[] = ['admin', 'operator', 'reviewer', 'service_desk'];
+// 【用户要求①】摘除退场的 service_desk（AI 对话是"权限属性"而非"某一岗位"，
+// 需要开放给自建岗位时，由租户经 role_permission 授予对应权限点，不再靠内置角色名单）。
+const AI_CHAT_ROLES: readonly string[] = ['admin', 'operator', 'reviewer'];
 
 router.post('/admin/ai-chat', async (req, res, next) => {
   try {

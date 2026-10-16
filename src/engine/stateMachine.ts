@@ -17,7 +17,39 @@ export interface WorkflowTransition {
   // A+ 扩展：把 UOne 流转"规则粒度"建模进可配置（老系统写死，此处可配）
   requiredFields?: string[]; // 该流转必填字段（缺失 → 422）
   allowedRoles?: string[];   // 允许执行的角色；为空/未定义 = 租户内任意已认证用户可走（向后兼容，避免门死自己）
+  // 【地基第二步】允许执行的**权限点**（任一命中即放行）；与 allowedRoles 取**并集**。
+  // 存在意义：把"审核"这类能力从"一个岗位"还原成"可叠加给任何角色的属性"——
+  // 用户原意：审核员不是单独一个人，是一个权限属性，可挂给谁，或配自动审核规则。
+  // 例：approve/reject 声明 allowedPerms:['workflow.approve'] 后，租户把该权限点授予
+  // 自建岗位"维修组长"，该岗位即可审核——无需新增内置角色、无需改代码。
+  allowedPerms?: string[];
   sideEffects?: string[];    // 副作用标记：pause_sla / resume_sla / notify_*（真实落库或记录）
+}
+
+/** 门禁判定的执行者上下文（纯数据，便于单测）。 */
+export interface TransitionActor {
+  /** 执行者角色 code（内置 6 角色或租户自建 role_def code）。 */
+  role?: string;
+  /** 执行者实际生效的权限点集合（来自 listPerms：租户覆盖行优先，否则默认矩阵）。 */
+  perms?: readonly string[];
+}
+
+/**
+ * 转移门禁判定（纯函数，单一事实源）：allowedRoles ∪ allowedPerms **并集**。
+ *  - 两者均未声明/为空 → 放行（向后兼容，避免门死自己）；
+ *  - 任一命中 → 放行（并集，非交集：新增权限门禁不得反过来收窄既有角色门禁）；
+ *  - 都不命中 → 拒。
+ * role 缺失视同"不在白名单"（R9-003：不得因缺字段短路放行）。
+ */
+export function isTransitionAllowed(t: WorkflowTransition, actor: TransitionActor = {}): boolean {
+  const roles = t.allowedRoles;
+  const perms = t.allowedPerms;
+  const hasRoleGate = Array.isArray(roles) && roles.length > 0;
+  const hasPermGate = Array.isArray(perms) && perms.length > 0;
+  if (!hasRoleGate && !hasPermGate) return true;
+  if (hasRoleGate && roles!.includes(actor.role ?? '')) return true;
+  if (hasPermGate && (actor.perms ?? []).some((p) => perms!.includes(p))) return true;
+  return false;
 }
 
 export interface AutoRoute {
@@ -81,39 +113,46 @@ export const RICH_WORK_ORDER_DEF: WorkflowDef = {
     { from: 'processing', to: 'completed', event: 'complete' },
     // —— UOne 粒度主干（取之所长）——
     { from: 'draft', to: 'pending_accept', event: 'submit' },
-    { from: 'pending_accept', to: 'pending_dispatch', event: 'accept', allowedRoles: ['admin', 'dispatcher', 'service_desk'] },
-    { from: 'pending_dispatch', to: 'assigned', event: 'dispatch', allowedRoles: ['admin', 'dispatcher', 'service_desk'], requiredFields: ['assignee'] },
+    // 【用户原始诉求②"师傅不能接单谁接单？师傅的职能就是接单执行"】
+    // 原边 allowedRoles = ['admin','dispatcher','service_desk'] —— **不含 worker**，
+    // 即真正干活的师傅接不了单，接单权反而落在 dispatcher/service_desk 两个待退场角色上。
+    // 此为"师傅不能接单"的代码根因。修复：**加 worker**（纯加法，存量三者权限一字不动）。
+    { from: 'pending_accept', to: 'pending_dispatch', event: 'accept', allowedRoles: ['admin', 'worker'] },
+    { from: 'pending_dispatch', to: 'assigned', event: 'dispatch', allowedRoles: ['admin'], allowedPerms: ['dispatch.override'], requiredFields: ['assignee'] },
     { from: 'assigned', to: 'arrived', event: 'arrive', allowedRoles: ['admin', 'worker'] },
     // 074 里程碑：到场后 start 开始处理；保留 assigned→processing 'receive' 旧边（无到场打卡的
     // 旧客户端/旧单兼容路径，绝不门死存量流转）。arrived 也属活跃态 → 补 cancel 逃逸边。
     { from: 'arrived', to: 'processing', event: 'start', allowedRoles: ['admin', 'worker'] },
     { from: 'assigned', to: 'processing', event: 'receive', allowedRoles: ['admin', 'worker'] },
     { from: 'assigned', to: 'pending_dispatch', event: 'return', requiredFields: ['return_reason'] },
-    { from: 'assigned', to: 'assigned', event: 'forward', requiredFields: ['assignee'], allowedRoles: ['admin', 'dispatcher', 'service_desk'] },
+    { from: 'assigned', to: 'assigned', event: 'forward', requiredFields: ['assignee'], allowedRoles: ['admin'], allowedPerms: ['dispatch.override'] },
     { from: 'processing', to: 'paused', event: 'pause', sideEffects: ['pause_sla'] },
     { from: 'paused', to: 'processing', event: 'resume', sideEffects: ['resume_sla'] },
     { from: 'processing', to: 'suspended', event: 'suspend', requiredFields: ['suspend_reason'], sideEffects: ['pause_sla'] },
     { from: 'suspended', to: 'processing', event: 'resume', sideEffects: ['resume_sla'] },
     { from: 'processing', to: 'pending_review', event: 'submit_review', allowedRoles: ['admin', 'worker'] },
-    { from: 'pending_review', to: 'review_passed', event: 'approve', allowedRoles: ['admin', 'reviewer'] },
-    { from: 'pending_review', to: 'processing', event: 'reject', allowedRoles: ['admin', 'reviewer'] },
+    // 审核 = 可叠加权限属性（地基第二步）：allowedRoles 原样保留（存量零回归），
+    // 追加 allowedPerms:['workflow.approve'] —— 租户把该权限点授给任何角色（含自建岗位）
+    // 即获得审核权，不必再新增"审核员"这个岗位。
+    { from: 'pending_review', to: 'review_passed', event: 'approve', allowedRoles: ['admin', 'reviewer'], allowedPerms: ['workflow.approve'] },
+    { from: 'pending_review', to: 'processing', event: 'reject', allowedRoles: ['admin', 'reviewer'], allowedPerms: ['workflow.approve'] },
     { from: 'review_passed', to: 'completed', event: 'complete' },
     { from: 'completed', to: 'closed', event: 'close', requiredFields: ['close_reason'] },
     { from: 'closed', to: 'evaluated', event: 'satisfy', requiredFields: ['satisfaction_score'] },
     // —— 抢单大厅（滴滴式未命中自动派单时归属，人员可抢单）——
-    { from: 'claim_hall', to: 'assigned', event: 'claim', allowedRoles: ['worker', 'admin', 'dispatcher', 'service_desk'] },
-    { from: 'claim_hall', to: 'assigned', event: 'dispatch', requiredFields: ['assignee'], allowedRoles: ['admin', 'dispatcher', 'service_desk'] },
+    { from: 'claim_hall', to: 'assigned', event: 'claim', allowedRoles: ['worker', 'admin'] },
+    { from: 'claim_hall', to: 'assigned', event: 'dispatch', requiredFields: ['assignee'], allowedRoles: ['admin'], allowedPerms: ['dispatch.override'] },
     // —— 撤销（活跃态 → cancelled）——
-    { from: 'draft', to: 'cancelled', event: 'cancel', requiredFields: ['cancel_reason'], allowedRoles: ['admin', 'dispatcher'] },
-    { from: 'claim_hall', to: 'cancelled', event: 'cancel', requiredFields: ['cancel_reason'], allowedRoles: ['admin', 'dispatcher'] },
-    { from: 'pending_accept', to: 'cancelled', event: 'cancel', requiredFields: ['cancel_reason'], allowedRoles: ['admin', 'dispatcher'] },
-    { from: 'pending_dispatch', to: 'cancelled', event: 'cancel', requiredFields: ['cancel_reason'], allowedRoles: ['admin', 'dispatcher'] },
-    { from: 'assigned', to: 'cancelled', event: 'cancel', requiredFields: ['cancel_reason'], allowedRoles: ['admin', 'dispatcher'] },
-    { from: 'arrived', to: 'cancelled', event: 'cancel', requiredFields: ['cancel_reason'], allowedRoles: ['admin', 'dispatcher'] },
-    { from: 'processing', to: 'cancelled', event: 'cancel', requiredFields: ['cancel_reason'], allowedRoles: ['admin', 'dispatcher'] },
-    { from: 'paused', to: 'cancelled', event: 'cancel', requiredFields: ['cancel_reason'], allowedRoles: ['admin', 'dispatcher'] },
-    { from: 'suspended', to: 'cancelled', event: 'cancel', requiredFields: ['cancel_reason'], allowedRoles: ['admin', 'dispatcher'] },
-    { from: 'pending_review', to: 'cancelled', event: 'cancel', requiredFields: ['cancel_reason'], allowedRoles: ['admin', 'dispatcher'] },
+    { from: 'draft', to: 'cancelled', event: 'cancel', requiredFields: ['cancel_reason'], allowedRoles: ['admin'], allowedPerms: ['ticket.manage'] },
+    { from: 'claim_hall', to: 'cancelled', event: 'cancel', requiredFields: ['cancel_reason'], allowedRoles: ['admin'], allowedPerms: ['ticket.manage'] },
+    { from: 'pending_accept', to: 'cancelled', event: 'cancel', requiredFields: ['cancel_reason'], allowedRoles: ['admin'], allowedPerms: ['ticket.manage'] },
+    { from: 'pending_dispatch', to: 'cancelled', event: 'cancel', requiredFields: ['cancel_reason'], allowedRoles: ['admin'], allowedPerms: ['ticket.manage'] },
+    { from: 'assigned', to: 'cancelled', event: 'cancel', requiredFields: ['cancel_reason'], allowedRoles: ['admin'], allowedPerms: ['ticket.manage'] },
+    { from: 'arrived', to: 'cancelled', event: 'cancel', requiredFields: ['cancel_reason'], allowedRoles: ['admin'], allowedPerms: ['ticket.manage'] },
+    { from: 'processing', to: 'cancelled', event: 'cancel', requiredFields: ['cancel_reason'], allowedRoles: ['admin'], allowedPerms: ['ticket.manage'] },
+    { from: 'paused', to: 'cancelled', event: 'cancel', requiredFields: ['cancel_reason'], allowedRoles: ['admin'], allowedPerms: ['ticket.manage'] },
+    { from: 'suspended', to: 'cancelled', event: 'cancel', requiredFields: ['cancel_reason'], allowedRoles: ['admin'], allowedPerms: ['ticket.manage'] },
+    { from: 'pending_review', to: 'cancelled', event: 'cancel', requiredFields: ['cancel_reason'], allowedRoles: ['admin'], allowedPerms: ['ticket.manage'] },
   ],
   config: {
     // 完成态口径（成功结束）：含"已完成"里程碑态 completed（非终态，但工作已做完）+ closed/evaluated。

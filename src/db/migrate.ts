@@ -12,6 +12,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { Pool } from 'pg';
 import 'dotenv/config';
+import { stripPsqlMeta } from './psqlMeta.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const migrationsDir = join(__dirname, '..', '..');
@@ -61,7 +62,14 @@ async function main() {
         console.log(`skip (already applied): ${file}`);
         continue;
       }
-      const sql = readFileSync(join(migrationsDir, file), 'utf8');
+      // psql 元命令（\echo 等，085 起引入）不是 SQL，走 pg 协议直接下发会 syntax error。
+      // 部署契约仍是 `psql -f`（认元命令）；此处为无 psql 的通道做等价清洗。
+      const { sql, stripped } = stripPsqlMeta(readFileSync(join(migrationsDir, file), 'utf8'));
+      if (stripped.length > 0) {
+        console.warn(
+          `[migrate] WARN ${file}: 剥离 ${stripped.length} 行 psql 元命令（psql -f 下仍会打印，此处仅为适配 pg 协议）`,
+        );
+      }
       await pool.query(sql);
       await pool.query('INSERT INTO _migrations(name) VALUES ($1) ON CONFLICT DO NOTHING', [file]);
       applied.add(file);

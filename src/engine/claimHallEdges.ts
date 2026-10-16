@@ -22,10 +22,15 @@ import type { WorkflowDef, WorkflowTransition } from './stateMachine.js';
 export const CLAIM_HALL_STATE = 'claim_hall';
 
 /** 大厅三条出边（与 stateMachine.ts RICH def 预置边逐字一致，角色门禁同源）。 */
+// 【用户要求①】dispatcher / service_desk 退场：三条出边的角色白名单同步摘除这两个角色，
+// 其职能改由**权限点**承载（与 stateMachine.ts RICH def 逐字同源，两处必须一起改）：
+//   claim   —— 抢单是执行动作，worker/admin 足够，不退权限点；
+//   dispatch—— 派单改挂 dispatch.override（operator 默认矩阵本就含该点 → 派单能力零损失）；
+//   cancel  —— 取消改挂 ticket.manage（operator 默认矩阵本就含该点 → 取消能力零损失）。
 export const CLAIM_HALL_EDGES: readonly WorkflowTransition[] = [
-  { from: 'claim_hall', to: 'assigned', event: 'claim', allowedRoles: ['worker', 'admin', 'dispatcher', 'service_desk'] },
-  { from: 'claim_hall', to: 'assigned', event: 'dispatch', requiredFields: ['assignee'], allowedRoles: ['admin', 'dispatcher', 'service_desk'] },
-  { from: 'claim_hall', to: 'cancelled', event: 'cancel', requiredFields: ['cancel_reason'], allowedRoles: ['admin', 'dispatcher'] },
+  { from: 'claim_hall', to: 'assigned', event: 'claim', allowedRoles: ['worker', 'admin'] },
+  { from: 'claim_hall', to: 'assigned', event: 'dispatch', requiredFields: ['assignee'], allowedRoles: ['admin'], allowedPerms: ['dispatch.override'] },
+  { from: 'claim_hall', to: 'cancelled', event: 'cancel', requiredFields: ['cancel_reason'], allowedRoles: ['admin'], allowedPerms: ['ticket.manage'] },
 ] as const;
 
 export interface EnsureClaimHallStateResult {

@@ -6,10 +6,22 @@
 // （如 DEFAULT 4 态图缺 closed），避免注入后 isKnownState 校验拒绝合法目标态。
 import type { WorkflowDef, WorkflowTransition } from './stateMachine.js';
 
-/** 验收两条边（allowedRoles 与验收端点角色门禁一致：admin/operator/reviewer）。 */
+/**
+ * 验收两条边（allowedRoles 与验收端点角色门禁一致：admin/operator/reviewer）。
+ *
+ * 地基第二步（用户拍板 2026-10-16）：验收与审核**同口径**改为"可叠加权限属性"——
+ * 追加 allowedPerms:['workflow.approve']。判定为 allowedRoles ∪ allowedPerms **并集**，
+ * 故 admin/operator/reviewer 三条老路径逐字不变（存量零回归），
+ * 新增的是"租户把 workflow.approve 授给任意角色（含自建岗位）→ 该角色即可验收"。
+ *
+ * 【命名纪律】此处**沿用既有权限点** workflow.approve（role.ts:26 PERMS 清单已登记），
+ * 未新造权限点名：验收通过/驳回本就是审批动作，与 workflowDef 的审批端点同语义族。
+ * 若产品要求"验收"与"流程配置审批"拆成两个独立权限点，需产品给定权限点名后再拆。
+ * 【存量】租户已落库的 def 不含 allowedPerms → 由 091 迁移回填（本常量只影响新注入的 def）。
+ */
 export const ACCEPTANCE_EDGES: readonly WorkflowTransition[] = [
-  { from: 'completed', to: 'closed', event: 'acceptance_pass', allowedRoles: ['admin', 'operator', 'reviewer'] },
-  { from: 'completed', to: 'processing', event: 'acceptance_reject', allowedRoles: ['admin', 'operator', 'reviewer'] },
+  { from: 'completed', to: 'closed', event: 'acceptance_pass', allowedRoles: ['admin', 'operator', 'reviewer'], allowedPerms: ['workflow.approve'] },
+  { from: 'completed', to: 'processing', event: 'acceptance_reject', allowedRoles: ['admin', 'operator', 'reviewer'], allowedPerms: ['workflow.approve'] },
 ] as const;
 
 /** 验收事件前缀（Y3 防后门判定与目标态解析共用）。 */

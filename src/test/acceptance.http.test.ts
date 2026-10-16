@@ -73,6 +73,15 @@ interface AccHandlersOpts {
   workerProfileId?: string | null;
   /** E-8 QA P3-1：双档案场景——worker 反查返回多行（任一命中 assignee 即 403） */
   workerProfileIds?: string[];
+  /**
+   * 地基第二步：租户 role_permission 覆盖行（listPerms 数据源）。
+   * 验收/审批边声明 allowedPerms 后，**非 admin 且非 dev** 的角色会惰性查一次该表：
+   *   - 不传（undefined）→ rows=[] → 回退默认矩阵（默认矩阵不含 workflow.approve
+   *     → 放行与否完全由 allowedRoles 决定 = 改造前行为，存量用例逐字不变）；
+   *   - 传 ['workflow.approve'] → 模拟租户把审批权限授给了当前角色。
+   * admin 恒短路返回全量 PERMS（role.ts:215），dev 模式同理，都不查本表。
+   */
+  perms?: string[];
 }
 
 function acceptanceHandlers(opts: AccHandlersOpts = {}): Handler[] {
@@ -128,6 +137,11 @@ function acceptanceHandlers(opts: AccHandlersOpts = {}): Handler[] {
     },
     { match: (t) => t.includes('UPDATE settlement SET total'), reply: () => ({ rows: [], rowCount: 1 }) },
     { match: (t) => t.startsWith('SELECT * FROM settlement WHERE id = $1'), reply: (_t, p) => ({ rows: [{ id: p[0], status: 'draft', item_count: 1 }] }) },
+    // 地基第二步：惰性 listPerms（仅非 admin / 非 dev 角色触发，见 opts.perms 注释）
+    {
+      match: (t) => t.includes('FROM role_permission WHERE tenant_id'),
+      reply: () => ({ rows: (opts.perms ?? []).map((p) => ({ perm: p })), rowCount: (opts.perms ?? []).length }),
+    },
     { match: (t) => t.includes('sla_due_at = NULL'), reply: () => ({ rows: [], rowCount: 1 }) },
     { match: (t) => t.includes("sla_due_at = now() + ($3::int * interval '1 minute')"), reply: () => ({ rows: [], rowCount: 1 }) },
   ];
@@ -223,6 +237,51 @@ describe('① 验收角色门禁（prod 模式 · 由 workflow_def 边的 allowe
     expect((await accept({ result: 'reject' }, { role: 'worker' })).status).toBe(403);
     h.client = makeClient(acceptanceHandlers(), { strict: true }).client;
     expect((await accept({ result: 'reject' }, { role: 'reviewer' })).status).toBe(200);
+  });
+});
+
+describe('①c 验收 = 可叠加权限属性（地基第二步：allowedRoles ∪ allowedPerms 并集）', () => {
+  /**
+   * 本组是"验收改权限属性"的**验收证据**：
+   *   - 用例 1/2 互为反转：同一自定义岗位，仅因 role_permission 多一行就 403 → 200，
+   *     证明门禁确实读权限点（改造前这两条必然同为 403，因为只认角色名）；
+   *   - 用例 3 证明权限点可越过内置角色白名单（worker 原本恒 403）；
+   *   - 用例 4/5 是**存量回归护栏**：未授权者行为与改造前逐字一致（该 200 仍 200、该 403 仍 403）。
+   */
+  const CUSTOM_ROLE = 'qa_inspector'; // ROLE_CODE_RE：^[a-z][a-z0-9_]{1,31}$，非内置 6 角色
+
+  it('自定义岗位未授 workflow.approve → 403（不在 allowedRoles 内，权限点也没有）', async () => {
+    h.client = makeClient(acceptanceHandlers({ perms: [] }), { strict: true }).client;
+    const r = await accept({ result: 'pass' }, { role: CUSTOM_ROLE });
+    expect(r.status, `期望 403，实际 ${r.status} ${JSON.stringify(r.body)}`).toBe(403);
+  });
+
+  it('同一自定义岗位 + 租户授予 workflow.approve → 200（权限属性生效，无需改角色白名单）', async () => {
+    h.client = makeClient(acceptanceHandlers({ perms: ['workflow.approve'] }), { strict: true }).client;
+    const r = await accept({ result: 'pass' }, { role: CUSTOM_ROLE });
+    expect(r.status, `期望 200，实际 ${r.status} ${JSON.stringify(r.body)}`).toBe(200);
+    expect(r.body.ok).toBe(true);
+    expect(r.body.status).toBe('closed');
+  });
+
+  it('内置 worker + 授予 workflow.approve → 200（权限点可越过内置角色白名单）', async () => {
+    h.client = makeClient(acceptanceHandlers({ perms: ['workflow.approve'] }), { strict: true }).client;
+    const r = await accept({ result: 'reject' }, { role: 'worker' });
+    expect(r.status, `期望 200，实际 ${r.status} ${JSON.stringify(r.body)}`).toBe(200);
+  });
+
+  it('存量回归：operator/reviewer 未授权任何权限点 → 仍 200（allowedRoles 保底，改造前行为不变）', async () => {
+    for (const role of ['operator', 'reviewer']) {
+      h.client = makeClient(acceptanceHandlers({ perms: [] }), { strict: true }).client;
+      const r = await accept({ result: 'pass' }, { role });
+      expect(r.status, `role=${role} 期望 200，实际 ${r.status} ${JSON.stringify(r.body)}`).toBe(200);
+    }
+  });
+
+  it('拒绝回归：worker 只授 ticket.manage（非 workflow.approve）→ 仍 403（不得误放宽）', async () => {
+    h.client = makeClient(acceptanceHandlers({ perms: ['ticket.manage'] }), { strict: true }).client;
+    const r = await accept({ result: 'pass' }, { role: 'worker' });
+    expect(r.status, `期望 403，实际 ${r.status} ${JSON.stringify(r.body)}`).toBe(403);
   });
 });
 

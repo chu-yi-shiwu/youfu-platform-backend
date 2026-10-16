@@ -104,6 +104,14 @@ function acceptanceHandlers(orderStatus: string, opts?: { slaMinutes?: number | 
     { match: (t: string) => t.startsWith('SELECT * FROM settlement WHERE id = $1'), reply: (_t: string, p: any[]) => ({ rows: [{ id: p[0], status: 'draft', item_count: 1 }] }) },
     { match: (t: string) => t.includes('sla_due_at = NULL'), reply: () => ({ rows: [], rowCount: 1 }) },
     { match: (t: string) => t.includes("sla_due_at = now() + ($3::int * interval '1 minute')"), reply: () => ({ rows: [], rowCount: 1 }) },
+    // 地基第二步：验收边声明 allowedPerms 后，非 admin 角色（如 reviewer）会惰性查一次
+    // role_permission（listPerms）。rows=[] = 无覆盖行 → 回退默认矩阵（reviewer 默认矩阵不含
+    // workflow.approve）→ 放行与否仍由 allowedRoles 决定，本用例期望值不变。
+    { match: (t: string) => t.includes('FROM role_permission WHERE tenant_id'), reply: () => ({ rows: [], rowCount: 0 }) },
+    // 地基④：transition 落库后会惰性查一次启用中的自动审核规则。
+    // rows=[] = 本租户未配/未启用任何规则 → tryAutoAdvance 立即返回 null（零自动行为），
+    // 与改造前逐字等价。这条 handler 的存在本身就是"新增 SQL 必须被感知"的护栏在工作。
+    { match: (t: string) => t.includes('FROM workflow_auto_rule'), reply: () => ({ rows: [], rowCount: 0 }) },
   ];
 }
 
