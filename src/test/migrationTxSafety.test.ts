@@ -77,4 +77,20 @@ describe('迁移事务安全（防半截）', () => {
     expect(branchLines.length, '必须有 BEGIN 探测分支，否则 059 会被双层包裹').toBeGreaterThan(0);
     expect(readFileSync(join(ROOT, '059_idempotency_tenant_scoped.sql'), 'utf8')).toMatch(/^\s*BEGIN\s*;/im);
   });
+
+  it('⑦ 调用 sudo -u postgres psql 前必须切到 postgres 可进入的目录（防 could not change directory）', () => {
+    // 真事故（2026-10-17 02:31，ECS 真机）：在 /root 下执行 `sudo -u postgres pg_dump` →
+    //   "could not change directory to /root: Permission denied"，命令直接失败。
+    // 成因：sudo -u 不重置 CWD，postgres 用户对 /root（0700）无 x 权限。
+    //   ssh 非交互式远程命令的 CWD 恰好就是 $HOME=/root ⇒ 用 ssh 包一层必踩。
+    // 同类证据（本仓库早有，tools/wfdef_arrived_patch_20260906.mjs:115）：
+    //   "sudo -u postgres psql 需要读该文件：mkdtemp 默认 0700（仅 root 可入），放开为 0755/0644"
+    // 因此脚本不得依赖调用时的 CWD，必须显式切到全局可进入目录（/tmp，1777）。
+    const sh = readFileSync(join(ROOT, 'scripts', 'migrate-as-owner.sh'), 'utf8');
+    const lines = sh.split('\n').filter((l) => !/^\s*#/.test(l));
+    const cdIdx = lines.findIndex((l) => /^\s*cd\s+("\$\{?RUN_DIR|'\/tmp'|\/tmp)/.test(l) || /^\s*cd\s+\/tmp\s*$/.test(l));
+    const psqlIdx = lines.findIndex((l) => /sudo\s+-u\s+postgres\s+psql/.test(l));
+    expect(cdIdx, '必须有一条非注释的 cd 到 /tmp（或 $RUN_DIR，默认 /tmp）').toBeGreaterThanOrEqual(0);
+    expect(psqlIdx).toBeGreaterThan(cdIdx);
+  });
 });

@@ -4,12 +4,20 @@
 # 因此迁移必须在 ECS 上以 postgres 身份运行。本脚本保证只应用 _migrations 中未记录的项。
 set -euo pipefail
 BACKEND_DIR="${1:-/opt/youfu/backend}"
+# postgres 用户的运行目录：sudo -u 不重置 CWD，若调用时 CWD 是 /root（0700，postgres 无 x 权限）
+# 会直接报 "could not change directory to /root: Permission denied" 而失败 ——
+# ssh 非交互式远程命令的 CWD 恰好就是 $HOME=/root，用 ssh 包一层必踩。
+# 因此先在 BACKEND_DIR 取文件清单，再显式切到 /tmp（1777，任何用户可进入）后才调 psql。
+RUN_DIR="${RUN_DIR:-/tmp}"
+
 cd "$BACKEND_DIR"
+FILES=$(ls [0-9][0-9][0-9]_*.sql 2>/dev/null | sort || true)
+cd "$RUN_DIR"
 
 # 确保追踪表存在
 sudo -u postgres psql -d youfu -c "CREATE TABLE IF NOT EXISTS _migrations (name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())" >/dev/null
 
-for f in $(ls [0-9][0-9][0-9]_*.sql 2>/dev/null | sort); do
+for f in $FILES; do
   exists=$(sudo -u postgres psql -d youfu -t -c "SELECT 1 FROM _migrations WHERE name='$f'" | tr -d ' ')
   if [ "$exists" = "1" ]; then
     echo "skip (already applied): $f"
