@@ -27,6 +27,7 @@ const {
   checkRoleWhitelist,
   verifyRoleWhitelist,
   ROLE_CHECK_SQL,
+  MIG_090_SQL,
 } = await import('../services/roleWhitelist.js');
 
 type QueryFn = (text: string, params?: any[]) => Promise<{ rows: any[]; rowCount?: number }>;
@@ -38,11 +39,14 @@ const DEF_046_4ROLES =
 const DEF_070_6ROLES =
   "CHECK (role = ANY (ARRAY['admin'::text, 'operator'::text, 'dispatcher'::text, 'worker'::text, 'reviewer'::text, 'service_desk'::text]))";
 
-function makeClient(rows: any[]) {
+function makeClient(rows: any[], opts?: { mig090Applied?: boolean }) {
   const calls: Array<{ text: string; params?: any[] }> = [];
+  const migRows = opts?.mig090Applied ? [{ name: '090_role_def.sql' }] : [];
   const client = {
     query: (async (text: string, params?: any[]) => {
       calls.push({ text, params });
+      // _migrations 查询按标志位路由（090 是否已记账）
+      if (text.includes('_migrations')) return { rows: migRows, rowCount: migRows.length };
       return { rows, rowCount: rows.length };
     }) as QueryFn,
   } as any;
@@ -68,9 +72,9 @@ describe('parseRoleCheckAllowlist（CHECK 约束文本 → 角色集合）', () 
 
 describe('checkRoleWhitelist（mock client 判定逻辑）', () => {
   it('SQL 指向 role_permission 的 CHECK 约束（conrelid + contype=c）', async () => {
+    // 无 CHECK 时会追加一次 _migrations 探测（090 放宽判定），故只断言**首个**查询是 CHECK 查询
     const { client, calls } = makeClient([]);
-    await checkRoleWhitelist(client);
-    expect(calls.length).toBe(1);
+    await checkRoleWhitelist(client as any);
     expect(calls[0].text).toContain("conrelid = 'role_permission'::regclass");
     expect(calls[0].text).toContain("contype = 'c'");
   });
@@ -110,6 +114,53 @@ describe('checkRoleWhitelist（mock client 判定逻辑）', () => {
 
   it('ROLE_CHECK_SQL 导出与内部使用一致（回归护栏）', () => {
     expect(ROLE_CHECK_SQL).toContain('pg_get_constraintdef');
+  });
+});
+
+// ---- 090 放宽后的自检语义（2026-10-17 生产事故复盘）----
+// 背景：090_role_def.sql 为支持"租户自建岗位"，有意 DROP 掉 account_user.role /
+// role_permission.role 上的内置 6 角色 CHECK（放宽不替换，由应用层 isRoleUsable + role_def 兜底）。
+// 而本启动门写于 070 时代，断言"CHECK 必须含 6 角色" → 090 一应用，服务必然拒绝启动。
+// 二者是同一套代码里的自相矛盾，必须在代码侧闭合：无 CHECK 且 090 已记账 = 预期终态，放行。
+describe('checkRoleWhitelist —— 090 放宽后的终态判定', () => {
+  it('090 已记账 + 无 CHECK → ok=true（放宽是 090 的设计终态，非 070 缺失）', async () => {
+    const { client } = makeClient([], { mig090Applied: true });
+    const r = await checkRoleWhitelist(client as any);
+    expect(r.ok).toBe(true);
+    expect(r.missing).toEqual([]);
+    expect(r.relaxedBy090).toBe(true);
+  });
+
+  it('090 未记账 + 无 CHECK → ok=false（仍是 070 未应用的真缺陷，fail-closed 不变）', async () => {
+    const { client } = makeClient([], { mig090Applied: false });
+    const r = await checkRoleWhitelist(client as any);
+    expect(r.ok).toBe(false);
+    expect(r.missing.length).toBe(6);
+    expect(r.relaxedBy090).toBe(false);
+  });
+
+  it('090 已记账 但残留 4 角色 CHECK → ok=false（DB 真会拒写，不许放过）', async () => {
+    const { client } = makeClient([{ conname: 'c', def: DEF_046_4ROLES }], { mig090Applied: true });
+    const r = await checkRoleWhitelist(client as any);
+    expect(r.ok).toBe(false);
+    expect(r.missing.sort()).toEqual(['reviewer', 'service_desk']);
+  });
+
+  it('090 已记账 + 仍是 6 角色 CHECK → ok=true（尚未 DROP 的过渡态也放行）', async () => {
+    const { client } = makeClient([{ conname: 'c', def: DEF_070_6ROLES }], { mig090Applied: true });
+    const r = await checkRoleWhitelist(client as any);
+    expect(r.ok).toBe(true);
+  });
+
+  it('MIG_090_SQL 查的是 _migrations 里的 090_role_def.sql（名字写错则整条放行链失效）', () => {
+    expect(MIG_090_SQL).toContain('_migrations');
+    expect(MIG_090_SQL).toContain('090_role_def.sql');
+  });
+
+  it('有 CHECK 时不额外查 _migrations（保持单查询，老库零额外开销）', async () => {
+    const { client, calls } = makeClient([{ conname: 'c', def: DEF_070_6ROLES }], { mig090Applied: true });
+    await checkRoleWhitelist(client as any);
+    expect(calls.length).toBe(1);
   });
 });
 
