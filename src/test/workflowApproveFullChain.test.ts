@@ -231,7 +231,7 @@ async function putDraft(trs: unknown[]) {
 }
 
 describe('流程可配置 —— 草稿审批落 live（真路由 + 真库）', () => {
-  it('①【现状·非期望】退场角色可经审批写回 live —— 096 的清理会被一份旧草稿复活', async () => {
+  it('① 退场角色不得经审批写回 live —— 096 的清理不被一份旧草稿复活', async () => {
     // live 已被 096 清理：assign 边只剩 admin
     await seedLive();
     // 一份 096 之前保存的旧草稿，assign 边仍带 dispatcher
@@ -239,17 +239,37 @@ describe('流程可配置 —— 草稿审批落 live（真路由 + 真库）', 
     expect((await call('POST', `/workflow-defs/${ET}/submit`, {})).status).toBe(200);
 
     const ap = await call('POST', `/workflow-defs/${ET}/approve`, {});
-    // 现状：放行（200）。根因：assertWorkflowDefRolesUsable 对 ROLES 里的内置角色直接 continue
-    // （workflowDef.ts:109），而 ROLES 仍含 dispatcher / service_desk（middleware/role.ts:28），
-    // 退场判定在 isRoleUsable 里，写流程这条路径没接。
-    expect(ap.status).toBe(200);
+    expect(ap.status).toBe(422);
+    expect(String((ap.body as { message?: string }).message)).toMatch(/已退场/);
 
-    const live = await rows(`SELECT def FROM workflow_def WHERE tenant_id=$1 AND entity_type=$2`, [T, ET]);
-    const tr = (asJson((live[0] as { def: unknown }).def).transitions as { allowedRoles?: string[] }[])[0];
-    expect(tr.allowedRoles).toContain('dispatcher'); // 死角色复活，096 白清
+    // live 一个字节都没动，变更行也还在（审批失败不吞草稿，可改后重提）
+    const v = await rows(`SELECT version FROM workflow_def WHERE tenant_id=$1`, [T]);
+    expect((v[0] as { version: number }).version).toBe(1);
+    const chg = await rows(`SELECT status FROM workflow_def_change WHERE tenant_id=$1`, [T]);
+    expect(chg).toEqual([{ status: 'submitted' }]);
   });
 
-  it('② 对照组：未创建的自定义角色 → 422（护栏只对"非内置"生效，缺口精准定位在内置退场角色）', async () => {
+  it('② 另一个退场角色 service_desk 同样被挡（两个退场角色口径一致）', async () => {
+    await seedLive();
+    expect((await putDraft([{ from: 'draft', to: 'assigned', event: 'assign', allowedRoles: ['service_desk'] }])).status).toBe(200);
+    expect((await call('POST', `/workflow-defs/${ET}/submit`, {})).status).toBe(200);
+    const ap = await call('POST', `/workflow-defs/${ET}/approve`, {});
+    expect(ap.status).toBe(422);
+    expect(String((ap.body as { message?: string }).message)).toMatch(/已退场/);
+  });
+
+  it('③ 存量豁免：live 里本来就有的退场角色，草稿沿用不拦（不翻旧账，防存量租户流程被卡死）', async () => {
+    // 尚未执行 096 清理的租户：live 里就是带 dispatcher
+    await seedLive(1, [{ from: 'draft', to: 'assigned', event: 'assign', allowedRoles: ['admin', 'dispatcher'] }]);
+    // 草稿沿用（只是改了别的边），不算"新增退场角色引用"
+    expect((await putDraft([{ from: 'draft', to: 'assigned', event: 'assign', allowedRoles: ['admin', 'dispatcher'] }])).status).toBe(200);
+    expect((await call('POST', `/workflow-defs/${ET}/submit`, {})).status).toBe(200);
+    expect((await call('POST', `/workflow-defs/${ET}/approve`, {})).status).toBe(200);
+    const v = await rows(`SELECT version FROM workflow_def WHERE tenant_id=$1`, [T]);
+    expect((v[0] as { version: number }).version).toBe(2);
+  });
+
+  it('④ 对照组：未创建的自定义角色 → 422（自定义角色仍按"本租户是否存在"判）', async () => {
     await seedLive();
     expect((await putDraft([{ from: 'draft', to: 'assigned', event: 'assign', allowedRoles: ['ghost_role'] }])).status).toBe(200);
     expect((await call('POST', `/workflow-defs/${ET}/submit`, {})).status).toBe(200);

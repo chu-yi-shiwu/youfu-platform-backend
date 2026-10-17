@@ -4,7 +4,7 @@ import type { PoolClient } from 'pg';
 import { DEFAULT_WORK_ORDER_DEF, doneStates, terminalStates, type WorkflowDef } from './stateMachine.js';
 import { ensureClaimHallState } from './claimHallEdges.js';
 import { AppError } from '../middleware/error.js';
-import { PERMS, ROLES, ROLE_CODE_RE } from '../middleware/role.js';
+import { PERMS, ROLES, ROLE_CODE_RE, isRetiredRole } from '../middleware/role.js';
 
 /**
  * V2-F7（2026-09-14）：读路径幂等注入抢单大厅机制态（仅 work_order）。
@@ -106,7 +106,21 @@ export async function assertWorkflowDefRolesUsable(
   for (const t of def.transitions ?? []) {
     for (const r of t.allowedRoles ?? []) {
       if (legacy.has(r)) continue; // 存量既有 → 豁免，不翻旧账
-      if ((ROLES as readonly string[]).includes(r)) continue; // 内置角色
+      if ((ROLES as readonly string[]).includes(r)) {
+        // 内置角色不查 role_def；但**退场角色一律不得新写进流程**。
+        // 背景：096 迁移清的是 workflow_def.def（live），草稿行（workflow_def_change）没动；
+        // 若此处沿用"内置即放行"，一份 096 之前的旧草稿审批通过就把 dispatcher/service_desk
+        // 原样写回 live —— 退场清理被复活、死角色重新出现在门禁里。
+        // 存量豁免（上一行 legacy）先于此判定，故已带退场角色的租户保存流程不受影响。
+        if (isRetiredRole(r)) {
+          throw new AppError(
+            'BAD_REQUEST',
+            `流程引用了已退场的内置角色 "${r}"（该岗位已停止新建，请改用内置在岗角色，或先在「自定义岗位」建岗后再引用）`,
+            422,
+          );
+        }
+        continue;
+      }
       if (!ROLE_CODE_RE.test(r)) {
         throw new AppError(
           'BAD_REQUEST',
