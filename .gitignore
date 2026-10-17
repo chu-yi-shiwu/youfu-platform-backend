@@ -47,3 +47,8 @@ src.bak*/
 src.bak*/
 .git.bak*/
 *.old.bak*/
+
+# --- 本地运行产物（测试报告 / TS 增量编译缓存，非源码）---
+.vitest-report.json
+tsconfig.tsbuildinfo
+*.tsbuildinfo
