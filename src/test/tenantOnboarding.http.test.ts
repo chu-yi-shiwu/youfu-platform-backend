@@ -17,6 +17,7 @@ import express from 'express';
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { errorMiddleware } from '../middleware/error.js';
+import { signJwt } from '../middleware/auth.js';
 
 // ---- mock DB 连接池：脚本化 SQL 响应 + 调用日志（pool.query 与事务/租户 client 同池脚本） ----
 const h = vi.hoisted(() => ({
@@ -33,6 +34,11 @@ const h = vi.hoisted(() => ({
 vi.mock('../db/pool.js', () => {
   const scriptedQuery = async (sql: string, params: unknown[] = []) => {
     h.calls.push({ sql, params });
+    // F7 配套：platformAdminAuth 在 prod 口径下会查 platform_admin 活跃行。
+    // 这是「身份替身」，不是业务脚本，故不受 h.reset() 影响（reset 只清业务脚本）。
+    if (/FROM\s+platform_admin/i.test(sql)) {
+      return { rows: [{ id: 'pa-1', username: 'pa', display_name: '平台管理员' }], rowCount: 1 };
+    }
     for (const s of h.scripted) {
       if (s.match.test(sql)) return { rows: s.rows, rowCount: s.rowCount ?? s.rows.length };
     }
@@ -67,6 +73,24 @@ const T = 't-verify-onboarding';
 let server: Server;
 let base = '';
 
+/**
+ * F7 配套（2026-10-19）：AUTH_MODE 缺省改 prod 后，platformAdminAuth 不再 dev 放行
+ * ——必须持 platform:true / role:platform_admin 的真实令牌。
+ * 本文件锁的是平台端开通/审批的 SQL 口径，鉴权是旁路；这里补齐真令牌（而非把模式调回 dev），
+ * 让平台端从此跑在生产同款门禁下。
+ */
+const PLATFORM_JWT_SECRET = 'test-jwt-secret-onboarding';
+const PLATFORM_TOKEN = signJwt(
+  { sub: 'pa-1', platform: true, role: 'platform_admin', username: 'pa' },
+  PLATFORM_JWT_SECRET,
+);
+function platformFetch(url: string, init: RequestInit = {}) {
+  return fetch(url, {
+    ...init,
+    headers: { ...(init.headers as Record<string, string> | undefined), Authorization: `Bearer ${PLATFORM_TOKEN}` },
+  });
+}
+
 function injectAuth(role: string) {
   return (_req: any, res: any, next: any) => {
     res.locals.auth = {
@@ -77,6 +101,8 @@ function injectAuth(role: string) {
 }
 
 beforeAll(async () => {
+  // platformAdminAuth 用 process.env.JWT_SECRET 验签，须与上面签令牌的密钥同源。
+  process.env.JWT_SECRET = process.env.JWT_SECRET || PLATFORM_JWT_SECRET;
   const app = express();
   app.use(express.json());
   app.use('/api/v1', publicReportRouter); // 公开搜索/试用申请（生产挂 auth 之前，同口径）
@@ -181,7 +207,7 @@ describe('平台试用审批 /platform/trial-applications', () => {
     h.reset();
     h.script(/count\(\*\)::int AS c FROM trial_applications/, [{ c: 1 }]);
     h.script(/FROM trial_applications/, [PENDING_ROW]);
-    const r = await fetch(`${base}/api/v1/platform/trial-applications?status=pending`);
+    const r = await platformFetch(`${base}/api/v1/platform/trial-applications?status=pending`);
     expect(r.status).toBe(200);
     const j = (await r.json()) as any;
     expect(j.items.length).toBe(1);
@@ -193,7 +219,7 @@ describe('平台试用审批 /platform/trial-applications', () => {
     h.reset();
     h.script(/SELECT \* FROM trial_applications WHERE id/, [PENDING_ROW]);
     h.script(/UPDATE trial_applications/, [{ id: 'ta-9', status: 'rejected', reject_reason: '资料不全' }]);
-    const r = await fetch(`${base}/api/v1/platform/trial-applications/ta-9/review`, {
+    const r = await platformFetch(`${base}/api/v1/platform/trial-applications/ta-9/review`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ action: 'reject', reason: '资料不全' }),
@@ -211,7 +237,7 @@ describe('平台试用审批 /platform/trial-applications', () => {
     h.script(/FOR UPDATE/, [{ status: 'pending' }]); // 事务内行锁预检命中 pending
     h.script(/INSERT INTO tenant_registry/, [{ tenant_id: 't-kangning' }]);
     h.script(/UPDATE trial_applications/, [{ id: 'ta-9', status: 'approved', tenant_id: 't-kangning' }]);
-    const r = await fetch(`${base}/api/v1/platform/trial-applications/ta-9/review`, {
+    const r = await platformFetch(`${base}/api/v1/platform/trial-applications/ta-9/review`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ action: 'approve', tenant_id: 't-kangning', admin_username: 'knadmin' }),
@@ -234,7 +260,7 @@ describe('平台试用审批 /platform/trial-applications', () => {
   it('⑦ 重复审批（非 pending）→ 409 TRIAL_REVIEWED', async () => {
     h.reset();
     h.script(/SELECT \* FROM trial_applications WHERE id/, [{ ...PENDING_ROW, status: 'approved' }]);
-    const r = await fetch(`${base}/api/v1/platform/trial-applications/ta-9/review`, {
+    const r = await platformFetch(`${base}/api/v1/platform/trial-applications/ta-9/review`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ action: 'reject' }),
@@ -248,7 +274,7 @@ describe('平台试用审批 /platform/trial-applications', () => {
     h.reset();
     h.script(/SELECT \* FROM trial_applications WHERE id/, [PENDING_ROW]); // 事务外预检仍是 pending（模拟并发穿透）
     // FOR UPDATE 不命中脚本 → rowCount 0（另一事务已置 approved 并提交）
-    const r = await fetch(`${base}/api/v1/platform/trial-applications/ta-9/review`, {
+    const r = await platformFetch(`${base}/api/v1/platform/trial-applications/ta-9/review`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ action: 'approve', tenant_id: 't-kangning', admin_username: 'knadmin' }),
@@ -264,7 +290,7 @@ describe('平台试用审批 /platform/trial-applications', () => {
     h.reset();
     h.script(/SELECT \* FROM trial_applications WHERE id/, [PENDING_ROW]);
     h.script(/UPDATE trial_applications/, [], 0); // 带 status='pending' 条件的 UPDATE 落空
-    const r = await fetch(`${base}/api/v1/platform/trial-applications/ta-9/review`, {
+    const r = await platformFetch(`${base}/api/v1/platform/trial-applications/ta-9/review`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ action: 'reject', reason: '晚了一步' }),
@@ -308,7 +334,7 @@ describe('租户 pending 态（零 DDL）', () => {
   it('⑨ PUT /platform/tenants/:id/status 枚举扩 pending → 200', async () => {
     h.reset();
     h.script(/UPDATE tenant_registry SET status/, [{ tenant_id: T, name: '康宁物业', status: 'pending' }]);
-    const r = await fetch(`${base}/api/v1/platform/tenants/${T}/status`, {
+    const r = await platformFetch(`${base}/api/v1/platform/tenants/${T}/status`, {
       method: 'PUT',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ status: 'pending' }),
@@ -321,7 +347,7 @@ describe('租户 pending 态（零 DDL）', () => {
   it('⑩ POST /platform/tenants status=pending 落库；缺省 active 兼容', async () => {
     h.reset();
     h.script(/INSERT INTO tenant_registry/, [{ tenant_id: 't-pending-new' }]);
-    const r = await fetch(`${base}/api/v1/platform/tenants`, {
+    const r = await platformFetch(`${base}/api/v1/platform/tenants`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ tenant_id: 't-pending-new', name: '待激活机构', category: 'school', status: 'pending' }),

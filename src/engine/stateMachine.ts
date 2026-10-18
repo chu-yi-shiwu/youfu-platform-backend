@@ -119,6 +119,9 @@ export const RICH_WORK_ORDER_DEF: WorkflowDef = {
     // 此为"师傅不能接单"的代码根因。修复：**加 worker**（纯加法，存量三者权限一字不动）。
     { from: 'pending_accept', to: 'pending_dispatch', event: 'accept', allowedRoles: ['admin', 'worker'] },
     { from: 'pending_dispatch', to: 'assigned', event: 'dispatch', allowedRoles: ['admin'], allowedPerms: ['dispatch.override'], requiredFields: ['assignee'] },
+    // 抢单机制边（与 claimHallEdges.ts PENDING_DISPATCH_CLAIM_EDGE 同源，两处必须一起改）：
+    // worker 认领待派单池的单——抢单端点历来允许，补成流程图上诚实的可见边。
+    { from: 'pending_dispatch', to: 'assigned', event: 'claim', allowedRoles: ['worker', 'admin'] },
     { from: 'assigned', to: 'arrived', event: 'arrive', allowedRoles: ['admin', 'worker'] },
     // 074 里程碑：到场后 start 开始处理；保留 assigned→processing 'receive' 旧边（无到场打卡的
     // 旧客户端/旧单兼容路径，绝不门死存量流转）。arrived 也属活跃态 → 补 cancel 逃逸边。
@@ -280,8 +283,8 @@ export function resolveDispatchTarget(def: WorkflowDef, from: string): string | 
 
 // ── 074 生命周期里程碑时间列（2026-09-06 任务④）──
 // 状态 → work_orders 里程碑列（074_work_order_milestone_timestamps.sql）的单一事实源，
-// 三条写路径共用：transition()（人工/接口流转）、autoDispatchAfterCreate（自动派单旁路）、
-// claim（抢单旁路）、linkedWorkOrder 自动派单旁路——保证派工/到场/完成时间口径一致。
+// 写路径共用：transition()（人工/接口流转，2026-10-19 起自动派单 F4、抢单 F6 也已并入主通道）、
+// linkedWorkOrder 自动派单旁路——保证派工/到场/完成时间口径一致。
 // 注：processing 为「最近一次进入」语义（resume/reject 再入会刷新 started_at），
 //     首末之分由 ticket_event/domain_event 事件流水兜底，不在此处做首次判定。
 export const STATUS_TIMESTAMP_COLUMNS: Readonly<Record<string, string>> = {

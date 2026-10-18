@@ -94,6 +94,11 @@ CREATE TABLE role_permission (
 const db = () => box.db as unknown as { query: (s: string, p?: unknown[]) => Promise<{ rows: any[] }> };
 
 beforeAll(async () => {
+  // F7 配套（2026-10-19）：AUTH_MODE 缺省改为 prod 后，登录签发走 fail-closed 分支
+  // （prod 缺 JWT_SECRET → 500 AUTH_CFG，不再回退不安全默认密钥）。
+  // 本用例锁的是「登记行 fail-closed」这条闸，与鉴权模式无关，但跑在 prod 口径下更贴近生产
+  // ——故显式补齐测试环境密钥，而不是把 AUTH_MODE 调回 dev。
+  process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret-fail-closed';
   box.db = new PGlite();
   await (box.db as unknown as { exec: (s: string) => Promise<void> }).exec(DDL);
 

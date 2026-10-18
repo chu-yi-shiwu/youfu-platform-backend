@@ -33,6 +33,17 @@ export const CLAIM_HALL_EDGES: readonly WorkflowTransition[] = [
   { from: 'claim_hall', to: 'cancelled', event: 'cancel', requiredFields: ['cancel_reason'], allowedRoles: ['admin'], allowedPerms: ['ticket.manage'] },
 ] as const;
 
+/**
+ * 待派单池认领边（引擎机制，2026-10-19 F6，与 claim_hall 认领边同语义）：
+ * RICH def 的 pending_dispatch 只有 dispatch 出边（admin + dispatch.override），
+ * 而抢单端点历来允许 worker 认领待派单池的单——机制边补上，让「认领」成为
+ * 流程图上诚实的可见边（与 claim_hall 三条边同哲学：注入引擎真实行为空间）。
+ * 仅当租户 def 已含 pending_dispatch 态时注入（客户自建 claim 事件边时幂等跳过）。
+ */
+export const PENDING_DISPATCH_CLAIM_EDGE: WorkflowTransition = {
+  from: 'pending_dispatch', to: 'assigned', event: 'claim', allowedRoles: ['worker', 'admin'],
+};
+
 export interface EnsureClaimHallStateResult {
   /** 注入后的 def（深拷贝，不改入参）。 */
   def: WorkflowDef;
@@ -64,6 +75,19 @@ export function ensureClaimHallState(def: WorkflowDef): EnsureClaimHallStateResu
     next.transitions.push({ ...edge });
     if (!next.states.includes(edge.to)) next.states.push(edge.to);
     added.push({ ...edge });
+  }
+  // 待派单池认领边：仅当租户 def 已有 pending_dispatch 态时注入（纯加法，幂等）。
+  if (next.states.includes(PENDING_DISPATCH_CLAIM_EDGE.from)) {
+    const exists = next.transitions.some(
+      (t) => t.from === PENDING_DISPATCH_CLAIM_EDGE.from && t.event === PENDING_DISPATCH_CLAIM_EDGE.event,
+    );
+    if (!exists) {
+      next.transitions.push({ ...PENDING_DISPATCH_CLAIM_EDGE });
+      if (!next.states.includes(PENDING_DISPATCH_CLAIM_EDGE.to)) {
+        next.states.push(PENDING_DISPATCH_CLAIM_EDGE.to);
+      }
+      added.push({ ...PENDING_DISPATCH_CLAIM_EDGE });
+    }
   }
   return { def: next, addedStates, added };
 }

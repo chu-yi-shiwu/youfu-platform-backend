@@ -21,12 +21,12 @@ import { incrementalLearn } from '../services/modelTrainer.js';
 // V2-F4（派单纵切 P0-10/11）：学习写回开关判定唯一来源（租户开关 + env 熔断/强制）
 import { isAutoTuneEffective } from '../repo/tenantSettings.js';
 import { emitDomainEvent } from '../db/eventBus.js';
-import { resolveDispatchShadow } from '../services/k2Shadow.js'; // R12-F1：自动派单/抢单也回填 dispatch 影子
 import { insertNotification, wechatSelfTest } from '../services/notify.js';
-import type { WorkOrderStatus, WorkflowDef } from '../engine/stateMachine.js';
+import { claimWorkOrder } from '../services/claimWorkOrder.js';
+import type { WorkOrderStatus } from '../engine/stateMachine.js';
 import { getWorkflowDef } from '../engine/workflowDef.js';
 import {
-  availableTransitions, learningTriggerStates, shouldTriggerLearning, RICH_WORK_ORDER_DEF,
+  availableTransitions, learningTriggerStates, shouldTriggerLearning,
   resolveDispatchTarget,
 } from '../engine/stateMachine.js';
 import { safeParseJsonb } from '../util/jsonb.js';
@@ -98,23 +98,6 @@ async function resolveWorkerIds(
  * 档案查不到时沿用既定降级纪律（warn + 放行，一线可用性优先）。
  */
 const MASTER_ROLES: readonly string[] = ['worker', 'operator'];
-
-/**
- * 抢单角色白名单（架构🟡12：消除硬编码角色数组）。
- * 单一事实源 = 本租户 workflow_def 的 claim 转移 allowedRoles（引擎 RICH def 默认
- * ['worker','admin','dispatcher','service_desk']）。此前本端点硬编码五角色（多放 operator，
- * 且租户在配置台改了 allowedRoles 也不生效，两处口径会漂移）。
- * 租户删掉 claim 边 → 回退引擎默认边，绝不因配置缺失把抢单通道堵死。
- */
-function claimAllowedRoles(def: WorkflowDef): readonly string[] {
-  const fromDef = (def.transitions ?? [])
-    .filter((t) => t.event === 'claim')
-    .flatMap((t) => t.allowedRoles ?? []);
-  if (fromDef.length > 0) return fromDef;
-  return RICH_WORK_ORDER_DEF.transitions
-    .filter((t) => t.event === 'claim')
-    .flatMap((t) => t.allowedRoles ?? []);
-}
 
 /**
  * 建单后自动派单（2026-08-29 从 POST /open/work_order handler 抽取为共享函数）：
@@ -1097,70 +1080,32 @@ router.get('/open/claim-hall', async (req, res, next) => {
 });
 
 // POST /api/v1/open/work_order/:id/claim —— 抢单（人员认领未分配工单，部门不匹配驳回）
-// 门禁来源（架构🟡12）：本租户 workflow_def 的 claim 转移 allowedRoles（引擎 RICH def 默认
-// worker/admin/dispatcher/service_desk），不再在本文件硬编码角色数组。
-// ⚠️ 行为变更：此前硬编码多放了 operator → 现按引擎口径收口；operator 请用派单（dispatch.override）。
-// 需要放行的租户：到 业务规则设置台 给 claim 边 allowedRoles 加上 operator 即生效（配置即事实）。
+// F6（2026-10-19）：本体抽去 services/claimWorkOrder.ts，并入 transition() 主通道——
+//   客户配在认领边上的 allowedRoles/allowedPerms/requiredFields/sideEffects/自动审核
+//   全部生效（与此前自动派单 F4 同一次根治）；目标态从客户 def 的认领边派生。
+//   门禁单一事实源 = transition()（本文件不再另写角色白名单，两处口径不再漂移）。
 // C-2 身份根治：token userId 即 worker.id（id 同源），body workerId 不一致 403。
 router.post('/open/work_order/:id/claim', async (req, res, next) => {
   try {
     const tenantId = res.locals.auth.tenantId;
     const role = res.locals.auth.role;
-    const b = z.object({ workerId: z.string().min(1).optional(), department: z.string().optional() }).parse(req.body);
+    // passthrough：客户在认领边配 requiredFields 时，工人端透传的字段原样进 transition()
+    // （与通用 transition 端点同口径；workerId/department 是端点自有参数，剥离不进 fields）。
+    const b = z
+      .object({ workerId: z.string().min(1).optional(), department: z.string().optional() })
+      .passthrough()
+      .parse(req.body);
     // C-2 身份根治：token 的 userId 即 worker.id（worker 与 account_user id 同源）。
     // 服务端只信 token 身份；body.workerId 仅兼容旧客户端——若传且与 token 身份不一致 → 403（堵伪造/替抢）。
     const authUserId = res.locals.auth.userId;
     if (b.workerId && authUserId && b.workerId !== authUserId) {
       throw new AppError('FORBIDDEN', 'workerId mismatch with authenticated identity', 403);
     }
-    // P0 修复（2026-08-23 审查）：token 的 userId 是 account_user.id（uuid），而 worker.id 是业务编码。
-    // 必须经 worker.account_id 反查真实 worker.id，不能直接拿 userId 当 worker.id 查。
     const workerId = authUserId ?? b.workerId!; // 优先 token 身份；无 token 身份时回退 body（兼容）
-    const ticket = await withTenantClient(tenantId, async (client) => {
-      const def = await getWorkflowDef(client, tenantId, 'work_order');
-      const allowed = claimAllowedRoles(def);
-      if (role && !allowed.includes(role)) {
-        throw new AppError('FORBIDDEN', `role ${role} not allowed to claim`, 403);
-      }
-      const cur = await findOneForUpdate(client, tenantId, req.params.id);
-      if (!cur) throw new AppError('NOT_FOUND', 'work order not found', 404);
-      if (cur.status !== 'claim_hall' && cur.status !== 'pending_dispatch') {
-        throw new AppError('CONFLICT', `work order not in claim hall (status=${cur.status})`, 409);
-      }
-      const worker = await client.query(
-        'SELECT id, department FROM worker WHERE tenant_id=$2 AND (account_id=$1 OR id=$1) LIMIT 1',
-        [workerId, tenantId],
-      );
-      if (worker.rowCount === 0) throw new AppError('NOT_FOUND', 'worker not found', 404);
-      // P0 修复：assignee_id 统一存 worker.id（业务编码），与派单路径一致——不能用 token uuid
-      const realWorkerId = worker.rows[0].id;
-      const wDept = worker.rows[0].department;
-      const woDept = cur.department;
-      // 部门级抢单：工单与人员均有部门且不一致 → 驳回（保持简单，跨部由调度/管理员另行处理）
-      if (woDept && wDept && woDept !== wDept) {
-        throw new AppError('FORBIDDEN', `worker department ${wDept} mismatch work order department ${woDept}`, 403);
-      }
-      // 074 里程碑回填：抢单与自动派单同为 assigned 旁路写路径，同步回填 assigned_at（口径一致）。
-      await client.query(
-        'UPDATE work_orders SET status=$1, assignee_id=$2, auto_flow=false, updated_at=now(), assigned_at=now() WHERE id=$3 AND tenant_id=$4',
-        ['assigned', realWorkerId, req.params.id, tenantId],
-      );
-      await client.query('UPDATE worker SET load = load + 1 WHERE id=$1', [realWorkerId]);
-      await client.query(
-        `INSERT INTO ticket_event (tenant_id, work_order_id, type, from_status, to_status, actor, payload)
-         VALUES ($1,$2,'claim',$3,$4,'worker',$5)`,
-        [tenantId, req.params.id, cur.status, 'assigned', JSON.stringify({ worker_id: realWorkerId })],
-      );
-      await emitDomainEvent(client, { tenantId, entityType: 'work_order', entityId: req.params.id, type: 'assigned', actor: 'worker', payload: { worker_id: realWorkerId, via: 'claim' } });
-      // R12-F1：抢单也是"人工实际"派单信号 → 回填 dispatch 影子 actual
-      await resolveDispatchShadow(client, tenantId, String(req.params.id), String(realWorkerId));
-      await insertNotification(client, {
-        tenantId, recipient: realWorkerId, type: 'claim', workOrderId: req.params.id,
-        title: '您已抢到工单', body: `工单 ${cur.order_no} 已由您认领`,
-        payload: { order_no: cur.order_no, page: `pages/worker/task-detail/task-detail?id=${req.params.id}` },
-      });
-      return findOne(client, tenantId, req.params.id);
-    });
+    const { workerId: _w, department: _d, ...fields } = b;
+    const ticket = await withTenantClient(tenantId, (client) =>
+      claimWorkOrder(client, tenantId, { orderId: req.params.id, workerId, role, fields }),
+    );
     return res.json({ ok: true, code: 0, ticket });
   } catch (e) {
     next(e);

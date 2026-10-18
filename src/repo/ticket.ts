@@ -279,8 +279,8 @@ export async function transition(
   // 净变化：before = 流转前「活跃且有 assignee」的贡献者；after = 流转后同口径贡献者。
   //   - before 且 before≠after → 旧 assignee -1（完成/取消/挂起/改派旧离场）
   //   - after  且 after≠before → 新 assignee +1（人工派单/恢复/改派新入场）
-  // 注意：自动派单 / 抢单 / 联动单三处直接 UPDATE 不走 transition（workOrder.ts:79/:824、
-  //   linkedWorkOrder.ts:106），各自手工 +1 的既有行为保持不变，此处不会与之叠加。
+  // 注意：2026-10-19 起自动派单（F4）、抢单（F6）已并入 transition 主通道，load 由此处净结算
+  //   （不再手工 +1，故不会重复计数）；仅 linkedWorkOrder.ts 联动单仍是旁路直写，保持其既有行为。
   const se0 = def.states.filter(
     (s) => !doneStates(def).includes(s) && !terminalStates(def).includes(s) && s !== 'paused' && s !== 'suspended',
   );
