@@ -175,7 +175,12 @@ export async function transition(
   // systemAuto（地基④）：系统按租户显式启用并过红线的规则执行，**跳过人类角色门禁**——
   //   这不是越权：规则必须由持 workflow.approve 的把关人显式启用，且目标态必过终态红线，
   //   且全程以 actor='system:auto' 写入 ticket_event 留痕可审计。仅 tryAutoAdvance 内部使用。
-  opts?: { actor?: string; role?: string; perms?: readonly string[]; fields?: Record<string, unknown>; eventOverride?: string; auto?: boolean; systemAuto?: boolean },
+  // autoFlow（F4 2026-10-19）：显式声明本次流转的 auto_flow 口径。P0-6 曾按"带 assignee
+  //   必是人工"打 false——自动派单恰好带 assignee，该假设把自动派单率打成 0（口径失真）。
+  //   现在系统发起的流转显式传 true；不传时保持存量语义逐字不变。
+  // eventLogType（F4 2026-10-19）：ticket_event.type 覆盖（缺省 'transition'）。自动派单传
+  //   'assign'——publicReport 的平均响应时长按 type='assign' 聚合，事件流类型不许因通道统一而断。
+  opts?: { actor?: string; role?: string; perms?: readonly string[]; fields?: Record<string, unknown>; eventOverride?: string; auto?: boolean; systemAuto?: boolean; autoFlow?: boolean; eventLogType?: string },
 ): Promise<TransitionResult> {
   // 行锁：并发流转同一工单时串行化（A 提交释放锁后 B 才拿到锁，此时 cur.status 为最新），
   // 同时让下方"首次进入触发态"判定基于锁内权威快照，杜绝 READ COMMITTED 下双触发增量学习。
@@ -257,11 +262,15 @@ export async function transition(
   // stateMachine.STATUS_TIMESTAMP_COLUMNS），transition 是工单流转唯一收口写路径，此处回填
   // 即覆盖人工/接口全部流转；自动派单与抢单旁路在 workOrder.ts / linkedWorkOrder.ts 各自同步回填。
   const milestoneCol = timestampColumnFor(to);
+  // F4（2026-10-19）：auto_flow 三态口径——①显式声明 autoFlow → 听声明（自动派单=true；
+  //   自动审核推进不带 assignee 也不许把单打成人工）；②未声明且带 assignee → false
+  //   （P0-6 人工派单口径，存量行为逐字不变）；③未声明且无 assignee → 不写该列。
+  const autoFlowSql =
+    opts?.autoFlow === true ? ', auto_flow = true'
+    : opts?.autoFlow === false ? ', auto_flow = false'
+    : assignee ? ', auto_flow = false' : '';
   const upd = await client.query<WorkOrderRow>(
-    // 2026-09-14 纵切② P0-6（口径修正）：显式携带 assignee 的流转必为人工动作（dispatch/forward/
-    // claim-hall 派单；依据下方 :225-226 注释——自动派单/抢单不走 transition，此处 assignee 必为
-    // 人工行为），故追加 auto_flow = false——人工派单不再冒充自动派单（过程挖掘口径失真根因）。
-    `UPDATE work_orders SET status = $1, updated_at = now()${assignee ? ', assignee_id = $4, auto_flow = false' : ''}${milestoneCol ? `, ${milestoneCol} = now()` : ''} WHERE id = $2 AND tenant_id = $3 RETURNING *`,
+    `UPDATE work_orders SET status = $1, updated_at = now()${assignee ? ', assignee_id = $4' : ''}${autoFlowSql}${milestoneCol ? `, ${milestoneCol} = now()` : ''} WHERE id = $2 AND tenant_id = $3 RETURNING *`,
     assignee ? [to, id, tenantId, assignee] : [to, id, tenantId],
   );
   // R32 load 对称回收（2026-08-31 拆雷三件套①）：transition 是工单流转唯一写路径，
@@ -290,7 +299,7 @@ export async function transition(
   }
   await client.query(
     `INSERT INTO ticket_event (tenant_id, work_order_id, type, from_status, to_status, actor, payload)
-     VALUES ($1,$2,'transition',$3,$4,$5,$6)`,
+     VALUES ($1,$2,'${opts?.eventLogType ?? 'transition'}',$3,$4,$5,$6)`,
     [tenantId, id, cur.status, to, opts?.actor ?? 'system', JSON.stringify({ fields, transition_event: tdef.event })],
   );
   // ④ 真实事件总线：每次状态流转自动记账到 domain_event（type=新状态=过程挖掘活动节点）。

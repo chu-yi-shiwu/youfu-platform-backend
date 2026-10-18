@@ -6,16 +6,14 @@
 //    保持 M1-M3 已验证行为，不破坏既有工单生命周期。
 //  - 不改动已验证的 workOrder.ts；本文件为增量新增。
 import type { PoolClient } from 'pg';
-import { createWithIdem } from '../repo/ticket.js';
+import { createWithIdem, transition } from '../repo/ticket.js';
 import { pickWorker, resolveDispatch, getActiveRules } from '../engine/dispatch.js';
-import { resolveDispatchTarget, timestampColumnFor } from '../engine/stateMachine.js';
+import { resolveDispatchTarget, type WorkOrderStatus } from '../engine/stateMachine.js';
 import { getWorkflowDef } from '../engine/workflowDef.js';
 import { setSlaDueAt } from '../engine/sla.js';
-import { emitDomainEvent } from '../db/eventBus.js';
 import { AppError } from '../middleware/error.js';
 // R12-F1（十轮审查）：K2 dispatch 影子回填——自动派单也是"人工实际"信号源（模型建议 vs 实际派单），
 // 此前仅 transition() 人工派单回填，导致 dispatch 影子 actual 永远空置（R12 live 查证 7/7 NULL）。
-import { resolveDispatchShadow } from './k2Shadow.js';
 // 2026-09-14 纵切② P0-4：派单未命中通知管理员（与 workOrder.ts / slaScheduler.ts 同源 notify 抽象层）
 import { insertNotification } from './notify.js';
 
@@ -126,26 +124,20 @@ export async function createLinkedWorkOrder(
     autoFlow = true;
     assignee = picked.id;
     reason = resolved ? resolved.reason : 'auto dispatched by least_load fallback';
-    // 074 里程碑回填：本函数为自动派单旁路（不走 transition()），按 dispatchTarget 同步回填
-    // 里程碑列（映射与 transition() 同源 stateMachine.STATUS_TIMESTAMP_COLUMNS，口径一致）。
-    const milestoneCol = timestampColumnFor(dispatchTarget);
-    await client.query(
-      `UPDATE work_orders SET status = $1, assignee_id = $2, auto_flow = true, updated_at = now()${milestoneCol ? `, ${milestoneCol} = now()` : ''} WHERE id = $3`,
-      [dispatchTarget, picked.id, row.id],
-    );
-    await client.query('UPDATE worker SET load = load + 1 WHERE id = $1', [picked.id]);
-    await client.query(
-      `INSERT INTO ticket_event (tenant_id, work_order_id, type, from_status, to_status, actor, payload)
-       VALUES ($1,$2,'assign',$3,$4,'auto_dispatch',$5)`,
-      [p.tenantId, row.id, initial, dispatchTarget, JSON.stringify({ worker_id: picked.id })],
-    );
-    // ④ 口径对齐 workOrder.ts:180：自动派单补写 domain_event，闭环过程挖掘数据源（R25-004）。
-    // 注：本函数已用 autoRouteFor(def, initial) 走 workflow_def 状态机决定 dispatchTarget，
-    // 故不强行套用 transitionEntity（其 ALLOWED_TABLES 仅含 business_flow_tasks/inspection_task，
-    // 不含 work_orders，硬塞会直接抛 BAD_REQUEST）；缺的是 domain_event 这一条，此处补齐。
-    await emitDomainEvent(client, { tenantId: p.tenantId, entityType: 'work_order', entityId: row.id, type: dispatchTarget, actor: 'auto_dispatch', payload: { worker_id: picked.id } });
-    // R12-F1：自动派单回填 dispatch 影子 actual（best-effort，内部吞错不影响主链路）
-    await resolveDispatchShadow(client, p.tenantId, String(row.id), String(picked.id));
+    // F4（2026-10-19 根治）：与 routes/workOrder.ts autoDispatchAfterCreate 同口径——
+    //   派单从旁路手写 UPDATE 改为走 transition() 主通道，客户配在派单边上的
+    //   requiredFields / sideEffects / 自动审核规则在自动路径同样生效；
+    //   allowedRoles/allowedPerms 对系统 actor 跳过（systemAuto 语义：客户启用自动派单
+    //   即授权系统发起），dispatchEdge?.event 钉死客户配的那条派单边。
+    await transition(client, p.tenantId, row.id, dispatchTarget as WorkOrderStatus, {
+      actor: 'auto_dispatch',
+      fields: { assignee: picked.id },
+      autoFlow: true,
+      eventLogType: 'assign',
+      eventOverride: dispatchEdge?.event,
+    });
+    // 注意：联动单派中不单独发工人通知（存量行为逐字保留——主路径 workOrder.ts 的 A5
+    //   fan-out 不覆盖本函数；"联动单派中是否该通知工人"另账评估，不在本次门禁修复里夹带）。
   } else {
     // 2026-09-14 纵切② P0-3：联动单派单未命中此前无 else 分支——工单无声卡死在 draft，
     // 无人可见、无人派发（断链）。逐行对齐 routes/workOrder.ts 的抢单大厅样板：

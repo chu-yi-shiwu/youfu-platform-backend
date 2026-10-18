@@ -23,12 +23,19 @@ function makeClient(handler: QueryFn) {
 const WORKER_ID = '11111111-1111-4111-8111-111111111111';
 
 function dispatchHandler(opts: { workerRows?: any[]; ruleRows?: any[]; adminRows?: any[] } = {}): QueryFn {
-  return async (text: string) => {
+  return async (text: string, params?: any[]) => {
     if (text.includes('UPDATE work_orders SET sla_minutes')) return { rows: [] };
     if (text.includes('FROM worker WHERE tenant_id')) return { rows: opts.workerRows ?? [] };
     if (text.includes('FROM dispatch_rule WHERE')) return { rows: opts.ruleRows ?? [] }; // 无规则 → least_load 兜底
     if (text.includes('SELECT def FROM workflow_def')) return { rows: [] }; // 无自定义 def → DEFAULT
     if (text.includes('SELECT params FROM model_state')) return { rows: [] };
+    // F4（2026-10-19）：派中段改走 transition() 主通道后的 mock 依赖——
+    //   行锁读当前单 / assignee 存在性校验 / UPDATE RETURNING 新行
+    if (text.includes('FOR UPDATE')) {
+      return { rows: [{ id: '22222222-2222-4222-8222-222222222222', tenant_id: 't-verification', status: 'draft', assignee_id: null, ext: {}, priority: 'normal', catalog: 'electrical' }], rowCount: 1 };
+    }
+    if (text.includes('SELECT 1 FROM worker WHERE')) return { rows: [{ ok: 1 }], rowCount: 1 };
+    if (text.includes('UPDATE work_orders SET status')) return { rows: [{ id: '22222222-2222-4222-8222-222222222222', status: params?.[0] }], rowCount: 1 };
     if (text.includes("SELECT id FROM account_user WHERE tenant_id=$1 AND role='admin'")) {
       return { rows: opts.adminRows ?? [] }; // 纵切② P0-4：派单未命中通知管理员
     }
@@ -55,11 +62,13 @@ describe('autoDispatchAfterCreate（R31-F2 回归护栏）', () => {
     expect(r.dispatchTarget).toBe('assigned');
     // SLA 起算（draft 态即计时）
     expect(calls.find((c) => c.text.includes('UPDATE work_orders SET sla_minutes'))).toBeTruthy();
-    // 流转到 assigned 且写 assignee
+    // 流转到 assigned 且写 assignee（F4：走 transition() 主通道，params = [to, id, tenantId, assignee]）
     const statusUpd = calls.find((c) => c.text.includes('UPDATE work_orders SET status'));
-    expect(statusUpd?.params).toEqual(['assigned', WORKER_ID, row.id]);
-    // worker load +1
-    expect(calls.find((c) => c.text.includes('UPDATE worker SET load'))?.params).toEqual([WORKER_ID]);
+    expect(statusUpd?.params?.[0]).toBe('assigned');
+    expect(statusUpd?.params).toContain(row.id);
+    expect(statusUpd?.params).toContain(WORKER_ID);
+    // worker load +1（transition() 活跃态净结算：+1 带 tenant 参数）
+    expect(calls.find((c) => c.text.includes('UPDATE worker SET load = load + 1'))?.params).toContain(WORKER_ID);
     // assign 事件（事件流；事件类型 'assign' 内联在 SQL 文本中，from=initial(draft)→to=assigned）
     const evt = calls.find((c) => c.text.includes('INSERT INTO ticket_event'));
     expect(evt?.text).toContain("'assign'");
@@ -142,7 +151,7 @@ describe('autoDispatchAfterCreate（R31-F2 回归护栏）', () => {
     expect(r.reason).toContain('维修-电工优先');
     // 命中的是规则链路：assign 事件 + worker load+1 正常发生
     expect(calls.find((c) => c.text.includes("'assign'"))).toBeTruthy();
-    expect(calls.find((c) => c.text.includes('UPDATE worker SET load'))).toBeTruthy();
+    expect(calls.find((c) => c.text.includes('UPDATE worker SET load = load + 1'))).toBeTruthy();
   });
 
   it('纵切② P0-1：least_load strategy + 规则未命中 → 落 pickWorker 兜底（与旧版行为一致）', async () => {

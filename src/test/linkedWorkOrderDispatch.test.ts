@@ -4,10 +4,12 @@
 // 范式与 autoDispatch.test.ts 相同：mock client + SQL 子串分流（无真实 PG）；createWithIdem mock。
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-vi.mock('../repo/ticket.js', () => ({ createWithIdem: vi.fn() }));
+// F4（2026-10-19）：派中段改走 transition() 主通道——mock 必须暴露 transition；
+// transition 内部的门禁/副作用/自动审核由 repo 层测试守护，本文件只管 linkedWorkOrder 编排。
+vi.mock('../repo/ticket.js', () => ({ createWithIdem: vi.fn(), transition: vi.fn() }));
 
 const { createLinkedWorkOrder } = await import('../services/linkedWorkOrder.js');
-const { createWithIdem } = await import('../repo/ticket.js');
+const { createWithIdem, transition } = await import('../repo/ticket.js');
 
 type QueryFn = (text: string, params?: any[]) => Promise<{ rows: any[]; rowCount?: number }>;
 
@@ -59,6 +61,8 @@ function basePayload(over: Record<string, unknown> = {}) {
 
 describe('linkedWorkOrder 派单未命中兜底（纵切② P0-3/P0-4）', () => {
   beforeEach(() => {
+    (transition as any).mockReset();
+    (transition as any).mockResolvedValue({ row: {}, transition: null, from: 'draft' });
     (createWithIdem as any).mockReset();
     (createWithIdem as any).mockResolvedValue({
       row: { id: WO_ID, order_no: ORDER_NO, auto_flow: false, assignee_id: null },
@@ -143,7 +147,14 @@ describe('linkedWorkOrder 派单未命中兜底（纵切② P0-3/P0-4）', () =>
     const r = await createLinkedWorkOrder(client, basePayload({ skillTags: ['inspection'] }));
     expect(r.autoFlow).toBe(true);
     expect(r.assignee).toBe(WORKER_ID);
-    expect(calls.find((c) => c.text.includes('UPDATE work_orders SET status'))?.params?.[0]).not.toBe('claim_hall');
+    // F4：派中走 transition() 主通道（DEFAULT def：draft→assigned assign 边），
+    //   系统 actor + autoFlow=true + eventLogType='assign' 钉死口径
+    expect(transition).toHaveBeenCalledTimes(1);
+    const tArgs = (transition as any).mock.calls[0];
+    expect(tArgs[2]).toBe(WO_ID);
+    expect(tArgs[3]).toBe('assigned');
+    expect(tArgs[4]).toMatchObject({ actor: 'auto_dispatch', autoFlow: true, eventLogType: 'assign' });
+    expect(tArgs[4].fields).toMatchObject({ assignee: WORKER_ID });
     // picked 分支无 enter_hall / 无 admin 通知
     expect(calls.find((c) => c.text.includes("'enter_hall'"))).toBeUndefined();
     expect(calls.find((c) => c.text.includes('INSERT INTO notification'))).toBeUndefined();

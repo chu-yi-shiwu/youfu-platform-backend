@@ -260,10 +260,19 @@ export function autoRouteFor(def: WorkflowDef, from: string): AutoRoute | null {
  *      对 RICH/DEFAULT 即 assigned，与旧硬编码在这些标准 def 上结果逐字一致）；
  *   ③ 初态没有任何可用转移 → null：调用方必须 422 拒绝派单并提示去配 autoRoutes，
  *      严禁再硬编码任何状态名。
+ *
+ * F4（2026-10-19 深修）：①的目标态还必须是**拓扑可达**的——autoRoutes.to 虽在 states 里，
+ *   但若不存在 from→to 的转移边，该 route 视为坏配置（客户把派单目标配成了流程里
+ *   跳不到的地方），跳过它落②。生产实证：t-phasea 配 draft→assigned 但其 def 只有
+ *   submit→pending_accept / cancel→cancelled 两条出边——旧旁路不查边直接写 assigned
+ *   = 跳过受理环节直达派单孤岛；走主通道（transition() 查边）后按拓扑诚实落到
+ *   pending_accept。这不是迁就坏配置，是消灭"配置指向拓扑外跳转"的静默容忍。
  */
 export function resolveDispatchTarget(def: WorkflowDef, from: string): string | null {
   const ar = autoRouteFor(def, from);
-  if (ar) return ar.to;
+  if (ar && (def.transitions ?? []).some((t) => t.from === from && t.to === ar.to)) {
+    return ar.to;
+  }
   const forbidden = new Set<string>([...doneStates(def), ...terminalStates(def)]);
   const edge = (def.transitions ?? []).find((t) => t.from === from && !forbidden.has(t.to));
   return edge ? edge.to : null;

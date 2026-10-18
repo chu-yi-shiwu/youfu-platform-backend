@@ -27,7 +27,7 @@ import type { WorkOrderStatus, WorkflowDef } from '../engine/stateMachine.js';
 import { getWorkflowDef } from '../engine/workflowDef.js';
 import {
   availableTransitions, learningTriggerStates, shouldTriggerLearning, RICH_WORK_ORDER_DEF,
-  timestampColumnFor, resolveDispatchTarget,
+  resolveDispatchTarget,
 } from '../engine/stateMachine.js';
 import { safeParseJsonb } from '../util/jsonb.js';
 import { validateIntake } from '../services/dataQuality.js';
@@ -181,24 +181,22 @@ export async function autoDispatchAfterCreate(
     autoFlow = true;
     assignee = picked.id;
     reason = resolved ? resolved.reason : 'auto dispatched by least_load fallback';
-    // 074 里程碑回填：自动派单不走 transition()（load 手工 +1 的既有旁路），此处按 dispatchTarget
-    // 同步回填里程碑列（映射与 transition() 同源 stateMachine.STATUS_TIMESTAMP_COLUMNS，口径一致）。
-    const milestoneCol = timestampColumnFor(dispatchTarget);
-    await client.query(
-      `UPDATE work_orders SET status = $1, assignee_id = $2, auto_flow = true, updated_at = now()${milestoneCol ? `, ${milestoneCol} = now()` : ''} WHERE id = $3`,
-      [dispatchTarget, picked.id, row.id],
-    );
-    await client.query('UPDATE worker SET load = load + 1 WHERE id = $1', [picked.id]);
-    await client.query(
-      `INSERT INTO ticket_event (tenant_id, work_order_id, type, from_status, to_status, actor, payload)
-       VALUES ($1,$2,'assign',$3,$4,'auto_dispatch', $5)`,
-      [tenantId, row.id, initial, dispatchTarget, JSON.stringify({ worker_id: picked.id })],
-    );
-    // ④ 口径对齐：domain_event.type 一律为"结果状态"（与 transition() 一致），自动派单落入 dispatchTarget。
-    await emitDomainEvent(client, { tenantId, entityType: 'work_order', entityId: row.id, type: dispatchTarget, actor: 'auto_dispatch', payload: { worker_id: picked.id } });
-    // R12-F1：自动派单回填 dispatch 影子 actual（best-effort，内部吞错不影响主链路）
-    await resolveDispatchShadow(client, tenantId, String(row.id), String(picked.id));
-    // A5 派单通知：落库通知被派单人（sms/push 为 stub，诚实未真实发送）
+    // F4（2026-10-19 根治）：派单从旁路手写 UPDATE 改为走 transition() 主通道——
+    //   客户配在派单边上的 requiredFields / sideEffects / 自动审核规则（tryAutoAdvance）
+    //   从此在自动路径同样生效，不再"人走门、系统翻墙"。
+    //   allowedRoles/allowedPerms 对系统 actor 跳过（systemAuto 语义）：产品口径=
+    //   客户启用自动派单即授权系统发起该动作；与 tryAutoAdvance 的 systemAuto 同一源头。
+    //   拓扑可达性由 resolveDispatchTarget 保证（autoRoutes 目标无边 → 落流程第一跳），
+    //   dispatchEdge?.event 钉死走客户配的那条派单边（同一 from→to 多条边时不漂移）。
+    await transition(client, tenantId, row.id, dispatchTarget as WorkOrderStatus, {
+      actor: 'auto_dispatch',
+      fields: { assignee: picked.id },
+      autoFlow: true,
+      eventLogType: 'assign', // 事件流保持 assign 类型（publicReport 平均响应时长按它聚合）
+      eventOverride: dispatchEdge?.event,
+    });
+    // A5 派单通知：落库通知被派单人（sms/push 为 stub，诚实未真实发送）。
+    // transition() 不发通知（人工流转的通知由各端点负责），系统派单的 fan-out 保留在此。
     await insertNotification(client, {
       tenantId, recipient: picked.id, recipientKind: 'worker', type: 'dispatch', workOrderId: row.id,
       title: '您有一条新工单', body: `工单 ${row.order_no} 已自动派给您`,
