@@ -243,6 +243,32 @@ export function autoRouteFor(def: WorkflowDef, from: string): AutoRoute | null {
   return null;
 }
 
+/**
+ * 解析自动派单目标态（派单旁路单一事实源，fail-closed）——2026-10-19 对齐审查修复。
+ *
+ * 【为什么必须有这个函数】此前两处派单旁路（routes/workOrder.ts autoDispatchAfterCreate、
+ * services/linkedWorkOrder.ts）都写 `autoRouteFor(def, initial)?.to ?? 'assigned'`：
+ *   租户未配置 autoRoutes 时硬编码回退 'assigned'——若该租户 def 根本没有 assigned 态
+ *   （自定义流程完全可以用别的状态名），派单直接把单子写进客户流程里不存在的状态，
+ *   之后 transition() 的 isKnownState 拒绝一切流转 = 造失管单。
+ *   现网无实例（t-verification/t-phasea 均配 autoRoutes draft→assigned，走①不受影响），
+ *   但这是地基级潜在缺陷：**客户配什么流程，派单就必须落在什么流程里**。
+ *
+ * 解析顺序（每步的场景对照见 src/test/dispatchTargetFailClosed.test.ts）：
+ *   ① def.config.autoRoutes[from] 合法声明 → 用之（autoRouteFor 已校验 to ∈ states）；
+ *   ② 未配置 → 取 from 的第一条「非终态且非完成态」转移的目标（客户流程的天然第一步；
+ *      对 RICH/DEFAULT 即 assigned，与旧硬编码在这些标准 def 上结果逐字一致）；
+ *   ③ 初态没有任何可用转移 → null：调用方必须 422 拒绝派单并提示去配 autoRoutes，
+ *      严禁再硬编码任何状态名。
+ */
+export function resolveDispatchTarget(def: WorkflowDef, from: string): string | null {
+  const ar = autoRouteFor(def, from);
+  if (ar) return ar.to;
+  const forbidden = new Set<string>([...doneStates(def), ...terminalStates(def)]);
+  const edge = (def.transitions ?? []).find((t) => t.from === from && !forbidden.has(t.to));
+  return edge ? edge.to : null;
+}
+
 // ── 074 生命周期里程碑时间列（2026-09-06 任务④）──
 // 状态 → work_orders 里程碑列（074_work_order_milestone_timestamps.sql）的单一事实源，
 // 三条写路径共用：transition()（人工/接口流转）、autoDispatchAfterCreate（自动派单旁路）、

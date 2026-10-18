@@ -26,8 +26,8 @@ import { insertNotification, wechatSelfTest } from '../services/notify.js';
 import type { WorkOrderStatus, WorkflowDef } from '../engine/stateMachine.js';
 import { getWorkflowDef } from '../engine/workflowDef.js';
 import {
-  availableTransitions, learningTriggerStates, autoRouteFor, shouldTriggerLearning, RICH_WORK_ORDER_DEF,
-  timestampColumnFor,
+  availableTransitions, learningTriggerStates, shouldTriggerLearning, RICH_WORK_ORDER_DEF,
+  timestampColumnFor, resolveDispatchTarget,
 } from '../engine/stateMachine.js';
 import { safeParseJsonb } from '../util/jsonb.js';
 import { validateIntake } from '../services/dataQuality.js';
@@ -138,11 +138,30 @@ export async function autoDispatchAfterCreate(
   const workerRows = workers.rows.map((w: any) => ({ ...w, skill_tags: safeParseJsonb(w.skill_tags) ?? [] }));
   const needPayload = { business_type: need.business_type, skill_tags: need.skill_tags ?? undefined, priority: prio };
   const rules = await getActiveRules(client, tenantId);
-  // ④⑤ 模数共振：读 workflow_def.autoRoutes，决定本租户自动派发的目标态与策略（缺省保持旧行为：落 assigned、规则优先）
+  // ④⑤ 模数共振：读 workflow_def 决定本租户自动派发的目标态（resolveDispatchTarget：
+  //   autoRoutes 优先 → 初态首条非终态转移 → 都没有则 422，绝不硬编码回退 'assigned'——
+  //   租户 def 可能没有 assigned 态，写未知态=造失管单。见 engine/stateMachine.ts 注释）。
   const def = await getWorkflowDef(client, tenantId, 'work_order');
   const initial = def.initial;
-  const route = autoRouteFor(def, initial);
-  const dispatchTarget = route?.to ?? 'assigned';
+  const dispatchTarget = resolveDispatchTarget(def, initial);
+  if (!dispatchTarget) {
+    throw new AppError(
+      'BAD_REQUEST',
+      '本租户流程未配置可用的自动派单路径：请在工作流配置里设置 autoRoutes（如 draft → assigned），或为初始态配置一条非终态转移边',
+      422,
+    );
+  }
+  // 系统派单唯一能自带的字段是 assignee（下方 picked.id）；解析边若要求其他必填字段，
+  // 系统无法提供 → 明确 422，绝不静默跳过客户配在派单边上的门禁（那正是本修复要消灭的行为）。
+  const dispatchEdge = (def.transitions ?? []).find((t) => t.from === initial && t.to === dispatchTarget);
+  const unmetFields = (dispatchEdge?.requiredFields ?? []).filter((f) => f !== 'assignee');
+  if (unmetFields.length > 0) {
+    throw new AppError(
+      'BAD_REQUEST',
+      `自动派单目标转移要求必填字段 ${unmetFields.join(',')}，系统派单无法提供；请调整流程配置或改用人工派单`,
+      422,
+    );
+  }
   // 2026-09-14 纵切② P0-1：strategy:'least_load' 不再短路规则匹配（t-phasea 实证规则被静默废掉；
   // 规则未命中时 resolveDispatch 返回 null，自然落 pickWorker 兜底，无规则租户行为不变）。
   // dispatchTarget（route?.to）逻辑不动：目标态仍由 autoRoutes 决定。

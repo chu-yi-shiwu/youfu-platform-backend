@@ -18,16 +18,22 @@
  * 【为什么全是纯函数】
  *   判定逻辑不碰 DB，才能被单测穷举；DB 读写放在 repo 层，路由层组合。
  */
-import type { WorkflowDef } from './stateMachine.js';
+import { terminalStates, type WorkflowDef } from './stateMachine.js';
 
 /** 允许自动化的事件（审核类动作；终态动作一律不在内）。 */
 export const AUTO_RULE_EVENTS = ['approve', 'reject'] as const;
 export type AutoRuleEvent = (typeof AUTO_RULE_EVENTS)[number];
 
 /**
- * 终态名单：自动审核**绝不**把单推进这些状态。
- * 说明：completed 不在内（它是"工作做完"的里程碑态，后面还有 close/satisfy，
- * 且 review_passed→completed 属正常推进）；closed/cancelled/evaluated 才是真正的终点。
+ * 内置 RICH 模板的终态名（红线并集的硬编码半边）。
+ *
+ * 2026-10-19 对齐审查修复：终态判定 = 本硬编码集 **∪** def 派生 terminalStates(def)
+ * （无出边状态）。取并集的原因：安全属性只加强不削弱——
+ *   - 硬编码边：RICH 下 closed 有出边（→evaluated），但"已关闭"是人工终局决定，
+ *     绝不因拓扑上还有评价步就放行自动关单（autoAdvance.test.ts 红线双保险用例口径）；
+ *   - def 派生边：自定义态名的 def（如 inspection_task 的 pending/in_progress/done）里
+ *     'done' 不在硬编码集，旧口径漏拦「自动审到自定义终态」，由派生集补上。
+ * RICH 下 completed 有出边且不在硬编码集 → 非终态，自动审核可推，与旧行为一致。
  */
 export const TERMINAL_STATES = ['closed', 'cancelled', 'evaluated'] as const;
 
@@ -136,7 +142,13 @@ export function assertAutoRuleSavable(
   if (!edge) {
     throw new Error(`本租户流程里不存在 ${rule.fromState} --${rule.event}--> 这条边`);
   }
-  if ((TERMINAL_STATES as readonly string[]).includes(edge.to)) {
+  // 终态红线 = 硬编码 RICH 终态名 ∪ 本租户 def 派生终态（无出边）——**并集，只加强不削弱**：
+  //   - 硬编码集：RICH 下 closed 有出边（→evaluated）但"已关闭"是人工终局决定，
+  //     绝不因拓扑上还有评价步就放行自动关单（autoAdvance.test.ts 红线双保险用例口径）；
+  //   - def 派生集：自定义态名的终态（如 inspection 的 done）旧口径漏拦，此处补上；
+  //   - RICH 下 completed 有出边且不在硬编码集 → 非终态，自动审核可推，语义不变。
+  const terminals = new Set<string>([...(TERMINAL_STATES as readonly string[]), ...terminalStates(def)]);
+  if (terminals.has(edge.to)) {
     throw new Error(`红线：不得自动推进到终态 ${edge.to}（终态必须由人工显式操作）`);
   }
   return { to: edge.to };

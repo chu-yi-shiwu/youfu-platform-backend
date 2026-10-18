@@ -8,10 +8,11 @@
 import type { PoolClient } from 'pg';
 import { createWithIdem } from '../repo/ticket.js';
 import { pickWorker, resolveDispatch, getActiveRules } from '../engine/dispatch.js';
-import { autoRouteFor, timestampColumnFor } from '../engine/stateMachine.js';
+import { resolveDispatchTarget, timestampColumnFor } from '../engine/stateMachine.js';
 import { getWorkflowDef } from '../engine/workflowDef.js';
 import { setSlaDueAt } from '../engine/sla.js';
 import { emitDomainEvent } from '../db/eventBus.js';
+import { AppError } from '../middleware/error.js';
 // R12-F1（十轮审查）：K2 dispatch 影子回填——自动派单也是"人工实际"信号源（模型建议 vs 实际派单），
 // 此前仅 transition() 人工派单回填，导致 dispatch 影子 actual 永远空置（R12 live 查证 7/7 NULL）。
 import { resolveDispatchShadow } from './k2Shadow.js';
@@ -92,8 +93,27 @@ export async function createLinkedWorkOrder(
   // ④⑤ 模数共振：读 workflow_def.autoRoutes，决定本租户自动派发的目标态与策略（缺省保持旧行为：落 assigned、规则优先）
   const def = await getWorkflowDef(client, p.tenantId, 'work_order');
   const initial = def.initial;
-  const route = autoRouteFor(def, initial);
-  const dispatchTarget = route?.to ?? 'assigned';
+  const route = resolveDispatchTarget(def, initial);
+  // 2026-10-19 对齐审查修复（F1）：与 routes/workOrder.ts autoDispatchAfterCreate 同口径——
+  // 租户未配 autoRoutes 时不再硬编码回退 'assigned'（def 可能没有该态，写未知态=造失管单），
+  // 无可用派单路径 → 422 明确拒绝；解析边要求系统无法提供的必填字段 → 422，不静默跳门禁。
+  const dispatchTarget = route;
+  if (!dispatchTarget) {
+    throw new AppError(
+      'BAD_REQUEST',
+      '本租户流程未配置可用的自动派单路径：请在工作流配置里设置 autoRoutes（如 draft → assigned），或为初始态配置一条非终态转移边',
+      422,
+    );
+  }
+  const dispatchEdge = (def.transitions ?? []).find((t) => t.from === initial && t.to === dispatchTarget);
+  const unmetFields = (dispatchEdge?.requiredFields ?? []).filter((f) => f !== 'assignee');
+  if (unmetFields.length > 0) {
+    throw new AppError(
+      'BAD_REQUEST',
+      `自动派单目标转移要求必填字段 ${unmetFields.join(',')}，系统派单无法提供；请调整流程配置或改用人工派单`,
+      422,
+    );
+  }
   // 2026-09-14 纵切② P0-1：strategy:'least_load' 不再短路规则匹配（t-phasea 实证规则被静默废掉；
   // 规则未命中时 resolveDispatch 返回 null，自然落 pickWorker 兜底，无规则租户行为不变）。
   // dispatchTarget（route?.to）逻辑不动：目标态仍由 autoRoutes 决定。

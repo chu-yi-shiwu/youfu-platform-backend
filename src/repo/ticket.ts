@@ -330,7 +330,7 @@ export async function transition(
  * 【四道闸（缺一不可）——"引擎绝不自动推进到终态"红线】
  *   ① 惰性：先查启用中的规则，为空（含 094 未应用）→ 立刻返回 null，零额外行为；
  *   ② 白名单：规则 event 只能是 approve / reject（schema + DB CHECK + 此处 resolveAutoRuleEdge 三重）；
- *   ③ 终态红线：解析出的 target state 命中 TERMINAL_STATES → 放弃自动（双保险，保存时已挡一次）；
+ *   ③ 终态红线：解析出的 target state 命中 def 派生终态（terminalStates，无出边）→ 放弃自动（双保险，保存时已挡一次）；
  *   ④ 单级：opts.auto 标记已自动推进过的流转不再触发，杜绝链式失控（自动→自动→…）。
  *   另：目标边若声明了 requiredFields（需人工填内容）→ 放弃自动，不硬推。
  *
@@ -367,7 +367,11 @@ async function tryAutoAdvance(
   const edge = def.transitions.find((t) => t.from === currentState && t.event === rule.event);
   if (!edge) return null;
   // ③ 终态红线（双保险：保存时 assertAutoRuleSavable 已挡一次，这里再挡运行期的数据漂移）
-  if ((TERMINAL_STATES as readonly string[]).includes(edge.to)) return null;
+  // 2026-10-19 对齐审查修复：硬编码 RICH 终态名 ∪ def 派生终态（无出边）取并集，只加强不削弱——
+  // closed 在 RICH 有出边但"自动关单"仍是人工终局决定（autoAdvance.test.ts 红线口径）；
+  // 自定义流程的终态名（如 done）运行期同样拦住。
+  const terminalSet = new Set<string>([...TERMINAL_STATES, ...terminalStates(def)]);
+  if (terminalSet.has(edge.to)) return null;
   // 需人工填字段的边不自动推（自动填不出来，硬推只会 422）
   if (edge.requiredFields && edge.requiredFields.length > 0) return null;
 
