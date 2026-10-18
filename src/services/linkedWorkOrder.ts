@@ -127,12 +127,15 @@ export async function createLinkedWorkOrder(
     // F4（2026-10-19 根治）：与 routes/workOrder.ts autoDispatchAfterCreate 同口径——
     //   派单从旁路手写 UPDATE 改为走 transition() 主通道，客户配在派单边上的
     //   requiredFields / sideEffects / 自动审核规则在自动路径同样生效；
-    //   allowedRoles/allowedPerms 对系统 actor 跳过（systemAuto 语义：客户启用自动派单
-    //   即授权系统发起），dispatchEdge?.event 钉死客户配的那条派单边。
+    //   F4 深修（systemActor）：allowedRoles/allowedPerms 是人类门禁，系统 actor 无角色
+    //   可谈；客户配 autoRoutes（授权系统）+ allowedRoles（约束人）不矛盾，系统只跳过
+    //   人类门禁（拓扑/必填/副作用/自动审核一个不跳）。生产实证与完整论证见
+    //   routes/workOrder.ts 同段注释 + src/test/dispatchSystemActor.test.ts。
     await transition(client, p.tenantId, row.id, dispatchTarget as WorkOrderStatus, {
       actor: 'auto_dispatch',
       fields: { assignee: picked.id },
       autoFlow: true,
+      systemAuto: true,
       eventLogType: 'assign',
       eventOverride: dispatchEdge?.event,
     });

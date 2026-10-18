@@ -184,14 +184,19 @@ export async function autoDispatchAfterCreate(
     // F4（2026-10-19 根治）：派单从旁路手写 UPDATE 改为走 transition() 主通道——
     //   客户配在派单边上的 requiredFields / sideEffects / 自动审核规则（tryAutoAdvance）
     //   从此在自动路径同样生效，不再"人走门、系统翻墙"。
-    //   allowedRoles/allowedPerms 对系统 actor 跳过（systemAuto 语义）：产品口径=
-    //   客户启用自动派单即授权系统发起该动作；与 tryAutoAdvance 的 systemAuto 同一源头。
-    //   拓扑可达性由 resolveDispatchTarget 保证（autoRoutes 目标无边 → 落流程第一跳），
-    //   dispatchEdge?.event 钉死走客户配的那条派单边（同一 from→to 多条边时不漂移）。
+    //   F4 深修（systemActor）：allowedRoles/allowedPerms 是**人类**门禁（约束"谁能点按钮"），
+    //   系统 actor 无角色可谈。客户在同一份 def 里配 autoRoutes（=显式授权系统沿此路自动
+    //   派单）与 allowedRoles（=约束人类操作者）不矛盾：前者授权系统，后者约束人。
+    //   若系统也守 allowedRoles，则任何配了角色门禁的派单边 = 自动派单永远 403，两个配置
+    //   互相抵消——那不是从严，是让客户的配置变得无意义（生产实证：demo_tenant 开通样板
+    //   的 submit 边带 allowedRoles=['admin','operator']，F4 首版即 403，见
+    //   src/test/dispatchSystemActor.test.ts）。与 tryAutoAdvance 的 systemAuto 同源头：
+    //   配置须客户显式启用，系统执行只跳过人类门禁；拓扑/必填/副作用/自动审核一个不跳。
     await transition(client, tenantId, row.id, dispatchTarget as WorkOrderStatus, {
       actor: 'auto_dispatch',
       fields: { assignee: picked.id },
       autoFlow: true,
+      systemAuto: true,
       eventLogType: 'assign', // 事件流保持 assign 类型（publicReport 平均响应时长按它聚合）
       eventOverride: dispatchEdge?.event,
     });
