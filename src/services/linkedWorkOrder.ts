@@ -10,6 +10,7 @@ import { createWithIdem, transition } from '../repo/ticket.js';
 import { pickWorker, resolveDispatch, getActiveRules } from '../engine/dispatch.js';
 import { resolveDispatchTarget, type WorkOrderStatus } from '../engine/stateMachine.js';
 import { getWorkflowDef } from '../engine/workflowDef.js';
+import { CLAIM_HALL_STATE } from '../engine/claimHallEdges.js'; // F8：落抢单大厅走主通道（机制态单一事实源）
 import { setSlaDueAt } from '../engine/sla.js';
 import { AppError } from '../middleware/error.js';
 // R12-F1（十轮审查）：K2 dispatch 影子回填——自动派单也是"人工实际"信号源（模型建议 vs 实际派单），
@@ -150,15 +151,17 @@ export async function createLinkedWorkOrder(
     const hallReason = workers.rows.some((w: { active: boolean }) => w.active)
       ? 'no_rule_matched'
       : 'no_available_worker';
-    await client.query(
-      'UPDATE work_orders SET status = $1, auto_flow = false, updated_at = now() WHERE id = $2',
-      ['claim_hall', row.id],
-    );
-    await client.query(
-      `INSERT INTO ticket_event (tenant_id, work_order_id, type, from_status, to_status, actor, payload)
-       VALUES ($1,$2,'enter_hall',$3,$4,'system',$5)`,
-      [p.tenantId, row.id, initial, 'claim_hall', JSON.stringify({ reason: hallReason })],
-    );
+    // F8（2026-10-19）：与 routes/workOrder.ts 落大厅同口径——由旁路手写 UPDATE 改为走
+    //   transition() 主通道（入厅边由 claimHallEdges 机制注入）。事件 type 仍 'enter_hall'、
+    //   payload 仍带 reason（GET /stats 的 claim_hall_reasons 聚合口径逐字不变）。
+    await transition(client, p.tenantId, row.id, CLAIM_HALL_STATE as WorkOrderStatus, {
+      actor: 'auto_dispatch',
+      autoFlow: false,
+      systemAuto: true,
+      eventLogType: 'enter_hall',
+      eventOverride: 'enter_hall',
+      payloadExtra: { reason: hallReason },
+    });
     // 2026-09-14 纵切② P0-4：派单未命中通知管理员（镜像 slaScheduler.ts admin fan-out 模式）。
     // QA-P1 修正（2026-09-14）：withTenantClient 是 BEGIN→fn→COMMIT（db/pool.ts），通知段 SQL
     // 一旦真出错，整个 PG 事务进入 aborted 态——单纯 try/catch 吞错后外层 COMMIT 实为 ROLLBACK，

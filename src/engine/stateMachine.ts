@@ -10,6 +10,15 @@
 // 非法态直接抛 422（CONFLICT），前端不可任意传状态，维护者无需担心类型放宽引入脏数据。
 export type WorkOrderStatus = string;
 
+/**
+ * 抢单大厅机制态名与入厅事件名——**单一事实源放在引擎核心**。
+ * F8（2026-10-19）：此前常量只在 claimHallEdges.ts 定义，而 stateMachine.ts（RICH 模板 +
+ *   resolveDispatchTarget）需要用它区分「机制边 vs 客户业务边」，反向 import 会成环。
+ *   故上提到此处，claimHallEdges.ts 改为同源 re-export（对外 import 路径零变化）。
+ */
+export const CLAIM_HALL_STATE = 'claim_hall';
+export const ENTER_HALL_EVENT = 'enter_hall';
+
 export interface WorkflowTransition {
   from: string;
   to: string;
@@ -143,6 +152,10 @@ export const RICH_WORK_ORDER_DEF: WorkflowDef = {
     { from: 'completed', to: 'closed', event: 'close', requiredFields: ['close_reason'] },
     { from: 'closed', to: 'evaluated', event: 'satisfy', requiredFields: ['satisfaction_score'] },
     // —— 抢单大厅（滴滴式未命中自动派单时归属，人员可抢单）——
+    // F8（2026-10-19）：补「入厅边」draft --enter_hall--> claim_hall。此前 RICH def 只有
+    //   三条**出厅**边，入厅这条只存在于 claimHallEdges 的运行时注入里（两处不同源）——
+    //   落大厅因此只能旁路手写 UPDATE。两处必须逐字同源（同 pending_dispatch claim 边的教训）。
+    { from: 'draft', to: 'claim_hall', event: 'enter_hall' },
     { from: 'claim_hall', to: 'assigned', event: 'claim', allowedRoles: ['worker', 'admin'] },
     { from: 'claim_hall', to: 'assigned', event: 'dispatch', requiredFields: ['assignee'], allowedRoles: ['admin'], allowedPerms: ['dispatch.override'] },
     // —— 撤销（活跃态 → cancelled）——
@@ -197,6 +210,49 @@ export function applyEvent(def: WorkflowDef, from: string, event: string): strin
 export function terminalStates(def: WorkflowDef): string[] {
   const hasOutgoing = new Set(def.transitions.map((t) => t.from));
   return def.states.filter((s) => !hasOutgoing.has(s));
+}
+
+/** 内置挂起态（兜底；客户自定义挂起态名时由 def.config.holdStates 或 sideEffects 派生覆盖）。 */
+export const BUILTIN_HOLD_STATES = ['paused', 'suspended'] as const;
+
+/**
+ * 挂起态（人已离场、工单暂不算在身）口径：worker.load 净结算与 SLA 扫描**共用同一派生源**。
+ *
+ * 【为什么要有这个函数】
+ *   此前 ticket.ts（load 结算）与 slaScheduler.ts（SLA 扫描）各自硬编码 `'paused'/'suspended'`
+ *   两处字面量——而 doneStates / terminalStates 早已是流程派生的。于是客户若在流程里
+ *   自定义挂起态名（如 on_hold / waiting_part），两边都不认：
+ *     · load：人已离场却不回收 → 派单均衡长期虚高，该派的人派不出去；
+ *     · SLA：挂起的单继续计时 → 超时率被污染。
+ *   这违反「不改代码发版、界面全搞定」的产品第一原则：客户配了个状态，引擎不认识。
+ *
+ * 【派生口径（三级，显式优先）】
+ *   ① def.config.holdStates —— 客户/配置台显式声明（只保留在 def.states 内的合法态）；
+ *   ② 兜底 = sideEffects 含 pause_sla 的**目标态**（挂起的语义锚点就是"暂停 SLA"）
+ *      ∪ 内置 paused/suspended（存量租户零行为变化）。
+ *   与 learningTriggerStates 同构：显式优先、兜底保持向后兼容。
+ */
+export function holdStates(def: WorkflowDef): string[] {
+  const cfg = def.config?.holdStates;
+  if (Array.isArray(cfg) && cfg.length > 0) {
+    return cfg.filter((s) => typeof s === 'string' && def.states.includes(s));
+  }
+  const derived = new Set<string>(BUILTIN_HOLD_STATES);
+  for (const t of def.transitions ?? []) {
+    if ((t.sideEffects ?? []).includes('pause_sla')) derived.add(t.to);
+  }
+  return def.states.filter((s) => derived.has(s));
+}
+
+/**
+ * 活跃态（worker 在身 / SLA 在跑）：全态 − 完成 − 终态 − 挂起。
+ * load 净结算与 SLA 扫描必须共用此派生，杜绝两处口径漂移（见 holdStates 注释）。
+ */
+export function activeStates(def: WorkflowDef): string[] {
+  const done = doneStates(def);
+  const term = terminalStates(def);
+  const hold = holdStates(def);
+  return def.states.filter((s) => !done.includes(s) && !term.includes(s) && !hold.includes(s));
 }
 
 /**
@@ -272,12 +328,20 @@ export function autoRouteFor(def: WorkflowDef, from: string): AutoRoute | null {
  *   pending_accept。这不是迁就坏配置，是消灭"配置指向拓扑外跳转"的静默容忍。
  */
 export function resolveDispatchTarget(def: WorkflowDef, from: string): string | null {
+  // F8（2026-10-19）：派单目标只能从**客户业务边**解析，必须排除引擎机制边
+  //   （enter_hall 入厅边 / 目标为 claim_hall）。否则「客户流程根本没有可用派单路径」
+  //   这一 fail-closed 语义会被机制兜底边顶替成"落抢单大厅"，422 变静默放行——
+  //   客户配错了流程却看不出来（正是 dispatchTargetFailClosed 用例⑥守护的事实）。
+  //   机制边是引擎的兜底行为空间，不是客户声明的派单路径，两者不可混用。
+  const isMechanism = (t: WorkflowTransition) => t.event === ENTER_HALL_EVENT || t.to === CLAIM_HALL_STATE;
   const ar = autoRouteFor(def, from);
-  if (ar && (def.transitions ?? []).some((t) => t.from === from && t.to === ar.to)) {
+  if (ar && (def.transitions ?? []).some((t) => t.from === from && t.to === ar.to && !isMechanism(t))) {
     return ar.to;
   }
   const forbidden = new Set<string>([...doneStates(def), ...terminalStates(def)]);
-  const edge = (def.transitions ?? []).find((t) => t.from === from && !forbidden.has(t.to));
+  const edge = (def.transitions ?? []).find(
+    (t) => t.from === from && !forbidden.has(t.to) && !isMechanism(t),
+  );
   return edge ? edge.to : null;
 }
 

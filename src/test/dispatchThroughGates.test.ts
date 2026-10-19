@@ -448,4 +448,88 @@ describe('自动派单走客户配的门禁 —— 系统干活也必须守客�
       ).rejects.toThrow();
     });
   });
+
+  // ── F8（2026-10-19）：落抢单大厅由旁路 UPDATE 并入 transition() 主通道 ──
+  // 旧行为：workOrder.ts / linkedWorkOrder.ts 各写一条 `UPDATE work_orders SET status='claim_hall'`
+  //   并手工插 enter_hall 事件 —— 客户配在**入厅边**上的规矩一条都不生效，
+  //   domain_event（过程挖掘）也根本没有这一节。以下三条钉住"并入之后"的产品事实。
+
+  it('⑥ 入厅边的 sideEffects 必须执行：客户配 pause_sla，落大厅后 SLA 暂停落库（旁路时代恒为 NULL）', async () => {
+    await db().query(
+      `INSERT INTO workflow_def (tenant_id, entity_type, def, version)
+       VALUES ($1, 'work_order', $2::jsonb, 1)
+       ON CONFLICT (tenant_id, entity_type) DO UPDATE SET def = EXCLUDED.def, version = workflow_def.version + 1`,
+      [T, JSON.stringify({
+        initial: 'draft',
+        states: ['draft', 'assigned', 'processing', 'completed'],
+        transitions: [
+          { from: 'draft', to: 'assigned', event: 'assign' },
+          { from: 'assigned', to: 'processing', event: 'start' },
+          { from: 'processing', to: 'completed', event: 'complete' },
+          // 客户自建入厅边并配副作用：机制注入因同 from+event 已存在而跳过（客户配置优先）
+          { from: 'draft', to: 'claim_hall', event: 'enter_hall', sideEffects: ['pause_sla'] },
+        ],
+        config: { autoRoutes: { draft: { to: 'assigned', strategy: 'least_load' } } },
+      })],
+    );
+    await seedOrder('WO-gate-6'); // 无工人 → 必落大厅
+
+    await inTx(async () => {
+      await autoDispatchAfterCreate(rawClient(), T, { id: 'WO-gate-6', order_no: 'WO_gate_6' }, {
+        business_type: 'repair',
+        priority: 'normal',
+      });
+      const wo = await rows(`SELECT status, sla_paused_at FROM work_orders WHERE id='WO-gate-6'`);
+      expect(wo[0].status).toBe('claim_hall');
+      expect(wo[0].sla_paused_at).not.toBeNull(); // 客户配的副作用真的执行了
+    });
+  });
+
+  it('⑦ 落大厅必须进 domain_event（过程挖掘留痕，旁路时代这一节凭空消失）', async () => {
+    await seedDef();
+    await seedOrder('WO-gate-7'); // 无工人 → 必落大厅
+
+    await inTx(async () => {
+      await autoDispatchAfterCreate(rawClient(), T, { id: 'WO-gate-7', order_no: 'WO_gate_7' }, {
+        business_type: 'repair',
+        priority: 'normal',
+      });
+      const dom = await rows(
+        `SELECT type, payload FROM domain_event WHERE entity_id='WO-gate-7' AND type='claim_hall'`,
+      );
+      expect(dom).toHaveLength(1);
+      expect(dom[0].payload.from_status).toBe('draft'); // 真实初态（旁路时代 from=to=claim_hall 的笔误已修正）
+      expect(dom[0].payload.reason).toBe('no_available_worker'); // 失配原因随事件带出，stats 聚合口径保住
+    });
+  });
+
+  it('⑧ 入厅边要求必填字段 → 系统无法提供，明确失败（不静默跳门禁，与派单边同口径）', async () => {
+    await db().query(
+      `INSERT INTO workflow_def (tenant_id, entity_type, def, version)
+       VALUES ($1, 'work_order', $2::jsonb, 1)
+       ON CONFLICT (tenant_id, entity_type) DO UPDATE SET def = EXCLUDED.def, version = workflow_def.version + 1`,
+      [T, JSON.stringify({
+        initial: 'draft',
+        states: ['draft', 'assigned', 'processing', 'completed'],
+        transitions: [
+          { from: 'draft', to: 'assigned', event: 'assign' },
+          // 客户在入厅边上配必填：系统落厅时拿不到 → 与派单边同口径，明确失败而非静默落厅
+          { from: 'draft', to: 'claim_hall', event: 'enter_hall', requiredFields: ['hall_intake_note'] },
+        ],
+        config: { autoRoutes: { draft: { to: 'assigned', strategy: 'least_load' } } },
+      })],
+    );
+    await seedOrder('WO-gate-8');
+
+    await inTx(async () => {
+      await expect(
+        autoDispatchAfterCreate(rawClient(), T, { id: 'WO-gate-8', order_no: 'WO_gate_8' }, {
+          business_type: 'repair',
+          priority: 'normal',
+        }),
+      ).rejects.toThrow();
+      const wo = await rows(`SELECT status FROM work_orders WHERE id='WO-gate-8'`);
+      expect(wo[0].status).toBe('draft'); // 没被静默写进大厅
+    });
+  });
 });

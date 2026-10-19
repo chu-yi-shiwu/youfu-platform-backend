@@ -92,9 +92,15 @@ describe('autoDispatchAfterCreate（R31-F2 回归护栏）', () => {
     expect(r.assignee).toBeNull();
     const statusUpd = calls.find((c) => c.text.includes('UPDATE work_orders SET status'));
     expect(statusUpd?.params?.[0]).toBe('claim_hall');
+    // F8（2026-10-19）：落大厅由旁路 UPDATE 改为 transition() 主通道后，事件的两处口径被修正——
+    //   ① from_status 由旧旁路的「claim_hall」（=to，笔误：一张单自己流向自己）
+    //      修正为真实初态 draft（from→to 才是过程挖掘要的语义）；
+    //   ② payload 位置由 params[3] 变为 params[5]（与全系统统一事件写入一致：[tenant,id,from,to,actor,payload]）。
     const evt = calls.find((c) => c.text.includes('INSERT INTO ticket_event'));
     expect(evt?.text).toContain("'enter_hall'");
-    expect(evt?.params?.[2]).toBe('claim_hall');
+    expect(evt?.params?.[2]).toBe('draft');
+    expect(evt?.params?.[3]).toBe('claim_hall');
+    expect(JSON.parse(String(evt?.params?.[5])).reason).toBe('no_available_worker');
     // 给工人的派单通知不出现（assignee 通知 only 在 picked 分支）
     expect(calls.filter((c) => c.text.includes('INSERT INTO notification')).length).toBe(2);
     expect(calls.find((c) => c.text.includes('UPDATE worker SET load'))).toBeUndefined();
@@ -113,9 +119,9 @@ describe('autoDispatchAfterCreate（R31-F2 回归护栏）', () => {
     const r = await autoDispatchAfterCreate(client, 't-verification', row, need);
     expect(r.autoFlow).toBe(false);
     expect(calls.find((c) => c.text.includes('UPDATE work_orders SET status'))?.params?.[0]).toBe('claim_hall');
-    // V2-F3：worker 全 inactive → 同口径 no_available_worker
+    // V2-F3：worker 全 inactive → 同口径 no_available_worker（F8：payload 位移至 params[5]）
     const evt0 = calls.find((c) => c.text.includes('INSERT INTO ticket_event'));
-    expect(JSON.parse(String(evt0?.params?.[3]))).toEqual({ reason: 'no_available_worker' });
+    expect(JSON.parse(String(evt0?.params?.[5]))).toMatchObject({ reason: 'no_available_worker', transition_event: 'enter_hall' });
   });
 
   it('V2-F3：有在岗工人但技能失配（规则/兜底都没接住）→ reason=no_rule_matched（P0-8 失配观测口）', async () => {
@@ -127,8 +133,8 @@ describe('autoDispatchAfterCreate（R31-F2 回归护栏）', () => {
     expect(r.assignee).toBeNull();
     const evt = calls.find((c) => c.text.includes('INSERT INTO ticket_event'));
     expect(evt?.text).toContain("'enter_hall'");
-    // 有 active 工人却没派出去 → 配置/技能失配口径 no_rule_matched
-    expect(JSON.parse(String(evt?.params?.[3]))).toEqual({ reason: 'no_rule_matched' });
+    // 有 active 工人却没派出去 → 配置/技能失配口径 no_rule_matched（F8：payload 位移至 params[5]）
+    expect(JSON.parse(String(evt?.params?.[5]))).toMatchObject({ reason: 'no_rule_matched' });
   });
 
   // 2026-09-14 纵切② P0-1：strategy:'least_load' 不再短路规则匹配。

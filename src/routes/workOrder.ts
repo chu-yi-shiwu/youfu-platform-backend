@@ -25,6 +25,7 @@ import { insertNotification, wechatSelfTest } from '../services/notify.js';
 import { claimWorkOrder } from '../services/claimWorkOrder.js';
 import type { WorkOrderStatus } from '../engine/stateMachine.js';
 import { getWorkflowDef } from '../engine/workflowDef.js';
+import { CLAIM_HALL_STATE } from '../engine/claimHallEdges.js'; // F8：落抢单大厅走主通道（机制态单一事实源）
 import {
   availableTransitions, learningTriggerStates, shouldTriggerLearning,
   resolveDispatchTarget,
@@ -191,25 +192,31 @@ export async function autoDispatchAfterCreate(
       payload: { order_no: row.order_no, from_status: initial, to_status: dispatchTarget, page: `pages/worker/task-detail/task-detail?id=${row.id}` },
     });
   } else {
-    // 滴滴式未命中自动派单：归属抢单大厅（claim_hall），待人员抢单
-    await client.query(
-      'UPDATE work_orders SET status = $1, auto_flow = false, updated_at = now() WHERE id = $2',
-      ['claim_hall', row.id],
-    );
+    // 滴滴式未命中自动派单：归属抢单大厅（claim_hall），待人员抢单。
+    // F8（2026-10-19 根治）：与 F4 自动派单、F6 抢单同源——此处原本旁路手写 UPDATE，
+    //   客户配在入厅边上的门禁（谁能落/要填什么/落了做什么）与留痕、里程碑全部落空。
+    //   现走 transition() 主通道：拓扑、必填、副作用、里程碑、ticket_event/domain_event
+    //   全部生效；入厅边（初态→claim_hall）由 claimHallEdges 机制注入，流程图上可见。
+    //   systemAuto=true：系统执行只跳过人类角色/权限门禁（同 F4/F6 论证），拓扑/必填/
+    //   副作用/自动审核一个不跳。事件 type 仍 'enter_hall'（存量消费方口径零影响）。
     // V2-F3（派单纵切 P0-8 失配观测，2026-09-14）：落大厅原因细分——
     //   no_available_worker = 本租户根本没有 active 工人（容量问题）；
     //   no_rule_matched      = 有在岗工人但规则/兜底都没接住（配置/技能失配问题，正是
     //                          §A-2「空调单派给电工」类历史事故的观测口）。
     //   计数经 GET /stats 的 claim_hall_reasons 聚合（repo/stats.ts 按 enter_hall 事件
     //   payload->>'reason' 分组），管理员可从 stats 面板直接看到两种失配的量级。
+    //   走主通道后 reason 由 transition 的 payloadExtra 携带，聚合口径逐字保住。
     const hallReason = workerRows.some((w: { active: boolean }) => w.active)
       ? 'no_rule_matched'
       : 'no_available_worker';
-    await client.query(
-      `INSERT INTO ticket_event (tenant_id, work_order_id, type, from_status, to_status, actor, payload)
-       VALUES ($1,$2,'enter_hall',$3,$3,'system', $4)`,
-      [tenantId, row.id, 'claim_hall', JSON.stringify({ reason: hallReason })],
-    );
+    await transition(client, tenantId, row.id, CLAIM_HALL_STATE as WorkOrderStatus, {
+      actor: 'auto_dispatch',
+      autoFlow: false,
+      systemAuto: true,
+      eventLogType: 'enter_hall',
+      eventOverride: 'enter_hall',
+      payloadExtra: { reason: hallReason },
+    });
     // 2026-09-14 纵切② P0-4：自动派单未命中此前无任何管理员感知（断链）——镜像
     // slaScheduler.ts admin fan-out 模式，通知本租户全部 active admin。
     // QA-P1 修正（2026-09-14）：withTenantClient 是 BEGIN→fn→COMMIT（db/pool.ts），通知段 SQL

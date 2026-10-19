@@ -253,7 +253,10 @@ function createHandlers(opts: { systemConfigValue?: string | null } = {}): Handl
     { match: (t) => t.includes('FROM dispatch_rule WHERE'), reply: () => ({ rows: [] }) },
     { match: (t) => t.includes('SELECT def FROM workflow_def'), reply: () => ({ rows: [] }) },
     { match: (t) => t.includes('SELECT params FROM model_state'), reply: () => ({ rows: [] }) },
-    { match: (t) => t.includes('UPDATE work_orders SET status'), reply: () => ({ rows: [], rowCount: 1 }) },
+    // F8：落大厅由旁路 UPDATE 改为 transition() 主通道 → 需行锁读（真实 DB 中刚插入的行必命中；
+    //   此前旁路不需要读行，正是"旁路不校验任何东西"的副作用之一）
+    { match: (t) => t.includes('FOR UPDATE'), reply: () => ({ rows: [{ id: WO_ID, tenant_id: T, order_no: 'WO_20260907_0000000001', status: 'draft', assignee_id: null, ext: {}, priority: 'normal', catalog: null }], rowCount: 1 }) },
+    { match: (t) => t.includes('UPDATE work_orders SET status'), reply: (_t, p) => ({ rows: [{ id: WO_ID, tenant_id: T, status: p[0] as string, assignee_id: null, ext: {}, auto_flow: false }], rowCount: 1 }) },
     { match: (t) => t.includes('UPDATE worker SET load'), reply: () => ({ rows: [], rowCount: 1 }) },
     // 详情 findOne（transition 等不触发，防御性）
     { match: (t) => t.includes('FROM workflow_def'), reply: () => ({ rows: [] }) },

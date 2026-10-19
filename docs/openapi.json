@@ -9166,6 +9166,34 @@
         }
       }
     },
+    "/api/v1/stats/worker-load-drift": {
+      "get": {
+        "tags": [
+          "stats"
+        ],
+        "summary": "worker.load 漂移对账（只读诊断）：逐工人比对「系统记的在身数」与「真实在身单数」，",
+        "description": "load 是派单负载均衡的唯一输入，历史存量曾出现与真实在身单背离（只增不减）。本端点只**读**不写，把 drift=load−active_orders 摆出来供人工复核；校正写库不在其职责内。\n\n来源：src/routes/stats.ts:120\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "HTTP 200",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "description": "骨架占位：字段以服务端实现为准"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/optimize/generate": {
       "post": {
         "tags": [

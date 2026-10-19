@@ -4,9 +4,11 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { computeCheckout } from '../routes/volunteer.js';
 import { generatePlanTasks } from '../routes/inspection.js';
 import { createLinkedWorkOrder } from '../services/linkedWorkOrder.js';
-import { createWithIdem } from '../repo/ticket.js';
+import { createWithIdem, transition } from '../repo/ticket.js';
 
-vi.mock('../repo/ticket.js', () => ({ createWithIdem: vi.fn() }));
+// F8（2026-10-19）：落抢单大厅改走 transition() 主通道，mock 必须暴露它
+//   （与 linkedWorkOrderDispatch.test.ts 同款；本文件只管编排，门禁/副作用由 repo 层测试守护）。
+vi.mock('../repo/ticket.js', () => ({ createWithIdem: vi.fn(), transition: vi.fn() }));
 
 // 可控 fake client：覆盖 createLinkedWorkOrder 内部所有 query（sla/worker/dispatch_rule/派单回写）
 function fakeClient() {
@@ -57,6 +59,8 @@ describe('巡检计划生成', () => {
 describe('转工单幂等（防重单）', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    // F8：落大厅走 transition()（此处 mock 掉，落厅行为由 repo 层真库测试守护）
+    (transition as any).mockResolvedValue({ row: {}, transition: null, from: 'draft' });
   });
   it('同一来源第二次转换不重复建单（created=false）', async () => {
     const client = fakeClient();

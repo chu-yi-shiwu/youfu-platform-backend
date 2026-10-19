@@ -5,7 +5,7 @@ import { randomBytes } from 'crypto';
 import { AppError } from '../middleware/error.js';
 import { listPerms } from '../middleware/role.js';
 import type { AuthLocals } from '../middleware/auth.js';
-import { isKnownState, doneStates, terminalStates, timestampColumnFor, isTransitionAllowed, type WorkOrderStatus, type WorkflowTransition, type WorkflowDef } from '../engine/stateMachine.js';
+import { isKnownState, doneStates, terminalStates, activeStates, timestampColumnFor, isTransitionAllowed, type WorkOrderStatus, type WorkflowTransition, type WorkflowDef } from '../engine/stateMachine.js';
 import { getWorkflowDef } from '../engine/workflowDef.js';
 import { pickAutoRule, TERMINAL_STATES } from '../engine/autoRules.js'; // 地基④：自动审核
 import { listEnabledAutoRules } from '../repo/autoRule.js';
@@ -180,7 +180,10 @@ export async function transition(
   //   现在系统发起的流转显式传 true；不传时保持存量语义逐字不变。
   // eventLogType（F4 2026-10-19）：ticket_event.type 覆盖（缺省 'transition'）。自动派单传
   //   'assign'——publicReport 的平均响应时长按 type='assign' 聚合，事件流类型不许因通道统一而断。
-  opts?: { actor?: string; role?: string; perms?: readonly string[]; fields?: Record<string, unknown>; eventOverride?: string; auto?: boolean; systemAuto?: boolean; autoFlow?: boolean; eventLogType?: string },
+  // payloadExtra（F8 2026-10-19）：并入 ticket_event / domain_event 的 payload（纯加法，缺省不传
+  //   与原逐字一致）。落大厅的失配原因（reason）即由此携带——stats 的 claim_hall_reasons
+  //   按 payload->>'reason' 聚合，走主通道后口径必须保住。冲突时以 payloadExtra 为准。
+  opts?: { actor?: string; role?: string; perms?: readonly string[]; fields?: Record<string, unknown>; eventOverride?: string; auto?: boolean; systemAuto?: boolean; autoFlow?: boolean; eventLogType?: string; payloadExtra?: Record<string, unknown> },
 ): Promise<TransitionResult> {
   // 行锁：并发流转同一工单时串行化（A 提交释放锁后 B 才拿到锁，此时 cur.status 为最新），
   // 同时让下方"首次进入触发态"判定基于锁内权威快照，杜绝 READ COMMITTED 下双触发增量学习。
@@ -281,9 +284,11 @@ export async function transition(
   //   - after  且 after≠before → 新 assignee +1（人工派单/恢复/改派新入场）
   // 注意：2026-10-19 起自动派单（F4）、抢单（F6）已并入 transition 主通道，load 由此处净结算
   //   （不再手工 +1，故不会重复计数）；仅 linkedWorkOrder.ts 联动单仍是旁路直写，保持其既有行为。
-  const se0 = def.states.filter(
-    (s) => !doneStates(def).includes(s) && !terminalStates(def).includes(s) && s !== 'paused' && s !== 'suspended',
-  );
+  // F8（2026-10-19）：挂起态不再硬编码 'paused'/'suspended'——改由 activeStates 与 SLA 扫描
+  //   共用同一派生源（stateMachine.holdStates：def.config.holdStates 显式声明 →
+  //   pause_sla 边目标态 → 内置兜底）。此前客户自定义挂起态名（如 on_hold）时，
+  //   人已离场却仍算"在身"，worker.load 不回收 → 派单均衡长期虚高（load 是派单唯一输入）。
+  const se0 = activeStates(def);
   const fromActive = se0.includes(cur.status);
   const toActive = se0.includes(to);
   const nextAssignee = assignee ?? cur.assignee_id ?? null;
@@ -297,10 +302,20 @@ export async function transition(
     // K2 影子回填（R34）：派单/改派发生 → 回填 dispatch 影子 actual（旁路 best-effort，内部吞错不影响主链路）
     await resolveDispatchShadow(client, tenantId, id, afterContrib);
   }
+  // F8：payloadExtra 并入事件 payload（落大厅的 reason 等），缺省与原逐字一致。
+  //   from_status/to_status 是过程挖掘（domain_event）的必需字段，必须与 transition_event 同在，
+  //   ticket_event 侧它们另有独立列（冗余写入无害，且两处 payload 结构统一便于消费方复用）。
+  const evtPayload = {
+    fields,
+    transition_event: tdef.event,
+    from_status: cur.status,
+    to_status: to,
+    ...(opts?.payloadExtra ?? {}),
+  };
   await client.query(
     `INSERT INTO ticket_event (tenant_id, work_order_id, type, from_status, to_status, actor, payload)
      VALUES ($1,$2,'${opts?.eventLogType ?? 'transition'}',$3,$4,$5,$6)`,
-    [tenantId, id, cur.status, to, opts?.actor ?? 'system', JSON.stringify({ fields, transition_event: tdef.event })],
+    [tenantId, id, cur.status, to, opts?.actor ?? 'system', JSON.stringify(evtPayload)],
   );
   // ④ 真实事件总线：每次状态流转自动记账到 domain_event（type=新状态=过程挖掘活动节点）。
   await emitDomainEvent(client, {
@@ -309,7 +324,7 @@ export async function transition(
     entityId: id,
     type: to,
     actor: opts?.actor ?? 'system',
-    payload: { from_status: cur.status, to_status: to, transition_event: tdef.event },
+    payload: evtPayload,
   });
   // A+ 副作用：SLA 暂停/恢复（真实落库，可断言）；notify_* 记录 domain_event（无短信网关，诚实标注 logged-not-delivered）
   const se = tdef.sideEffects ?? [];

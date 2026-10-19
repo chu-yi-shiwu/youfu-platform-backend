@@ -9,7 +9,7 @@
 import pool from '../db/pool.js';
 import { withTenantClient } from '../db/pool.js';
 import { getWorkflowDef, getWorkflowDefOrDefault } from '../engine/workflowDef.js';
-import { doneStates, terminalStates, type WorkOrderStatus } from '../engine/stateMachine.js';
+import { doneStates, terminalStates, holdStates, activeStates as engineActiveStates, type WorkOrderStatus } from '../engine/stateMachine.js';
 import { slaScan, type SlaScanRow } from '../engine/sla.js';
 import { TRANSPORT_DEF } from '../engine/themes.js';
 import { emitDomainEvent } from '../db/eventBus.js';
@@ -125,10 +125,11 @@ export async function runTransportSlaScanForTenant(tenantId: string): Promise<Tr
   return withTenantClient(tenantId, async (client) => {
     const def = await getWorkflowDefOrDefault(client, tenantId, 'transport_task', TRANSPORT_DEF);
     // P3-②：与工单线 runSlaScanForTenant 口径对齐——除 doneStates ∪ terminalStates 外，
-    // 无条件追加排除挂起态 paused/suspended（防御租户自定义 def 含挂起态被误判 SLA 超时）；
+    // 追加排除挂起态（防御租户自定义 def 含挂起态被误判 SLA 超时）；
     // 工单线经 activeStates 二次过滤实现同款排除，运送线无二道过滤，直接落在 SQL 排除集。
+    // F8：挂起态由 holdStates 派生（不再硬编码 paused/suspended），与工单线同源。
     const exclude = Array.from(
-      new Set([...doneStates(def), ...terminalStates(def), 'paused', 'suspended']),
+      new Set([...doneStates(def), ...terminalStates(def), ...holdStates(def)]),
     );
     const rows = await client.query(
       `SELECT id, code, status, carrier, sla_due_at FROM transport_order
@@ -185,10 +186,9 @@ export async function runSlaScanForTenant(tenantId: string): Promise<SlaHit[]> {
     // A+ Phase1.5：SLA 活跃集由 workflow_def 派生（排除完成态 ∪ 终态 ∪ 挂起态），
     // 与富模板对齐且不写死 4 态（R13-005 修复口径，保持不变）。
     const def = await getWorkflowDef(client, tenantId, 'work_order');
+    // F8：挂起态与 load 结算共用 holdStates 派生（客户自定义挂起态名不再被漏排）。
     const slaExclude = Array.from(new Set([...doneStates(def), ...terminalStates(def)]));
-    const activeStates = def.states.filter(
-      (s) => !slaExclude.includes(s) && s !== 'paused' && s !== 'suspended',
-    );
+    const activeStates = engineActiveStates(def);
     const active = await client.query<SlaScanRow & { assignee_id: string | null; order_no: string }>(
       `SELECT id, status, sla_due_at, escalated_at, assignee_id, order_no FROM work_orders
        WHERE tenant_id = $1 AND status <> ALL($2::text[])`,
