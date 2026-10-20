@@ -9,7 +9,7 @@
 //   authMode=dev（权限点 dev 恒放行）+ role=admin（最该被拦的那个角色）：
 //   于是"过/不过"只由**归属闸门**决定，不会被权限矩阵干扰——且直接证明连 admin 都拦得住。
 //   既有 4 个流程测试文件（env=tenant）负责覆盖"放开后的真实写库路径"（46 例全绿）。
-import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import express from 'express';
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -130,6 +130,36 @@ describe('097 ① 归属读取：三种来源的优先级（env > DB > 默认）
   });
 });
 
+// 深化（第 2 轮）：脏数据方向。开关值是 TEXT 列，任何人 psql 手工 UPDATE 都能写进任意字符串；
+// 读取侧必须「只认合法枚举，其余一律最严」，否则一次手误（大小写/空格/旧值）就把配置权放给了客户。
+describe('097 ①-2 脏数据/非法值一律回退最严侧（TEXT 列没有约束，只能靠读取侧兜）', () => {
+  const dirty: Array<[string, string]> = [
+    ['Platform', '大小写错'],
+    ['PLATFORM', '全大写'],
+    [' tenant', '带前导空格'],
+    ['tenant ', '带尾随空格'],
+    ['ops', '完全无关的值'],
+    ['', '空串'],
+  ];
+  for (const [raw, why] of dirty) {
+    it(`DB 值 = ${JSON.stringify(raw)}（${why}）→ platform，绝不因此放开`, async () => {
+      box.owner = raw;
+      expect(await getWorkflowConfigOwner()).toBe('platform');
+    });
+  }
+
+  it('DB 无此行（0 行）→ platform', async () => {
+    const none = { query: async () => ({ rows: [], rowCount: 0 }) };
+    expect(await getWorkflowConfigOwner(none)).toBe('platform');
+  });
+
+  it('env 非法值（Platform）→ 忽略 env，以 DB 为准（env 只接受精确值，不猜）', async () => {
+    box.owner = 'tenant';
+    process.env.WORKFLOW_CONFIG_OWNER = 'Platform';
+    expect(await getWorkflowConfigOwner()).toBe('tenant'); // env 未生效，按 DB 走
+  });
+});
+
 describe('097 ② 守卫单元：platform 抛 403 / tenant 放行', () => {
   it('owner=platform → 抛 403 且 code = WORKFLOW_CONFIG_PLATFORM_ONLY', async () => {
     box.owner = 'platform';
@@ -156,6 +186,9 @@ describe('097 ③ 端到端：归属=platform 时租户 admin 的写端点全数
     ['POST', '/workflow-defs/work_order/import', { def: DEF }],
     ['PUT', '/workflow-defs/work_order/auto-rules', { from_state: 'draft', event: 'approve', conditions: {}, enabled: false }],
     ['DELETE', '/workflow-defs/work_order/auto-rules/draft/approve'],
+    // 第 12 处：optimize 旁路。V3-D5 后它从「直写 live」收敛为「存草稿」，
+    // 但仍是**改流程**——不同一道闸，客户 admin 从这条旁路就能改，收口形同虚设。
+    ['PUT', '/workflow/def', { entity: 'work_order', def: DEF }],
   ];
 
   for (const [m, p, b] of writeCalls) {
@@ -218,5 +251,53 @@ describe('097 ⑥ 平台运维通道：归属=platform 时运维仍可代客配�
     const r = await call('PUT', '/platform/config/workflow-config-owner', { owner: 'anyone' });
     expect(r.status).toBe(422); // 本系统参数校验失败统一 VALIDATION_001/422
     expect(box.owner).toBe('platform'); // 校验失败不得改写开关
+  });
+});
+
+// 深化（第 3 轮）：这两条端点平时只生成建议，但 **AUTO_TUNE 打开时会直接把建议写成 live 流程定义**
+// ——那就是改流程。静态护栏（workflowGuardCoverage）只能证明「代码里挂了闸」，
+// 这里补行为锚：证明闸真的按开关开合，且**没开 AUTO_TUNE 时不误伤**（生成建议照常可用）。
+describe('097 ⑦ optimize 旁路：自动改流程同样受归属闸约束', () => {
+  const savedEnv = { v: undefined as string | undefined };
+  beforeEach(() => { savedEnv.v = process.env.MODEL_AUTO_TUNE; });
+  afterEach(() => {
+    if (savedEnv.v === undefined) delete process.env.MODEL_AUTO_TUNE;
+    else process.env.MODEL_AUTO_TUNE = savedEnv.v;
+  });
+
+  it('AUTO_TUNE 打开 + 归属=platform → apply-workflow 403（不许客户靠自动优化改流程）', async () => {
+    process.env.MODEL_AUTO_TUNE = 'true';
+    const r = await call('POST', '/optimize/apply-workflow');
+    expect(r.status).toBe(403);
+    expect(r.body.code).toBe(WORKFLOW_CONFIG_PLATFORM_ONLY);
+  });
+
+  it('AUTO_TUNE 打开 + 归属=platform → generate-mining 403（它会顺手写 live）', async () => {
+    process.env.MODEL_AUTO_TUNE = 'true';
+    const r = await call('POST', '/optimize/generate-mining');
+    expect(r.status).toBe(403);
+    expect(r.body.code).toBe(WORKFLOW_CONFIG_PLATFORM_ONLY);
+  });
+
+  it('AUTO_TUNE 打开 + 归属=tenant → 同端点不再 403（开关放开后恢复原行为）', async () => {
+    process.env.MODEL_AUTO_TUNE = 'true';
+    box.owner = 'tenant';
+    const r = await call('POST', '/optimize/apply-workflow');
+    expect(r.status).not.toBe(403);
+    expect(r.body.code).not.toBe(WORKFLOW_CONFIG_PLATFORM_ONLY);
+  });
+
+  it('AUTO_TUNE 关闭 → apply-workflow 早退 200，闸门不介入（没开就不该被误伤）', async () => {
+    process.env.MODEL_AUTO_TUNE = 'false';
+    const r = await call('POST', '/optimize/apply-workflow');
+    expect(r.status, JSON.stringify(r.body)).toBe(200);
+    expect(r.body.applied).toBe(false);
+  });
+
+  it('AUTO_TUNE 关闭 → generate-mining 仍可生成建议（200，闸门不该挡只读的挖掘）', async () => {
+    process.env.MODEL_AUTO_TUNE = 'false';
+    const r = await call('POST', '/optimize/generate-mining');
+    expect(r.status, JSON.stringify(r.body)).toBe(200);
+    expect(r.body.applied).toBe(false);
   });
 });

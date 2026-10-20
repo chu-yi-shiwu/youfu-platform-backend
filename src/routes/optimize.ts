@@ -98,6 +98,11 @@ router.post('/optimize/generate-mining', async (req, res, next) => {
       await requirePermission(res.locals.auth, client, 'dashboard.view');
       const result = await processMining(client, tenantId, { entityType, days: daysRaw });
       const dec = generateMiningOptimizations(result);
+      // 097 归属闸门：本端点平时只生成建议（落 optimization_feedback），
+      //   但 autoTune 打开时会**顺手把建议直接写成 live 流程定义** —— 那就是「改流程」，
+      //   必须过同一道闸，否则客户开了自动改流程就能绕过收口。
+      //   放在 INSERT 之前：被拦时一个建议都不落（要么完整生成，要么整体不动）。
+      if (autoTune) await assertWorkflowConfigEditableByTenant(client);
       for (const d of dec) {
         await client.query(
           `INSERT INTO optimization_feedback (tenant_id, scope, target, recommendation, reason, status)
@@ -234,6 +239,9 @@ router.post('/optimize/apply-workflow', async (req, res, next) => {
       });
     }
     const result = await withTenantClient(tenantId, async (client) => {
+      // 097 归属闸门：applyWorkflowOptimizations 直写 live 流程定义，与 PUT /workflow/def
+      //   同为「改流程」。AUTO_TUNE 关闭时本端点早退（只记录不应用），开了就是真改，必须过闸。
+      await assertWorkflowConfigEditableByTenant(client);
       await requirePermission(res.locals.auth, client, 'optimize.tune');
       return applyWorkflowOptimizations(client, tenantId);
     });
