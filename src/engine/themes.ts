@@ -85,6 +85,22 @@ export const ENERGY_COLLECTION_DEF: WorkflowDef = {
   config: { doneStates: ['archived'], learningTriggers: ['reviewed'] },
 };
 
+/**
+ * entity_type → 内置兜底 def（businessFlow.ts 的 ENTITY_DEF 与 aiPreview 的样本口径共用）。
+ * 此前 businessFlow 的兜底映射是文件私有常量，消费方（AI 样本 SQL）用不了只好写死状态名。
+ */
+export const BUILTIN_ENTITY_DEF: Record<string, WorkflowDef> = {
+  transport_task: TRANSPORT_DEF,
+  emergency_plan: EMERGENCY_DEF,
+} as const;
+
+/** 某 entity_type 的内置兜底 def；无内置主题时回退通用 4 态（与 businessFlow 旧行为一致）。 */
+export function builtinDefFor(entityType: string): WorkflowDef {
+  const d = BUILTIN_ENTITY_DEF[entityType];
+  if (d) return d;
+  return { initial: 'draft', states: ['draft', 'assigned', 'processing', 'completed'], transitions: [], config: {} };
+}
+
 export interface ThemeTemplate {
   entityType: string;
   name: string;

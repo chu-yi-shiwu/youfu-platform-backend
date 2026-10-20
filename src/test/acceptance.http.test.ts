@@ -340,7 +340,10 @@ describe('② 状态与流程前置校验（409 语义）', () => {
     h.client = makeClient(acceptanceHandlers({ status: 'processing' }), { strict: true }).client;
     const r = await accept({ result: 'pass' });
     expect(r.status, `期望 409，实际 ${r.status} ${JSON.stringify(r.body)}`).toBe(409);
-    expect(String(r.body.message)).toContain('仅已完成工单可验收');
+    // F10：文案不再把 'completed' 这个状态名写死在提示里（那个名字属于租户流程，不属于代码），
+    //   改为由 def 的验收边派生出「可验收状态」清单——此处 def 默认 → completed。
+    expect(String(r.body.message)).toContain('可验收状态');
+    expect(String(r.body.message)).toContain('completed');
   });
 
   it('工单不存在 → 404', async () => {

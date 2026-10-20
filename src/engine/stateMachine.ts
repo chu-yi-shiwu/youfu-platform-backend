@@ -20,6 +20,8 @@ export const CLAIM_HALL_STATE = 'claim_hall';
 export const ENTER_HALL_EVENT = 'enter_hall';
 /** 取消事件名（内置模板一致约定：入边 event='cancel' 的目标态即取消态）。 */
 export const CANCEL_EVENT = 'cancel';
+/** 认领（抢单）事件名：认领边是"谁可以抢"的事实源，认领池口径由此派生。 */
+export const CLAIM_EVENT = 'claim';
 
 export interface WorkflowTransition {
   from: string;
@@ -261,6 +263,42 @@ export function cancelledStates(def: WorkflowDef): string[] {
   }
   const hit = def.states.filter((s) => derived.has(s));
   return hit.length > 0 ? hit : def.states.filter((s) => (BUILTIN_CANCEL_STATES as readonly string[]).includes(s));
+}
+
+/** 评价事件名（内置模板约定：入边 event='satisfy' 的目标态即评价完成态）。 */
+export const SATISFY_EVENT = 'satisfy';
+
+/**
+ * 评价完成态：存在 **event='satisfy' 入边** 的目标态集合（内置模板 = evaluated）。
+ * 用途：workOrder.ts 在评价完成时回写满意度 + 自动生成结算草稿。若把 'evaluated' 写死，
+ *   客户把评价态改名后这两件事会静默不发生（满意度不入库、草稿不生成，且无任何报错）。
+ */
+export function evaluatedStates(def: WorkflowDef): string[] {
+  const tos = new Set<string>();
+  for (const t of def.transitions ?? []) {
+    if (t.event === SATISFY_EVENT) tos.add(t.to);
+  }
+  return def.states.filter((s) => tos.has(s));
+}
+
+/**
+ * 认领池态（抢单大厅 / 待派单池口径）：存在 **claim 出边** 的 from 态集合。
+ *
+ * 【为什么要有这个函数】此前「哪些态可以被抢」在两处各写一份
+ *   `['claim_hall','pending_dispatch']`——services/claimWorkOrder.ts 的入参守卫与
+ *   routes/workOrder.ts GET /open/claim-hall 的列表 SQL。两份字面量的后果与 F9 同源：
+ *   ① 客户在流程里另配 claim 边（如 "二次转单池 secondary_pool"）→ 列表查得到、
+ *      认领端点 409 拒不了/反过来认领放行但列表看不见；
+ *   ② 客户把池态改名 → 两边同时失明，单进得去出不来（与 R32 load 断链同款静默事故）。
+ *   派生口径：**能 claim 的状态就是池**——认领边说话，名单不听代码。
+ *   内置模板（RICH + claimHallEdges 机制注入）下结果逐字 = claim_hall / pending_dispatch。
+ */
+export function claimableStates(def: WorkflowDef): string[] {
+  const froms = new Set<string>();
+  for (const t of def.transitions ?? []) {
+    if (t.event === CLAIM_EVENT) froms.add(t.from);
+  }
+  return def.states.filter((s) => froms.has(s));
 }
 
 /**

@@ -35,7 +35,7 @@ function makeClient(scanRows: any[]) {
   const client = {
     query: (async (text: string, params?: any[]) => {
       calls.push({ text, params });
-      if (text.includes("w.status = 'claim_hall'") && text.includes('make_interval')) return { rows: scanRows };
+      if (text.includes('w.status = $2') && text.includes('make_interval')) return { rows: scanRows };
       if (text.includes(STAFF_ROLE_SQL)) {
         return { rows: [{ id: ADMIN }, { id: OPERATOR }, { id: DISPATCHER }] };
       }
@@ -130,7 +130,9 @@ describe('runClaimHallTimeoutScanForTenant（P0-5 大厅超时感知闭环）', 
     h.client = client;
     await runClaimHallTimeoutScanForTenant(TENANT);
     const scan = calls.find((c) => c.text.includes('make_interval'));
-    expect(scan?.params?.[1]).toBe(10);
+    // F10：SQL 里不再出现 'claim_hall' 字面量（改为常量同源传参），阈值位随之后移一位
+    expect(scan?.params?.[1]).toBe('claim_hall');
+    expect(scan?.params?.[2]).toBe(10);
   });
 });
 
@@ -139,7 +141,7 @@ function clientOf(calls: Array<{ text: string; params?: any[] }>): any {
   return {
     query: async (text: string, params?: any[]) => {
       calls.push({ text, params });
-      if (text.includes("w.status = 'claim_hall'") && text.includes('make_interval')) return { rows: [] };
+      if (text.includes('w.status = $2') && text.includes('make_interval')) return { rows: [] };
       if (text.includes(STAFF_ROLE_SQL)) return { rows: [] };
       return { rows: [] };
     },

@@ -9,7 +9,7 @@
 import pool from '../db/pool.js';
 import { withTenantClient } from '../db/pool.js';
 import { getWorkflowDef, getWorkflowDefOrDefault } from '../engine/workflowDef.js';
-import { doneStates, terminalStates, holdStates, activeStates as engineActiveStates, type WorkOrderStatus } from '../engine/stateMachine.js';
+import { doneStates, terminalStates, holdStates, activeStates as engineActiveStates, CLAIM_HALL_STATE, type WorkOrderStatus } from '../engine/stateMachine.js';
 import { slaScan, type SlaScanRow } from '../engine/sla.js';
 import { TRANSPORT_DEF } from '../engine/themes.js';
 import { emitDomainEvent } from '../db/eventBus.js';
@@ -58,14 +58,14 @@ export async function runClaimHallTimeoutScanForTenant(tenantId: string): Promis
   return withTenantClient(tenantId, async (client) => {
     const rows = await client.query<{ id: string; order_no: string; updated_at: string }>(
       `SELECT w.id, w.order_no, w.updated_at FROM work_orders w
-       WHERE w.tenant_id = $1 AND w.status = 'claim_hall'
-         AND w.updated_at < now() - make_interval(mins => $2::int)
+       WHERE w.tenant_id = $1 AND w.status = $2
+         AND w.updated_at < now() - make_interval(mins => $3::int)
          AND NOT EXISTS (
            SELECT 1 FROM ticket_event e
            WHERE e.tenant_id = w.tenant_id AND e.work_order_id = w.id AND e.type = 'claim_hall_timeout'
          )
        LIMIT 200`,
-      [tenantId, timeoutMin],
+      [tenantId, CLAIM_HALL_STATE, timeoutMin],
     );
     const hits: ClaimHallHit[] = [];
     if (rows.rows.length === 0) return hits;
@@ -81,7 +81,7 @@ export async function runClaimHallTimeoutScanForTenant(tenantId: string): Promis
       await client.query(
         `INSERT INTO ticket_event (tenant_id, work_order_id, type, from_status, to_status, actor, payload)
          VALUES ($1,$2,'claim_hall_timeout',$3,$3,'system',$4)`,
-        [tenantId, r.id, 'claim_hall', JSON.stringify({ wait_minutes: waitedMin, threshold_minutes: timeoutMin })],
+        [tenantId, r.id, CLAIM_HALL_STATE, JSON.stringify({ wait_minutes: waitedMin, threshold_minutes: timeoutMin })],
       );
       await emitDomainEvent(client, {
         tenantId, entityType: 'work_order', entityId: r.id, type: 'claim_hall_timeout', actor: 'system',

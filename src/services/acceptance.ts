@@ -14,7 +14,10 @@ import { AppError } from '../middleware/error.js';
 import { transition } from '../repo/ticket.js';
 import { recalcHeader } from '../repo/settlement.js';
 import { getWorkflowDef } from '../engine/workflowDef.js';
-import { ACCEPTANCE_EVENT_PREFIX, hasAcceptanceEdges } from '../engine/acceptanceEdges.js';
+import {
+  ACCEPTANCE_EVENT_PREFIX, hasAcceptanceEdges,
+  acceptanceFromStates, acceptanceTargetStatus, acceptanceEventFor,
+} from '../engine/acceptanceEdges.js';
 import type { WorkOrderStatus, WorkflowDef } from '../engine/stateMachine.js';
 
 // 审查修复（架构🔴2 / QA🟡4）：此处原硬编码 ACCEPTANCE_ROLES 白名单，与 workflow_def 边里的
@@ -122,14 +125,26 @@ export async function applyAcceptance(
   if (cur.rows.length === 0) {
     throw new AppError('NOT_FOUND', 'work order not found', 404);
   }
-  if (cur.rows[0].status !== 'completed') {
-    throw new AppError('CONFLICT', `work order not completed (status=${cur.rows[0].status})，仅已完成工单可验收`, 409);
+  // ① 租户 def（只读）——验收起止态一律由它派生，服务层不保留状态名字面量（F10）。
+  const def = await getWorkflowDef(client, tenantId, 'work_order');
+  // F10：等待验收的起态 = def 里 acceptance_* 边的 from（默认是 completed；租户改了就跟他走）。
+  //   此前写死 status !== 'completed'：租户把验收边挂在别的完成态名上 → 那些单永远验不了。
+  const acceptableFrom = acceptanceFromStates(def);
+  // 流程根本没有验收边（老租户未升级）→ 让位于 assertAcceptanceEdgesReady 的可操作文案
+  //   （"去业务规则设置启用完工验收"），管理员能自救；不得降级成"状态不对"这种无出路的报错。
+  if (acceptableFrom.length === 0) assertAcceptanceEdgesReady(def);
+  if (!acceptableFrom.includes(cur.rows[0].status)) {
+    const cfg = acceptableFrom.join('、') || '<流程未配置验收边>';
+    throw new AppError(
+      'CONFLICT',
+      `work order not acceptable (status=${cur.rows[0].status})，可验收状态：${cfg}`,
+      409,
+    );
   }
   // ①b SELF_ACCEPT 守卫（E-8 BUG-003）：处理工人不得验收本人名下工单 → 403。
   await assertNotSelfAcceptance(client, tenantId, cur.rows[0].assignee_id, input.userId);
   // ①b 老租户自救（QA🔴①连带）：def 缺验收边时给可操作 409，而非 422 illegal transition。
   // 角色门禁不在此处判定——由 transition() 边的 allowedRoles 统一把关（架构🔴2 单一事实源）。
-  const def = await getWorkflowDef(client, tenantId, 'work_order');
   assertAcceptanceEdgesReady(def);
   // ② 完工凭证落库
   const acceptedBy = input.actor ?? input.role ?? 'system';
@@ -147,10 +162,15 @@ export async function applyAcceptance(
     ],
   );
   const acceptanceId: string = ins.rows[0].id;
-  // ③ 状态流转（事件钉死）：pass→closed / reject→processing
-  const toStatus: WorkOrderStatus = input.result === 'pass' ? 'closed' : 'processing';
-  const event = input.result === 'pass' ? 'acceptance_pass' : 'acceptance_reject';
-  await transition(client, tenantId, workOrderId, toStatus, {
+  // ③ 状态流转（事件钉死）：目标态由 def 的验收边派生（F10）——
+  //   此前写死 pass→'closed'/reject→'processing'：租户自定义流程若无这两个态，
+  //   transition() 的 isKnownState 直接 422，验收这条路被代码钉死。
+  const toStatus = acceptanceTargetStatus(def, input.result);
+  if (!toStatus) {
+    throw new AppError('CONFLICT', '当前流程未配置验收流转目标态，请管理员检查工单流程', 409);
+  }
+  const event = acceptanceEventFor(input.result);
+  await transition(client, tenantId, workOrderId, toStatus as WorkOrderStatus, {
     actor: acceptedBy,
     role: input.role,
     fields: {},

@@ -28,7 +28,7 @@ import { getWorkflowDef } from '../engine/workflowDef.js';
 import { CLAIM_HALL_STATE } from '../engine/claimHallEdges.js'; // F8：落抢单大厅走主通道（机制态单一事实源）
 import {
   availableTransitions, learningTriggerStates, shouldTriggerLearning,
-  resolveDispatchTarget, activeStates, doneStates,
+  resolveDispatchTarget, activeStates, doneStates, claimableStates, evaluatedStates,
 } from '../engine/stateMachine.js';
 import { safeParseJsonb } from '../util/jsonb.js';
 import { validateIntake } from '../services/dataQuality.js';
@@ -367,7 +367,10 @@ const transitionSchema = z.object({
 // 生成对齐前端的响应：未命中派单诚实返回 claim_hall（A 点确认）
 // DEF-1 修复：code 仅作成功标记（0），真实业务工单号通过 order_no 返回。
 // DEF-3 修复：返回内部 id（uuid）—— /transition/:id 需要它，否则建单后无法流转（契约错配）。
-export function toCreateRes(row: any, autoFlow: boolean, assignee: string | null, reason: string, _landedStatus = 'assigned') {
+// F10：删掉从未被使用的 _landedStatus 形参——它的默认值 assigned 是个隐患：
+//   默认值暗示派单目标可以兜底成 assigned，与 F4「严禁硬编码回退」的决议正面冲突，
+//   而返回体根本不含这个字段，纯粹是误导。
+export function toCreateRes(row: any, autoFlow: boolean, assignee: string | null, reason: string) {
   return {
     ok: true, code: 0, id: row.id, order_no: row.order_no, status: row.status, auto_flow: autoFlow, assignee, reason,
     source: row.source ?? 'backend', fault_type: row.fault_type ?? null,
@@ -459,7 +462,7 @@ router.post('/open/work_order', async (req, res, next) => {
       void dispatchEvent(tenantId, { type: 'assign', workOrderId: woId, fromStatus: 'draft', toStatus: result.dispatchTarget, actor: 'auto_dispatch', payload: { worker_id: result.assignee } }).catch(() => {});
     }
     return res.status(result.created ? 201 : 200).json({
-      ...toCreateRes(result.final, result.autoFlow, result.assignee, result.reason, result.dispatchTarget),
+      ...toCreateRes(result.final, result.autoFlow, result.assignee, result.reason),
       warnings: q.warnings, // D3：软提示（位置/电话/术语建议），不阻断
     });
   } catch (e) {
@@ -518,8 +521,10 @@ router.post('/open/work_order/:id/transition', async (req, res, next) => {
       // 无法单测，SAVEPOINT 修复零回归护栏）。行为与抽取前逐行等价，learn_error 语义不变。
       const learnStep = await runIncrementalLearnStep(client, tenantId, req.params.id, to, r.from);
       learnError = learnStep.learnError;
+      // F10：评价完成态由 def 派生（存在 satisfy 入边的目标态），不再写死 evaluated 这个名
+      const evaluatedSet = evaluatedStates(await getWorkflowDef(client, tenantId, 'work_order'));
       // 评价完成回写满意度评分（UOne 满意度颗粒度）
-      if (to === 'evaluated' && typeof score === 'number') {
+      if (evaluatedSet.includes(to) && typeof score === 'number') {
         await client.query(
           'UPDATE work_orders SET satisfaction_score = $1 WHERE id = $2 AND tenant_id = $3',
           [score, req.params.id, tenantId],
@@ -527,7 +532,7 @@ router.post('/open/work_order/:id/transition', async (req, res, next) => {
       }
       // E-9 BUG-004：评价流转自动生成结算草稿（draft，待 admin 确认）。
       // SAVEPOINT 隔离——结算故障不拖垮评价流转；幂等（已有明细则跳过）；失败经 settle_error 透出。
-      if (to === 'evaluated') {
+      if (evaluatedSet.includes(to)) {
         // created_by 固定留痕 'auto:evaluated'（与人工 POST /settlements 的 username 留痕相区分，FE 据此打「自动生成」标记）
         const settleStep = await runAutoSettleStep(client, tenantId, req.params.id);
         settleError = settleStep.settleError;
@@ -1059,20 +1064,28 @@ router.post('/open/work_order/:id/transpond', async (req, res, next) => {
   }
 });
 
-// GET /api/v1/open/claim-hall —— 抢单大厅：列出未分配(claim_hall/pending_dispatch)工单，可按部门过滤
+// GET /api/v1/open/claim-hall —— 抢单大厅：列出可被认领的工单（池态由流程派生），可按部门过滤
 router.get('/open/claim-hall', async (req, res, next) => {
   try {
     const tenantId = res.locals.auth.tenantId;
     const department = req.query.department as string | undefined;
-    const items = await withTenantClient(tenantId, (client) => {
-      const conds = ['tenant_id=$1', "status IN ('claim_hall','pending_dispatch')"];
-      const params: unknown[] = [tenantId];
+    const { items, def } = await withTenantClient(tenantId, async (client) => {
+      // F10：池态不再写死 ('claim_hall','pending_dispatch')——与认领端点守卫共用
+      //   claimableStates(def)（写在代码里的名单换成"能 claim 的态即池"的派生），
+      //   杜绝「列表查得到、认领却 409」的两份字面量漂移。
+      //   def 已含引擎机制注入；内置模板（RICH + 机制边）下结果逐字 = claim_hall/pending_dispatch。
+      const wdef = await getWorkflowDef(client, tenantId, 'work_order');
+      const poolSet = claimableStates(wdef);
+      if (poolSet.length === 0) return { items: [] as unknown[], def: wdef }; // 流程无认领边 = 无池，诚实返回空
+      const conds = ['tenant_id=$1', 'status = ANY($2::text[])'];
+      const params: unknown[] = [tenantId, poolSet];
       if (department) { params.push(department); conds.push(`department = $${params.length}`); }
-      return client
-        .query(`SELECT * FROM work_orders WHERE ${conds.join(' AND ')} ORDER BY created_at ASC LIMIT 500`, params)
-        .then((r) => r.rows);
+      const r = await client.query(
+        `SELECT * FROM work_orders WHERE ${conds.join(' AND ')} ORDER BY created_at ASC LIMIT 500`,
+        params,
+      );
+      return { items: r.rows, def: wdef };
     });
-    const def = await withTenantClient(tenantId, (client) => getWorkflowDef(client, tenantId, 'work_order'));
     const out = items.map((it: any) => ({
       ...it,
       code: it.order_no,
@@ -1177,12 +1190,12 @@ router.get('/open/me/summary', async (req, res, next) => {
       //      ——实测 t-verification 有 4 张 evaluated + 1 张 closed 正被报成「在办」；
       //   ② 客户改完成态名 → done_count 恒 0，且那些单倒灌进 active_count（双重错）；
       //   ③ 完全没排除挂起态 → 人已离场仍算在办（当前生产无挂起单，属未触发的隐患）。
-      //   机制态（抢单大厅 / 待派单池）在点亮后也会出现在 def.states 里，但它们语义上
-      //   不属于任何人名下，显式剔除——与原 SQL 排除 claim_hall 的行为保持一致。
+      // F10：机制态/池态不再写死 'claim_hall'/'pending_dispatch' 两个名字——它们语义上
+      //   不属于任何人名下，剔除口径统一取 claimableStates(def)（= 存在认领边的池态），
+      //   与 GET /open/claim-hall 列表、认领端点守卫三处同源。
       const workerDef = await getWorkflowDef(client, tenantId, 'work_order');
-      const activeSet = activeStates(workerDef).filter(
-        (s) => s !== CLAIM_HALL_STATE && s !== 'pending_dispatch',
-      );
+      const poolSet = claimableStates(workerDef);
+      const activeSet = activeStates(workerDef).filter((s) => !poolSet.includes(s));
       const doneSet = doneStates(workerDef);
       const stats = await client.query(
         `SELECT

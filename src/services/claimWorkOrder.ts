@@ -26,9 +26,11 @@ import { getWorkflowDef } from '../engine/workflowDef.js';
 import { insertNotification } from './notify.js';
 import { AppError } from '../middleware/error.js';
 import type { WorkOrderStatus } from '../engine/stateMachine.js';
+import { claimableStates, CLAIM_EVENT } from '../engine/stateMachine.js';
 
-/** 认领池态：抢单大厅 + 待派单池（与 GET /open/claim-hall 列表口径同源）。 */
-const POOL_STATES: readonly string[] = ['claim_hall', 'pending_dispatch'];
+// F10：池态不再写死 ['claim_hall','pending_dispatch']——由 claimableStates(def) 派生
+//   （能 claim 的状态就是池），与 GET /open/claim-hall 列表 SQL 共用同一口径。
+//   同理：客户在流程里另配认领边（如二次转单池）→ 池自动扩到那里，不用改代码。
 
 export interface ClaimParams {
   orderId: string;
@@ -47,8 +49,8 @@ export async function claimWorkOrder(
   const def = await getWorkflowDef(client, tenantId, 'work_order');
   const cur = await findOneForUpdate(client, tenantId, p.orderId);
   if (!cur) throw new AppError('NOT_FOUND', 'work order not found', 404);
-  if (!POOL_STATES.includes(cur.status)) {
-    throw new AppError('CONFLICT', `work order not in claim hall (status=${cur.status})`, 409);
+  if (!claimableStates(def).includes(cur.status)) {
+    throw new AppError('CONFLICT', `work order not in claimable pool (status=${cur.status})`, 409);
   }
   // P0 修复：token 的 userId 是 account_user.id（uuid），worker.id 是业务编码，
   // 必须经 worker.account_id 反查真实 worker.id（与存量端点口径一致）。
@@ -67,7 +69,7 @@ export async function claimWorkOrder(
   // 认领边：客户 def 里从当前池态出发的 claim 事件边。目标态从边派生——
   // 绝不硬编码（客户把认领边指向别的态就落那个态）。池态的 claim 边由
   // claimHallEdges 机制注入保证存在；客户自建 claim 边时以其为准（注入幂等跳过）。
-  const claimEdge = (def.transitions ?? []).find((t) => t.from === cur.status && t.event === 'claim');
+  const claimEdge = (def.transitions ?? []).find((t) => t.from === cur.status && t.event === CLAIM_EVENT);
   if (!claimEdge) {
     throw new AppError('CONFLICT', `no claim edge configured from ${cur.status}`, 422);
   }

@@ -19,9 +19,14 @@ import type { WorkflowDef, WorkflowTransition } from './stateMachine.js';
  * 若产品要求"验收"与"流程配置审批"拆成两个独立权限点，需产品给定权限点名后再拆。
  * 【存量】租户已落库的 def 不含 allowedPerms → 由 091 迁移回填（本常量只影响新注入的 def）。
  */
+
+/** 验收事件名单一事实源：服务层(Event钉死)与本常量(边定义)必须同源，不得各写字面量。 */
+export const ACCEPTANCE_PASS_EVENT = 'acceptance_pass';
+export const ACCEPTANCE_REJECT_EVENT = 'acceptance_reject';
+
 export const ACCEPTANCE_EDGES: readonly WorkflowTransition[] = [
-  { from: 'completed', to: 'closed', event: 'acceptance_pass', allowedRoles: ['admin', 'operator', 'reviewer'], allowedPerms: ['workflow.approve'] },
-  { from: 'completed', to: 'processing', event: 'acceptance_reject', allowedRoles: ['admin', 'operator', 'reviewer'], allowedPerms: ['workflow.approve'] },
+  { from: 'completed', to: 'closed', event: ACCEPTANCE_PASS_EVENT, allowedRoles: ['admin', 'operator', 'reviewer'], allowedPerms: ['workflow.approve'] },
+  { from: 'completed', to: 'processing', event: ACCEPTANCE_REJECT_EVENT, allowedRoles: ['admin', 'operator', 'reviewer'], allowedPerms: ['workflow.approve'] },
 ] as const;
 
 /** 验收事件前缀（Y3 防后门判定与目标态解析共用）。 */
@@ -60,4 +65,37 @@ export function hasAcceptanceEdges(def: WorkflowDef): boolean {
   return ACCEPTANCE_EDGES.every((e) =>
     def.transitions.some((t) => t.from === e.from && t.event === e.event),
   );
+}
+
+/**
+ * F10：验收起止态由 def 派生，不写字面量。
+ *
+ * 【为什么】services/acceptance.ts 此前把三个状态名写死在代码里：
+ *   `if (status !== 'completed') 409` 与 `toStatus = pass ? 'closed' : 'processing'`。
+ *   而验收边本体（ACCEPTANCE_EDGES）里的 from/to 才是租户流程里的真实名字——租户在
+ *   配置中心把验收边改成 `review_passed → archived`（例如他们的完成态就叫 archived），
+ *   注入与字典都认，唯独服务层不认：单已到 archived 却在守卫里报「仅已完成工单可验收」，
+ *   且收尾硬写 'closed' → isKnownState 拒绝 = 验收按钮彻底不可用、单据卡在最后一步。
+ *   这与 F9 的统计口径、F8 的挂起态同款「写了两处，其中一处是死的」。
+ *   修法同一哲学：**边怎么写的，服务层就怎么走**。
+ */
+export function acceptanceEventFor(result: 'pass' | 'reject'): string {
+  return result === 'pass' ? ACCEPTANCE_PASS_EVENT : ACCEPTANCE_REJECT_EVENT;
+}
+
+/** 可验收的起态集合（def 中 acceptance_* 边的 from）。无边时返回空数组（守卫按"不可验收"处理）。 */
+export function acceptanceFromStates(def: WorkflowDef): string[] {
+  const events: string[] = [ACCEPTANCE_PASS_EVENT, ACCEPTANCE_REJECT_EVENT];
+  const froms = new Set<string>();
+  for (const t of def.transitions ?? []) {
+    if (events.includes(t.event)) froms.add(t.from);
+  }
+  return [...froms];
+}
+
+/** 收尾目标态（def 中对应 acceptance 边的 to）；无边返回 null，调用方必须显式报错。 */
+export function acceptanceTargetStatus(def: WorkflowDef, result: 'pass' | 'reject'): string | null {
+  const ev = acceptanceEventFor(result);
+  const hit = (def.transitions ?? []).find((t) => t.event === ev);
+  return hit ? hit.to : null;
 }
