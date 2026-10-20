@@ -18,6 +18,8 @@ export type WorkOrderStatus = string;
  */
 export const CLAIM_HALL_STATE = 'claim_hall';
 export const ENTER_HALL_EVENT = 'enter_hall';
+/** 取消事件名（内置模板一致约定：入边 event='cancel' 的目标态即取消态）。 */
+export const CANCEL_EVENT = 'cancel';
 
 export interface WorkflowTransition {
   from: string;
@@ -214,6 +216,7 @@ export function terminalStates(def: WorkflowDef): string[] {
 
 /** 内置挂起态（兜底；客户自定义挂起态名时由 def.config.holdStates 或 sideEffects 派生覆盖）。 */
 export const BUILTIN_HOLD_STATES = ['paused', 'suspended'] as const;
+export const BUILTIN_CANCEL_STATES = ['cancelled'] as const;
 
 /**
  * 挂起态（人已离场、工单暂不算在身）口径：worker.load 净结算与 SLA 扫描**共用同一派生源**。
@@ -242,6 +245,22 @@ export function holdStates(def: WorkflowDef): string[] {
     if ((t.sideEffects ?? []).includes('pause_sla')) derived.add(t.to);
   }
   return def.states.filter((s) => derived.has(s));
+}
+
+/**
+ * 取消态（作废）口径：存在 **入边 event === 'cancel'** 的目标态。
+ * 与 holdStates 同哲学——机制语义从流转边派生，而不是把状态名写死在 SQL 里。
+ * 该约定在全部内置模板（stateMachine RICH / themes 各主题）中一致成立：
+ * 一律 `{ ..., to: 'cancelled', event: 'cancel' }`。
+ * 兜底：def 里找不到 cancel 边时退回内置名（存量与极端自定义 def 行为零变化）。
+ */
+export function cancelledStates(def: WorkflowDef): string[] {
+  const derived = new Set<string>();
+  for (const t of def.transitions ?? []) {
+    if (t.event === CANCEL_EVENT) derived.add(t.to);
+  }
+  const hit = def.states.filter((s) => derived.has(s));
+  return hit.length > 0 ? hit : def.states.filter((s) => (BUILTIN_CANCEL_STATES as readonly string[]).includes(s));
 }
 
 /**

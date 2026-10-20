@@ -5,6 +5,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import pool, { withTenantClient } from '../db/pool.js';
 import { saveWorkflowDef, getWorkflowDef, getWorkflowDefVersion } from '../engine/workflowDef.js';
+import { activeStates, doneStates } from '../engine/stateMachine.js';
 import { AppError } from '../middleware/error.js';
 import { platformAdminAuth } from '../middleware/platformAuth.js';
 import { refreshApplyEffect } from '../services/templateEffects.js';
@@ -142,13 +143,18 @@ router.post('/templates/:id/apply', async (req, res, next) => {
     const result = await withTenantClient(tenantId, async (client) => {
       // 应用前快照：版本 + 指标（闭环率/超时率）
       const beforeVersion = await getWorkflowDefVersion(client, tenantId, entityType);
+      // 闭环率/超时率口径由客户流程派生（同 templateEffects.ts 的 after 刷新：
+      // before/after 必须同源，否则 Δ 不可比）。详见 services/templateEffects.ts 注释。
+      const beforeDef = await getWorkflowDef(client, tenantId, entityType === 'work_order' ? 'work_order' : entityType);
+      const beforeDone = doneStates(beforeDef);
+      const beforeActive = activeStates(beforeDef);
       const m = await client.query(
         `SELECT
-           count(*) FILTER (WHERE status IN ('completed','closed','evaluated'))::numeric / nullif(count(*),0) AS close_rate,
-           count(*) FILTER (WHERE status NOT IN ('completed','closed','evaluated','cancelled')
+           count(*) FILTER (WHERE status = ANY($2::text[]))::numeric / nullif(count(*),0) AS close_rate,
+           count(*) FILTER (WHERE status = ANY($3::text[])
              AND sla_due_at IS NOT NULL AND sla_due_at < now())::numeric / nullif(count(*),0) AS overdue_rate
          FROM work_orders WHERE tenant_id = $1`,
-        [tenantId],
+        [tenantId, beforeDone, beforeActive],
       );
       const beforeMetrics = { close_rate: m.rows[0]?.close_rate ?? null, overdue_rate: m.rows[0]?.overdue_rate ?? null };
 

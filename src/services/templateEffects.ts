@@ -3,6 +3,8 @@
 // 审查修复：#2 效果回写联动模板评分；#3 7/30 两次观测（refreshed_at）。
 import pool from '../db/pool.js';
 import { withTenantClient } from '../db/pool.js';
+import { getWorkflowDef } from '../engine/workflowDef.js';
+import { activeStates, doneStates } from '../engine/stateMachine.js';
 
 /** effect_rating（闭环率 delta，范围约 -1~1）→ 模板评分 0~5（映射并夹取 1~5）。 */
 function deltaToScore(delta: number): number {
@@ -14,17 +16,24 @@ export async function refreshApplyEffect(applyId: string): Promise<{ refreshed: 
   const ap = await pool.query(`SELECT * FROM platform_template_apply WHERE id = $1`, [applyId]);
   if (ap.rowCount === 0) return { refreshed: false, effect_rating: null, note: 'apply record not found' };
   const row = ap.rows[0];
-  const m = await withTenantClient(row.tenant_id, async (client) =>
-    client.query(
+  const m = await withTenantClient(row.tenant_id, async (client) => {
+    // 闭环率/超时率的口径必须由客户流程派生——模板市场卖的就是「应用这套流程后指标变好多少」，
+    //   写死 'completed'/'closed'/'evaluated'/'cancelled' 会让自定义流程的 Δ 全线失真，
+    //   且与 before 快照（templateMarket.ts）必须同源于同一 def，否则差值不可比。
+    //   口径与 ticket.ts 的 load 净结算、slaScheduler 的活跃集共用 activeStates/doneStates。
+    const tplDef = await getWorkflowDef(client, row.tenant_id, 'work_order');
+    const tplDone = doneStates(tplDef);
+    const tplActive = activeStates(tplDef);
+    return client.query(
       `SELECT
-         count(*) FILTER (WHERE status IN ('completed','closed','evaluated'))::numeric / nullif(count(*),0) AS close_rate,
-         count(*) FILTER (WHERE status NOT IN ('completed','closed','evaluated','cancelled')
+         count(*) FILTER (WHERE status = ANY($2::text[]))::numeric / nullif(count(*),0) AS close_rate,
+         count(*) FILTER (WHERE status = ANY($3::text[])
            AND sla_due_at IS NOT NULL AND sla_due_at < now())::numeric / nullif(count(*),0) AS overdue_rate,
          count(*) AS total
        FROM work_orders WHERE tenant_id = $1`,
-      [row.tenant_id],
-    ).then((r) => r.rows[0]),
-  );
+      [row.tenant_id, tplDone, tplActive],
+    ).then((r) => r.rows[0]);
+  });
   const after = { close_rate: m?.close_rate ?? null, overdue_rate: m?.overdue_rate ?? null, total: Number(m?.total ?? 0) };
   let effect: number | null = null;
   const before = row.before_metrics && typeof row.before_metrics === 'object' ? row.before_metrics : {};

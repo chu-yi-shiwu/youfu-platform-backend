@@ -8,7 +8,7 @@
 //   此处不编造"演示自动完成"数据（已消除演示自动置 completed 的旧问题）。
 import type { PoolClient } from 'pg';
 import { getWorkflowDef } from '../engine/workflowDef.js';
-import { doneStates, terminalStates, activeStates } from '../engine/stateMachine.js';
+import { doneStates, terminalStates, activeStates, cancelledStates } from '../engine/stateMachine.js';
 
 // P-5：统计聚合短 TTL 缓存（单进程部署足够；对齐 DataScreen 30s 刷新，降低重复聚合压力）。
 // 按租户键隔离；仅缓存最终计算结果，不影响 RLS（结果已按租户算出）。
@@ -56,6 +56,8 @@ export async function ticketStats(client: PoolClient, tenantId: string): Promise
   // 富模板下不漏计 closed/evaluated，且不把 cancelled 算完成。
   const def = await getWorkflowDef(client, tenantId, 'work_order');
   const done = doneStates(def);
+  // 取消态口径同源派生（不入这一格则客户改流程后 cancelled 恒为 0）。
+  const cancelledStatesList = cancelledStates(def);
   const r = await client.query<{
     total: string;
     completed: string;
@@ -68,13 +70,13 @@ export async function ticketStats(client: PoolClient, tenantId: string): Promise
     `SELECT
        COUNT(*)::text                                          AS total,
        COUNT(*) FILTER (WHERE status = ANY($2::text[]))::text  AS completed,
-       COUNT(*) FILTER (WHERE status = 'cancelled')::text      AS cancelled,
+       COUNT(*) FILTER (WHERE status = ANY($3::text[]))::text      AS cancelled,
        COUNT(*) FILTER (WHERE auto_flow = true)::text          AS auto_dispatched,
        COUNT(*) FILTER (WHERE auto_flow = true AND status = ANY($2::text[]))::text AS auto_closed,
        AVG(satisfaction_score)::text                          AS satisfaction_avg,
        COUNT(satisfaction_score)::text                        AS satisfaction_count
      FROM work_orders WHERE tenant_id = $1`,
-    [tenantId, done],
+    [tenantId, done, cancelledStatesList],
   );
   const row = r.rows[0];
   const total = Number(row.total);

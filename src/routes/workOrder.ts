@@ -28,7 +28,7 @@ import { getWorkflowDef } from '../engine/workflowDef.js';
 import { CLAIM_HALL_STATE } from '../engine/claimHallEdges.js'; // F8：落抢单大厅走主通道（机制态单一事实源）
 import {
   availableTransitions, learningTriggerStates, shouldTriggerLearning,
-  resolveDispatchTarget,
+  resolveDispatchTarget, activeStates, doneStates,
 } from '../engine/stateMachine.js';
 import { safeParseJsonb } from '../util/jsonb.js';
 import { validateIntake } from '../services/dataQuality.js';
@@ -1170,13 +1170,27 @@ router.get('/open/me/summary', async (req, res, next) => {
       );
       if (w.rowCount === 0) return null;
       const workerId = w.rows[0].id; // 真实 worker.id（业务编码），后续统计/派单均用它
+      // 「在办 / 已完成」口径必须由客户流程派生（与 ticket.ts 的 load 净结算、slaScheduler
+      //   的 SLA 活跃集共用 activeStates/doneStates），杜绝三处口径漂移。
+      //   此前这里把 'completed'/'cancelled'/'claim_hall' 三个状态名写死在 SQL 里，后果：
+      //   ① 流程里的其它终态（closed / evaluated / 客户自定义的任意终态）**全被算成在办**
+      //      ——实测 t-verification 有 4 张 evaluated + 1 张 closed 正被报成「在办」；
+      //   ② 客户改完成态名 → done_count 恒 0，且那些单倒灌进 active_count（双重错）；
+      //   ③ 完全没排除挂起态 → 人已离场仍算在办（当前生产无挂起单，属未触发的隐患）。
+      //   机制态（抢单大厅 / 待派单池）在点亮后也会出现在 def.states 里，但它们语义上
+      //   不属于任何人名下，显式剔除——与原 SQL 排除 claim_hall 的行为保持一致。
+      const workerDef = await getWorkflowDef(client, tenantId, 'work_order');
+      const activeSet = activeStates(workerDef).filter(
+        (s) => s !== CLAIM_HALL_STATE && s !== 'pending_dispatch',
+      );
+      const doneSet = doneStates(workerDef);
       const stats = await client.query(
         `SELECT
-           COUNT(*) FILTER (WHERE status NOT IN ('completed','cancelled','claim_hall')) AS active_count,
-           COUNT(*) FILTER (WHERE status IN ('completed')) AS done_count,
+           COUNT(*) FILTER (WHERE status = ANY($3::text[])) AS active_count,
+           COUNT(*) FILTER (WHERE status = ANY($4::text[])) AS done_count,
            COUNT(*) FILTER (WHERE created_at::date = CURRENT_DATE) AS today_new
          FROM work_orders WHERE tenant_id=$1 AND assignee_id=$2`,
-        [tenantId, workerId],
+        [tenantId, workerId, activeSet, doneSet],
       );
       return { worker: w.rows[0], stats: stats.rows[0] };
     });

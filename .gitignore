@@ -52,3 +52,6 @@ src.bak*/
 .vitest-report.json
 tsconfig.tsbuildinfo
 *.tsbuildinfo
+
+# vitest 缓存重定向目录（Windows TEMP 目录偶发 EPERM 导致漏跑用例时的 workaround）
+.vitest-cache/
