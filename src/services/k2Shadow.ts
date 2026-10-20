@@ -141,6 +141,113 @@ export async function recordShadowSuggestions(
   }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// 影子回放只读出口（任务 #356「派单模型上线」的解挂判据）
+// ─────────────────────────────────────────────────────────────────────────────
+// 背景：ai_shadow_suggestions 此前**只写不读**（全仓无 SELECT），于是「影子达标才开
+// MODEL_AUTO_TUNE」这句话没有任何机读通道——达标与否全靠人跑 SQL 手算，而手算口径
+// 极易错（见下）。本出口把达标判定变成一次 GET，#356 才具备解挂条件。
+//
+// 🔴 消解口径两条影子不一样（踩过一次坑，务必保持）：
+//   category：matched 在 INSERT 当场就写好（见本文件 :97），**从不写 resolved_at**
+//             ⇒ 已判定 = matched IS NOT NULL。若按 resolved_at 统计，category 会被全漏。
+//   dispatch：建单时 actual 未知，派单时才 resolveDispatchShadow 回填
+//             ⇒ 已判定 = resolved_at IS NOT NULL。
+// 曾有人（我）按 resolved_at 统一统计，得出「category 零消解=飞轮断点」的错误结论；
+// 实测按正确口径 category 命中率 0.841 已达标。故口径写死在 SQL 里并由真库测试锚住。
+//
+// 阈值：以下默认值为**建议值**（尚无业务确认口径），可用 env 覆盖，且响应里如实标注
+// 来源——不许让「建议值」在接口里伪装成既定标准。
+// ─────────────────────────────────────────────────────────────────────────────
+
+function numFromEnv(raw: string | undefined, fallback: number): number {
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 ? n : fallback;
+}
+
+export interface ShadowTuneThresholds {
+  /** 每一类影子至少要有多少条**已判定**样本才谈得上统计显著。 */
+  minJudged: number;
+  category: number;
+  dispatch: number;
+}
+
+export function shadowTuneThresholds(): ShadowTuneThresholds {
+  return {
+    minJudged: numFromEnv(process.env.SHADOW_MIN_JUDGED, 200),
+    category: numFromEnv(process.env.SHADOW_CATEGORY_HITRATE, 0.6),
+    dispatch: numFromEnv(process.env.SHADOW_DISPATCH_HITRATE, 0.5),
+  };
+}
+
+export interface ShadowReplayRow {
+  kind: string;
+  total: number;
+  judged: number;
+  hits: number;
+  hitRate: number | null;
+  lastAt: string | null;
+}
+
+/** 按 kind 聚合影子消解情况。days 为空表示全量。 */
+export async function getShadowReplayStats(
+  client: PoolClient,
+  tenantId: string,
+  days?: number,
+): Promise<ShadowReplayRow[]> {
+  const r = await client.query<{ kind: string; total: number; judged: number; hits: number; last_at: Date | string | null }>(
+    `SELECT kind,
+            count(*)::int AS total,
+            count(*) FILTER (
+              WHERE CASE WHEN kind = 'category' THEN matched IS NOT NULL
+                         ELSE resolved_at IS NOT NULL END
+            )::int AS judged,
+            count(*) FILTER (WHERE matched)::int AS hits,
+            max(created_at) AS last_at
+       FROM ai_shadow_suggestions
+      WHERE tenant_id = $1
+        AND ($2::int IS NULL OR created_at >= now() - make_interval(days => $2))
+      GROUP BY kind
+      ORDER BY kind`,
+    [tenantId, days ?? null],
+  );
+  return r.rows.map((row) => ({
+    kind: row.kind,
+    total: Number(row.total),
+    judged: Number(row.judged),
+    hits: Number(row.hits),
+    hitRate: Number(row.judged) > 0 ? Number(row.hits) / Number(row.judged) : null,
+    lastAt: row.last_at ? new Date(row.last_at as unknown as string).toISOString() : null,
+  }));
+}
+
+/**
+ * 达标判定。**空集一律判不达标**——没有样本 ≠ 达标，否则新租户上线第一天就是"全绿"，
+ * 那是假绿（与仓内护栏"空集通过不算通过"同一条纪律）。
+ */
+export function summarizeShadowReplay(rows: ShadowReplayRow[], th: ShadowTuneThresholds) {
+  const want = (kind: string) => (kind === 'category' ? th.category : th.dispatch);
+  const kinds = rows.map((r) => {
+    const threshold = want(r.kind);
+    const reasons: string[] = [];
+    if (r.judged < th.minJudged) reasons.push(`已判定样本 ${r.judged} 条 < 要求的 ${th.minJudged} 条`);
+    if (r.hitRate === null || r.hitRate < threshold) {
+      reasons.push(`命中率 ${r.hitRate === null ? '不可计算' : r.hitRate.toFixed(3)} < 要求的 ${threshold.toFixed(2)}`);
+    }
+    return { ...r, threshold, hit_rate: r.hitRate, ready: reasons.length === 0, reasons };
+  });
+  // 两类影子都必须在场且都达标 —— 只统计有的那一类会让"从未产生 dispatch 影子"看起来达标。
+  // 空集同样走这条路：missing 非空 ⇒ 不达标（不需要另加 kinds.length>0，加了就是冗余条件）。
+  const present = new Set(kinds.map((k) => k.kind));
+  const missing = ['category', 'dispatch'].filter((k) => !present.has(k));
+  const ready = kinds.every((k) => k.ready) && missing.length === 0;
+  const reasons = [
+    ...kinds.flatMap((k) => k.reasons.map((x) => `${k.kind}：${x}`)),
+    ...missing.map((k) => `${k}：无任何影子样本`),
+  ];
+  return { kinds, ready, reasons };
+}
+
 /**
  * 派单/改派发生时回填 dispatch 影子（ticket.ts transition 内调用）。
  * 旁路自我隔离：内部吞错仅告警——影子失败绝不允许炸主流转事务。

@@ -4,7 +4,7 @@
     "title": "优服家 API",
     "version": "0.0.0-generated",
     "description": "多租户物业 SaaS 后端开放规范（M-3 交付）。\n\n**口径**：本文件由 `tools/generate_openapi.mjs` 自动扫描 `src/server.ts` 挂载表与 `src/routes/*.ts`、`src/webhook/routes.ts` 路由声明生成（generated，非手写）。\n\n**诚实边界**：summary/description 取自路由上方中文注释（启发式）；请求/响应 schema 为宽松骨架，字段一律以服务端实现为准，不编造字段。\n\n**鉴权**：租户/管理端 JWT Bearer；开放 API 走 X-App-Key + X-App-Secret（openApiAuth）；公开端点见各操作 security: []。",
-    "x-generated-at": "2026-10-20T19:36:03.555Z",
+    "x-generated-at": "2026-10-20T21:24:14.562Z",
     "x-generator": "tools/generate_openapi.mjs",
     "x-source": "src/server.ts + src/routes/*.ts + src/webhook/routes.ts（代码扫描口径）"
   },
@@ -9548,7 +9548,7 @@
           "optimize"
         ],
         "summary": "生成优化决策：dev 下仅记录 pending 建议；AUTO_TUNE 生效时应用 dispatch 写回 + 记录 workflow 建议。",
-        "description": "V2-F4（派单纵切 P0-10/11）：autoTune 判定统一收敛到 isAutoTuneEffective 单一来源——\n此前本端点读 env（unset 恒 false），租户界面开关对它无效（死开关）；现在 env unset/true\n均尊重租户开关，仅 env=false 全局熔断保持 fail-safe 覆盖（生产行为不变）。\n审查修复（横切⑤⑥ F3）：本文件三个写/读敏感端点原零守卫——任意登录角色（含 worker）\n可触发生成优化建议、读全租户过程挖掘、AUTO_TUNE 开启时触发流程改写。补齐：\nPOST /optimize/generate        → optimize.tune（改 dispatch_rule/写建议，调优语义）\nmining → dashboard.view（只读挖掘+落 pending 建议，不直接改 live）\nworkflow  → optimize.tune（AUTO_TUNE 生效时改写 workflow_def）\n与 workOrder.ts /stats 同款范式：requirePermission 在 withTenantClient 内调用（admin 恒放行）。\n\n来源：src/routes/optimize.ts:41\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "V2-F4（派单纵切 P0-10/11）：autoTune 判定统一收敛到 isAutoTuneEffective 单一来源——\n此前本端点读 env（unset 恒 false），租户界面开关对它无效（死开关）；现在 env unset/true\n均尊重租户开关，仅 env=false 全局熔断保持 fail-safe 覆盖（生产行为不变）。\n审查修复（横切⑤⑥ F3）：本文件三个写/读敏感端点原零守卫——任意登录角色（含 worker）\n可触发生成优化建议、读全租户过程挖掘、AUTO_TUNE 开启时触发流程改写。补齐：\nPOST /optimize/generate        → optimize.tune（改 dispatch_rule/写建议，调优语义）\nmining → dashboard.view（只读挖掘+落 pending 建议，不直接改 live）\nworkflow  → optimize.tune（AUTO_TUNE 生效时改写 workflow_def）\n与 workOrder.ts /stats 同款范式：requirePermission 在 withTenantClient 内调用（admin 恒放行）。\n\n来源：src/routes/optimize.ts:46\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -9588,7 +9588,7 @@
           "optimize"
         ],
         "summary": "⑦P2 自适应优化飞轮：消费过程挖掘（飞轮\"眼睛\"）产出精确实例级优化建议并落库 pending。",
-        "description": "与 /optimize/generate（粗粒度 processMetrics）互补，本接口驱动\"数据→模型\"方向（模数共振）。\n安全：自动改写 workflow_def 由\"自动改流程\"租户开关（④）控制——GET/PUT /api/v1/auto-tune 在\n/workflow-admin 界面自主翻转、实时生效、落库持久化；ENV MODEL_AUTO_TUNE 仅作全局覆盖/熔断。\n\n来源：src/routes/optimize.ts:88\n\n服务端响应状态码（代码扫描）：200, 400\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "与 /optimize/generate（粗粒度 processMetrics）互补，本接口驱动\"数据→模型\"方向（模数共振）。\n安全：自动改写 workflow_def 由\"自动改流程\"租户开关（④）控制——GET/PUT /api/v1/auto-tune 在\n/workflow-admin 界面自主翻转、实时生效、落库持久化；ENV MODEL_AUTO_TUNE 仅作全局覆盖/熔断。\n\n来源：src/routes/optimize.ts:93\n\n服务端响应状态码（代码扫描）：200, 400\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -9640,7 +9640,35 @@
           "optimize"
         ],
         "summary": "查看优化决策（pending/applied/dismissed）。",
-        "description": "来源：src/routes/optimize.ts:120\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/optimize.ts:130\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "HTTP 200",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "description": "骨架占位：字段以服务端实现为准"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/optimize/shadow-replay": {
+      "get": {
+        "tags": [
+          "optimize"
+        ],
+        "summary": "影子回放只读出口（任务 #356 解挂判据）：ai_shadow_suggestions 此前只写不读，",
+        "description": "「影子达标才开 MODEL_AUTO_TUNE」没有机读通道，达标与否只能靠人跑 SQL 手算。\n本端点把判定变成一次 GET。只读端点，权限取 dashboard.view（与 generate-mining 同款只读语义）。\n阈值默认是**建议值**，响应里如实标注来源并支持 env 覆盖，不伪装成既定标准。\n\n来源：src/routes/optimize.ts:152\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -9668,7 +9696,7 @@
           "optimize"
         ],
         "summary": "查看某业务流当前状态图定义（可配置状态机 T-①）。",
-        "description": "来源：src/routes/optimize.ts:139\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/optimize.ts:187\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -9694,7 +9722,7 @@
           "optimize"
         ],
         "summary": "PUT /api/v1/workflow/def",
-        "description": "来源：src/routes/optimize.ts:184\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/optimize.ts:232\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -9734,7 +9762,7 @@
           "optimize"
         ],
         "summary": "A+ Phase5：返回可选状态图模板（默认最小 4 态 / 富 13 态 UOne 颗粒度），供薄配置器一键应用。",
-        "description": "来源：src/routes/optimize.ts:151\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/optimize.ts:199\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -9762,7 +9790,7 @@
           "optimize"
         ],
         "summary": "消费 workflow 类 pending 优化建议，改写 workflow_def（收口自我优化闭环）。",
-        "description": "受 MODEL_AUTO_TUNE 控制（与 dispatch 写回一致）：dev 默认仅记录不应用；AUTO_TUNE=true 才真正改写流程定义。\n\n来源：src/routes/optimize.ts:224\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "受 MODEL_AUTO_TUNE 控制（与 dispatch 写回一致）：dev 默认仅记录不应用；AUTO_TUNE=true 才真正改写流程定义。\n\n来源：src/routes/optimize.ts:272\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -11210,7 +11238,7 @@
           "workflowDef"
         ],
         "summary": "upsert 单个 workflow_def（兼容原路径）：现改写为保存/覆盖草稿，不直接触 live。",
-        "description": "来源：src/routes/workflowDef.ts:179\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/workflowDef.ts:185\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -11261,7 +11289,7 @@
           "workflowDef"
         ],
         "summary": "显式草稿端点（PUT /:entityType/draft）：与上面兼容路径同一语义，供 mp/web 新接线使用。",
-        "description": "来源：src/routes/workflowDef.ts:202\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/workflowDef.ts:208\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -11310,7 +11338,7 @@
           "workflowDef"
         ],
         "summary": "读在途草稿（workflow.edit 或 workflow.approve）：含 status/note/reject_comment/submitted_by；无则 404。",
-        "description": "来源：src/routes/workflowDef.ts:225\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/workflowDef.ts:231\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -11349,7 +11377,7 @@
           "workflowDef"
         ],
         "summary": "提交审核（draft→submitted，workflow.edit）：base_version 锚定提交时刻的 live 版本。",
-        "description": "来源：src/routes/workflowDef.ts:243\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/workflowDef.ts:249\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -11400,7 +11428,7 @@
           "workflowDef"
         ],
         "summary": "审核通过（workflow.approve）：三重校验后复用 saveWorkflowDef 生效（版本自增 + history 快照 reason='approve'），",
-        "description": "然后删除变更行（审计由 history 承担）。\n① submitted_by ≠ 当前账号（403 SELF_APPROVAL，按账号非按角色，admin 也不例外）；\nF16 豁免（初一裁决 2026-09-14）：单 admin 租户（active admin 计数=1）允许自批——\n审批人池只有自己，硬禁=流程永久死锁；豁免强制同事务写 platform_audit（self_approved=true，\n留痕失败即整个审批回滚）；多 admin 租户仍硬禁不变\n② base_version = 当前 live 版本（409 DRAFT_STALE：live 已被推进，需重存重提）\n③ 行必须存在且 status=submitted（404 NO_DRAFT / 409 CHANGE_NOT_SUBMITTED）\nV3-D4 逃生口：body.confirm_inflight_loss:true → saveWorkflowDef(allowInflightLoss)——\n显式二次确认删态在途损失（把关人知情裁量），留痕走 history operator/reason。\n\n来源：src/routes/workflowDef.ts:283\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "然后删除变更行（审计由 history 承担）。\n① submitted_by ≠ 当前账号（403 SELF_APPROVAL，按账号非按角色，admin 也不例外）；\nF16 豁免（初一裁决 2026-09-14）：单 admin 租户（active admin 计数=1）允许自批——\n审批人池只有自己，硬禁=流程永久死锁；豁免强制同事务写 platform_audit（self_approved=true，\n留痕失败即整个审批回滚）；多 admin 租户仍硬禁不变\n② base_version = 当前 live 版本（409 DRAFT_STALE：live 已被推进，需重存重提）\n③ 行必须存在且 status=submitted（404 NO_DRAFT / 409 CHANGE_NOT_SUBMITTED）\nV3-D4 逃生口：body.confirm_inflight_loss:true → saveWorkflowDef(allowInflightLoss)——\n显式二次确认删态在途损失（把关人知情裁量），留痕走 history operator/reason。\n\n来源：src/routes/workflowDef.ts:289\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -11451,7 +11479,7 @@
           "workflowDef"
         ],
         "summary": "审核驳回（workflow.approve，comment 必填）：status 回 draft + reject_comment；live 不动、不产生新版本。",
-        "description": "来源：src/routes/workflowDef.ts:354\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/workflowDef.ts:360\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -11502,7 +11530,7 @@
           "workflowDef"
         ],
         "summary": "草稿 vs live 并排差异（workflow.approve 或 workflow.edit）：复用版本 diff 的 summary 结构。",
-        "description": "来源：src/routes/workflowDef.ts:380\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/workflowDef.ts:386\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -11541,7 +11569,7 @@
           "workflowDef"
         ],
         "summary": "V3-D4 预演端点（UI 糖，非闸门）：POST /:entityType/preflight——body 带新 def，",
-        "description": "返回 { removed, inflight_total, by_state }：FE 在保存前展示删态影响面，与硬闸构成\"提示 + 强制\"两层。\n\n来源：src/routes/workflowDef.ts:416\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "返回 { removed, inflight_total, by_state }：FE 在保存前展示删态影响面，与硬闸构成\"提示 + 强制\"两层。\n\n来源：src/routes/workflowDef.ts:422\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -11592,7 +11620,7 @@
           "workflowDef"
         ],
         "summary": "从主题模板生成（下拉生成）：改产草稿——模板只是起点，微调后仍需过审。",
-        "description": "来源：src/routes/workflowDef.ts:444\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/workflowDef.ts:450\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -11632,7 +11660,7 @@
           "workflowDef"
         ],
         "summary": "============ 批次三 卡4：老租户自愿升级——给 work_order def 追加验收边 ============",
-        "description": "acceptance（门禁：workflow.edit 权限点）\n审核一期裁决：added>0（结构性变更）改产草稿待审；added=0 幂等无操作原样放行（no-op 不产生内容）。\n\n来源：src/routes/workflowDef.ts:469\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "acceptance（门禁：workflow.edit 权限点）\n审核一期裁决：added>0（结构性变更）改产草稿待审；added=0 幂等无操作原样放行（no-op 不产生内容）。\n\n来源：src/routes/workflowDef.ts:475\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -11683,7 +11711,7 @@
           "workflowDef"
         ],
         "summary": "版本历史列表（含快照）。",
-        "description": "来源：src/routes/workflowDef.ts:507\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/workflowDef.ts:513\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -11722,7 +11750,7 @@
           "workflowDef"
         ],
         "summary": "查看单个历史版本快照。",
-        "description": "来源：src/routes/workflowDef.ts:524\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/workflowDef.ts:530\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -11770,7 +11798,7 @@
           "workflowDef"
         ],
         "summary": "两版本差异（返回两版完整内容 + 顶层结构摘要，前端做并排对比）。",
-        "description": "来源：src/routes/workflowDef.ts:541\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/workflowDef.ts:547\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -11827,7 +11855,7 @@
           "workflowDef"
         ],
         "summary": "一键回滚：把指定历史版本存为新版本（版本自增，reason=rollback）。",
-        "description": "审核一期裁决：豁免审批（目标版本曾生效 + 急救场景，过审会延误止血），但把关责任不消失——\n权限点由 workflow.edit 收紧为 workflow.approve（把关人亲自即时裁量）。\nV3-D4 逃生口：body.confirm_inflight_loss:true → allowInflightLoss（与 approve 同款显式二次确认）。\n\n来源：src/routes/workflowDef.ts:572\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "审核一期裁决：豁免审批（目标版本曾生效 + 急救场景，过审会延误止血），但把关责任不消失——\n权限点由 workflow.edit 收紧为 workflow.approve（把关人亲自即时裁量）。\nV3-D4 逃生口：body.confirm_inflight_loss:true → allowInflightLoss（与 approve 同款显式二次确认）。\n\n来源：src/routes/workflowDef.ts:578\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -11887,7 +11915,7 @@
           "workflowDef"
         ],
         "summary": "导出当前 def（带版本与导出时间，供备份/迁移）。",
-        "description": "来源：src/routes/workflowDef.ts:608\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/workflowDef.ts:614\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -11938,7 +11966,7 @@
           "workflowDef"
         ],
         "summary": "导入 def：改产草稿——外部文件风险最高，最需要人把关（来源标记 G5）。",
-        "description": "来源：src/routes/workflowDef.ts:625\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/workflowDef.ts:631\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -11989,7 +12017,7 @@
           "workflowDef"
         ],
         "summary": "— 列出本租户全部自动审核规则（含未启用）。",
-        "description": "来源：src/routes/workflowDef.ts:687\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/workflowDef.ts:693\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -12026,7 +12054,7 @@
           "workflowDef"
         ],
         "summary": "— 新建或更新一条自动审核规则。",
-        "description": "来源：src/routes/workflowDef.ts:704\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/workflowDef.ts:710\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -12077,7 +12105,7 @@
           "workflowDef"
         ],
         "summary": "— 删除一条规则。",
-        "description": "来源：src/routes/workflowDef.ts:744\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/workflowDef.ts:750\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []

@@ -25,6 +25,11 @@ import { isAutoTuneEffective } from '../repo/tenantSettings.js';
 import { DEFAULT_WORK_ORDER_DEF, RICH_WORK_ORDER_DEF, type WorkflowDef } from '../engine/stateMachine.js';
 import { requirePermission } from '../middleware/role.js';
 import { assertWorkflowConfigEditableByTenant } from '../middleware/workflowConfigGuard.js';
+import {
+  getShadowReplayStats,
+  summarizeShadowReplay,
+  shadowTuneThresholds,
+} from '../services/k2Shadow.js';
 
 const router = Router();
 
@@ -135,6 +140,44 @@ router.get('/optimize/list', async (req, res, next) => {
         .then((r) => r.rows),
     );
     return res.json({ ok: true, code: 0, items });
+  } catch (e) {
+    next(e);
+  }
+});
+
+// 影子回放只读出口（任务 #356 解挂判据）：ai_shadow_suggestions 此前只写不读，
+// 「影子达标才开 MODEL_AUTO_TUNE」没有机读通道，达标与否只能靠人跑 SQL 手算。
+// 本端点把判定变成一次 GET。只读端点，权限取 dashboard.view（与 generate-mining 同款只读语义）。
+// 阈值默认是**建议值**，响应里如实标注来源并支持 env 覆盖，不伪装成既定标准。
+router.get('/optimize/shadow-replay', async (req, res, next) => {
+  try {
+    const tenantId = res.locals.auth.tenantId;
+    const daysRaw = req.query.days;
+    const days = daysRaw === undefined || String(daysRaw) === '' ? undefined : Number(daysRaw);
+    if (days !== undefined && (!Number.isInteger(days) || days < 1 || days > 3650)) {
+      throw new AppError('VALIDATION_001', 'days 必须是 1~3650 的整数', 422);
+    }
+    const th = shadowTuneThresholds();
+    const { kinds, ready, reasons } = await withTenantClient(tenantId, async (client) => {
+      await requirePermission(res.locals.auth, client, 'dashboard.view');
+      const rows = await getShadowReplayStats(client, tenantId, days);
+      return summarizeShadowReplay(rows, th);
+    });
+    return res.json({
+      ok: true,
+      code: 0,
+      window_days: days ?? null,
+      thresholds: {
+        min_judged: th.minJudged,
+        category: th.category,
+        dispatch: th.dispatch,
+        source: '建议值（未经业务确认），可用 SHADOW_MIN_JUDGED / SHADOW_CATEGORY_HITRATE / SHADOW_DISPATCH_HITRATE 覆盖',
+      },
+      ready,
+      ready_text: ready ? '影子达标，具备开启 MODEL_AUTO_TUNE 的数据条件' : '影子未达标，暂不具备开启 MODEL_AUTO_TUNE 的数据条件',
+      reasons,
+      kinds,
+    });
   } catch (e) {
     next(e);
   }
