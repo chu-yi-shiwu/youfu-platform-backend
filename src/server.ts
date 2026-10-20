@@ -51,6 +51,7 @@ import acceptanceRouter from './routes/acceptance.js';// 注册制批次三 卡4
 import energyCollectionRouter from './routes/energyCollection.js';// T303a 能耗采集收单（能源平台 webhook + worker token + 只读列表）
 import platformRouter from './routes/platform.js';// 城市级平台层（E_min）
 import templateMarketRouter from './routes/templateMarket.js';// E2 模板市场（官方模板库/应用/效果）
+import platformWorkflowRouter from './routes/platformWorkflow.js';// 097：平台运维代客配置流程 + 归属开关
 import openApiRouter from './routes/openApi.js';// E0_open 开放 API（app_key 认证）
 import metaRouter from './routes/meta.js';// #938 展示标签字典（公开端点，挂 auth 之前）
 import intakeOptionsRouter from './routes/intakeOptions.js';// FE Intake 申报页配置聚合（租户级，挂 auth 之后）
@@ -144,6 +145,7 @@ app.use((req, res, next) => {
 // 平台管理员与租户账号两套体系互不干扰；登录公开，其余 platformAdminAuth 保护）。
 app.use('/api/v1/platform', platformRouter);
 app.use('/api/v1/platform', templateMarketRouter);
+app.use('/api/v1/platform', platformWorkflowRouter);
 
 // E0_open 开放 API（第三方/上级平台/ISV 凭 app_key 调聚合）：独立于租户/平台 JWT，
 // 走 openApiAuth（app_key+secret 双因子 + scopes + 调用审计）。

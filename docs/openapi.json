@@ -4,7 +4,7 @@
     "title": "优服家 API",
     "version": "0.0.0-generated",
     "description": "多租户物业 SaaS 后端开放规范（M-3 交付）。\n\n**口径**：本文件由 `tools/generate_openapi.mjs` 自动扫描 `src/server.ts` 挂载表与 `src/routes/*.ts`、`src/webhook/routes.ts` 路由声明生成（generated，非手写）。\n\n**诚实边界**：summary/description 取自路由上方中文注释（启发式）；请求/响应 schema 为宽松骨架，字段一律以服务端实现为准，不编造字段。\n\n**鉴权**：租户/管理端 JWT Bearer；开放 API 走 X-App-Key + X-App-Secret（openApiAuth）；公开端点见各操作 security: []。",
-    "x-generated-at": "2026-09-12T23:01:31.038Z",
+    "x-generated-at": "2026-10-20T19:36:03.555Z",
     "x-generator": "tools/generate_openapi.mjs",
     "x-source": "src/server.ts + src/routes/*.ts + src/webhook/routes.ts（代码扫描口径）"
   },
@@ -21,6 +21,10 @@
     {
       "name": "templateMarket",
       "description": "路由文件：src/routes/templateMarket.ts"
+    },
+    {
+      "name": "platformWorkflow",
+      "description": "路由文件：src/routes/platformWorkflow.ts"
     },
     {
       "name": "openApi",
@@ -415,7 +419,7 @@
           "platform"
         ],
         "summary": "GET /api/v1/platform/summary",
-        "description": "来源：src/routes/platform.ts:215\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/platform.ts:219\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -443,7 +447,7 @@
           "platform"
         ],
         "summary": "— 应用列表（secret 不返回，仅展示 key/scopes/状态）",
-        "description": "来源：src/routes/platform.ts:281\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/platform.ts:285\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -469,7 +473,7 @@
           "platform"
         ],
         "summary": "— 创建应用（返回 app_key + app_secret，secret 仅此一次）",
-        "description": "来源：src/routes/platform.ts:294\n\n服务端响应状态码（代码扫描）：201\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/platform.ts:298\n\n服务端响应状态码（代码扫描）：201\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -509,7 +513,7 @@
           "platform"
         ],
         "summary": "— 吊销应用（立即失效，不可逆）",
-        "description": "来源：src/routes/platform.ts:313\n\n服务端响应状态码（代码扫描）：200, 404\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/platform.ts:317\n\n服务端响应状态码（代码扫描）：200, 404\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -572,7 +576,7 @@
           "platform"
         ],
         "summary": "---- PUT /platform/auth/password —— 平台管理员修改自己的密码（登录态 + 旧密码校验） ----",
-        "description": "来源：src/routes/platform.ts:333\n\n服务端响应状态码（代码扫描）：200, 401, 404\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/platform.ts:337\n\n服务端响应状态码（代码扫描）：200, 401, 404\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -636,7 +640,7 @@
           "platform"
         ],
         "summary": "---- 审计日志查询（平台操作 audit + 开放 API 调用 log；append-only 只读） ----",
-        "description": "来源：src/routes/platform.ts:355\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/platform.ts:359\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -664,7 +668,7 @@
           "platform"
         ],
         "summary": "GET /api/v1/platform/open-api-logs",
-        "description": "来源：src/routes/platform.ts:383\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/platform.ts:387\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -692,7 +696,7 @@
           "platform"
         ],
         "summary": "PUT /api/v1/platform/tenants/{id}/llm",
-        "description": "来源：src/routes/platform.ts:408\n\n服务端响应状态码（代码扫描）：200, 409, 422\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/platform.ts:412\n\n服务端响应状态码（代码扫描）：200, 409, 422\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -767,7 +771,7 @@
           "platform"
         ],
         "summary": "---- 位置字典 CRUD（v0.4.0：报修位置预录入，扫码自动带出） ----",
-        "description": "来源：src/routes/platform.ts:433\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/platform.ts:437\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -804,7 +808,7 @@
           "platform"
         ],
         "summary": "POST /api/v1/platform/tenants/{id}/locations",
-        "description": "来源：src/routes/platform.ts:446\n\n服务端响应状态码（代码扫描）：201\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/platform.ts:450\n\n服务端响应状态码（代码扫描）：201\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -855,7 +859,7 @@
           "platform"
         ],
         "summary": "---- 报修人角色字典 CRUD（v0.4.0：姓名+手机号预录入，扫码自动带出） ----",
-        "description": "来源：src/routes/platform.ts:468\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/platform.ts:472\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -892,7 +896,7 @@
           "platform"
         ],
         "summary": "POST /api/v1/platform/tenants/{id}/reporters",
-        "description": "来源：src/routes/platform.ts:490\n\n服务端响应状态码（代码扫描）：201\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/platform.ts:494\n\n服务端响应状态码（代码扫描）：201\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -943,7 +947,7 @@
           "platform"
         ],
         "summary": "---- GET /platform/trial-applications?status= —— 试用申请列表（分页） ----",
-        "description": "来源：src/routes/platform.ts:514\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/platform.ts:518\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -971,7 +975,7 @@
           "platform"
         ],
         "summary": "POST /api/v1/platform/trial-applications/{id}/review",
-        "description": "来源：src/routes/platform.ts:549\n\n服务端响应状态码（代码扫描）：200, 201, 404, 409, 422\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/platform.ts:553\n\n服务端响应状态码（代码扫描）：200, 201, 404, 409, 422\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -1070,7 +1074,7 @@
           "templateMarket"
         ],
         "summary": "GET /api/v1/platform/templates",
-        "description": "来源：src/routes/templateMarket.ts:31\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/templateMarket.ts:32\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -1096,7 +1100,7 @@
           "templateMarket"
         ],
         "summary": "POST /api/v1/platform/templates",
-        "description": "来源：src/routes/templateMarket.ts:94\n\n服务端响应状态码（代码扫描）：201\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/templateMarket.ts:95\n\n服务端响应状态码（代码扫描）：201\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -1136,7 +1140,7 @@
           "templateMarket"
         ],
         "summary": "UGC 审核：通过/驳回（平台侧；通过 → published，驳回 → archived）",
-        "description": "来源：src/routes/templateMarket.ts:54\n\n服务端响应状态码（代码扫描）：200, 404, 409\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/templateMarket.ts:55\n\n服务端响应状态码（代码扫描）：200, 404, 409\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -1211,7 +1215,7 @@
           "templateMarket"
         ],
         "summary": "---- 详情（含 playbook 预览） ----",
-        "description": "来源：src/routes/templateMarket.ts:76\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/templateMarket.ts:77\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -1250,7 +1254,7 @@
           "templateMarket"
         ],
         "summary": "POST /api/v1/platform/templates/{id}/apply",
-        "description": "来源：src/routes/templateMarket.ts:116\n\n服务端响应状态码（代码扫描）：201\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/templateMarket.ts:117\n\n服务端响应状态码（代码扫描）：201\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -1301,7 +1305,7 @@
           "templateMarket"
         ],
         "summary": "---- 效果回写：某模板的所有应用记录 + 惰性刷新单条 after 指标 ----",
-        "description": "来源：src/routes/templateMarket.ts:195\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/templateMarket.ts:201\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -1340,7 +1344,7 @@
           "templateMarket"
         ],
         "summary": "刷新单条 apply 的 after 指标（7/30 天 cron 落地前的惰性刷新；R7 样本门槛）",
-        "description": "来源：src/routes/templateMarket.ts:209\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/templateMarket.ts:215\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -1383,6 +1387,397 @@
             }
           }
         }
+      }
+    },
+    "/api/v1/platform/config/workflow-config-owner": {
+      "get": {
+        "tags": [
+          "platformWorkflow"
+        ],
+        "summary": "GET /api/v1/platform/config/workflow-config-owner",
+        "description": "来源：src/routes/platformWorkflow.ts:58\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "HTTP 200",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "description": "骨架占位：字段以服务端实现为准"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "platformWorkflow"
+        ],
+        "summary": "PUT /api/v1/platform/config/workflow-config-owner",
+        "description": "来源：src/routes/platformWorkflow.ts:65\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "HTTP 200",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "description": "骨架占位：字段以服务端实现为准"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "description": "骨架占位：请求字段以服务端实现为准"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/platform/tenants/{id}/workflow-def/{entityType}": {
+      "get": {
+        "tags": [
+          "platformWorkflow"
+        ],
+        "summary": "读指定租户的流程定义（含引擎机制注入后的最终形态）。",
+        "description": "来源：src/routes/platformWorkflow.ts:78\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "HTTP 200",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "description": "骨架占位：字段以服务端实现为准"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "路径参数（原代码声明形如 :param）"
+          },
+          {
+            "name": "entityType",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "路径参数（原代码声明形如 :param）"
+          }
+        ]
+      },
+      "put": {
+        "tags": [
+          "platformWorkflow"
+        ],
+        "summary": "存草稿（不触 live）：与租户侧 PUT /:entityType 同语义。",
+        "description": "来源：src/routes/platformWorkflow.ts:89\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "HTTP 200",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "description": "骨架占位：字段以服务端实现为准"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "路径参数（原代码声明形如 :param）"
+          },
+          {
+            "name": "entityType",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "路径参数（原代码声明形如 :param）"
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "description": "骨架占位：请求字段以服务端实现为准"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/platform/tenants/{id}/workflow-def/{entityType}/submit": {
+      "post": {
+        "tags": [
+          "platformWorkflow"
+        ],
+        "summary": "提交（draft → submitted）",
+        "description": "来源：src/routes/platformWorkflow.ts:107\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "HTTP 200",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "description": "骨架占位：字段以服务端实现为准"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "路径参数（原代码声明形如 :param）"
+          },
+          {
+            "name": "entityType",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "路径参数（原代码声明形如 :param）"
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "description": "骨架占位：请求字段以服务端实现为准"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/platform/tenants/{id}/workflow-def/{entityType}/approve": {
+      "post": {
+        "tags": [
+          "platformWorkflow"
+        ],
+        "summary": "审批生效（submitted → live，版本自增）。",
+        "description": "【自审自批】租户侧的 SELF_APPROVAL 禁令针对的是**租户内部双人制**（submitted_by 与租户账号比对），\n平台运维是外部代客操作、且本端点强制 platform_audit 留痕，不适用该禁令——\n若照搬，单运维场景下会永久死锁（提交人即唯一审批人，与 F16 裁决处理的是同一个坑）。\n\n来源：src/routes/platformWorkflow.ts:132\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "HTTP 200",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "description": "骨架占位：字段以服务端实现为准"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "路径参数（原代码声明形如 :param）"
+          },
+          {
+            "name": "entityType",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "路径参数（原代码声明形如 :param）"
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "description": "骨架占位：请求字段以服务端实现为准"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/platform/tenants/{id}/workflow-def/{entityType}/reject": {
+      "post": {
+        "tags": [
+          "platformWorkflow"
+        ],
+        "summary": "驳回（submitted → draft，comment 必填）",
+        "description": "来源：src/routes/platformWorkflow.ts:161\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "HTTP 200",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "description": "骨架占位：字段以服务端实现为准"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "路径参数（原代码声明形如 :param）"
+          },
+          {
+            "name": "entityType",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "路径参数（原代码声明形如 :param）"
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "description": "骨架占位：请求字段以服务端实现为准"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/platform/tenants/{id}/workflow-def-pending": {
+      "get": {
+        "tags": [
+          "platformWorkflow"
+        ],
+        "summary": "待审批清单",
+        "description": "来源：src/routes/platformWorkflow.ts:184\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "HTTP 200",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "description": "骨架占位：字段以服务端实现为准"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "路径参数（原代码声明形如 :param）"
+          }
+        ]
       }
     },
     "/api/v1/open-api/health": {
@@ -2684,7 +3079,7 @@
           "workOrder"
         ],
         "summary": "POST /api/v1/open/work_order",
-        "description": "来源：src/routes/workOrder.ts:290\n\n服务端响应状态码（代码扫描）：200, 201, 400\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/workOrder.ts:382\n\n服务端响应状态码（代码扫描）：200, 201, 400\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -2748,7 +3143,7 @@
           "workOrder"
         ],
         "summary": "POST /api/v1/open/work_order/:id/transition",
-        "description": "来源：src/routes/workOrder.ts:382\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/workOrder.ts:474\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -2799,7 +3194,7 @@
           "workOrder"
         ],
         "summary": "GET /api/v1/open/work_orders",
-        "description": "来源：src/routes/workOrder.ts:446\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/workOrder.ts:550\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -2827,7 +3222,7 @@
           "workOrder"
         ],
         "summary": "— 返回某状态下可执行的转移规则（前端动态渲染/权限判断用）。",
-        "description": "status 省略时返回初始态(initial)的可用转移。\n\n来源：src/routes/workOrder.ts:526\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "status 省略时返回初始态(initial)的可用转移。\n\n来源：src/routes/workOrder.ts:632\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -2855,7 +3250,7 @@
           "workOrder"
         ],
         "summary": "— 工单事件流（前端工单详情时间线）",
-        "description": "来源：src/routes/workOrder.ts:546\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/workOrder.ts:652\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -2894,7 +3289,7 @@
           "workOrder"
         ],
         "summary": "— 工单详情（单条）：含当前状态可执行的转移规则 + 事件流。",
-        "description": "A+ Phase4：供 SPA TicketDetail 动态渲染动作按钮（不再前端硬编码状态→事件映射）。\n\n来源：src/routes/workOrder.ts:566\n\n服务端响应状态码（代码扫描）：200, 404\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "A+ Phase4：供 SPA TicketDetail 动态渲染动作按钮（不再前端硬编码状态→事件映射）。\n\n来源：src/routes/workOrder.ts:672\n\n服务端响应状态码（代码扫描）：200, 404\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -2945,7 +3340,7 @@
           "workOrder"
         ],
         "summary": "POST /api/v1/open/work_order/{id}/photos",
-        "description": "来源：src/routes/workOrder.ts:626\n\n服务端响应状态码（代码扫描）：200, 404\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/workOrder.ts:734\n\n服务端响应状态码（代码扫描）：200, 404\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -3008,7 +3403,7 @@
           "workOrder"
         ],
         "summary": "D1：语音留言追加（worker 录语音 → /upload 得 URL → 追加 ext.voice 数组）",
-        "description": "来源：src/routes/workOrder.ts:651\n\n服务端响应状态码（代码扫描）：200, 404\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/workOrder.ts:759\n\n服务端响应状态码（代码扫描）：200, 404\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -3071,7 +3466,7 @@
           "workOrder"
         ],
         "summary": "— 通知列表（?recipient= 过滤；缺省=租户全部）",
-        "description": "审查修复：合并原 454(recipient 版) 与 585(全量版) 重复注册——Express 先注册先匹配，585 版永不生效。\nin_app 落库即可达；sms/push 为 stub 未真发，诚实标注。\n\n来源：src/routes/workOrder.ts:679\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "审查修复：合并原 454(recipient 版) 与 585(全量版) 重复注册——Express 先注册先匹配，585 版永不生效。\nin_app 落库即可达；sms/push 为 stub 未真发，诚实标注。\n\n来源：src/routes/workOrder.ts:787\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -3098,8 +3493,8 @@
         "tags": [
           "workOrder"
         ],
-        "summary": "— 标记已读（body { ids?: string[] }；缺省=全部已读）",
-        "description": "来源：src/routes/workOrder.ts:707\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "summary": "— 标记已读（body { ids?: string[] }；缺省=本人收件箱全部已读）",
+        "description": "审查修复（横切⑦ B-1）：原实现两条路径均只按 tenant_id 限定——任意登录账号可把\n**全租户**（含他人）的通知置已读（缺省路径），或按 id 把**他人**的通知置已读\n（ids 路径无 recipient 校验）。已读不可逆（读态覆盖未读提醒），必须收口到本人收件箱。\n口径：当前登录身份集合 = auth.userId ∪ resolveWorkerIds 结果（worker 通知 recipient=\nworker.id、账号通知 recipient=account_user.id，双路身份覆盖两种 recipient_kind）。\n身份解析不出（空集合）→ 422 拒绝：置已读不可逆，绝不做\"全租户\"降级放行。\n\n来源：src/routes/workOrder.ts:821\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -3139,7 +3534,7 @@
           "workOrder"
         ],
         "summary": "— 微信订阅消息自检（工人单点：先授权→立即真发→返回原始 errcode）",
-        "description": "不落库，直接对当前登录工人发起一次真实订阅消息发送，返回微信原始 errcode，供前端「微信通知自检」按钮屏上展示。\n目的：消除「用户点允许 → relay 给后端手动重跑」的来回，实现通知链路自助验证闭环。\n\n来源：src/routes/workOrder.ts:731\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "不落库，直接对当前登录工人发起一次真实订阅消息发送，返回微信原始 errcode，供前端「微信通知自检」按钮屏上展示。\n目的：消除「用户点允许 → relay 给后端手动重跑」的来回，实现通知链路自助验证闭环。\n\n来源：src/routes/workOrder.ts:860\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -3179,7 +3574,7 @@
           "workOrder"
         ],
         "summary": "PATCH /api/v1/open/work_order/{id}/ext",
-        "description": "来源：src/routes/workOrder.ts:771\n\n服务端响应状态码（代码扫描）：200, 404\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/workOrder.ts:910\n\n服务端响应状态码（代码扫描）：200, 404\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -3242,7 +3637,7 @@
           "workOrder"
         ],
         "summary": "— P6 自动派单率/自动闭环率口径（诚实，不编造演示数据）",
-        "description": "权限墙（修复批次 X-8）：挂 dashboard.view——默认矩阵 admin/operator/dispatcher/reviewer/\nservice_desk 均含该权限点，worker 不含（403）。调用方核实：FE Dashboard.tsx:216 /\nDataScreen.tsx:144 / Statistics.tsx:55（MainLayout.tsx:109,125-126 三页菜单本就按\ndashboard.view 过滤，挂墙与 FE 既有口径完全对齐）+ mp overview.js:33 / report.js:45\n两个 admin 页。worker/未登录端点层零调用 → 挂墙零回归。\n\n来源：src/routes/workOrder.ts:799\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "权限墙（修复批次 X-8）：挂 dashboard.view——默认矩阵 admin/operator/dispatcher/reviewer/\nservice_desk 均含该权限点，worker 不含（403）。调用方核实：FE Dashboard.tsx:216 /\nDataScreen.tsx:144 / Statistics.tsx:55（MainLayout.tsx:109,125-126 三页菜单本就按\ndashboard.view 过滤，挂墙与 FE 既有口径完全对齐）+ mp overview.js:33 / report.js:45\n两个 admin 页。worker/未登录端点层零调用 → 挂墙零回归。\n\n来源：src/routes/workOrder.ts:967\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -3270,7 +3665,7 @@
           "workOrder"
         ],
         "summary": "— M3 真实解析：目录码/资产码识别（替代前端 MSW 写死 mock）",
-        "description": "生产化②：优先查库（asset_catalog/asset_registry），DB 权威、查不到诚实 unresolved。\n契约与前端 services.scan 对齐：{ok,code,asset:{qr,resolved,note,...}}\n\n来源：src/routes/workOrder.ts:816\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "生产化②：优先查库（asset_catalog/asset_registry），DB 权威、查不到诚实 unresolved。\n契约与前端 services.scan 对齐：{ok,code,asset:{qr,resolved,note,...}}\n\n来源：src/routes/workOrder.ts:984\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -3310,7 +3705,7 @@
           "workOrder"
         ],
         "summary": "— P4 SLA 守护：扫本租户超时单，标记升级并 emit sla_escalated 事件",
-        "description": "拆雷三件套②（2026-08-31）：扫描实现抽到 src/scheduler/slaScheduler.ts 的 runSlaScanForTenant，\n本端点与进程内 cron 共用同一实现；命中同时落通知（在身 assignee + 租户管理员），契约不变。\n\n来源：src/routes/workOrder.ts:836\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "拆雷三件套②（2026-08-31）：扫描实现抽到 src/scheduler/slaScheduler.ts 的 runSlaScanForTenant，\n本端点与进程内 cron 共用同一实现；命中同时落通知（在身 assignee + 租户管理员），契约不变。\n\n来源：src/routes/workOrder.ts:1004\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -3350,7 +3745,7 @@
           "workOrder"
         ],
         "summary": "— 转台（把工单从一个服务台转移到另一个服务台）",
-        "description": "门禁：dispatch.override（RBAC 默认矩阵 admin/operator/dispatcher 有，worker 无）。\n\n来源：src/routes/workOrder.ts:857\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "门禁：dispatch.override（RBAC 默认矩阵 admin/operator/dispatcher 有，worker 无）。\n\n来源：src/routes/workOrder.ts:1025\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -3400,8 +3795,8 @@
         "tags": [
           "workOrder"
         ],
-        "summary": "— 抢单大厅：列出未分配(claim_hall/pending_dispatch)工单，可按部门过滤",
-        "description": "来源：src/routes/workOrder.ts:900\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "summary": "— 抢单大厅：列出可被认领的工单（池态由流程派生），可按部门过滤",
+        "description": "来源：src/routes/workOrder.ts:1068\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -3429,7 +3824,7 @@
           "workOrder"
         ],
         "summary": "— 抢单（人员认领未分配工单，部门不匹配驳回）",
-        "description": "门禁来源（架构🟡12）：本租户 workflow_def 的 claim 转移 allowedRoles（引擎 RICH def 默认\nworker/admin/dispatcher/service_desk），不再在本文件硬编码角色数组。\n⚠️ 行为变更：此前硬编码多放了 operator → 现按引擎口径收口；operator 请用派单（dispatch.override）。\n需要放行的租户：到 业务规则设置台 给 claim 边 allowedRoles 加上 operator 即生效（配置即事实）。\nC-2 身份根治：token userId 即 worker.id（id 同源），body workerId 不一致 403。\n\n来源：src/routes/workOrder.ts:932\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "F6（2026-10-19）：本体抽去 services/claimWorkOrder.ts，并入 transition() 主通道——\n客户配在认领边上的 allowedRoles/allowedPerms/requiredFields/sideEffects/自动审核\n全部生效（与此前自动派单 F4 同一次根治）；目标态从客户 def 的认领边派生。\n门禁单一事实源 = transition()（本文件不再另写角色白名单，两处口径不再漂移）。\nC-2 身份根治：token userId 即 worker.id（id 同源），body workerId 不一致 403。\n\n来源：src/routes/workOrder.ts:1108\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -3480,7 +3875,7 @@
           "workOrder"
         ],
         "summary": "— 派单智能推荐（DMR 可解释呈现，dispatcher 端）。",
-        "description": "当前工人（token 身份）今日工作台统计见下方 /open/me/summary。\n只读推荐：基于 技能匹配 + 当前负载 的确定性评分，不写回任何配置（AUTO_TUNE 无关）。\n诚实口径：无 worker 级满意度数据 → 理由不编造满意度；技能匹配 = 分类名/码与 worker.skill_tags 子串包含（≥2 字符）。\n冷启动（无 dispatch_rule/UCB 数据）时依然有区分度：技能命中优先、负载低次之。\n\n来源：src/routes/workOrder.ts:1002\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "当前工人（token 身份）今日工作台统计见下方 /open/me/summary。\n只读推荐：基于 技能匹配 + 当前负载 的确定性评分，不写回任何配置（AUTO_TUNE 无关）。\n诚实口径：无 worker 级满意度数据 → 理由不编造满意度；技能匹配 = 分类名/码与 worker.skill_tags 子串包含（≥2 字符）。\n冷启动（无 dispatch_rule/UCB 数据）时依然有区分度：技能命中优先、负载低次之。\n\n来源：src/routes/workOrder.ts:1140\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -3508,7 +3903,7 @@
           "workOrder"
         ],
         "summary": "GET /api/v1/open/me/summary",
-        "description": "来源：src/routes/workOrder.ts:1034\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/workOrder.ts:1172\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -3797,7 +4192,7 @@
           "auth"
         ],
         "summary": "— 受保护：返回当前令牌对应账户",
-        "description": "来源：src/routes/auth.ts:103\n\n服务端响应状态码（代码扫描）：200, 401, 404\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/auth.ts:113\n\n服务端响应状态码（代码扫描）：200, 401, 404\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -3849,7 +4244,7 @@
           "auth"
         ],
         "summary": "— 受保护：登录用户修改自己的密码（需旧密码校验）",
-        "description": "来源：src/routes/auth.ts:145\n\n服务端响应状态码（代码扫描）：200, 401, 404\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/auth.ts:155\n\n服务端响应状态码（代码扫描）：200, 401, 404\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -3913,7 +4308,7 @@
           "auth"
         ],
         "summary": "— admin：创建账户（同租户）",
-        "description": "来源：src/routes/auth.ts:177\n\n服务端响应状态码（代码扫描）：201, 401, 403, 409\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/auth.ts:187\n\n服务端响应状态码（代码扫描）：201, 401, 403, 409\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -3987,7 +4382,7 @@
           "auth"
         ],
         "summary": "— admin：列出租户内账户",
-        "description": "来源：src/routes/auth.ts:195\n\n服务端响应状态码（代码扫描）：200, 401, 403\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/auth.ts:205\n\n服务端响应状态码（代码扫描）：200, 401, 403\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -4039,7 +4434,7 @@
           "auth"
         ],
         "summary": "============ v5.0 P0：微信 openid 绑定/免密登录 ============",
-        "description": "— 需登录态：wx.login code → openid → 绑定当前账号（一次绑定终身免密）\n\n来源：src/routes/auth.ts:209\n\n服务端响应状态码（代码扫描）：200, 401, 409, 502\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "— 需登录态：wx.login code → openid → 绑定当前账号（一次绑定终身免密）\n\n来源：src/routes/auth.ts:219\n\n服务端响应状态码（代码扫描）：200, 401, 409, 502\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -4115,7 +4510,7 @@
           "auth"
         ],
         "summary": "— 免登录：openid 直接换 JWT（未绑定返回提示）",
-        "description": "来源：src/routes/auth.ts:232\n\n服务端响应状态码（代码扫描）：200, 409, 500, 502\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/auth.ts:242\n\n服务端响应状态码（代码扫描）：200, 409, 500, 502\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -4191,7 +4586,7 @@
           "invite"
         ],
         "summary": "---- POST /api/v1/invites —— admin：生成邀请码（明文仅本次响应返回一次；重发先作废旧码） ----",
-        "description": "来源：src/routes/invite.ts:91\n\n服务端响应状态码（代码扫描）：201\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/invite.ts:93\n\n服务端响应状态码（代码扫描）：201\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -4229,7 +4624,7 @@
           "invite"
         ],
         "summary": "GET /api/v1/invites",
-        "description": "来源：src/routes/invite.ts:170\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/invite.ts:182\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -4257,7 +4652,7 @@
           "invite"
         ],
         "summary": "---- DELETE /api/v1/invites/:id —— admin：作废邀请码（置 revoked_at；已用/已作废幂等视作 404） ----",
-        "description": "来源：src/routes/invite.ts:195\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/invite.ts:207\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -4296,7 +4691,7 @@
           "invite"
         ],
         "summary": "---- POST /api/v1/invites/redeem —— 公开激活：凭码 + 设密码 → 建号 + 签发 JWT ----",
-        "description": "防枚举：码不存在/已过期/已使用/已作废 → 一律 400 INVITE_INVALID + 统一文案；\n建号 + 置 used_at 在同租户单连接事务内完成（并发双花由 UPDATE 行锁 + 守卫条件兜底）。\n\n来源：src/routes/invite.ts:227\n\n服务端响应状态码（代码扫描）：201\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "防枚举：码不存在/已过期/已使用/已作废 → 一律 400 INVITE_INVALID + 统一文案；\n建号 + 置 used_at 在同租户单连接事务内完成（并发双花由 UPDATE 行锁 + 守卫条件兜底）。\n\n来源：src/routes/invite.ts:239\n\n服务端响应状态码（代码扫描）：201\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -6945,55 +7340,8 @@
             "application/json": {
               "schema": {
                 "type": "object",
-                "description": "对齐 activitySchema（src/routes/volunteer.ts zod 定义，X-16 20260913 手工补齐；generate_openapi.mjs 重建会覆盖为骨架）。signup_deadline 与 end_at 同给时必须早于 end_at（否则 422 INVALID_RANGE）。",
-                "required": [
-                  "title"
-                ],
-                "properties": {
-                  "title": {
-                    "type": "string",
-                    "minLength": 1,
-                    "description": "活动标题（必填）"
-                  },
-                  "batch": {
-                    "type": "string",
-                    "description": "活动批次（可选）"
-                  },
-                  "location": {
-                    "type": "string",
-                    "description": "活动地点（可选）"
-                  },
-                  "start_at": {
-                    "type": "string",
-                    "format": "date-time",
-                    "description": "开始时间（可选；end_at 同给时须早于 end_at，否则 422 INVALID_RANGE）"
-                  },
-                  "end_at": {
-                    "type": "string",
-                    "format": "date-time",
-                    "description": "结束时间（可选）"
-                  },
-                  "slots": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "default": 0,
-                    "description": "名额（可选，默认 0=不可报名；zod min(0) 下界）"
-                  },
-                  "user_id": {
-                    "type": "string",
-                    "description": "预留关联账号（083 迁移，可空，TEXT NULL）"
-                  },
-                  "signup_deadline": {
-                    "type": "string",
-                    "format": "date-time",
-                    "description": "报名截止（083 迁移，可空；须早于 end_at 若同给）"
-                  },
-                  "description": {
-                    "type": "string",
-                    "description": "活动描述（083 迁移，可空，TEXT NULL）"
-                  }
-                },
-                "additionalProperties": false
+                "additionalProperties": true,
+                "description": "骨架占位：请求字段以服务端实现为准"
               }
             }
           }
@@ -7827,7 +8175,7 @@
           "material"
         ],
         "summary": "GET /api/v1/materials",
-        "description": "来源：src/routes/material.ts:28\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/material.ts:35\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -7853,7 +8201,7 @@
           "material"
         ],
         "summary": "POST /api/v1/materials",
-        "description": "来源：src/routes/material.ts:52\n\n服务端响应状态码（代码扫描）：201\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/material.ts:59\n\n服务端响应状态码（代码扫描）：201\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -7893,7 +8241,7 @@
           "material"
         ],
         "summary": "PUT /api/v1/materials/{id}",
-        "description": "来源：src/routes/material.ts:72\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/material.ts:82\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -7942,7 +8290,7 @@
           "material"
         ],
         "summary": "DELETE /api/v1/materials/{id}",
-        "description": "来源：src/routes/material.ts:94\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/material.ts:105\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -7981,7 +8329,7 @@
           "material"
         ],
         "summary": "GET /api/v1/inventory",
-        "description": "来源：src/routes/material.ts:124\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/material.ts:136\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -8009,7 +8357,7 @@
           "material"
         ],
         "summary": "POST /api/v1/inventory/in",
-        "description": "来源：src/routes/material.ts:148\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/material.ts:160\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -8049,7 +8397,7 @@
           "material"
         ],
         "summary": "POST /api/v1/inventory/out",
-        "description": "来源：src/routes/material.ts:183\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/material.ts:197\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -8088,8 +8436,8 @@
         "tags": [
           "material"
         ],
-        "summary": "POST /api/v1/inventory/return（V3-D3 退料回冲）",
-        "description": "退料回冲（V3-D3）：body { material_id, qty(正数=退回量), work_order_no, note? }。写 type='out' + 负 qty 流水行（事实源 SUM(type='out') 天然抵消）；库存回补；净消耗守卫（退回量 ≤ 净消耗，400）；SETTLEMENT_LOCKED 422（confirmed 单先作废）；draft 结算单联动全量重投影（pruneStale=true）。权限 material.manage。\n\n来源：src/routes/material.ts\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "summary": "POST /api/v1/inventory/return",
+        "description": "来源：src/routes/material.ts:278\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -8129,7 +8477,7 @@
           "material"
         ],
         "summary": "POST /api/v1/inventory/consume",
-        "description": "E-9 工单耗材消耗（工人/受理台专用）。权限点 consumable.consume（默认 worker+operator）；body { work_order_id, items:[{material_id,qty,note?}] }（≤20 行）；流水强制挂 work_order_id；all-or-nothing 扣减；422 INSUFFICIENT_STOCK（缺货明细）/ 422 ORDER_CLOSED（工单已结束）。\n\n来源：src/routes/material.ts\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/material.ts:434\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -8169,7 +8517,7 @@
           "material"
         ],
         "summary": "GET /api/v1/inventory/logs",
-        "description": "来源：src/routes/material.ts:225\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/material.ts:575\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -8197,7 +8545,7 @@
           "material"
         ],
         "summary": "GET /api/v1/materials/export",
-        "description": "来源：src/routes/material.ts:250\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/material.ts:602\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -8225,7 +8573,7 @@
           "material"
         ],
         "summary": "POST /api/v1/materials/import",
-        "description": "来源：src/routes/material.ts:268\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/material.ts:620\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -8265,7 +8613,7 @@
           "asset"
         ],
         "summary": "GET /api/v1/assets",
-        "description": "来源：src/routes/asset.ts:33\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/asset.ts:36\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -8291,7 +8639,7 @@
           "asset"
         ],
         "summary": "POST /api/v1/assets",
-        "description": "来源：src/routes/asset.ts:68\n\n服务端响应状态码（代码扫描）：201\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/asset.ts:71\n\n服务端响应状态码（代码扫描）：201\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -8331,7 +8679,7 @@
           "asset"
         ],
         "summary": "PUT /api/v1/assets/{id}",
-        "description": "来源：src/routes/asset.ts:104\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/asset.ts:108\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -8382,7 +8730,7 @@
           "asset"
         ],
         "summary": "POST /api/v1/assets/{id}/transfer",
-        "description": "来源：src/routes/asset.ts:143\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/asset.ts:148\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -8433,7 +8781,7 @@
           "asset"
         ],
         "summary": "故障报修 → 转标准维修工单（进入既有派单流）；同时维护 linked_order_ids 供 history 反查",
-        "description": "来源：src/routes/asset.ts:167\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/asset.ts:173\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -8484,7 +8832,7 @@
           "asset"
         ],
         "summary": "关联工单历史（只读聚合）：读 work_orders WHERE id = ANY(linked_order_ids)",
-        "description": "来源：src/routes/asset.ts:211\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/asset.ts:218\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -8523,7 +8871,7 @@
           "asset"
         ],
         "summary": "GET /api/v1/assets/{id}/maintenance",
-        "description": "来源：src/routes/asset.ts:240\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/asset.ts:247\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -8560,7 +8908,7 @@
           "asset"
         ],
         "summary": "POST /api/v1/assets/{id}/maintenance",
-        "description": "来源：src/routes/asset.ts:257\n\n服务端响应状态码（代码扫描）：201\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/asset.ts:264\n\n服务端响应状态码（代码扫描）：201\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -8611,7 +8959,7 @@
           "asset"
         ],
         "summary": "PUT /api/v1/assets/maintenance/{mid}",
-        "description": "来源：src/routes/asset.ts:277\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/asset.ts:285\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -8660,7 +9008,7 @@
           "asset"
         ],
         "summary": "DELETE /api/v1/assets/maintenance/{mid}",
-        "description": "来源：src/routes/asset.ts:307\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/asset.ts:316\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -8699,7 +9047,7 @@
           "asset"
         ],
         "summary": "GET /api/v1/assets/export",
-        "description": "来源：src/routes/asset.ts:323\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/asset.ts:333\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -8727,7 +9075,7 @@
           "asset"
         ],
         "summary": "POST /api/v1/assets/import",
-        "description": "来源：src/routes/asset.ts:341\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/asset.ts:351\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -9059,8 +9407,8 @@
         "tags": [
           "stats"
         ],
-        "summary": "GET /api/v1/stats/by-catalog",
-        "description": "来源：src/routes/stats.ts:17\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "summary": "审查修复（横切⑤⑥ F1）：原四端点零守卫——任意登录角色（含 worker）可拉全租户报表聚合",
+        "description": "（工单分布/过程度量/数据质量/超时预警）。统一挂 dashboard.view，与 workOrder.ts GET /stats\n同款范式（requirePermission 在 withTenantClient 内调用，租户级覆盖生效；admin 恒放行）。\n调用面核实：四端点均为 FE 大屏/统计页消费，FE 菜单本就按 dashboard.view 过滤，挂墙零回归。\n\n来源：src/routes/stats.ts:22\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -9088,7 +9436,7 @@
           "stats"
         ],
         "summary": "B2 过程挖掘度量：派单命中率/转派率/SLA/时长分布/瓶颈（飞轮眼睛数据源）",
-        "description": "来源：src/routes/stats.ts:35\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/stats.ts:41\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -9116,7 +9464,7 @@
           "stats"
         ],
         "summary": "C2 数据质量治理：租户事件/工单数据质量评分与问题分布（诚实：无数据返回 1.0 + note）",
-        "description": "来源：src/routes/stats.ts:46\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/stats.ts:55\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -9144,7 +9492,7 @@
           "stats"
         ],
         "summary": "§12.4 超时预警（管理端红色卡）：sla_due_at 已过期且未进入完成态的工单，",
-        "description": "按 catalog 排行 + 最早超时。诚实口径：无 SLA 的工单不计入（sla_due_at IS NULL 过滤）。\n\n来源：src/routes/stats.ts:58\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "按 catalog 排行 + 最早超时。诚实口径：无 SLA 的工单不计入（sla_due_at IS NULL 过滤）。\n\n来源：src/routes/stats.ts:70\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -9171,8 +9519,8 @@
         "tags": [
           "stats"
         ],
-        "summary": "worker.load 漂移对账（只读诊断）：逐工人比对「系统记的在身数」与「真实在身单数」，",
-        "description": "load 是派单负载均衡的唯一输入，历史存量曾出现与真实在身单背离（只增不减）。本端点只**读**不写，把 drift=load−active_orders 摆出来供人工复核；校正写库不在其职责内。\n\n来源：src/routes/stats.ts:120\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "summary": "worker.load 漂移对账（2026-10-19 · 只读诊断端点）",
+        "description": "load 是派单负载均衡的**唯一输入**，历史上出现过与真实在身单长期背离（存量脏数据）。\n这里只**读**不写：把每位工人的「系统记的在身数 vs 真实在身单数」摆出来，\n让失真可见、可复核。校正（写库）不在本端点职责内，须人工批准另做。\n\n来源：src/routes/stats.ts:112\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -9199,8 +9547,8 @@
         "tags": [
           "optimize"
         ],
-        "summary": "生成优化决策：dev 下仅记录 pending 建议；AUTO_TUNE=true 时应用 dispatch 写回 + 记录 workflow 建议。",
-        "description": "来源：src/routes/optimize.ts:30\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "summary": "生成优化决策：dev 下仅记录 pending 建议；AUTO_TUNE 生效时应用 dispatch 写回 + 记录 workflow 建议。",
+        "description": "V2-F4（派单纵切 P0-10/11）：autoTune 判定统一收敛到 isAutoTuneEffective 单一来源——\n此前本端点读 env（unset 恒 false），租户界面开关对它无效（死开关）；现在 env unset/true\n均尊重租户开关，仅 env=false 全局熔断保持 fail-safe 覆盖（生产行为不变）。\n审查修复（横切⑤⑥ F3）：本文件三个写/读敏感端点原零守卫——任意登录角色（含 worker）\n可触发生成优化建议、读全租户过程挖掘、AUTO_TUNE 开启时触发流程改写。补齐：\nPOST /optimize/generate        → optimize.tune（改 dispatch_rule/写建议，调优语义）\nmining → dashboard.view（只读挖掘+落 pending 建议，不直接改 live）\nworkflow  → optimize.tune（AUTO_TUNE 生效时改写 workflow_def）\n与 workOrder.ts /stats 同款范式：requirePermission 在 withTenantClient 内调用（admin 恒放行）。\n\n来源：src/routes/optimize.ts:41\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -9240,7 +9588,7 @@
           "optimize"
         ],
         "summary": "⑦P2 自适应优化飞轮：消费过程挖掘（飞轮\"眼睛\"）产出精确实例级优化建议并落库 pending。",
-        "description": "与 /optimize/generate（粗粒度 processMetrics）互补，本接口驱动\"数据→模型\"方向（模数共振）。\n安全：自动改写 workflow_def 由\"自动改流程\"租户开关（④）控制——GET/PUT /api/v1/auto-tune 在\n/workflow-admin 界面自主翻转、实时生效、落库持久化；ENV MODEL_AUTO_TUNE 仅作全局覆盖/熔断。\n\n来源：src/routes/optimize.ts:76\n\n服务端响应状态码（代码扫描）：200, 400\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "与 /optimize/generate（粗粒度 processMetrics）互补，本接口驱动\"数据→模型\"方向（模数共振）。\n安全：自动改写 workflow_def 由\"自动改流程\"租户开关（④）控制——GET/PUT /api/v1/auto-tune 在\n/workflow-admin 界面自主翻转、实时生效、落库持久化；ENV MODEL_AUTO_TUNE 仅作全局覆盖/熔断。\n\n来源：src/routes/optimize.ts:88\n\n服务端响应状态码（代码扫描）：200, 400\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -9292,7 +9640,7 @@
           "optimize"
         ],
         "summary": "查看优化决策（pending/applied/dismissed）。",
-        "description": "来源：src/routes/optimize.ts:107\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/optimize.ts:120\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -9320,7 +9668,7 @@
           "optimize"
         ],
         "summary": "查看某业务流当前状态图定义（可配置状态机 T-①）。",
-        "description": "来源：src/routes/optimize.ts:126\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/optimize.ts:139\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -9345,8 +9693,8 @@
         "tags": [
           "optimize"
         ],
-        "summary": "PUT /api/v1/workflow/def（V3-D5：保存为草稿，不再直写 live）",
-        "description": "V3-D5 收敛（2026-09-14）：本端点语义从「生效」改为「存草稿」——body { entity?, def } 经诚实校验后写入 workflow_def_change 草稿（upsert，status='draft'），不触碰 workflow_def live 表；响应 { ok, code, entity_type, draft:true, status:'draft' }（不再返回 version）。后续走 POST /workflow-defs/:entityType/submit → approve 生效。兼容壳：FE/mp 现用主端点 PUT /workflow-defs/:entityType（同语义），本端点为旧调用方保留。\n\n来源：src/routes/optimize.ts:171\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "summary": "PUT /api/v1/workflow/def",
+        "description": "来源：src/routes/optimize.ts:184\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -9386,7 +9734,7 @@
           "optimize"
         ],
         "summary": "A+ Phase5：返回可选状态图模板（默认最小 4 态 / 富 13 态 UOne 颗粒度），供薄配置器一键应用。",
-        "description": "来源：src/routes/optimize.ts:138\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/optimize.ts:151\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -9414,7 +9762,7 @@
           "optimize"
         ],
         "summary": "消费 workflow 类 pending 优化建议，改写 workflow_def（收口自我优化闭环）。",
-        "description": "受 MODEL_AUTO_TUNE 控制（与 dispatch 写回一致）：dev 默认仅记录不应用；AUTO_TUNE=true 才真正改写流程定义。\n\n来源：src/routes/optimize.ts:207\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "受 MODEL_AUTO_TUNE 控制（与 dispatch 写回一致）：dev 默认仅记录不应用；AUTO_TUNE=true 才真正改写流程定义。\n\n来源：src/routes/optimize.ts:224\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -9572,7 +9920,7 @@
           "worker"
         ],
         "summary": "============ 人员列表 ============",
-        "description": "来源：src/routes/worker.ts:31\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/worker.ts:33\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -9598,7 +9946,7 @@
           "worker"
         ],
         "summary": "============ 新建人员 ============",
-        "description": "来源：src/routes/worker.ts:72\n\n服务端响应状态码（代码扫描）：201\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/worker.ts:74\n\n服务端响应状态码（代码扫描）：201\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -9638,7 +9986,7 @@
           "worker"
         ],
         "summary": "============ 人员详情 ============",
-        "description": "来源：src/routes/worker.ts:56\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/worker.ts:58\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -9675,7 +10023,7 @@
           "worker"
         ],
         "summary": "============ 更新人员 ============",
-        "description": "来源：src/routes/worker.ts:93\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/worker.ts:95\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -9724,7 +10072,7 @@
           "worker"
         ],
         "summary": "============ 删除人员（保护：在途工单孤儿引用） ============",
-        "description": "来源：src/routes/worker.ts:126\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/worker.ts:128\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -9763,7 +10111,7 @@
           "worker"
         ],
         "summary": "POST /api/v1/workers/with-account",
-        "description": "来源：src/routes/worker.ts:175\n\n服务端响应状态码（代码扫描）：201\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/worker.ts:183\n\n服务端响应状态码（代码扫描）：201\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -10148,7 +10496,7 @@
           "accounts"
         ],
         "summary": "— G6：权限点全集 + 中文名（role.manage）。",
-        "description": "FE 权限矩阵 tab 以此渲染列头，不再硬编码权限点清单。\n\n来源：src/routes/accounts.ts:73\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "FE 权限矩阵 tab 以此渲染列头，不再硬编码权限点清单。\n\n来源：src/routes/accounts.ts:111\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -10176,7 +10524,7 @@
           "accounts"
         ],
         "summary": "— 列出本租户全部 6 角色的权限。",
-        "description": "语义（修正 2026-09-05）：role_permission 表有该租户该角色的行 → **覆盖替换**（只用覆盖集合，非并集）；\n无覆盖行 → 回退官方推荐默认矩阵（overridden:false，随平台升级自动更新）。\n账号权限一期：守卫统一切 role.manage（G4）；响应补 default_perms（§3.5，矩阵\"默认值参考列\"）。\n\n来源：src/routes/accounts.ts:94\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "语义（修正 2026-09-05）：role_permission 表有该租户该角色的行 → **覆盖替换**（只用覆盖集合，非并集）；\n无覆盖行 → 回退官方推荐默认矩阵（overridden:false，随平台升级自动更新）。\n账号权限一期：守卫统一切 role.manage（G4）；响应补 default_perms（§3.5，矩阵\"默认值参考列\"）。\n\n来源：src/routes/accounts.ts:132\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -10204,7 +10552,7 @@
           "accounts"
         ],
         "summary": "— 覆盖某角色的权限点（先删后插，事务）。",
-        "description": "G5：perms 逐项白名单校验（∈ PERMS），非法点 400 BAD_PERM 列出全部——禁错字静默落库\n（hasPerm 恒 false 难排查教训）。\n\n来源：src/routes/accounts.ts:120\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "G5：perms 逐项白名单校验（∈ PERMS），非法点 400 BAD_PERM 列出全部——禁错字静默落库\n（hasPerm 恒 false 难排查教训）。\n\n来源：src/routes/accounts.ts:161\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -10249,13 +10597,167 @@
         }
       }
     },
+    "/api/v1/accounts/roles": {
+      "get": {
+        "tags": [
+          "accounts"
+        ],
+        "summary": "— 本租户全部**可选**角色（内置剔除已退场 + 自建），带来源与启用态。",
+        "description": "来源：src/routes/accounts.ts:236\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "HTTP 200",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "description": "骨架占位：字段以服务端实现为准"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "accounts"
+        ],
+        "summary": "— 新建自定义岗位。",
+        "description": "来源：src/routes/accounts.ts:278\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "HTTP 200",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "description": "骨架占位：字段以服务端实现为准"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "description": "骨架占位：请求字段以服务端实现为准"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/accounts/roles/{role}": {
+      "patch": {
+        "tags": [
+          "accounts"
+        ],
+        "summary": "— 改自定义岗位的显示名/说明/启用态/排序。",
+        "description": "来源：src/routes/accounts.ts:312\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "HTTP 200",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "description": "骨架占位：字段以服务端实现为准"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "role",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "路径参数（原代码声明形如 :param）"
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "description": "骨架占位：请求字段以服务端实现为准"
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "accounts"
+        ],
+        "summary": "— 删除自定义岗位（有账号在用则 409）。",
+        "description": "来源：src/routes/accounts.ts:344\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "HTTP 200",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "description": "骨架占位：字段以服务端实现为准"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "role",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "路径参数（原代码声明形如 :param）"
+          }
+        ]
+      }
+    },
     "/api/v1/accounts": {
       "get": {
         "tags": [
           "accounts"
         ],
         "summary": "============ 账户列表（不外泄密码哈希） ============",
-        "description": "R38-R3-F1 修复：GET /accounts 此前无角色守卫，operator/reporter 均可枚举本租户\n全部账号（username/role/active）。账号权限一期：统一收口 role.manage（G4）——\n租户可显式授予非 admin 管理面；默认矩阵下仅 admin 可读，无默认行为放宽。\n\n来源：src/routes/accounts.ts:154\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "R38-R3-F1 修复：GET /accounts 此前无角色守卫，operator/reporter 均可枚举本租户\n全部账号（username/role/active）。账号权限一期：统一收口 role.manage（G4）——\n租户可显式授予非 admin 管理面；默认矩阵下仅 admin 可读，无默认行为放宽。\n\n来源：src/routes/accounts.ts:375\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -10281,7 +10783,7 @@
           "accounts"
         ],
         "summary": "============ 新建账户 ============",
-        "description": "来源：src/routes/accounts.ts:188\n\n服务端响应状态码（代码扫描）：201\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/accounts.ts:409\n\n服务端响应状态码（代码扫描）：201\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -10321,7 +10823,7 @@
           "accounts"
         ],
         "summary": "============ 账户详情 ============",
-        "description": "来源：src/routes/accounts.ts:170\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/accounts.ts:391\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -10358,7 +10860,7 @@
           "accounts"
         ],
         "summary": "============ 更新账户（显示名/角色/启用/手机号；重置密码走独立端点） ============",
-        "description": "来源：src/routes/accounts.ts:223\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/accounts.ts:454\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -10407,7 +10909,7 @@
           "accounts"
         ],
         "summary": "============ 删除账户（保护：至少保留一个活跃管理员，避免锁死登录） ============",
-        "description": "来源：src/routes/accounts.ts:325\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/accounts.ts:570\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -10446,7 +10948,7 @@
           "accounts"
         ],
         "summary": "POST /api/v1/accounts/{id}/reset-password",
-        "description": "来源：src/routes/accounts.ts:301\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/accounts.ts:544\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -10587,7 +11089,7 @@
           "workflowDef"
         ],
         "summary": "业务主题模板清单（下拉生成数据源）。",
-        "description": "来源：src/routes/workflowDef.ts:33\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/workflowDef.ts:57\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -10615,7 +11117,7 @@
           "workflowDef"
         ],
         "summary": "============ 流程审核（一期）：在审清单 ============",
-        "description": "本租户全部 submitted 变更（workflow.approve）。必须注册在 GET /:entityType 之前，\n否则 /pending 会被 :entityType 参数路由吞掉。\n\n来源：src/routes/workflowDef.ts:44\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "本租户全部 submitted 变更（workflow.approve）。必须注册在 GET /:entityType 之前，\n否则 /pending 会被 :entityType 参数路由吞掉。\n\n来源：src/routes/workflowDef.ts:68\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -10643,7 +11145,7 @@
           "workflowDef"
         ],
         "summary": "列出本租户所有 workflow_def（轻量：不含完整 def，供左侧列表）。",
-        "description": "来源：src/routes/workflowDef.ts:68\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/workflowDef.ts:93\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -10671,7 +11173,7 @@
           "workflowDef"
         ],
         "summary": "取单个 workflow_def 的完整 def。",
-        "description": "来源：src/routes/workflowDef.ts:99\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/workflowDef.ts:124\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -10708,7 +11210,7 @@
           "workflowDef"
         ],
         "summary": "upsert 单个 workflow_def（兼容原路径）：现改写为保存/覆盖草稿，不直接触 live。",
-        "description": "来源：src/routes/workflowDef.ts:151\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/workflowDef.ts:179\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -10759,7 +11261,7 @@
           "workflowDef"
         ],
         "summary": "显式草稿端点（PUT /:entityType/draft）：与上面兼容路径同一语义，供 mp/web 新接线使用。",
-        "description": "来源：src/routes/workflowDef.ts:172\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/workflowDef.ts:202\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -10808,7 +11310,7 @@
           "workflowDef"
         ],
         "summary": "读在途草稿（workflow.edit 或 workflow.approve）：含 status/note/reject_comment/submitted_by；无则 404。",
-        "description": "来源：src/routes/workflowDef.ts:193\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/workflowDef.ts:225\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -10841,64 +11343,13 @@
         ]
       }
     },
-    "/api/v1/workflow-defs/{entityType}/preflight": {
-      "post": {
-        "tags": [
-          "workflowDef"
-        ],
-        "summary": "删态影响面预演（V3-D4，UI 糖非闸门）：body 带新 def，返回 { removed, inflight_total, by_state }。",
-        "description": "V3-D4：FE 在保存前展示删态影响面，与 saveWorkflowDef 硬闸（409 INFLIGHT_STATE_LOSS）构成「提示 + 强制」两层。权限 workflow.edit 或 workflow.approve。\n\n来源：src/routes/workflowDef.ts\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
-        "security": [
-          {
-            "bearerAuth": []
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "HTTP 200",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "description": "骨架占位：字段以服务端实现为准"
-                }
-              }
-            }
-          }
-        },
-        "parameters": [
-          {
-            "name": "entityType",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            },
-            "description": "路径参数（原代码声明形如 :param）"
-          }
-        ],
-        "requestBody": {
-          "required": false,
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object",
-                "additionalProperties": true,
-                "description": "骨架占位：请求字段以服务端实现为准"
-              }
-            }
-          }
-        }
-      }
-    },
     "/api/v1/workflow-defs/{entityType}/submit": {
       "post": {
         "tags": [
           "workflowDef"
         ],
         "summary": "提交审核（draft→submitted，workflow.edit）：base_version 锚定提交时刻的 live 版本。",
-        "description": "来源：src/routes/workflowDef.ts:211\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/workflowDef.ts:243\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -10949,7 +11400,7 @@
           "workflowDef"
         ],
         "summary": "审核通过（workflow.approve）：三重校验后复用 saveWorkflowDef 生效（版本自增 + history 快照 reason='approve'），",
-        "description": "然后删除变更行（审计由 history 承担）。\n① submitted_by ≠ 当前账号（403 SELF_APPROVAL，按账号非按角色，admin 也不例外）\n② base_version = 当前 live 版本（409 DRAFT_STALE：live 已被推进，需重存重提）\n③ 行必须存在且 status=submitted（404 NO_DRAFT / 409 CHANGE_NOT_SUBMITTED）\n\n来源：src/routes/workflowDef.ts:245\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "然后删除变更行（审计由 history 承担）。\n① submitted_by ≠ 当前账号（403 SELF_APPROVAL，按账号非按角色，admin 也不例外）；\nF16 豁免（初一裁决 2026-09-14）：单 admin 租户（active admin 计数=1）允许自批——\n审批人池只有自己，硬禁=流程永久死锁；豁免强制同事务写 platform_audit（self_approved=true，\n留痕失败即整个审批回滚）；多 admin 租户仍硬禁不变\n② base_version = 当前 live 版本（409 DRAFT_STALE：live 已被推进，需重存重提）\n③ 行必须存在且 status=submitted（404 NO_DRAFT / 409 CHANGE_NOT_SUBMITTED）\nV3-D4 逃生口：body.confirm_inflight_loss:true → saveWorkflowDef(allowInflightLoss)——\n显式二次确认删态在途损失（把关人知情裁量），留痕走 history operator/reason。\n\n来源：src/routes/workflowDef.ts:283\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -11000,7 +11451,7 @@
           "workflowDef"
         ],
         "summary": "审核驳回（workflow.approve，comment 必填）：status 回 draft + reject_comment；live 不动、不产生新版本。",
-        "description": "来源：src/routes/workflowDef.ts:284\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/workflowDef.ts:354\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -11051,7 +11502,7 @@
           "workflowDef"
         ],
         "summary": "草稿 vs live 并排差异（workflow.approve 或 workflow.edit）：复用版本 diff 的 summary 结构。",
-        "description": "来源：src/routes/workflowDef.ts:309\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/workflowDef.ts:380\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -11084,13 +11535,64 @@
         ]
       }
     },
+    "/api/v1/workflow-defs/{entityType}/preflight": {
+      "post": {
+        "tags": [
+          "workflowDef"
+        ],
+        "summary": "V3-D4 预演端点（UI 糖，非闸门）：POST /:entityType/preflight——body 带新 def，",
+        "description": "返回 { removed, inflight_total, by_state }：FE 在保存前展示删态影响面，与硬闸构成\"提示 + 强制\"两层。\n\n来源：src/routes/workflowDef.ts:416\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "HTTP 200",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "description": "骨架占位：字段以服务端实现为准"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "entityType",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "路径参数（原代码声明形如 :param）"
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "description": "骨架占位：请求字段以服务端实现为准"
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/workflow-defs/generate-from-theme": {
       "post": {
         "tags": [
           "workflowDef"
         ],
         "summary": "从主题模板生成（下拉生成）：改产草稿——模板只是起点，微调后仍需过审。",
-        "description": "来源：src/routes/workflowDef.ts:344\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/workflowDef.ts:444\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -11130,7 +11632,7 @@
           "workflowDef"
         ],
         "summary": "============ 批次三 卡4：老租户自愿升级——给 work_order def 追加验收边 ============",
-        "description": "acceptance（门禁：workflow.edit 权限点）\n审核一期裁决：added>0（结构性变更）改产草稿待审；added=0 幂等无操作原样放行（no-op 不产生内容）。\n\n来源：src/routes/workflowDef.ts:368\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "acceptance（门禁：workflow.edit 权限点）\n审核一期裁决：added>0（结构性变更）改产草稿待审；added=0 幂等无操作原样放行（no-op 不产生内容）。\n\n来源：src/routes/workflowDef.ts:469\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -11181,7 +11683,7 @@
           "workflowDef"
         ],
         "summary": "版本历史列表（含快照）。",
-        "description": "来源：src/routes/workflowDef.ts:405\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/workflowDef.ts:507\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -11220,7 +11722,7 @@
           "workflowDef"
         ],
         "summary": "查看单个历史版本快照。",
-        "description": "来源：src/routes/workflowDef.ts:422\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/workflowDef.ts:524\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -11268,7 +11770,7 @@
           "workflowDef"
         ],
         "summary": "两版本差异（返回两版完整内容 + 顶层结构摘要，前端做并排对比）。",
-        "description": "来源：src/routes/workflowDef.ts:439\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/workflowDef.ts:541\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -11325,7 +11827,7 @@
           "workflowDef"
         ],
         "summary": "一键回滚：把指定历史版本存为新版本（版本自增，reason=rollback）。",
-        "description": "审核一期裁决：豁免审批（目标版本曾生效 + 急救场景，过审会延误止血），但把关责任不消失——\n权限点由 workflow.edit 收紧为 workflow.approve（把关人亲自即时裁量）。\n\n来源：src/routes/workflowDef.ts:469\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "审核一期裁决：豁免审批（目标版本曾生效 + 急救场景，过审会延误止血），但把关责任不消失——\n权限点由 workflow.edit 收紧为 workflow.approve（把关人亲自即时裁量）。\nV3-D4 逃生口：body.confirm_inflight_loss:true → allowInflightLoss（与 approve 同款显式二次确认）。\n\n来源：src/routes/workflowDef.ts:572\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -11385,7 +11887,7 @@
           "workflowDef"
         ],
         "summary": "导出当前 def（带版本与导出时间，供备份/迁移）。",
-        "description": "来源：src/routes/workflowDef.ts:502\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/workflowDef.ts:608\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -11436,7 +11938,7 @@
           "workflowDef"
         ],
         "summary": "导入 def：改产草稿——外部文件风险最高，最需要人把关（来源标记 G5）。",
-        "description": "来源：src/routes/workflowDef.ts:519\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/workflowDef.ts:625\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -11479,6 +11981,151 @@
             }
           }
         }
+      }
+    },
+    "/api/v1/workflow-defs/{entityType}/auto-rules": {
+      "get": {
+        "tags": [
+          "workflowDef"
+        ],
+        "summary": "— 列出本租户全部自动审核规则（含未启用）。",
+        "description": "来源：src/routes/workflowDef.ts:687\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "HTTP 200",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "description": "骨架占位：字段以服务端实现为准"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "entityType",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "路径参数（原代码声明形如 :param）"
+          }
+        ]
+      },
+      "put": {
+        "tags": [
+          "workflowDef"
+        ],
+        "summary": "— 新建或更新一条自动审核规则。",
+        "description": "来源：src/routes/workflowDef.ts:704\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "HTTP 200",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "description": "骨架占位：字段以服务端实现为准"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "entityType",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "路径参数（原代码声明形如 :param）"
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "description": "骨架占位：请求字段以服务端实现为准"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/workflow-defs/{entityType}/auto-rules/{fromState}/{event}": {
+      "delete": {
+        "tags": [
+          "workflowDef"
+        ],
+        "summary": "— 删除一条规则。",
+        "description": "来源：src/routes/workflowDef.ts:744\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "HTTP 200",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "description": "骨架占位：字段以服务端实现为准"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "entityType",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "路径参数（原代码声明形如 :param）"
+          },
+          {
+            "name": "fromState",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "路径参数（原代码声明形如 :param）"
+          },
+          {
+            "name": "event",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "路径参数（原代码声明形如 :param）"
+          }
+        ]
       }
     },
     "/api/v1/basic-data/{type}": {
@@ -11799,7 +12446,7 @@
           "adminAiChat"
         ],
         "summary": "POST /api/v1/admin/ai-chat",
-        "description": "来源：src/routes/adminAiChat.ts:29\n\n服务端响应状态码（代码扫描）：200, 503\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/adminAiChat.ts:31\n\n服务端响应状态码（代码扫描）：200, 503\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -12535,7 +13182,7 @@
           "aiPreview"
         ],
         "summary": "POST /ai/preview",
-        "description": "来源：src/routes/aiPreview.ts:102\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/aiPreview.ts:105\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -12575,7 +13222,7 @@
           "aiPreview"
         ],
         "summary": "处置建议检索：/ai/similar { description?, category? } → top3 相似案例",
-        "description": "K2（有 embedding key）：语义检索租户自身历史单（隐私/隔离增益）→ 关键词兜底（无 key 时路径不变）\n\n来源：src/routes/aiPreview.ts:237\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "K2（有 embedding key）：语义检索租户自身历史单（隐私/隔离增益）→ 关键词兜底（无 key 时路径不变）\n\n来源：src/routes/aiPreview.ts:289\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -12615,7 +13262,7 @@
           "aiPreview"
         ],
         "summary": "POST /api/v1/ai/feedback",
-        "description": "来源：src/routes/aiPreview.ts:339\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/aiPreview.ts:392\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -12655,7 +13302,7 @@
           "aiPreview"
         ],
         "summary": "智能体健康（C1）：GET /ai/agent-stats → 反馈闭环统计 + 待复核 + LLM 状态（全部真实数据）",
-        "description": "来源：src/routes/aiPreview.ts:358\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/aiPreview.ts:411\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -12683,7 +13330,7 @@
           "aiPreview"
         ],
         "summary": "POST /api/v1/ai/gen-config",
-        "description": "来源：src/routes/aiPreview.ts:397\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/aiPreview.ts:450\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -12723,7 +13370,7 @@
           "aiPreview"
         ],
         "summary": "I4 灰度总开关管理：GET /ai/features（读当前开关）→ 仅 admin/operator",
-        "description": "PUT /ai/features { enabled }（翻转开关，落库 tenant_settings.settings.ai_features_enabled）\n\n来源：src/routes/aiPreview.ts:418\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "PUT /ai/features { enabled }（翻转开关，落库 tenant_settings.settings.ai_features_enabled）\n\n来源：src/routes/aiPreview.ts:471\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -12749,7 +13396,7 @@
           "aiPreview"
         ],
         "summary": "PUT /api/v1/ai/features",
-        "description": "来源：src/routes/aiPreview.ts:429\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/aiPreview.ts:482\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -12905,7 +13552,7 @@
           "settlement"
         ],
         "summary": "— 列表（含明细数/总额）",
-        "description": "来源：src/routes/settlement.ts:36\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/settlement.ts:45\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -12931,7 +13578,7 @@
           "settlement"
         ],
         "summary": "— 建草稿（work_order_ids；冲突 409 并列明冲突单号）",
-        "description": "来源：src/routes/settlement.ts:79\n\n服务端响应状态码（代码扫描）：201, 409\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/settlement.ts:88\n\n服务端响应状态码（代码扫描）：201, 409\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -12983,7 +13630,7 @@
           "settlement"
         ],
         "summary": "— 详情（含 items，items 关联 work_orders 带出 order_no/category）",
-        "description": "来源：src/routes/settlement.ts:63\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/settlement.ts:72\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -13020,7 +13667,7 @@
           "settlement"
         ],
         "summary": "— 删草稿（仅 draft；CASCADE 释放明细，工单回归\"未结算\"）",
-        "description": "来源：src/routes/settlement.ts:125\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/settlement.ts:134\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -13059,7 +13706,7 @@
           "settlement"
         ],
         "summary": "— 改明细（仅 draft；重算金额与表头汇总）",
-        "description": "来源：src/routes/settlement.ts:106\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/settlement.ts:115\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -13119,7 +13766,7 @@
           "settlement"
         ],
         "summary": "— 确认锁定（draft→confirmed；0 明细/已确认 → 409）",
-        "description": "来源：src/routes/settlement.ts:140\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/settlement.ts:149\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -13169,8 +13816,8 @@
         "tags": [
           "settlement"
         ],
-        "summary": "— 作废（confirmed→voided；V3-D2）",
-        "description": "作废已确认结算单（V3-D2）：明细 DELETE、total/confirmed_* 冻结、快照存 voided_snapshot；draft → 409（请走 DELETE）、voided → 409、空串 void_reason → 400。作废后同工单可重建结算单（键位随明细删除释放）。作废后的结算单不可导出（409 SETTLEMENT_VOIDED）。\n\n来源：src/routes/settlement.ts\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "summary": "— 作废（V3-D2）：仅 confirmed 可作废；明细快照后删除，表头冻结留痕。",
+        "description": "来源：src/routes/settlement.ts:164\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -13221,7 +13868,7 @@
           "settlement"
         ],
         "summary": "— CSV 导出（BOM+UTF-8；confirmed 与 draft 均可导）",
-        "description": "来源：src/routes/settlement.ts:155\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "description": "来源：src/routes/settlement.ts:186\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
         "security": [
           {
             "bearerAuth": []
@@ -13418,293 +14065,6 @@
             }
           }
         }
-      }
-    },
-    "/api/v1/accounts/roles": {
-      "get": {
-        "tags": [
-          "accounts"
-        ],
-        "summary": "— 列出本租户全部可用角色（内置 6 + 自建岗位）。",
-        "description": "地基第二步补漏（2026-10-16）：090 建了 role_def 表但此前无写入入口，角色实际被锁死为内置 6 个。\n本组端点补上生成/停用/删除，与 PUT /accounts/roles/{role}/permissions（配权限）合成闭环。\n\n响应每项含 code / name / description / enabled / builtin / sort；builtin:true 为内置角色（不可改不可删）。\n守卫：role.manage。\n\n来源：src/routes/accounts.ts（GET /accounts/roles）\n\n服务端响应状态码（代码扫描）：200\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
-        "security": [
-          {
-            "bearerAuth": []
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "HTTP 200",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "description": "骨架占位：字段以服务端实现为准"
-                }
-              }
-            }
-          }
-        }
-      },
-      "post": {
-        "tags": [
-          "accounts"
-        ],
-        "summary": "— 新建自定义岗位（角色可配置的\"生成\"入口）。",
-        "description": "校验：code 形状 ^[a-z][a-z0-9_]{1,31}$（与 090 role_def_code_format CHECK 同口径）；\n内置 6 角色禁止同名（role_def_code_reserved）；租户内 code 唯一（重复 → 409）。\n新建角色默认权限为 []（最小权限，须由租户显式授权，不继承任何内置岗）。\n守卫：role.manage。\n\n来源：src/routes/accounts.ts（POST /accounts/roles）\n\n服务端响应状态码（代码扫描）：200\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
-        "security": [
-          {
-            "bearerAuth": []
-          }
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object",
-                "additionalProperties": true,
-                "description": "骨架占位：字段以服务端实现为准"
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "HTTP 200",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "description": "骨架占位：字段以服务端实现为准"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/accounts/roles/{role}": {
-      "patch": {
-        "tags": [
-          "accounts"
-        ],
-        "summary": "— 修改自定义岗位（显示名/说明/启用态/排序）。",
-        "description": "内置角色不可修改（400）。\n停用语义（产品未定，取安全默认）：enabled=false → isRoleUsable 返回 false，\n不能再分配给新账号或改号时选它；已持有该角色的存量账号保持原角色不变（不自动改派）。\n守卫：role.manage。\n\n来源：src/routes/accounts.ts（PATCH /accounts/roles/:role）\n\n服务端响应状态码（代码扫描）：200\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
-        "security": [
-          {
-            "bearerAuth": []
-          }
-        ],
-        "parameters": [
-          {
-            "name": "role",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            },
-            "description": "路径参数（原代码声明形如 :param）"
-          }
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object",
-                "additionalProperties": true,
-                "description": "骨架占位：字段以服务端实现为准"
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "HTTP 200",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "description": "骨架占位：字段以服务端实现为准"
-                }
-              }
-            }
-          }
-        }
-      },
-      "delete": {
-        "tags": [
-          "accounts"
-        ],
-        "summary": "— 删除自定义岗位。",
-        "description": "前置校验：仍有账号使用该角色 → 409 拒绝（防留下无角色定义的孤儿账号）。\n删除时级联清理该角色的 role_permission 覆盖行（防留下取不回的僵尸权限行）。\n内置角色不可删除（400）。\n守卫：role.manage。\n\n来源：src/routes/accounts.ts（DELETE /accounts/roles/:role）\n\n服务端响应状态码（代码扫描）：200\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
-        "security": [
-          {
-            "bearerAuth": []
-          }
-        ],
-        "parameters": [
-          {
-            "name": "role",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            },
-            "description": "路径参数（原代码声明形如 :param）"
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "HTTP 200",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "description": "骨架占位：字段以服务端实现为准"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/workflow-defs/{entityType}/auto-rules": {
-      "get": {
-        "tags": [
-          "workflowDef"
-        ],
-        "summary": "自动审核规则列表（含未启用）。",
-        "description": "来源：src/routes/workflowDef.ts:677\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
-        "security": [
-          {
-            "bearerAuth": []
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "HTTP 200",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "description": "骨架占位：字段以服务端实现为准"
-                }
-              }
-            }
-          }
-        },
-        "parameters": [
-          {
-            "name": "entityType",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            },
-            "description": "路径参数（原代码声明形如 :param）"
-          }
-        ]
-      },
-      "put": {
-        "tags": [
-          "workflowDef"
-        ],
-        "summary": "新建或更新一条自动审核规则。enabled 为必填且不默认 true；启用需 workflow.approve；目标态命中终态（closed/cancelled/evaluated）→ 422 拒绝保存。",
-        "description": "来源：src/routes/workflowDef.ts:694\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
-        "security": [
-          {
-            "bearerAuth": []
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "HTTP 200",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "description": "骨架占位：字段以服务端实现为准"
-                }
-              }
-            }
-          }
-        },
-        "parameters": [
-          {
-            "name": "entityType",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            },
-            "description": "路径参数（原代码声明形如 :param）"
-          }
-        ]
-      }
-    },
-    "/api/v1/workflow-defs/{entityType}/auto-rules/{fromState}/{event}": {
-      "delete": {
-        "tags": [
-          "workflowDef"
-        ],
-        "summary": "删除一条自动审核规则。",
-        "description": "来源：src/routes/workflowDef.ts:733\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
-        "security": [
-          {
-            "bearerAuth": []
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "HTTP 200",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "description": "骨架占位：字段以服务端实现为准"
-                }
-              }
-            }
-          }
-        },
-        "parameters": [
-          {
-            "name": "entityType",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            },
-            "description": "路径参数（原代码声明形如 :param）"
-          },
-          {
-            "name": "fromState",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            },
-            "description": "路径参数（原代码声明形如 :param）"
-          },
-          {
-            "name": "event",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            },
-            "description": "路径参数（原代码声明形如 :param）"
-          }
-        ]
       }
     }
   },

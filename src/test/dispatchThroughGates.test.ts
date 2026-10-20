@@ -206,6 +206,7 @@ CREATE TABLE account_user (
 const db = () => box.db as unknown as { query: (s: string, p?: unknown[]) => Promise<{ rows: any[] }> };
 
 beforeAll(async () => {
+  process.env.WORKFLOW_CONFIG_OWNER = 'tenant'; // 097：本文件验证的是「归属放开」后的流程语义（审批链/乐观锁/删态硬闸）
   box.db = new PGlite();
   await (box.db as unknown as { exec: (s: string) => Promise<void> }).exec(DDL);
 
@@ -232,6 +233,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  delete process.env.WORKFLOW_CONFIG_OWNER; // 097：环境隔离，避免污染同进程其它测试文件
   await new Promise<void>((r) => server.close(() => r()));
   await (box.db as unknown as { close: () => Promise<void> }).close();
 });

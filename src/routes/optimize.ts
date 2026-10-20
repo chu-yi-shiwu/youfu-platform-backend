@@ -24,6 +24,7 @@ import { upsertWorkflowDefDraft } from '../engine/workflowDefChange.js';
 import { isAutoTuneEffective } from '../repo/tenantSettings.js';
 import { DEFAULT_WORK_ORDER_DEF, RICH_WORK_ORDER_DEF, type WorkflowDef } from '../engine/stateMachine.js';
 import { requirePermission } from '../middleware/role.js';
+import { assertWorkflowConfigEditableByTenant } from '../middleware/workflowConfigGuard.js';
 
 const router = Router();
 
@@ -203,6 +204,9 @@ router.put('/workflow/def', async (req, res, next) => {
     // 不再能单人绕过提交→审核改 live（审批状态机的自审禁令/版本锚/权限分离重新闭合）。
     // 端点保留不删（兼容旧调用方），语义从「生效」变「存草稿」（FE/mp 现用主端点，零感知）。
     await withTenantClient(tenantId, async (client) => {
+      // 097 归属闸门：本端点与 workflowDef 写端点同为「改流程」，必须同一道闸——
+      //   否则客户 admin 从 /optimize 这条旁路就能改流程，收口形同虚设。
+      await assertWorkflowConfigEditableByTenant(client);
       await requirePermission(res.locals.auth, client, 'workflow.edit');
       await upsertWorkflowDefDraft(client, tenantId, entityType, cleanDef, {
         operator: res.locals.auth.username,
