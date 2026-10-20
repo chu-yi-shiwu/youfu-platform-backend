@@ -13,7 +13,7 @@ import { z } from 'zod';
 import pool, { withTenantClient } from '../db/pool.js';
 import { AppError } from '../middleware/error.js';
 import { requirePermission, requireAnyPermission } from '../middleware/role.js';
-import { assertWorkflowConfigEditableByTenant } from '../middleware/workflowConfigGuard.js';
+import { assertWorkflowConfigEditableByTenant, readWorkflowConfigOwner } from '../middleware/workflowConfigGuard.js';
 import { getWorkflowDef, saveWorkflowDef, ensureWorkflowDef, getWorkflowDefVersion, listWorkflowDefHistory, getWorkflowDefHistoryVersion, countInflightByStates } from '../engine/workflowDef.js';
 import {
   upsertWorkflowDefDraft,
@@ -125,8 +125,14 @@ router.get('/:entityType', async (req, res, next) => {
   try {
     const tenantId = res.locals.auth.tenantId;
     const { entityType } = req.params;
-    const def = await withTenantClient(tenantId, (client) => getWorkflowDef(client, tenantId, entityType));
-    return res.json({ ok: true, code: 0, entityType, def });
+    const def = await withTenantClient(tenantId, async (client) => ({
+      def: await getWorkflowDef(client, tenantId, entityType),
+      // 097：把「流程配置权归谁」一并带回，前端据此决定写控件禁用与否——
+      // 读端点不设闸（客户必须看得见自己的流程），但有权知道能不能改。
+      // 好处：平台运维拨开关后前端自动恢复可编辑，**不必再发一次前端版本**。
+      owner: await readWorkflowConfigOwner(client),
+    }));
+    return res.json({ ok: true, code: 0, entityType, def: def.def, configOwner: def.owner });
   } catch (e) {
     next(e);
   }

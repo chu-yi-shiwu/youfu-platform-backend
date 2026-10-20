@@ -133,21 +133,22 @@
         </select>
       </div>
       <button class="ghost" onclick="fcLoad()">载入配置</button>
-      <button onclick="fcSave()">保存草稿</button>
-      <button class="ghost" onclick="fcSubmit()">提交审核</button>
+      <button id="fcBtnSave" onclick="fcSave()">保存草稿</button>
+      <button id="fcBtnSubmit" class="ghost" onclick="fcSubmit()">提交审核</button>
     </div>
     <div class="note" id="fcStatus" style="color:var(--accent)"></div>
+    <div class="note" id="fcOwnerTip" style="display:none"></div>
 
     <h3 style="margin:14px 0 6px;font-size:14px">初始状态</h3>
     <input id="fcInitial" placeholder="initial" style="padding:7px 10px;border:1px solid var(--line);border-radius:8px;font-size:13px;width:220px" />
 
     <h3 style="margin:14px 0 6px;font-size:14px">自定义状态（每行一个）</h3>
     <div id="fcStates"></div>
-    <button class="ghost" onclick="fcAddState()">+ 添加状态</button>
+    <button class="ghost" data-fc-write onclick="fcAddState()">+ 添加状态</button>
 
     <h3 style="margin:14px 0 6px;font-size:14px">自定义字段</h3>
     <div id="fcFields"></div>
-    <button class="ghost" onclick="fcAddField()">+ 添加字段</button>
+    <button class="ghost" data-fc-write onclick="fcAddField()">+ 添加字段</button>
 
     <div class="note" id="fcErr" style="color:var(--bad)"></div>
     <pre id="fcPreview" class="data" style="margin-top:12px">载入配置后显示…</pre>
@@ -259,6 +260,28 @@ async function loadList() {
 // ===== 字段级配置编辑器（P0） =====
 let fcDef = { initial: '', states: [], transitions: [], config: { fields: [] } };
 
+let fcReadOnly = false;
+
+/** 统一写错误条（页面原本各函数各自 getElementById，这里抽一个给只读分支复用）。 */
+function fcErrText(msg) { document.getElementById('fcErr').textContent = msg; }
+
+/** 097：把「保存/提交/添加/删除」一次性切成只读，并给出人话说明。 */
+function fcSetReadOnly(ro) {
+  fcReadOnly = !!ro;
+  const tip = document.getElementById('fcOwnerTip');
+  if (tip) {
+    tip.style.display = ro ? 'block' : 'none';
+    tip.textContent = ro
+      ? '业务流程由平台运维统一维护：当前不开放自助修改，页面为只读。如需调整请联系平台运维代为配置。'
+      : '';
+  }
+  ['fcBtnSave', 'fcBtnSubmit'].forEach((id) => {
+    const b = document.getElementById(id);
+    if (b) b.disabled = ro;
+  });
+  document.querySelectorAll('[data-fc-write]').forEach((b) => { b.disabled = ro; });
+}
+
 async function fcLoad() {
   const entity = document.getElementById('fcEntity').value;
   const err = document.getElementById('fcErr'); err.textContent = '';
@@ -267,6 +290,8 @@ async function fcLoad() {
     const j = await r.json();
     if (j.ok && j.def) fcDef = j.def;
     else fcDef = { initial: '', states: [], transitions: [], config: { fields: [] } };
+    // 097：配置权归平台时页面转只读——后端会 403，与其让人填完才报错，不如一开始就说明。
+    fcSetReadOnly(j.configOwner === 'platform');
     document.getElementById('fcInitial').value = fcDef.initial || '';
     fcRenderStates();
     fcRenderFields();
@@ -336,6 +361,7 @@ function fcAddField() {
 function fcSync() { document.getElementById('fcPreview').textContent = JSON.stringify(fcDef, null, 2); }
 
 async function fcSave() {
+  if (fcReadOnly) { fcErrText('业务流程由平台运维统一维护，如需调整请联系平台运维'); return; }
   const entity = document.getElementById('fcEntity').value;
   const err = document.getElementById('fcErr'); err.textContent = '';
   fcDef.initial = document.getElementById('fcInitial').value.trim();
@@ -355,6 +381,7 @@ async function fcSave() {
 }
 
 async function fcSubmit() {
+  if (fcReadOnly) { fcErrText('业务流程由平台运维统一维护，如需调整请联系平台运维'); return; }
   const entity = document.getElementById('fcEntity').value;
   const err = document.getElementById('fcErr'); err.textContent = '';
   if (!confirm('确认提交审核？提交后由具备 workflow.approve 权限的审批人通过才生效。')) return;

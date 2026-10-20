@@ -28,6 +28,21 @@ export const WORKFLOW_CONFIG_PLATFORM_ONLY = 'WORKFLOW_CONFIG_PLATFORM_ONLY';
  * 租户侧改流程前的归属闸门。无返回值；不满足时抛 403。
  * @param client 可选：调用方已有连接时复用（测试注入 / 同事务读取）。
  */
+/**
+ * 租户侧读取「流程配置权归谁」的唯一出口。
+ *
+ * 为什么不直接 import repo/platformConfig：那会让**每一处**想显示归属的租户路由
+ * 都直接依赖平台级表，平台开关的来源（env > DB > 默认、DB 故障回退）就会在租户侧
+ * 被复制一遍，将来改口径要改 N 处，且任何一处复制错都会把配置权放给客户。
+ * 边界护栏（platformConfigBoundary.test.ts）正是按「只有守卫与平台路由能碰平台表」
+ * 这条不变量来卡的；本函数让租户侧只认识守卫，不认识平台表。
+ */
+export async function readWorkflowConfigOwner(client?: {
+  query: (sql: string, params?: unknown[]) => Promise<{ rows: Array<{ value: string }> }>;
+}): Promise<'platform' | 'tenant'> {
+  return getWorkflowConfigOwner(client);
+}
+
 export async function assertWorkflowConfigEditableByTenant(client?: {
   query: (sql: string, params?: unknown[]) => Promise<{ rows: Array<{ value: string }> }>;
 }): Promise<void> {

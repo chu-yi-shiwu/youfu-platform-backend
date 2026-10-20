@@ -301,3 +301,31 @@ describe('097 ⑦ optimize 旁路：自动改流程同样受归属闸约束', ()
     expect(r.body.applied).toBe(false);
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 读端点带出 configOwner：让前端「进页面就知道能不能改」，而不是填完点保存才吃 403。
+// 关键在**联动**——字段必须随开关真实变化，写死 'platform' 会让运维拨开关后前端永远锁死。
+// ─────────────────────────────────────────────────────────────────────────────
+describe('097 读端点带出 configOwner（前端禁用态的数据源）', () => {
+  it('归属=platform → GET 流程定义带 configOwner=platform', async () => {
+    box.owner = 'platform';
+    const r = await call('GET', '/workflow-defs/work_order');
+    expect(r.status, JSON.stringify(r.body)).toBe(200);
+    expect(r.body.configOwner).toBe('platform');
+  });
+
+  it('归属拨成 tenant → 同一 GET 立刻变成 tenant（联动，不是常量）', async () => {
+    box.owner = 'tenant';
+    const r = await call('GET', '/workflow-defs/work_order');
+    expect(r.status, JSON.stringify(r.body)).toBe(200);
+    expect(r.body.configOwner).toBe('tenant');
+  });
+
+  it('带出归属的同时，def 照旧返回（加字段不得挤掉原有载荷）', async () => {
+    box.owner = 'platform';
+    const r = await call('GET', '/workflow-defs/work_order');
+    expect(r.status).toBe(200);
+    expect(r.body).toHaveProperty('def');
+    expect(r.body.entityType).toBe('work_order');
+  });
+});
