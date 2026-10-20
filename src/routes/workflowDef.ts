@@ -252,10 +252,16 @@ router.post('/:entityType/submit', async (req, res, next) => {
     const tenantId = auth.tenantId;
     const { entityType } = req.params;
     assertEntityType(entityType);
+    // 099 起可有多份在途草稿：change_id 不传时仅在草稿恰好一份时提交（兼容既有前端），
+    // 多份时由 submitWorkflowDefChange 抛 409 CHANGE_ID_REQUIRED 要求显式选择。
+    const b = z.object({ change_id: z.number().int().positive().optional() }).parse(req.body ?? {});
     const submitted = await withTenantClient(tenantId, async (client) => {
       await assertWorkflowConfigEditableByTenant(client); // 097 归属闸门：platform 时租户侧（含 admin）一律 403
       await requirePermission(auth, client, 'workflow.edit');
-      return submitWorkflowDefChange(client, tenantId, entityType, { submittedBy: auth.username ?? '' });
+      return submitWorkflowDefChange(client, tenantId, entityType, {
+        submittedBy: auth.username ?? '',
+        changeId: b.change_id,
+      });
     });
     if (!submitted) {
       const existing = await withTenantClient(tenantId, (client) =>
@@ -348,7 +354,7 @@ router.post('/:entityType/approve', async (req, res, next) => {
         reason: 'approve',
         allowInflightLoss: b.confirm_inflight_loss === true,
       });
-      await deleteWorkflowDefChange(client, tenantId, entityType);
+      await deleteWorkflowDefChange(client, tenantId, entityType, change.id);
     });
     return res.json({ ok: true, code: 0, entityType, approved: true, selfApproved, version: 'incremented' });
   } catch (e) {

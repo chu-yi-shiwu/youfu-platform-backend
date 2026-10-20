@@ -3,6 +3,7 @@
 import type { PoolClient } from 'pg';
 import { DEFAULT_WORK_ORDER_DEF, doneStates, terminalStates, type WorkflowDef } from './stateMachine.js';
 import { ensureClaimHallState } from './claimHallEdges.js';
+import { ensureTenantStateLabels } from './labelDictTenant.js';
 import { AppError } from '../middleware/error.js';
 import { PERMS, ROLES, ROLE_CODE_RE, isRetiredRole } from '../middleware/role.js';
 
@@ -308,6 +309,24 @@ export async function saveWorkflowDef(
      DO UPDATE SET def = EXCLUDED.def, version = workflow_def.version + 1, updated_at = now()`,
     [tenantId, entityType, JSON.stringify(def)],
   );
+  // #938-B：流程生效即把该 def 的状态名补进租户覆盖字典（098 label_dict_tenant，只补不覆盖既有译名），
+  // 让租户自定义状态（如 rated）有中文名可改，而不是在界面上显示裸 key；读侧 GET /api/v1/meta/labels/me。
+  //
+  // 【为什么挂这里而不是挂在某条路由】live 写边有五条（approve / rollback / template / auto-tune /
+  // provision，见上方 SaveWorkflowDefOpts 注释），**全部收敛到本函数**；挂在此处 = 五条路全覆盖，
+  // 挂在任一单条路由 = 其余几条路保存的流程状态继续显示裸 key。
+  //
+  // 【为什么失败只告警不抛出】标签是**展示层**关注点：098 未应用（滚动发布期代码先于迁移）
+  // 或权限缺失时，让"配不了流程"这种业务阻断去背展示层的锅是不可接受的降级顺序。
+  // 此处失败 ⇒ 界面退化为裸 key（= 本次改动前的行为），流程照常生效。
+  try {
+    await ensureTenantStateLabels(client, tenantId, def.states ?? []);
+  } catch (e) {
+    console.warn(
+      '[workflowDef] 状态名落租户覆盖字典失败（展示层退化为裸 key，流程已生效）:',
+      e instanceof Error ? e.message : e,
+    );
+  }
 }
 
 /** 当前版本号（无定义返回 0）。 */

@@ -2,10 +2,13 @@
 -- uone_knowledge 知识库去重脚本（2026-09-06）
 -- ============================================================================
 -- ⚠️ 执行环境与权限（必读）：
---   本脚本在 ECS 生产库执行，必须以 postgres 超管身份运行（psql -U postgres -f ...）。
---   原因：uone_knowledge 受租户 RLS 策略约束（见 060_rls_tenant_scoped_ai_tables.sql），
---   youfu_app 角色的 DELETE 会被 RLS 架空（静默 0 行删除、不报错），
---   只有表 Owner / 超管（BYPASSRLS）能真正删除。
+--   本脚本在 ECS 生产库执行，建议以 postgres 超管身份运行（psql -U postgres -f ...）。
+--   说明（已修正旧注释的错误断言）：uone_knowledge **既无 tenant_id 列，也未启用 RLS**——
+--   049_uone_knowledge.sql 建表时就没有租户维度，而 060_rls_tenant_scoped_ai_tables.sql
+--   只给 ai_case_embeddings / ai_feedback / ai_inference_log 三张 AI 表补了 RLS，与本表无关
+--   （060 全文不含 uone_knowledge）。因此**不存在**「youfu_app 的 DELETE 被 RLS 架空（静默 0 行）」。
+--   仍建议超管执行的真实原因：CREATE TABLE AS 全表备份 + 大批量 DELETE 属高危操作，
+--   需由表 Owner 在维护窗口执行并核对行数。
 -- 背景：UOne 老平台导入的约 10 万条历史知识中约 12.6% 为内容完全相同的重复记录，
 --   污染 src/routes/aiPreview.ts 相似案例检索的 topK。本脚本只删除
 --   「全字段完全相同」的重复行（每组保留最小 id），不做任何模糊/近重复清理。

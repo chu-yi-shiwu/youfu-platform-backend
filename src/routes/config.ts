@@ -26,7 +26,10 @@ const ruleSchema = z.object({
     .optional(),
   strategy_json: z
     .object({
-      type: z.enum(['skill_match', 'load_balance']),
+      // R4-E：策略种类不再写死成枚举——注册表可扩展，配置侧只校验是字符串。
+      // 未知 type **不在这里拒绝**：便于「先配好、后部署策略代码」的灰度顺序；
+      // 运行期由 dispatch.ts 注册表未命中 → fail-safe 回退 + warn 日志（不静默失败）。
+      type: z.string(),
       skill_tags: z.array(z.string()).optional(),
     })
     .optional(),

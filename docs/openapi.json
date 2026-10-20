@@ -3073,6 +3073,37 @@
         }
       }
     },
+    "/api/v1/meta/labels/me": {
+      "get": {
+        "tags": [
+          "meta"
+        ],
+        "summary": "GET /api/v1/meta/labels/me",
+        "description": "来源：src/routes/meta.ts:47\n\n服务端响应状态码（代码扫描）：200, 401\n\n租户覆盖字典：平台字典 label_dict ∪ 本租户覆盖 label_dict_tenant（覆盖优先）。\n必须鉴权（租户私有译名），tenant_id 一律取 res.locals.auth.tenantId，不接受请求参数。\n响应头 private（禁止公共缓存共享）。\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "HTTP 200",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "description": "骨架占位：字段以服务端实现为准"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "HTTP 401（未登录：res.locals.auth.tenantId 取不到）"
+          }
+        }
+      }
+    },
     "/api/v1/open/work_order": {
       "post": {
         "tags": [

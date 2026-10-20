@@ -110,8 +110,10 @@ router.post('/tenants/:id/workflow-def/:entityType/submit', async (req, res, nex
     const { entityType } = req.params;
     assertEntityType(entityType);
     const actor = actorOf(res);
+    // 099 起可有多份在途草稿：平台运维代客提交同样需要能指定哪一份（不传时仅一份草稿才提交）
+    const b = z.object({ change_id: z.number().int().positive().optional() }).parse(req.body ?? {});
     const submitted = await withTenantClient(tenantId, (client) =>
-      submitWorkflowDefChange(client, tenantId, entityType, { submittedBy: actor }),
+      submitWorkflowDefChange(client, tenantId, entityType, { submittedBy: actor, changeId: b.change_id }),
     );
     if (!submitted) {
       const existing = await withTenantClient(tenantId, (client) =>
@@ -150,7 +152,7 @@ router.post('/tenants/:id/workflow-def/:entityType/approve', async (req, res, ne
       await saveWorkflowDef(client, tenantId, entityType, change.def, {
         operator: actor, reason: 'approve', allowInflightLoss: b.confirm_inflight_loss === true,
       });
-      await deleteWorkflowDefChange(client, tenantId, entityType);
+      await deleteWorkflowDefChange(client, tenantId, entityType, change.id);
     });
     await audit(actor, 'workflow_def.approve', entityType, tenantId, { by_platform: true });
     return res.json({ ok: true, code: 0, tenantId, entityType, approved: true, version: 'incremented' });

@@ -152,7 +152,11 @@ router.post('/preview', async (req, res, next) => {
 });
 
 // 处置建议检索：/ai/similar { description?, category? } → top3 相似案例
-// 知识源：uone_knowledge（UOne 10 万条历史，离线预灌）+ 租户自身已完成单（增量）
+// 知识源：uone_knowledge（UOne 10 万条历史，纯离线预灌的全局知识库，**无租户维度、未启用 RLS**）。
+//   租户自身已完成单的增量走 **ai_case_embeddings**（有 tenant_id + RLS），不是写进 uone_knowledge。
+//   ⚠️ 旧注释曾写「+ 租户自身已完成单（增量）」——那是假的：本文件从不向 uone_knowledge 写入，
+//   若照旧注释把租户数据灌进这张无租户维度的全局表，即为跨租户泄露。护栏：
+//   src/test/uoneKnowledgeBoundary.test.ts
 const similarSchema = z.object({
   description: z.string().max(500).optional(),
   category: z.string().max(100).optional(),

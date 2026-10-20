@@ -12,6 +12,8 @@ import { AppError } from '../middleware/error.js';
 import { conversationAvailable } from '../services/conversationAgent.js';
 import { runAdminTurn } from '../services/adminAgent.js';
 import { makeAdminToolExecutor } from '../services/adminAgentTools.js';
+import { withTenantClient } from '../db/pool.js';
+import { getWorkflowDef } from '../engine/workflowDef.js';
 
 const router = Router();
 
@@ -45,10 +47,16 @@ router.post('/admin/ai-chat', async (req, res, next) => {
     }
 
     const conversationId = b.conversation_id ?? crypto.randomUUID();
+    // R2-C：提示词必须跟随本租户流程取真实状态名——否则 few-shot 会教模型输出本机构
+    // 根本不存在的状态（如 assigned/processing），被工具层白名单过滤后变成空条件、答非所问。
+    const def = await withTenantClient(tenantId, (client) =>
+      getWorkflowDef(client, tenantId, 'work_order'),
+    );
     const { reply, confirm_card, result_card } = await runAdminTurn(tenantId, b.message, {
       role,
       contextPage: b.context?.page,
       toolExecutor: makeAdminToolExecutor(tenantId),
+      def,
     });
     return res.json({ ok: true, code: 0, conversation_id: conversationId, reply, confirm_card, result_card });
   } catch (e) {

@@ -2,8 +2,12 @@
 -- uone_knowledge 去重预检（只读 dry-run，2026-09-06）
 -- ============================================================================
 -- ⚠️ 本脚本【不修改任何数据】，纯 SELECT，可随时安全执行。
---   仍建议以 postgres 超管执行（youfu_app 在 RLS 下可能读不全/读不到该表，
---   统计口径会失真）。
+--   仍建议以 postgres 超管执行。
+--   ⚠️ 更正（2026-10-21）：旧注释写「youfu_app 在 RLS 下可能读不全」是**错的**——
+--      uone_knowledge 由 049 建表，**无 tenant_id 列、全仓未对该表启用 RLS**（060 只给三张 AI 表
+--      ai_case_embeddings / ai_feedback / ai_inference_log 补了 RLS，与本表无关）。
+--      本表是**纯离线预灌的全局知识库**，租户隔离的增量知识走 ai_case_embeddings。
+--      用超管跑的真实原因只是权限与统计口径一致，与 RLS 无关。
 -- 用途：上线前确认 uone_knowledge_dedup_20260906.sql 的预计删除规模，
 --   应与既知结论一致：约 12.6% 为全字段完全相同的重复行。偏差过大先停下排查。
 -- 列清单（与 049_uone_knowledge.sql DDL 一致）：
