@@ -3104,6 +3104,75 @@
         }
       }
     },
+    "/api/v1/meta/labels/me/{scope}/{key}": {
+      "put": {
+        "tags": [
+          "meta"
+        ],
+        "summary": "PUT /api/v1/meta/labels/me/{scope}/{key}",
+        "description": "来源：src/routes/metaTenantLabel.ts:38\n\n服务端响应状态码（代码扫描）：200, 400, 401, 403\n\n租户覆盖字典**写**端点（R1-B）：把本租户某个 key 的展示译名改成中文，UPSERT 进 label_dict_tenant\n（流程生效落下的行 label 缺省 = key，管理员靠本端点把裸 key 改成中文名）。\n三条红线：① tenantId 只取 res.locals.auth.tenantId，请求参数/body 里的 tenant_id 一律无效\n（防越权改别人字典）；② 只写 label_dict_tenant，**绝不写平台字典 label_dict**（无租户维度，写穿 = 全平台事故）；\n③ scope 限 wo_status / source / business_type / priority，label 去空白后 1~64 字符（非法 → 400）。\n权限点 workflow.edit（仓内既有：src/middleware/role.ts PERMS，流程配置编辑；不新增权限点）。\n写完按 tenantId 失效 /meta/labels/me 的租户缓存槽（否则改完要等 60s 才生效）。\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "scope",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "标签域，白名单：wo_status / source / business_type / priority（非法 → 400）"
+          },
+          {
+            "name": "key",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "枚举值（含租户自定义状态名），1~64 字符"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "description": "骨架占位：请求字段以服务端实现为准（label：去空白后 1~64 字符，上限 64）"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "HTTP 200",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "description": "骨架占位：字段以服务端实现为准"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "HTTP 400（scope 不在白名单 / key 非法 / label 去空白后非 1~64 字符）"
+          },
+          "401": {
+            "description": "HTTP 401（未登录：res.locals.auth.tenantId 取不到）"
+          },
+          "403": {
+            "description": "HTTP 403（无 workflow.edit 权限点）"
+          }
+        }
+      }
+    },
     "/api/v1/open/work_order": {
       "post": {
         "tags": [

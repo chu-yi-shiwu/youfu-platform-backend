@@ -46,6 +46,10 @@ vi.mock('../db/pool.js', () => ({
 }));
 
 import metaRouter from '../routes/meta.js';
+// GET /meta/labels/me 已迁到 metaTenantLabel.ts（挂在 authMiddleware 之后 —— 它要读
+// res.locals.auth.tenantId，挂在 meta.ts 那个免鉴权挂载点上会生产恒 401）。
+// 路径不变，本文件的 URL 与断言一行不改，只需把新 router 也挂上。
+import metaTenantLabelRouter from '../routes/metaTenantLabel.js';
 
 // 平台字典（073 种子子集）
 const PLATFORM: Row[] = [
@@ -75,6 +79,7 @@ beforeAll(async () => {
     next();
   });
   app.use('/api/v1', metaRouter);
+  app.use('/api/v1', metaTenantLabelRouter);
   app.use(errorMiddleware);
   server = app.listen(0, '127.0.0.1');
   await new Promise<void>((resolve) => server.once('listening', () => resolve()));
