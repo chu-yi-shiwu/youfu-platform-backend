@@ -21,6 +21,7 @@
 
 import type { PoolClient } from 'pg';
 import { getActiveRules, resolveDispatch } from '../engine/dispatch.js';
+import { resolveNeed } from '../engine/dispatch/needResolver.js';
 import { StatsModelBackend } from '../engine/model/ModelBackend.js';
 import { safeParseJsonb } from '../util/jsonb.js';
 
@@ -188,9 +189,11 @@ export async function recordAutoTuneShadow(
   finalCategory: string,
 ): Promise<boolean> {
   try {
-    // 本单的派单需求维度（business_type/priority；skill_tags 不落工单表，诚实留空）
-    const wo = await client.query<{ business_type: string | null; priority: string | null }>(
-      'SELECT business_type, priority FROM work_orders WHERE tenant_id = $1 AND id = $2',
+    // 本单的派单需求维度：business_type/priority/catalog。
+    // 技能不落工单表——它由 needResolver 从 catalog 当场派生（与实派同入口）。
+    const wo = await client.query<{ business_type: string | null; priority: string | null; catalog: string | null }>(
+      // catalog 一并读出：技能维度由 needResolver 派生，影子与实派必须吃同一份输入
+      'SELECT business_type, priority, catalog FROM work_orders WHERE tenant_id = $1 AND id = $2',
       [tenantId, String(workOrderId)],
     );
     const woRow = wo.rows[0];
@@ -214,7 +217,21 @@ export async function recordAutoTuneShadow(
       [tenantId, 'dispatch_score'],
     );
     const model = new StatsModelBackend(safeParseJsonb(ms.rows[0]?.params) ?? undefined);
-    const resolved = resolveDispatch(workerRows, rules, { business_type: businessType, priority: prio }, model);
+    // 与 workOrder.ts 共用同一个 resolveNeed：此前影子侧手写 need（不含 skill_tags）、
+    // 实派侧另写一份（含 skill_tags），靠测试看守潜在分叉；收敛后分叉在结构上不可能。
+    // 注：回放用的是**当前**目录技能配置，历史实派当时的配置不同则不严格等价——
+    //     影子评的是"按此刻配置会派给谁"，这是刻意的口径，不是偏差。
+    const shadowNeed = await resolveNeed(
+      {
+        tenantId,
+        entityType: 'work_order',
+        business_type: businessType,
+        priority: prio,
+        catalog: woRow?.catalog ?? undefined,
+      },
+      client,
+    );
+    const resolved = resolveDispatch(workerRows, rules, shadowNeed, model);
     if (!resolved) return false; // 无规则命中 / 无候选可选 → 不落行
     await client.query(
       `INSERT INTO ai_shadow_suggestions (tenant_id, work_order_id, kind, suggested, suggested_by, detail)
