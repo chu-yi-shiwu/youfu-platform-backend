@@ -11,6 +11,7 @@ import { platformAdminAuth } from '../middleware/platformAuth.js';
 import { verifyPassword, hashPassword } from '../account.js';
 import { llmConfigured } from '../services/llm.js';
 import { provisionNewTenantContent } from '../repo/tenantProvision.js';
+import { recordPlatformAudit } from '../repo/platformAudit.js';
 
 const router = Router();
 
@@ -35,18 +36,9 @@ async function audit(
   targetTenant?: string | null,
   payload?: unknown,
 ): Promise<void> {
-  try {
-    await pool.query(
-      `INSERT INTO platform_audit (actor, action, resource, target_tenant, payload) VALUES ($1,$2,$3,$4,$5)`,
-      [actor, action, resource ?? null, targetTenant ?? null, payload ? JSON.stringify(payload) : null],
-    );
-  } catch (e) {
-    // 审查修复（QA🟡6）：原 `catch {}` 静默吞掉审计写失败——审计断链无人知晓。
-    // 审计属旁路（失败绝不阻断主流程），但必须留痕以便事后追账。
-    console.warn('[audit] platform_audit 写入失败（不阻断主流程）', {
-      actor, action, resource, targetTenant, err: e instanceof Error ? e.message : String(e),
-    });
-  }
+  // 统一走 repo/platformAudit.ts —— 平台审计是 append-only 证据链，
+  // 「写什么字段 / 失败是否留痕」必须只有一个地方能决定（此前 7 份逐字重复实现）。
+  await recordPlatformAudit(pool, { actor, action, resource, targetTenant, payload, scope: 'platform' });
 }
 
 // ---- POST /platform/auth/login —— 平台管理员登录（公开） ----

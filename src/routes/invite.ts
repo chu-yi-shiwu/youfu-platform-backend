@@ -14,6 +14,7 @@ import pool, { withTenantClient } from '../db/pool.js';
 import { AUTH_MODE, loginRateLimit, requireRole, type AuthLocals } from '../middleware/auth.js';
 import { listPerms, ROLE_CODE_RE } from '../middleware/role.js';
 import { isRoleUsable } from '../repo/roleDef.js';
+import { recordPlatformAudit } from '../repo/platformAudit.js';
 import {
   createUser,
   findUserByUsername,
@@ -55,16 +56,9 @@ async function audit(
   targetTenant?: string | null,
   payload?: unknown,
 ): Promise<void> {
-  try {
-    await pool.query(
-      `INSERT INTO platform_audit (actor, action, resource, target_tenant, payload) VALUES ($1,$2,$3,$4,$5)`,
-      [actor, action, resource ?? null, targetTenant ?? null, payload ? JSON.stringify(payload) : null],
-    );
-  } catch (e) {
-    console.warn('[invite] platform_audit 写入失败（不阻断主流程）', {
-      actor, action, resource, targetTenant, err: e instanceof Error ? e.message : String(e),
-    });
-  }
+  // 统一走 repo/platformAudit.ts —— 平台审计是 append-only 证据链，
+  // 「写什么字段 / 失败是否留痕」必须只有一个地方能决定（此前 7 份逐字重复实现）。
+  await recordPlatformAudit(pool, { actor, action, resource, targetTenant, payload, scope: 'invite' });
 }
 
 // 与 routes/auth.ts resolveSecret 同口径：prod 缺 JWT_SECRET → fail-closed null；dev 用不安全默认

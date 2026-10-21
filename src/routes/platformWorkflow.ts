@@ -16,6 +16,7 @@ import { z } from 'zod';
 import { withTenantClient } from '../db/pool.js';
 import { AppError } from '../middleware/error.js';
 import { platformAdminAuth } from '../middleware/platformAuth.js';
+import { recordPlatformAudit } from '../repo/platformAudit.js';
 import {
   getWorkflowDef, getWorkflowDefVersion, saveWorkflowDef,
 } from '../engine/workflowDef.js';
@@ -33,19 +34,17 @@ router.use(platformAdminAuth);
 
 // 审计（与 platform.ts 同口径：append-only platform_audit；失败不阻断主流程）
 async function audit(
-  actor: string, action: string, resource: string | null, targetTenant: string | null, payload?: unknown,
+  actor: string,
+  action: string,
+  resource?: string | null,
+  targetTenant?: string | null,
+  payload?: unknown,
 ): Promise<void> {
-  try {
-    const { default: pool } = await import('../db/pool.js');
-    await pool.query(
-      `INSERT INTO platform_audit (actor, action, resource, target_tenant, payload) VALUES ($1,$2,$3,$4,$5)`,
-      [actor, action, resource, targetTenant, payload ? JSON.stringify(payload) : null],
-    );
-  } catch (e) {
-    console.warn('[platformWorkflow] platform_audit 写入失败（不阻断主流程）', {
-      actor, action, resource, targetTenant, err: e instanceof Error ? e.message : String(e),
-    });
-  }
+  // 统一走 repo/platformAudit.ts —— 平台审计是 append-only 证据链，
+  // 「写什么字段 / 失败是否留痕」必须只有一个地方能决定（此前 7 份逐字重复实现）。
+  // pool 沿用本文件原有的**动态 import**形态（原实现即如此，推测为规避循环依赖，不擅自改成静态）。
+  const { default: pool } = await import('../db/pool.js');
+  await recordPlatformAudit(pool, { actor, action, resource, targetTenant, payload, scope: 'platformWorkflow' });
 }
 
 /** 平台运维在留痕里的身份标记（与租户 username 可区分）。 */

@@ -6,6 +6,13 @@
 import type { WorkOrderStatus } from './stateMachine.js';
 
 // 目录 -> { urgent, normal } 时限（分钟）。未命中目录按一般维修 240 兜底。
+//
+// ⚠️ 诚实边界（本次审查实测，见审查报告）：本表的 key 是**原型期手写**的技能词
+// （electrician/plumber/specimen/patient_escort），而建单传入的 catalog 实际来自
+// `fault_category.code`（intakeOptions.ts:31 实测），该 code 由租户在分类维护页自定义。
+// ⇒ 两者对不上时**恒落 DEFAULT_SLA**，即"运送类 15min"这条口径在租户自定义 code 下
+//   从未生效过。本次**不擅自改这些 key**（改了会变动所有存量/新建单的 SLA，属行为变更），
+//   正确出口是让租户用 sla_policy 配（slaPolicy.ts 已接上）——配了策略就以策略为准。
 const SLA_MINUTES: Record<string, { urgent: number; normal: number }> = {
   // 维修类（电工/水工）
   electrician: { urgent: 30, normal: 240 },
@@ -36,6 +43,17 @@ export function setSlaDueAt(
   now: Date = new Date(),
 ): { slaMinutes: number; dueAt: Date } {
   const slaMinutes = resolveSlaMinutes(catalog, priority);
+  return { slaMinutes, dueAt: new Date(now.getTime() + slaMinutes * 60_000) };
+}
+
+/**
+ * 已知分钟数 → 截止时刻（供已由 slaPolicy 定好分钟数的调用方使用）。
+ *
+ * 与 setSlaDueAt 的区别：setSlaDueAt 自己从"目录+优先级"派生分钟数（原型常量表）；
+ * 本函数不派生，只做 now + minutes 的转换，让"分钟数从哪来"这一层可替换。
+ * 保留旧函数不动，避免改动存量调用点的行为。
+ */
+export function setSlaDueAtWithMinutes(slaMinutes: number, now: Date = new Date()): { slaMinutes: number; dueAt: Date } {
   return { slaMinutes, dueAt: new Date(now.getTime() + slaMinutes * 60_000) };
 }
 

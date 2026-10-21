@@ -7,6 +7,7 @@ import pool, { withTenantClient } from '../db/pool.js';
 import { getWorkflowDef } from '../engine/workflowDef.js';
 import { AppError } from '../middleware/error.js';
 import { requireConfigRole } from '../middleware/role.js';
+import { recordPlatformAudit } from '../repo/platformAudit.js';
 
 const router = Router();
 
@@ -50,17 +51,15 @@ router.post('/template-contributions', async (req, res, next) => {
        VALUES ($1,$2,$3,$4,$5,'draft','ugc',$6,$7) RETURNING id, name, status, source`,
       [b.name, b.category ?? null, b.entity_type, b.description ?? null, JSON.stringify(playbook), tenantId, actor ?? 'tenant'],
     );
-    // 审计（平台审计表 append-only）
-    try {
-      await pool.query(
-        `INSERT INTO platform_audit (actor, action, resource, target_tenant, payload) VALUES ($1,$2,$3,$4,$5)`,
-        [actor ?? 'tenant', 'template.contribute', r.rows[0].id, tenantId, JSON.stringify({ name: b.name })],
-      );
-    } catch (e) { /* 审计失败不阻断，但必须留痕（QA🟡6：原静默吞异常） */
-      console.warn('[audit] template.contribute 审计写入失败（不阻断主流程）', {
-        actor, tenantId, err: e instanceof Error ? e.message : String(e),
-      });
-    }
+    // 审计（平台审计表 append-only）—— 统一走 repo/platformAudit.ts，不再内联重复实现
+    await recordPlatformAudit(pool, {
+      actor: actor ?? 'tenant',
+      action: 'template.contribute',
+      resource: r.rows[0].id,
+      targetTenant: tenantId,
+      payload: { name: b.name },
+      scope: 'templateContributions',
+    });
     return res.status(201).json({
       ok: true, code: 0, item: r.rows[0],
       note: '已提交为草稿，待平台审核通过后进入模板市场',
