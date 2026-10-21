@@ -14,7 +14,8 @@ import { resolveNeed } from '../engine/dispatch/needResolver.js';
 import { AppError } from '../middleware/error.js';
 import { requirePermission, requireAnyPermission, assertOpsRole } from '../middleware/role.js';
 import { resolveScanFromDb } from '../scan.js';
-import { setSlaDueAt } from '../engine/sla.js';
+import { setSlaDueAtWithMinutes } from '../engine/sla.js';
+import { loadSlaPolicy, pickSlaPolicy, resolveSlaMinutesWithPolicy } from '../engine/slaPolicy.js';
 import { runSlaScanForTenant } from '../scheduler/slaScheduler.js';
 import { dispatchEvent } from '../webhook/dispatch.js';
 import { StatsModelBackend, type ModelBackend } from '../engine/model/ModelBackend.js';
@@ -114,9 +115,20 @@ export async function autoDispatchAfterCreate(
   row: { id: string; order_no: string },
   need: { business_type: string; skill_tags?: string[] | null; priority?: string | null; catalog?: string | null },
 ): Promise<{ autoFlow: boolean; assignee: string | null; reason: string; dispatchTarget: string }> {
-  // P4：建单即起算 SLA（draft 态即计时，符合"建单进入 SLA 计时"）
+  // P4：建单即起算 SLA（draft 态即计时，符合"建单进入 SLA 计时"）。
+  // 租户在基础数据里配了 sla_policy ⇒ 以配置为准；没配（空表）⇒ 回退内置常量，分钟数逐字不变。
   const prio = need.priority === 'urgent' || need.priority === 'normal' ? need.priority : undefined;
-  const sla = setSlaDueAt(need.catalog ?? undefined, prio);
+  const slaPolicyRows = await loadSlaPolicy(client, tenantId);
+  const slaPolicy = pickSlaPolicy(slaPolicyRows, {
+    entityType: 'work_order',
+    priority: need.priority ?? null,
+  });
+  const slaMinutes = resolveSlaMinutesWithPolicy({
+    policy: slaPolicy,
+    catalog: need.catalog ?? undefined,
+    priority: need.priority ?? undefined,
+  });
+  const sla = setSlaDueAtWithMinutes(slaMinutes);
   await client.query('UPDATE work_orders SET sla_minutes = $1, sla_due_at = $2 WHERE id = $3', [sla.slaMinutes, sla.dueAt, row.id]);
   // 自动派单：优先按 dispatch_rule 配置匹配；无命中降级 least_load 兜底（保持 M1-M3 已验证行为）
   const workers = await client.query('SELECT id, skill_tags, load, active FROM worker WHERE tenant_id = $1', [tenantId]);

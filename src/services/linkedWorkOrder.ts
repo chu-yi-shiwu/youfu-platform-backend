@@ -11,7 +11,8 @@ import { pickWorker, resolveDispatch, getActiveRules } from '../engine/dispatch.
 import { resolveDispatchTarget, type WorkOrderStatus } from '../engine/stateMachine.js';
 import { getWorkflowDef } from '../engine/workflowDef.js';
 import { CLAIM_HALL_STATE } from '../engine/claimHallEdges.js'; // F8：落抢单大厅走主通道（机制态单一事实源）
-import { setSlaDueAt } from '../engine/sla.js';
+import { setSlaDueAtWithMinutes } from '../engine/sla.js';
+import { loadSlaPolicy, pickSlaPolicy, resolveSlaMinutesWithPolicy } from '../engine/slaPolicy.js';
 import { AppError } from '../middleware/error.js';
 // R12-F1（十轮审查）：K2 dispatch 影子回填——自动派单也是"人工实际"信号源（模型建议 vs 实际派单），
 // 此前仅 transition() 人工派单回填，导致 dispatch 影子 actual 永远空置（R12 live 查证 7/7 NULL）。
@@ -72,8 +73,19 @@ export async function createLinkedWorkOrder(
       created: false,
     };
   }
-  // 建单即起算 SLA（与 workOrder.ts 一致）
-  const sla = setSlaDueAt(p.catalog, p.priority);
+  // 建单即起算 SLA（与 workOrder.ts 一致）。
+  // 租户在基础数据里配了 sla_policy ⇒ 以配置为准；没配 ⇒ 回退内置常量（零行为变化）。
+  const slaPolicyRows = await loadSlaPolicy(client, p.tenantId);
+  const slaPolicy = pickSlaPolicy(slaPolicyRows, {
+    entityType: 'work_order',
+    priority: p.priority ?? null,
+  });
+  const slaMinutes = resolveSlaMinutesWithPolicy({
+    policy: slaPolicy,
+    catalog: p.catalog ?? undefined,
+    priority: p.priority ?? undefined,
+  });
+  const sla = setSlaDueAtWithMinutes(slaMinutes);
   await client.query(
     'UPDATE work_orders SET sla_minutes = $1, sla_due_at = $2 WHERE id = $3',
     [sla.slaMinutes, sla.dueAt, row.id],
