@@ -23,6 +23,7 @@ import { AppError } from '../middleware/error.js';
 import { PERMS, DEFAULT_PERM_MATRIX, canAssignRole, requirePermission, ROLE_CODE_RE, ASSIGNABLE_BUILTIN_ROLES, RETIRED_ROLES, isRetiredRole, type Role, type Perm } from '../middleware/role.js';
 import type { AuthLocals } from '../middleware/auth.js';
 import { hashPassword, toPublic } from '../account.js';
+import { recordPlatformAudit } from '../repo/platformAudit.js';
 import { samePermSet } from '../repo/tenantProvision.js'; // 纵切① P0-1：保存默认矩阵=解除定格 判定
 import { isBuiltinRole, isRoleUsable, listAllRoles } from '../repo/roleDef.js'; // 地基第二步：自定义角色
 
@@ -46,16 +47,9 @@ async function audit(
   targetTenant?: string | null,
   payload?: unknown,
 ): Promise<void> {
-  try {
-    await pool.query(
-      `INSERT INTO platform_audit (actor, action, resource, target_tenant, payload) VALUES ($1,$2,$3,$4,$5)`,
-      [actor, action, resource ?? null, targetTenant ?? null, payload ? JSON.stringify(payload) : null],
-    );
-  } catch (e) {
-    console.warn('[accounts] platform_audit 写入失败（不阻断主流程）', {
-      actor, action, resource, targetTenant, err: e instanceof Error ? e.message : String(e),
-    });
-  }
+  // 统一走 repo/platformAudit.ts —— 平台审计是 append-only 证据链，
+  // 「写什么字段 / 失败是否留痕」必须只有一个地方能决定（此前 7 份逐字重复实现）。
+  await recordPlatformAudit(pool, { actor, action, resource, targetTenant, payload, scope: 'accounts' });
 }
 
 const COLS = 'id, tenant_id, username, display_name, role, active, phone';

@@ -15,6 +15,7 @@ import { AppError } from '../middleware/error.js';
 import { requirePermission, requireAnyPermission } from '../middleware/role.js';
 import { assertWorkflowConfigEditableByTenant, readWorkflowConfigOwner } from '../middleware/workflowConfigGuard.js';
 import { getWorkflowDef, saveWorkflowDef, ensureWorkflowDef, getWorkflowDefVersion, listWorkflowDefHistory, getWorkflowDefHistoryVersion, countInflightByStates } from '../engine/workflowDef.js';
+import { recordPlatformAudit } from '../repo/platformAudit.js';
 import {
   upsertWorkflowDefDraft,
   getWorkflowDefChange,
@@ -41,16 +42,9 @@ async function audit(
   targetTenant?: string | null,
   payload?: unknown,
 ): Promise<void> {
-  try {
-    await pool.query(
-      `INSERT INTO platform_audit (actor, action, resource, target_tenant, payload) VALUES ($1,$2,$3,$4,$5)`,
-      [actor, action, resource ?? null, targetTenant ?? null, payload ? JSON.stringify(payload) : null],
-    );
-  } catch (e) {
-    console.warn('[workflowDef] platform_audit 写入失败（不阻断主流程）', {
-      actor, action, resource, targetTenant, err: e instanceof Error ? e.message : String(e),
-    });
-  }
+  // 统一走 repo/platformAudit.ts —— 平台审计是 append-only 证据链，
+  // 「写什么字段 / 失败是否留痕」必须只有一个地方能决定（此前 7 份逐字重复实现）。
+  await recordPlatformAudit(pool, { actor, action, resource, targetTenant, payload, scope: 'workflowDef' });
 }
 
 // 业务主题模板清单（下拉生成数据源）。
@@ -323,7 +317,13 @@ router.post('/:entityType/approve', async (req, res, next) => {
           throw new AppError('SELF_APPROVAL', 'submitter cannot approve own change (self-approval forbidden)', 403);
         }
         selfApproved = true;
-        // 强制留痕（fail-closed）：platform_audit 与审批同事务，INSERT 失败即整体回滚
+        // 强制留痕（fail-closed）：platform_audit 与审批同事务，INSERT 失败即整体回滚。
+        //
+        // ⚠️ 刻意**不走** recordPlatformAudit（审计收敛时全仓其他 7 处都改了，唯独此处保留）：
+        // 共享函数的契约是「失败 warn 留痕、不阻断主流程」（旁路），而此处契约**相反**——
+        // 自批豁免是安全红线例外（单 admin 租户可自批），留痕失败必须让审批整体失败，
+        // 否则会出现"批了但没留下痕迹"的证据黑洞。改成共享函数等于把 fail-closed 降级成
+        // fail-open，属安全红线放松，故保持原样并记录理由。
         await client.query(
           `INSERT INTO platform_audit (actor, action, resource, target_tenant, payload) VALUES ($1,$2,$3,$4,$5)`,
           [

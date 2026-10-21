@@ -9,6 +9,7 @@ import { activeStates, doneStates } from '../engine/stateMachine.js';
 import { AppError } from '../middleware/error.js';
 import { platformAdminAuth } from '../middleware/platformAuth.js';
 import { refreshApplyEffect } from '../services/templateEffects.js';
+import { recordPlatformAudit } from '../repo/platformAudit.js';
 
 const router = Router();
 
@@ -16,15 +17,16 @@ const router = Router();
 router.use(platformAdminAuth);
 
 // 平台审计（复用 platform_audit，append-only）
-async function audit(actor: string, action: string, resource?: string | null, targetTenant?: string | null, payload?: unknown) {
-  try {
-    await pool.query(
-      `INSERT INTO platform_audit (actor, action, resource, target_tenant, payload) VALUES ($1,$2,$3,$4,$5)`,
-      [actor, action, resource, targetTenant ?? null, payload ? JSON.stringify(payload) : null],
-    );
-  } catch {
-    // 审计失败不阻断
-  }
+async function audit(
+  actor: string,
+  action: string,
+  resource?: string | null,
+  targetTenant?: string | null,
+  payload?: unknown,
+): Promise<void> {
+  // 统一走 repo/platformAudit.ts —— 平台审计是 append-only 证据链，
+  // 「写什么字段 / 失败是否留痕」必须只有一个地方能决定（此前 7 份逐字重复实现）。
+  await recordPlatformAudit(pool, { actor, action, resource, targetTenant, payload, scope: 'templateMarket' });
 }
 
 // ---- 列表（分类/搜索/评分排序；默认仅 published；?status=draft 审核队列） ----
