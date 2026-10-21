@@ -204,14 +204,18 @@ describe('P2-2 派了才可见：详情同口径', () => {
 
 describe('P2-2 兼容性：抢单大厅不受影响（8 operator 试点行为保留）', () => {
   it('M9 claim-hall 未分派单照常可见（operator 视角回归）', async () => {
+    // F10：列表 SQL 不再含 'claim_hall' 字面量（旧 mock 匹配 `status IN ('claim_hall',...)`），
+    //   池态改由 claimableStates(def) 派生并以参数数组传入。租户无 def → DEFAULT + 机制注入，
+    //   故池 = ['claim_hall']——M9 的可见性行为（未分派单仍可见）不因派生化而改变。
     const calls = makeClient([
-      { match: (t) => t.includes("status IN ('claim_hall','pending_dispatch')"), reply: () => ({ rows: [{ id: 'wo-hall', order_no: 'WO_H', status: 'claim_hall', assignee_id: null }] }) },
+      { match: (t) => t.includes('SELECT * FROM work_orders') && t.includes('status = ANY($2::text[])'), reply: () => ({ rows: [{ id: 'wo-hall', order_no: 'WO_H', status: 'claim_hall', assignee_id: null }] }) },
       { match: (t) => t.includes('FROM workflow_def'), reply: () => ({ rows: [] }) },
     ]);
     const r = await get('/open/claim-hall', 'operator');
     expect(r.status).toBe(200);
     expect((r.body as any).items.length).toBe(1);
-    const hallCall = calls.find((c) => c.text.includes('claim_hall'));
+    const hallCall = calls.find((c) => c.text.includes('status = ANY($2::text[])'));
     expect(hallCall).toBeTruthy();
+    expect(hallCall!.params?.[1]).toEqual(['claim_hall']);
   });
 });

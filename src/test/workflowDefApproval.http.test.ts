@@ -281,6 +281,7 @@ async function api(
 let app: express.Express;
 
 beforeAll(async () => {
+  process.env.WORKFLOW_CONFIG_OWNER = 'tenant'; // 097：本文件验证的是「归属放开」后的流程语义（审批链/乐观锁/删态硬闸）
   process.env.JWT_SECRET = process.env.JWT_SECRET ?? 'test-wf-approval-secret';
   app = express();
   app.use(express.json());
@@ -296,6 +297,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  delete process.env.WORKFLOW_CONFIG_OWNER; // 097：环境隔离，避免污染同进程其它测试文件
   await new Promise<void>((resolve) => server.close(() => resolve()));
 });
 

@@ -10,9 +10,10 @@
 // 兼容性：原写路径保留、code/ok 不变，仅新增 draft 字段与行为变化（发版说明标注 breaking）。
 import { Router } from 'express';
 import { z } from 'zod';
-import { withTenantClient } from '../db/pool.js';
+import pool, { withTenantClient } from '../db/pool.js';
 import { AppError } from '../middleware/error.js';
 import { requirePermission, requireAnyPermission } from '../middleware/role.js';
+import { assertWorkflowConfigEditableByTenant, readWorkflowConfigOwner } from '../middleware/workflowConfigGuard.js';
 import { getWorkflowDef, saveWorkflowDef, ensureWorkflowDef, getWorkflowDefVersion, listWorkflowDefHistory, getWorkflowDefHistoryVersion, countInflightByStates } from '../engine/workflowDef.js';
 import {
   upsertWorkflowDefDraft,
@@ -25,9 +26,32 @@ import {
 } from '../engine/workflowDefChange.js';
 import { THEME_TEMPLATES, themeLabel, type ThemeTemplate } from '../engine/themes.js';
 import { ensureAcceptanceEdges } from '../engine/acceptanceEdges.js'; // 批次三：验收边幂等注入
+import { assertAutoRuleSavable } from '../engine/autoRules.js'; // 地基④：自动审核规则红线校验
+import { listAutoRules, upsertAutoRule, deleteAutoRule } from '../repo/autoRule.js';
 import type { WorkflowDef } from '../engine/stateMachine.js';
 
 const router = Router();
+
+// ---- 审计（与 accounts.ts 同口径：append-only platform_audit；失败不阻断主流程）----
+// 自动审核规则的建/改/删属"会真实改变工单走向"的高风险配置，必须留痕可追溯。
+async function audit(
+  actor: string,
+  action: string,
+  resource?: string | null,
+  targetTenant?: string | null,
+  payload?: unknown,
+): Promise<void> {
+  try {
+    await pool.query(
+      `INSERT INTO platform_audit (actor, action, resource, target_tenant, payload) VALUES ($1,$2,$3,$4,$5)`,
+      [actor, action, resource ?? null, targetTenant ?? null, payload ? JSON.stringify(payload) : null],
+    );
+  } catch (e) {
+    console.warn('[workflowDef] platform_audit 写入失败（不阻断主流程）', {
+      actor, action, resource, targetTenant, err: e instanceof Error ? e.message : String(e),
+    });
+  }
+}
 
 // 业务主题模板清单（下拉生成数据源）。
 router.get('/themes', async (_req, res) => {
@@ -101,15 +125,21 @@ router.get('/:entityType', async (req, res, next) => {
   try {
     const tenantId = res.locals.auth.tenantId;
     const { entityType } = req.params;
-    const def = await withTenantClient(tenantId, (client) => getWorkflowDef(client, tenantId, entityType));
-    return res.json({ ok: true, code: 0, entityType, def });
+    const def = await withTenantClient(tenantId, async (client) => ({
+      def: await getWorkflowDef(client, tenantId, entityType),
+      // 097：把「流程配置权归谁」一并带回，前端据此决定写控件禁用与否——
+      // 读端点不设闸（客户必须看得见自己的流程），但有权知道能不能改。
+      // 好处：平台运维拨开关后前端自动恢复可编辑，**不必再发一次前端版本**。
+      owner: await readWorkflowConfigOwner(client),
+    }));
+    return res.json({ ok: true, code: 0, entityType, def: def.def, configOwner: def.owner });
   } catch (e) {
     next(e);
   }
 });
 
 // —— 请求体 schema 与 def 合并（写路径共用）——
-const defSchema = z.object({
+export const defSchema = z.object({
   name: z.string().optional(),
   note: z.string().max(500).optional(), // 变更说明（审核清单/详情展示，提交人填写）
   // V3-D6 乐观锁：带 base_rev（草稿当前 rev）→ 原子比对，他人已先保存 → 409 DRAFT_REV_CONFLICT；
@@ -125,13 +155,13 @@ const defSchema = z.object({
     .passthrough(),
 });
 
-function assertEntityType(entityType: string): void {
+export function assertEntityType(entityType: string): void {
   if (!/^[a-z][a-z0-9_]*$/.test(entityType)) {
     throw new AppError('BAD_PARAM', 'entityType must match ^[a-z][a-z0-9_]*$', 400);
   }
 }
 
-function mergeDef(b: z.infer<typeof defSchema>): WorkflowDef {
+export function mergeDef(b: z.infer<typeof defSchema>): WorkflowDef {
   return {
     ...b.def,
     config: { ...(b.def.config ?? {}), ...(b.name ? { name: b.name } : {}) },
@@ -160,6 +190,7 @@ router.put('/:entityType', async (req, res, next) => {
     assertEntityType(entityType);
     const b = defSchema.parse(req.body);
     const { rev } = await withTenantClient(tenantId, async (client) => {
+      await assertWorkflowConfigEditableByTenant(client); // 097 归属闸门：platform 时租户侧（含 admin）一律 403
       await requirePermission(auth, client, 'workflow.edit');
       return upsertWorkflowDefDraft(client, tenantId, entityType, mergeDef(b), {
         operator: auth.username,
@@ -182,6 +213,7 @@ router.put('/:entityType/draft', async (req, res, next) => {
     assertEntityType(entityType);
     const b = defSchema.parse(req.body);
     const { rev } = await withTenantClient(tenantId, async (client) => {
+      await assertWorkflowConfigEditableByTenant(client); // 097 归属闸门：platform 时租户侧（含 admin）一律 403
       await requirePermission(auth, client, 'workflow.edit');
       return upsertWorkflowDefDraft(client, tenantId, entityType, mergeDef(b), {
         operator: auth.username,
@@ -220,9 +252,16 @@ router.post('/:entityType/submit', async (req, res, next) => {
     const tenantId = auth.tenantId;
     const { entityType } = req.params;
     assertEntityType(entityType);
+    // 099 起可有多份在途草稿：change_id 不传时仅在草稿恰好一份时提交（兼容既有前端），
+    // 多份时由 submitWorkflowDefChange 抛 409 CHANGE_ID_REQUIRED 要求显式选择。
+    const b = z.object({ change_id: z.number().int().positive().optional() }).parse(req.body ?? {});
     const submitted = await withTenantClient(tenantId, async (client) => {
+      await assertWorkflowConfigEditableByTenant(client); // 097 归属闸门：platform 时租户侧（含 admin）一律 403
       await requirePermission(auth, client, 'workflow.edit');
-      return submitWorkflowDefChange(client, tenantId, entityType, { submittedBy: auth.username ?? '' });
+      return submitWorkflowDefChange(client, tenantId, entityType, {
+        submittedBy: auth.username ?? '',
+        changeId: b.change_id,
+      });
     });
     if (!submitted) {
       const existing = await withTenantClient(tenantId, (client) =>
@@ -262,6 +301,7 @@ router.post('/:entityType/approve', async (req, res, next) => {
     const b = z.object({ confirm_inflight_loss: z.literal(true).optional() }).parse(req.body ?? {});
     let selfApproved = false; // F16：单 admin 自批豁免标记（响应透出 + audit 已强制留痕）
     await withTenantClient(tenantId, async (client) => {
+      await assertWorkflowConfigEditableByTenant(client); // 097 归属闸门：platform 时租户侧（含 admin）一律 403
       await requirePermission(auth, client, 'workflow.approve');
       const change = await getWorkflowDefChange(client, tenantId, entityType);
       if (!change) throw new AppError('NO_DRAFT', `no in-flight change for ${entityType}`, 404);
@@ -314,7 +354,7 @@ router.post('/:entityType/approve', async (req, res, next) => {
         reason: 'approve',
         allowInflightLoss: b.confirm_inflight_loss === true,
       });
-      await deleteWorkflowDefChange(client, tenantId, entityType);
+      await deleteWorkflowDefChange(client, tenantId, entityType, change.id);
     });
     return res.json({ ok: true, code: 0, entityType, approved: true, selfApproved, version: 'incremented' });
   } catch (e) {
@@ -331,6 +371,7 @@ router.post('/:entityType/reject', async (req, res, next) => {
     assertEntityType(entityType);
     const b = z.object({ comment: z.string().min(1) }).parse(req.body);
     const rejected = await withTenantClient(tenantId, async (client) => {
+      await assertWorkflowConfigEditableByTenant(client); // 097 归属闸门：platform 时租户侧（含 admin）一律 403
       await requirePermission(auth, client, 'workflow.approve');
       return rejectWorkflowDefChange(client, tenantId, entityType, b.comment);
     });
@@ -421,6 +462,7 @@ router.post('/generate-from-theme', async (req, res, next) => {
     if (!tpl) throw new AppError('NOT_FOUND', `unknown theme: ${entityType}`, 404);
     const merged: WorkflowDef = { ...tpl.def, config: { ...(tpl.def.config ?? {}), name: tpl.name } } as WorkflowDef;
     await withTenantClient(tenantId, async (client) => {
+      await assertWorkflowConfigEditableByTenant(client); // 097 归属闸门：platform 时租户侧（含 admin）一律 403
       await requirePermission(auth, client, 'workflow.edit');
       await upsertWorkflowDefDraft(client, tenantId, entityType, merged, {
         operator: auth.username,
@@ -443,6 +485,7 @@ router.post('/:entityType/enable-acceptance', async (req, res, next) => {
     const { entityType } = req.params;
     assertEntityType(entityType);
     const result = await withTenantClient(tenantId, async (client) => {
+      await assertWorkflowConfigEditableByTenant(client); // 097 归属闸门：platform 时租户侧（含 admin）一律 403
       await requirePermission(auth, client, 'workflow.edit');
       // 无 def 行的租户先落引擎默认图（显式落库后再注入，保证升级可追溯）
       const cur = await ensureWorkflowDef(client, tenantId, entityType);
@@ -559,6 +602,7 @@ router.post('/:entityType/versions/:version/rollback', async (req, res, next) =>
       throw new AppError('VERSION_NOT_FOUND', `版本 ${version} 不存在于 ${entityType} 的历史中（范围见版本历史接口）`, 404);
     }
     await withTenantClient(tenantId, async (client) => {
+      await assertWorkflowConfigEditableByTenant(client); // 097 归属闸门：platform 时租户侧（含 admin）一律 403
       await requirePermission(auth, client, 'workflow.approve');
       await saveWorkflowDef(client, tenantId, entityType, target, {
         operator: auth.username ?? '', // username 缺失时由 saveWorkflowDef 运行期 422 兜底（留痕不为空）
@@ -598,6 +642,7 @@ router.post('/:entityType/import', async (req, res, next) => {
     assertEntityType(entityType);
     const b = defSchema.parse(req.body);
     await withTenantClient(tenantId, async (client) => {
+      await assertWorkflowConfigEditableByTenant(client); // 097 归属闸门：platform 时租户侧（含 admin）一律 403
       await requirePermission(auth, client, 'workflow.edit');
       await upsertWorkflowDefDraft(client, tenantId, entityType, mergeDef(b), {
         operator: auth.username,
@@ -612,6 +657,116 @@ router.post('/:entityType/import', async (req, res, next) => {
       draft: true,
       version: 'draft-pending-approval',
     });
+  } catch (e) {
+    next(e);
+  }
+});
+
+// ============ 自动审核规则（地基④：租户可配，**默认关闭**） ============
+// 用户原意（stateMachine.ts:22 原文）：「审核员不是单独一个人，是一个权限属性，
+//   它可以加给谁一个审核权限，或者配置自动审核规则。」
+// 前半句（审核 = 可叠加权限属性）由 allowedPerms 落地；这组分端点是后半句。
+//
+// 🔴 红线（stateMachine.ts:5-6）：引擎绝不自动推进到终态。
+//   自动审核只能推到中间态（pending_review → review_passed / processing），
+//   绝不能自动 close / cancel / satisfy。守线三道闸：
+//     ① schema 层 z.enum 只收 approve / reject；
+//     ② engine/autoRules.ts 的 assertAutoRuleSavable：按本租户 def 解析真实 to_state，
+//        命中终态 → 422 拒绝保存（写库前就挡住，不等运行期出事）；
+//     ③ 094 迁移 DB CHECK 同款白名单。
+//   另：`enabled` 为必填且不默认 true —— 建规则 ≠ 启用，杜绝"配了就自动跑"误伤存量。
+//   启用（enabled=true）额外要 workflow.approve：开自动审核是把关人级别的决定。
+
+const autoRuleSchema = z.object({
+  from_state: z.string().regex(/^[a-z][a-z0-9_]{0,31}$/, 'from_state 形状非法'),
+  event: z.enum(['approve', 'reject']),
+  // 维度严格对应 work_orders 真实列（priority / catalog / ext.has_exception）；
+  // 本表无金额列，故不提供金额条件——不实现取不到数的假条件。
+  conditions: z
+    .object({
+      priority_in: z.array(z.string()).optional(),
+      categories: z.array(z.string()).optional(),
+      no_exception: z.boolean().nullable().optional(),
+    })
+    .optional()
+    .default({}),
+  // 必填：不允许"不传就默认启用"。默认启用 = 配了就自动跑，属误伤风险。
+  enabled: z.boolean(),
+  note: z.string().max(200).nullable().optional(),
+});
+
+/** GET /api/v1/workflow/def/:entityType/auto-rules —— 列出本租户全部自动审核规则（含未启用）。 */
+router.get('/:entityType/auto-rules', async (req, res, next) => {
+  try {
+    const auth = res.locals.auth;
+    const tenantId = auth.tenantId;
+    const { entityType } = req.params;
+    assertEntityType(entityType);
+    const items = await withTenantClient(tenantId, async (client) => {
+      await requireAnyPermission(auth, client, ['workflow.edit', 'workflow.approve']);
+      return listAutoRules(client, tenantId, entityType);
+    });
+    return res.json({ ok: true, code: 0, entityType, items });
+  } catch (e) {
+    next(e);
+  }
+});
+
+/** PUT /api/v1/workflow/def/:entityType/auto-rules —— 新建或更新一条自动审核规则。 */
+router.put('/:entityType/auto-rules', async (req, res, next) => {
+  try {
+    const auth = res.locals.auth;
+    const tenantId = auth.tenantId;
+    const { entityType } = req.params;
+    assertEntityType(entityType);
+    const b = autoRuleSchema.parse(req.body);
+    const item = await withTenantClient(tenantId, async (client) => {
+      await assertWorkflowConfigEditableByTenant(client); // 097 归属闸门：platform 时租户侧（含 admin）一律 403
+      await requirePermission(auth, client, 'workflow.edit');
+      // 启用自动审核是把关人级别的决定：额外要 workflow.approve（关掉只需 workflow.edit）
+      if (b.enabled) await requirePermission(auth, client, 'workflow.approve');
+      const def = await getWorkflowDef(client, tenantId, entityType as never);
+      // 红线闸②：按本租户真实流程解析目标态，指向终态直接 422 拒绝保存
+      const { to } = assertAutoRuleSavable(def, { fromState: b.from_state, event: b.event });
+      const saved = await upsertAutoRule(client, tenantId, {
+        entityType,
+        fromState: b.from_state,
+        event: b.event,
+        conditions: {
+          priorityIn: b.conditions.priority_in ?? null,
+          categories: b.conditions.categories ?? null,
+          noException: b.conditions.no_exception ?? null,
+        },
+        enabled: b.enabled,
+        note: b.note ?? null,
+      });
+      return { ...saved, to_state: to };
+    });
+    await audit(auth.username ?? 'unknown', 'workflow.autorule.upsert', `${entityType}/${b.from_state}/${b.event}`, tenantId, {
+      enabled: b.enabled,
+      conditions: b.conditions,
+    });
+    return res.json({ ok: true, code: 0, entityType, item });
+  } catch (e) {
+    next(e);
+  }
+});
+
+/** DELETE /api/v1/workflow/def/:entityType/auto-rules/:fromState/:event —— 删除一条规则。 */
+router.delete('/:entityType/auto-rules/:fromState/:event', async (req, res, next) => {
+  try {
+    const auth = res.locals.auth;
+    const tenantId = auth.tenantId;
+    const { entityType, fromState, event } = req.params;
+    assertEntityType(entityType);
+    const ok = await withTenantClient(tenantId, async (client) => {
+      await assertWorkflowConfigEditableByTenant(client); // 097 归属闸门：platform 时租户侧（含 admin）一律 403
+      await requirePermission(auth, client, 'workflow.edit');
+      return deleteAutoRule(client, tenantId, entityType, fromState, event);
+    });
+    if (!ok) throw new AppError('NOT_FOUND', `auto rule not found: ${fromState}/${event}`, 404);
+    await audit(auth.username ?? 'unknown', 'workflow.autorule.delete', `${entityType}/${fromState}/${event}`, tenantId, {});
+    return res.json({ ok: true, code: 0, entityType, deleted: true });
   } catch (e) {
     next(e);
   }

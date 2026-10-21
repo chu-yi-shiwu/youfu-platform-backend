@@ -3,7 +3,9 @@
 import type { PoolClient } from 'pg';
 import { DEFAULT_WORK_ORDER_DEF, doneStates, terminalStates, type WorkflowDef } from './stateMachine.js';
 import { ensureClaimHallState } from './claimHallEdges.js';
+import { ensureTenantStateLabels } from './labelDictTenant.js';
 import { AppError } from '../middleware/error.js';
+import { PERMS, ROLES, ROLE_CODE_RE, isRetiredRole } from '../middleware/role.js';
 
 /**
  * V2-F7（2026-09-14）：读路径幂等注入抢单大厅机制态（仅 work_order）。
@@ -36,6 +38,27 @@ export function validateWorkflowDef(def: WorkflowDef): void {
   if (unknown.length > 0) {
     throw new AppError('BAD_REQUEST', `transition references unknown state: ${JSON.stringify(unknown[0])}`, 422);
   }
+  // 【地基第二步补漏：角色/权限 ↔ 流程的联动校验】
+  // 此前只校验"状态拓扑"，完全不校验 allowedRoles / allowedPerms 里写的名字是否存在：
+  //   租户把某条边的 allowedRoles 写成拼错的名字（或引用一个已删除的自定义岗位）→
+  //   **这条边永久门死，没有任何人能走这条流转，且保存时不报错**（配错了连提示都没有）。
+  //   角色可配置与流程可配置之间缺这道校验，两者就不算真正闭环。
+  //
+  // ① allowedPerms ∈ PERMS（同步，零存量风险）：allowedPerms 是本批新增字段，
+  //    存量只可能是 091/092 回填的 'workflow.approve'（合法），写错即挡。
+  for (const t of transitions) {
+    const perms = (t as { allowedPerms?: string[] }).allowedPerms;
+    if (!Array.isArray(perms)) continue;
+    for (const p of perms) {
+      if (!(PERMS as readonly string[]).includes(p)) {
+        throw new AppError(
+          'BAD_REQUEST',
+          `transition ${t.from}--${t.event ?? ''}-->${t.to} 引用了未登记的权限点 "${p}"（可用清单见 GET /accounts/roles/perm-catalog）`,
+          422,
+        );
+      }
+    }
+  }
   const routes = def.config?.autoRoutes;
   if (routes) {
     // 禁止自动派发直达的目标态 = 完成态 ∪ 终态（completed/closed/evaluated 等必须由显式事件驱动，
@@ -54,6 +77,75 @@ export function validateWorkflowDef(def: WorkflowDef): void {
         );
       }
     }
+  }
+}
+
+/**
+ * 【地基第二步补漏】流程里 allowedRoles 引用的角色必须真实存在（异步，需查 role_def）。
+ *
+ * 为什么必须补：此前流程保存只校验状态拓扑，allowedRoles 写什么都能存 ——
+ *   租户把某条边的 allowedRoles 写成拼错的名字（如 'weixiuzuzhang'），或引用一个已删掉的
+ *   自定义岗位 → **这条边永久门死，谁都走不了，且保存时零提示**。
+ *   角色可配置与流程可配置之间少了这道校验，两者就不算闭环。
+ *
+ * 【存量安全（关键设计）】只校验"本次新出现的角色名"：
+ *   oldDef 里已存在的角色名一律豁免（哪怕它现在已不在 role_def 里）。
+ *   否则存量 def 里若有历史脏角色名，租户一保存流程就被 422 挡住 = 生产事故。
+ *   精准取舍：**拦增量错字，不翻存量旧账。**
+ */
+export async function assertWorkflowDefRolesUsable(
+  client: PoolClient,
+  tenantId: string,
+  def: WorkflowDef,
+  oldDef?: WorkflowDef | null,
+): Promise<void> {
+  const legacy = new Set<string>();
+  for (const t of oldDef?.transitions ?? []) {
+    for (const r of t.allowedRoles ?? []) legacy.add(r);
+  }
+  const need = new Set<string>();
+  for (const t of def.transitions ?? []) {
+    for (const r of t.allowedRoles ?? []) {
+      if (legacy.has(r)) continue; // 存量既有 → 豁免，不翻旧账
+      if ((ROLES as readonly string[]).includes(r)) {
+        // 内置角色不查 role_def；但**退场角色一律不得新写进流程**。
+        // 背景：096 迁移清的是 workflow_def.def（live），草稿行（workflow_def_change）没动；
+        // 若此处沿用"内置即放行"，一份 096 之前的旧草稿审批通过就把 dispatcher/service_desk
+        // 原样写回 live —— 退场清理被复活、死角色重新出现在门禁里。
+        // 存量豁免（上一行 legacy）先于此判定，故已带退场角色的租户保存流程不受影响。
+        if (isRetiredRole(r)) {
+          throw new AppError(
+            'BAD_REQUEST',
+            `流程引用了已退场的内置角色 "${r}"（该岗位已停止新建，请改用内置在岗角色，或先在「自定义岗位」建岗后再引用）`,
+            422,
+          );
+        }
+        continue;
+      }
+      if (!ROLE_CODE_RE.test(r)) {
+        throw new AppError(
+          'BAD_REQUEST',
+          `流程引用了形状非法的角色名 "${r}"（须 ^[a-z][a-z0-9_]{1,31}$，如 repair_lead）`,
+          422,
+        );
+      }
+      need.add(r);
+    }
+  }
+  if (need.size === 0) return;
+  const codes = [...need];
+  const r = await client.query<{ code: string }>(
+    `SELECT code FROM role_def WHERE tenant_id = $1 AND code = ANY($2::text[])`,
+    [tenantId, codes],
+  );
+  const found = new Set(r.rows.map((x) => x.code));
+  const missing = codes.filter((c) => !found.has(c));
+  if (missing.length > 0) {
+    throw new AppError(
+      'BAD_REQUEST',
+      `流程引用了本租户不存在的角色：${missing.join('、')}（请先在「角色管理」创建该岗位，或改回内置角色）`,
+      422,
+    );
   }
 }
 
@@ -178,6 +270,8 @@ export async function saveWorkflowDef(
   if (cur.rows[0]) {
     const oldRaw = cur.rows[0].def;
     const oldDef = normalizeDef(typeof oldRaw === 'string' ? JSON.parse(oldRaw) : oldRaw);
+    // 地基第二步补漏：allowedRoles 存在性校验（只挡"本次新写错的角色"，见函数注释）
+    await assertWorkflowDefRolesUsable(client, tenantId, def, oldDef);
     const removed = (oldDef.states ?? []).filter((s: string) => !def.states.includes(s));
     if (removed.length > 0 && !opts.allowInflightLoss) {
       const hits = await countInflightByStates(client, tenantId, entityType, removed);
@@ -215,6 +309,24 @@ export async function saveWorkflowDef(
      DO UPDATE SET def = EXCLUDED.def, version = workflow_def.version + 1, updated_at = now()`,
     [tenantId, entityType, JSON.stringify(def)],
   );
+  // #938-B：流程生效即把该 def 的状态名补进租户覆盖字典（098 label_dict_tenant，只补不覆盖既有译名），
+  // 让租户自定义状态（如 rated）有中文名可改，而不是在界面上显示裸 key；读侧 GET /api/v1/meta/labels/me。
+  //
+  // 【为什么挂这里而不是挂在某条路由】live 写边有五条（approve / rollback / template / auto-tune /
+  // provision，见上方 SaveWorkflowDefOpts 注释），**全部收敛到本函数**；挂在此处 = 五条路全覆盖，
+  // 挂在任一单条路由 = 其余几条路保存的流程状态继续显示裸 key。
+  //
+  // 【为什么失败只告警不抛出】标签是**展示层**关注点：098 未应用（滚动发布期代码先于迁移）
+  // 或权限缺失时，让"配不了流程"这种业务阻断去背展示层的锅是不可接受的降级顺序。
+  // 此处失败 ⇒ 界面退化为裸 key（= 本次改动前的行为），流程照常生效。
+  try {
+    await ensureTenantStateLabels(client, tenantId, def.states ?? []);
+  } catch (e) {
+    console.warn(
+      '[workflowDef] 状态名落租户覆盖字典失败（展示层退化为裸 key，流程已生效）:',
+      e instanceof Error ? e.message : e,
+    );
+  }
 }
 
 /** 当前版本号（无定义返回 0）。 */

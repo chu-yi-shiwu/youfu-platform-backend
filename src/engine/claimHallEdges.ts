@@ -17,16 +17,47 @@
 // 与 acceptanceEdges 的差异：验收边注入只补边+目标态，本函数还需补 from 态本身。
 // ─────────────────────────────────────────────────────────────────────────────
 import type { WorkflowDef, WorkflowTransition } from './stateMachine.js';
+import { CLAIM_HALL_STATE, ENTER_HALL_EVENT } from './stateMachine.js';
+
+// F8：常量单一事实源上提到 stateMachine（引擎核心），此处同源 re-export，
+//   对外 import 路径零变化（routes/services 仍从 claimHallEdges 取）。
+export { CLAIM_HALL_STATE, ENTER_HALL_EVENT };
 
 /** 抢单大厅机制态名（与 RICH_WORK_ORDER_DEF 预置态同名，注入幂等）。 */
-export const CLAIM_HALL_STATE = 'claim_hall';
 
 /** 大厅三条出边（与 stateMachine.ts RICH def 预置边逐字一致，角色门禁同源）。 */
+// 【用户要求①】dispatcher / service_desk 退场：三条出边的角色白名单同步摘除这两个角色，
+// 其职能改由**权限点**承载（与 stateMachine.ts RICH def 逐字同源，两处必须一起改）：
+//   claim   —— 抢单是执行动作，worker/admin 足够，不退权限点；
+//   dispatch—— 派单改挂 dispatch.override（operator 默认矩阵本就含该点 → 派单能力零损失）；
+//   cancel  —— 取消改挂 ticket.manage（operator 默认矩阵本就含该点 → 取消能力零损失）。
 export const CLAIM_HALL_EDGES: readonly WorkflowTransition[] = [
-  { from: 'claim_hall', to: 'assigned', event: 'claim', allowedRoles: ['worker', 'admin', 'dispatcher', 'service_desk'] },
-  { from: 'claim_hall', to: 'assigned', event: 'dispatch', requiredFields: ['assignee'], allowedRoles: ['admin', 'dispatcher', 'service_desk'] },
-  { from: 'claim_hall', to: 'cancelled', event: 'cancel', requiredFields: ['cancel_reason'], allowedRoles: ['admin', 'dispatcher'] },
+  { from: 'claim_hall', to: 'assigned', event: 'claim', allowedRoles: ['worker', 'admin'] },
+  { from: 'claim_hall', to: 'assigned', event: 'dispatch', requiredFields: ['assignee'], allowedRoles: ['admin'], allowedPerms: ['dispatch.override'] },
+  { from: 'claim_hall', to: 'cancelled', event: 'cancel', requiredFields: ['cancel_reason'], allowedRoles: ['admin'], allowedPerms: ['ticket.manage'] },
 ] as const;
+
+/**
+ * 待派单池认领边（引擎机制，2026-10-19 F6，与 claim_hall 认领边同语义）：
+ * RICH def 的 pending_dispatch 只有 dispatch 出边（admin + dispatch.override），
+ * 而抢单端点历来允许 worker 认领待派单池的单——机制边补上，让「认领」成为
+ * 流程图上诚实的可见边（与 claim_hall 三条边同哲学：注入引擎真实行为空间）。
+ * 仅当租户 def 已含 pending_dispatch 态时注入（客户自建 claim 事件边时幂等跳过）。
+ */
+export const PENDING_DISPATCH_CLAIM_EDGE: WorkflowTransition = {
+  from: 'pending_dispatch', to: 'assigned', event: 'claim', allowedRoles: ['worker', 'admin'],
+};
+
+/**
+ * 入厅边（引擎机制，2026-10-19 F8）：派单未命中时「初态 → 抢单大厅」的转移。
+ * 此前只注入了三条**出厅**边，入厅这条在流程图上根本不存在——所以落大厅只能旁路
+ * 手写 UPDATE（客户配的门禁/必填/副作用/留痕全不生效，与 F4 派单、F6 抢单同源）。
+ * 补上入厅边后，落大厅走 transition() 主通道，成为流程图上诚实的可见边。
+ * from 取 def.initial（租户初态可能是 draft/created/待提交 等，不硬编码）。
+ */
+export function enterHallEdge(def: WorkflowDef): WorkflowTransition {
+  return { from: def.initial, to: CLAIM_HALL_STATE, event: ENTER_HALL_EVENT };
+}
 
 export interface EnsureClaimHallStateResult {
   /** 注入后的 def（深拷贝，不改入参）。 */
@@ -59,6 +90,26 @@ export function ensureClaimHallState(def: WorkflowDef): EnsureClaimHallStateResu
     next.transitions.push({ ...edge });
     if (!next.states.includes(edge.to)) next.states.push(edge.to);
     added.push({ ...edge });
+  }
+  // 入厅边：初态→claim_hall（幂等，同 from+event 已存在则跳过，客户自建优先）。
+  const enterEdge = enterHallEdge(next);
+  const enterExists = next.transitions.some((t) => t.from === enterEdge.from && t.event === enterEdge.event);
+  if (!enterExists) {
+    next.transitions.push({ ...enterEdge });
+    added.push({ ...enterEdge });
+  }
+  // 待派单池认领边：仅当租户 def 已有 pending_dispatch 态时注入（纯加法，幂等）。
+  if (next.states.includes(PENDING_DISPATCH_CLAIM_EDGE.from)) {
+    const exists = next.transitions.some(
+      (t) => t.from === PENDING_DISPATCH_CLAIM_EDGE.from && t.event === PENDING_DISPATCH_CLAIM_EDGE.event,
+    );
+    if (!exists) {
+      next.transitions.push({ ...PENDING_DISPATCH_CLAIM_EDGE });
+      if (!next.states.includes(PENDING_DISPATCH_CLAIM_EDGE.to)) {
+        next.states.push(PENDING_DISPATCH_CLAIM_EDGE.to);
+      }
+      added.push({ ...PENDING_DISPATCH_CLAIM_EDGE });
+    }
   }
   return { def: next, addedStates, added };
 }

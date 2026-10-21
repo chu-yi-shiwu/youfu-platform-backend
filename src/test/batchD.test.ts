@@ -104,6 +104,14 @@ function acceptanceHandlers(orderStatus: string, opts?: { slaMinutes?: number | 
     { match: (t: string) => t.startsWith('SELECT * FROM settlement WHERE id = $1'), reply: (_t: string, p: any[]) => ({ rows: [{ id: p[0], status: 'draft', item_count: 1 }] }) },
     { match: (t: string) => t.includes('sla_due_at = NULL'), reply: () => ({ rows: [], rowCount: 1 }) },
     { match: (t: string) => t.includes("sla_due_at = now() + ($3::int * interval '1 minute')"), reply: () => ({ rows: [], rowCount: 1 }) },
+    // 地基第二步：验收边声明 allowedPerms 后，非 admin 角色（如 reviewer）会惰性查一次
+    // role_permission（listPerms）。rows=[] = 无覆盖行 → 回退默认矩阵（reviewer 默认矩阵不含
+    // workflow.approve）→ 放行与否仍由 allowedRoles 决定，本用例期望值不变。
+    { match: (t: string) => t.includes('FROM role_permission WHERE tenant_id'), reply: () => ({ rows: [], rowCount: 0 }) },
+    // 地基④：transition 落库后会惰性查一次启用中的自动审核规则。
+    // rows=[] = 本租户未配/未启用任何规则 → tryAutoAdvance 立即返回 null（零自动行为），
+    // 与改造前逐字等价。这条 handler 的存在本身就是"新增 SQL 必须被感知"的护栏在工作。
+    { match: (t: string) => t.includes('FROM workflow_auto_rule'), reply: () => ({ rows: [], rowCount: 0 }) },
   ];
 }
 
@@ -266,6 +274,10 @@ describe('结算建草稿（createSettlementDraft · 预填/汇总/冲突）', (
 
   function draftHandlers(opts?: { settled?: any[]; orderRows?: any[] }) {
     return [
+      // F10：结算可入账状态改由租户流程 doneStates 派生，故此处多一次 workflow_def 读。
+      //   rows=[] → 回退 RICH 模板（完成态 completed/closed/evaluated），
+      //   即本用例 WO(completed) 与 WO2(closed) 的通过与否就是"零回归"的直接证据。
+      { match: (t: string) => t.includes('FROM workflow_def'), reply: () => ({ rows: [] }) },
       { match: (t: string) => t.includes('FROM work_orders') && t.includes('ANY($2'), reply: () => ({ rows: opts?.orderRows ?? orders }) },
       { match: (t: string) => t.includes('FROM settlement_item si') && t.includes('JOIN work_orders'), reply: () => ({ rows: opts?.settled ?? [] }) },
       { match: (t: string) => t.includes('FROM settlement WHERE tenant_id') && t.includes('COUNT'), reply: () => ({ rows: [{ c: 0 }] }) },
@@ -482,6 +494,8 @@ describe('mock 收口（SQL 全覆盖 · 防新增/改写 SQL 无感知）', () 
   it('createSettlementDraft 全链路（含 SAVEPOINT 重试路径）：零未命中 SQL', async () => {
     const mk = makeMock(
       [
+        // F10：结算可入账状态改由租户流程 doneStates 派生 → 主链路多一次 workflow_def 读
+        { match: (t: string) => t.includes('FROM workflow_def'), reply: () => ({ rows: [] }) },
         { match: (t: string) => t.includes('FROM work_orders') && t.includes('ANY($2'), reply: () => ({ rows: [{ id: WO, order_no: 'WO_1', status: 'completed', category: '空调维修' }] }) },
         { match: (t: string) => t.includes('FROM settlement_item si') && t.includes('JOIN work_orders'), reply: () => ({ rows: [] }) },
         { match: (t: string) => t.includes('COUNT') && t.includes('FROM settlement WHERE'), reply: () => ({ rows: [{ c: 0 }] }) },

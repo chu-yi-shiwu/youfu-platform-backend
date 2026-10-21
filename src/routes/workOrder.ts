@@ -21,13 +21,14 @@ import { incrementalLearn } from '../services/modelTrainer.js';
 // V2-F4（派单纵切 P0-10/11）：学习写回开关判定唯一来源（租户开关 + env 熔断/强制）
 import { isAutoTuneEffective } from '../repo/tenantSettings.js';
 import { emitDomainEvent } from '../db/eventBus.js';
-import { resolveDispatchShadow } from '../services/k2Shadow.js'; // R12-F1：自动派单/抢单也回填 dispatch 影子
 import { insertNotification, wechatSelfTest } from '../services/notify.js';
-import type { WorkOrderStatus, WorkflowDef } from '../engine/stateMachine.js';
+import { claimWorkOrder } from '../services/claimWorkOrder.js';
+import type { WorkOrderStatus } from '../engine/stateMachine.js';
 import { getWorkflowDef } from '../engine/workflowDef.js';
+import { CLAIM_HALL_STATE } from '../engine/claimHallEdges.js'; // F8：落抢单大厅走主通道（机制态单一事实源）
 import {
-  availableTransitions, learningTriggerStates, autoRouteFor, shouldTriggerLearning, RICH_WORK_ORDER_DEF,
-  timestampColumnFor,
+  availableTransitions, learningTriggerStates, shouldTriggerLearning,
+  resolveDispatchTarget, activeStates, doneStates, claimableStates, evaluatedStates,
 } from '../engine/stateMachine.js';
 import { safeParseJsonb } from '../util/jsonb.js';
 import { validateIntake } from '../services/dataQuality.js';
@@ -100,23 +101,6 @@ async function resolveWorkerIds(
 const MASTER_ROLES: readonly string[] = ['worker', 'operator'];
 
 /**
- * 抢单角色白名单（架构🟡12：消除硬编码角色数组）。
- * 单一事实源 = 本租户 workflow_def 的 claim 转移 allowedRoles（引擎 RICH def 默认
- * ['worker','admin','dispatcher','service_desk']）。此前本端点硬编码五角色（多放 operator，
- * 且租户在配置台改了 allowedRoles 也不生效，两处口径会漂移）。
- * 租户删掉 claim 边 → 回退引擎默认边，绝不因配置缺失把抢单通道堵死。
- */
-function claimAllowedRoles(def: WorkflowDef): readonly string[] {
-  const fromDef = (def.transitions ?? [])
-    .filter((t) => t.event === 'claim')
-    .flatMap((t) => t.allowedRoles ?? []);
-  if (fromDef.length > 0) return fromDef;
-  return RICH_WORK_ORDER_DEF.transitions
-    .filter((t) => t.event === 'claim')
-    .flatMap((t) => t.allowedRoles ?? []);
-}
-
-/**
  * 建单后自动派单（2026-08-29 从 POST /open/work_order handler 抽取为共享函数）：
  * 修复「公开报修单卡 draft、无派单、无通知、小程序通知点不开」的断链——公开报修与后台建单
  * 同一引擎待遇：SLA 起算 → dispatch_rule 匹配（降级 least_load）→ 流转 assigned + worker load+1
@@ -138,11 +122,30 @@ export async function autoDispatchAfterCreate(
   const workerRows = workers.rows.map((w: any) => ({ ...w, skill_tags: safeParseJsonb(w.skill_tags) ?? [] }));
   const needPayload = { business_type: need.business_type, skill_tags: need.skill_tags ?? undefined, priority: prio };
   const rules = await getActiveRules(client, tenantId);
-  // ④⑤ 模数共振：读 workflow_def.autoRoutes，决定本租户自动派发的目标态与策略（缺省保持旧行为：落 assigned、规则优先）
+  // ④⑤ 模数共振：读 workflow_def 决定本租户自动派发的目标态（resolveDispatchTarget：
+  //   autoRoutes 优先 → 初态首条非终态转移 → 都没有则 422，绝不硬编码回退 'assigned'——
+  //   租户 def 可能没有 assigned 态，写未知态=造失管单。见 engine/stateMachine.ts 注释）。
   const def = await getWorkflowDef(client, tenantId, 'work_order');
   const initial = def.initial;
-  const route = autoRouteFor(def, initial);
-  const dispatchTarget = route?.to ?? 'assigned';
+  const dispatchTarget = resolveDispatchTarget(def, initial);
+  if (!dispatchTarget) {
+    throw new AppError(
+      'BAD_REQUEST',
+      '本租户流程未配置可用的自动派单路径：请在工作流配置里设置 autoRoutes（如 draft → assigned），或为初始态配置一条非终态转移边',
+      422,
+    );
+  }
+  // 系统派单唯一能自带的字段是 assignee（下方 picked.id）；解析边若要求其他必填字段，
+  // 系统无法提供 → 明确 422，绝不静默跳过客户配在派单边上的门禁（那正是本修复要消灭的行为）。
+  const dispatchEdge = (def.transitions ?? []).find((t) => t.from === initial && t.to === dispatchTarget);
+  const unmetFields = (dispatchEdge?.requiredFields ?? []).filter((f) => f !== 'assignee');
+  if (unmetFields.length > 0) {
+    throw new AppError(
+      'BAD_REQUEST',
+      `自动派单目标转移要求必填字段 ${unmetFields.join(',')}，系统派单无法提供；请调整流程配置或改用人工派单`,
+      422,
+    );
+  }
   // 2026-09-14 纵切② P0-1：strategy:'least_load' 不再短路规则匹配（t-phasea 实证规则被静默废掉；
   // 规则未命中时 resolveDispatch 返回 null，自然落 pickWorker 兜底，无规则租户行为不变）。
   // dispatchTarget（route?.to）逻辑不动：目标态仍由 autoRoutes 决定。
@@ -162,49 +165,58 @@ export async function autoDispatchAfterCreate(
     autoFlow = true;
     assignee = picked.id;
     reason = resolved ? resolved.reason : 'auto dispatched by least_load fallback';
-    // 074 里程碑回填：自动派单不走 transition()（load 手工 +1 的既有旁路），此处按 dispatchTarget
-    // 同步回填里程碑列（映射与 transition() 同源 stateMachine.STATUS_TIMESTAMP_COLUMNS，口径一致）。
-    const milestoneCol = timestampColumnFor(dispatchTarget);
-    await client.query(
-      `UPDATE work_orders SET status = $1, assignee_id = $2, auto_flow = true, updated_at = now()${milestoneCol ? `, ${milestoneCol} = now()` : ''} WHERE id = $3`,
-      [dispatchTarget, picked.id, row.id],
-    );
-    await client.query('UPDATE worker SET load = load + 1 WHERE id = $1', [picked.id]);
-    await client.query(
-      `INSERT INTO ticket_event (tenant_id, work_order_id, type, from_status, to_status, actor, payload)
-       VALUES ($1,$2,'assign',$3,$4,'auto_dispatch', $5)`,
-      [tenantId, row.id, initial, dispatchTarget, JSON.stringify({ worker_id: picked.id })],
-    );
-    // ④ 口径对齐：domain_event.type 一律为"结果状态"（与 transition() 一致），自动派单落入 dispatchTarget。
-    await emitDomainEvent(client, { tenantId, entityType: 'work_order', entityId: row.id, type: dispatchTarget, actor: 'auto_dispatch', payload: { worker_id: picked.id } });
-    // R12-F1：自动派单回填 dispatch 影子 actual（best-effort，内部吞错不影响主链路）
-    await resolveDispatchShadow(client, tenantId, String(row.id), String(picked.id));
-    // A5 派单通知：落库通知被派单人（sms/push 为 stub，诚实未真实发送）
+    // F4（2026-10-19 根治）：派单从旁路手写 UPDATE 改为走 transition() 主通道——
+    //   客户配在派单边上的 requiredFields / sideEffects / 自动审核规则（tryAutoAdvance）
+    //   从此在自动路径同样生效，不再"人走门、系统翻墙"。
+    //   F4 深修（systemActor）：allowedRoles/allowedPerms 是**人类**门禁（约束"谁能点按钮"），
+    //   系统 actor 无角色可谈。客户在同一份 def 里配 autoRoutes（=显式授权系统沿此路自动
+    //   派单）与 allowedRoles（=约束人类操作者）不矛盾：前者授权系统，后者约束人。
+    //   若系统也守 allowedRoles，则任何配了角色门禁的派单边 = 自动派单永远 403，两个配置
+    //   互相抵消——那不是从严，是让客户的配置变得无意义（生产实证：demo_tenant 开通样板
+    //   的 submit 边带 allowedRoles=['admin','operator']，F4 首版即 403，见
+    //   src/test/dispatchSystemActor.test.ts）。与 tryAutoAdvance 的 systemAuto 同源头：
+    //   配置须客户显式启用，系统执行只跳过人类门禁；拓扑/必填/副作用/自动审核一个不跳。
+    await transition(client, tenantId, row.id, dispatchTarget as WorkOrderStatus, {
+      actor: 'auto_dispatch',
+      fields: { assignee: picked.id },
+      autoFlow: true,
+      systemAuto: true,
+      eventLogType: 'assign', // 事件流保持 assign 类型（publicReport 平均响应时长按它聚合）
+      eventOverride: dispatchEdge?.event,
+    });
+    // A5 派单通知：落库通知被派单人（sms/push 为 stub，诚实未真实发送）。
+    // transition() 不发通知（人工流转的通知由各端点负责），系统派单的 fan-out 保留在此。
     await insertNotification(client, {
       tenantId, recipient: picked.id, recipientKind: 'worker', type: 'dispatch', workOrderId: row.id,
       title: '您有一条新工单', body: `工单 ${row.order_no} 已自动派给您`,
       payload: { order_no: row.order_no, from_status: initial, to_status: dispatchTarget, page: `pages/worker/task-detail/task-detail?id=${row.id}` },
     });
   } else {
-    // 滴滴式未命中自动派单：归属抢单大厅（claim_hall），待人员抢单
-    await client.query(
-      'UPDATE work_orders SET status = $1, auto_flow = false, updated_at = now() WHERE id = $2',
-      ['claim_hall', row.id],
-    );
+    // 滴滴式未命中自动派单：归属抢单大厅（claim_hall），待人员抢单。
+    // F8（2026-10-19 根治）：与 F4 自动派单、F6 抢单同源——此处原本旁路手写 UPDATE，
+    //   客户配在入厅边上的门禁（谁能落/要填什么/落了做什么）与留痕、里程碑全部落空。
+    //   现走 transition() 主通道：拓扑、必填、副作用、里程碑、ticket_event/domain_event
+    //   全部生效；入厅边（初态→claim_hall）由 claimHallEdges 机制注入，流程图上可见。
+    //   systemAuto=true：系统执行只跳过人类角色/权限门禁（同 F4/F6 论证），拓扑/必填/
+    //   副作用/自动审核一个不跳。事件 type 仍 'enter_hall'（存量消费方口径零影响）。
     // V2-F3（派单纵切 P0-8 失配观测，2026-09-14）：落大厅原因细分——
     //   no_available_worker = 本租户根本没有 active 工人（容量问题）；
     //   no_rule_matched      = 有在岗工人但规则/兜底都没接住（配置/技能失配问题，正是
     //                          §A-2「空调单派给电工」类历史事故的观测口）。
     //   计数经 GET /stats 的 claim_hall_reasons 聚合（repo/stats.ts 按 enter_hall 事件
     //   payload->>'reason' 分组），管理员可从 stats 面板直接看到两种失配的量级。
+    //   走主通道后 reason 由 transition 的 payloadExtra 携带，聚合口径逐字保住。
     const hallReason = workerRows.some((w: { active: boolean }) => w.active)
       ? 'no_rule_matched'
       : 'no_available_worker';
-    await client.query(
-      `INSERT INTO ticket_event (tenant_id, work_order_id, type, from_status, to_status, actor, payload)
-       VALUES ($1,$2,'enter_hall',$3,$3,'system', $4)`,
-      [tenantId, row.id, 'claim_hall', JSON.stringify({ reason: hallReason })],
-    );
+    await transition(client, tenantId, row.id, CLAIM_HALL_STATE as WorkOrderStatus, {
+      actor: 'auto_dispatch',
+      autoFlow: false,
+      systemAuto: true,
+      eventLogType: 'enter_hall',
+      eventOverride: 'enter_hall',
+      payloadExtra: { reason: hallReason },
+    });
     // 2026-09-14 纵切② P0-4：自动派单未命中此前无任何管理员感知（断链）——镜像
     // slaScheduler.ts admin fan-out 模式，通知本租户全部 active admin。
     // QA-P1 修正（2026-09-14）：withTenantClient 是 BEGIN→fn→COMMIT（db/pool.ts），通知段 SQL
@@ -355,7 +367,10 @@ const transitionSchema = z.object({
 // 生成对齐前端的响应：未命中派单诚实返回 claim_hall（A 点确认）
 // DEF-1 修复：code 仅作成功标记（0），真实业务工单号通过 order_no 返回。
 // DEF-3 修复：返回内部 id（uuid）—— /transition/:id 需要它，否则建单后无法流转（契约错配）。
-export function toCreateRes(row: any, autoFlow: boolean, assignee: string | null, reason: string, _landedStatus = 'assigned') {
+// F10：删掉从未被使用的 _landedStatus 形参——它的默认值 assigned 是个隐患：
+//   默认值暗示派单目标可以兜底成 assigned，与 F4「严禁硬编码回退」的决议正面冲突，
+//   而返回体根本不含这个字段，纯粹是误导。
+export function toCreateRes(row: any, autoFlow: boolean, assignee: string | null, reason: string) {
   return {
     ok: true, code: 0, id: row.id, order_no: row.order_no, status: row.status, auto_flow: autoFlow, assignee, reason,
     source: row.source ?? 'backend', fault_type: row.fault_type ?? null,
@@ -447,7 +462,7 @@ router.post('/open/work_order', async (req, res, next) => {
       void dispatchEvent(tenantId, { type: 'assign', workOrderId: woId, fromStatus: 'draft', toStatus: result.dispatchTarget, actor: 'auto_dispatch', payload: { worker_id: result.assignee } }).catch(() => {});
     }
     return res.status(result.created ? 201 : 200).json({
-      ...toCreateRes(result.final, result.autoFlow, result.assignee, result.reason, result.dispatchTarget),
+      ...toCreateRes(result.final, result.autoFlow, result.assignee, result.reason),
       warnings: q.warnings, // D3：软提示（位置/电话/术语建议），不阻断
     });
   } catch (e) {
@@ -472,6 +487,8 @@ router.post('/open/work_order/:id/transition', async (req, res, next) => {
       const r = await transition(client, tenantId, req.params.id, to as WorkOrderStatus, {
         actor: role ?? 'system',
         role,
+        // 地基第二步：allowedPerms 门禁由 transition() 内部惰性取权限点（仅声明 allowedPerms
+        // 的转移才查库），调用方无需透传——存量路径零额外查询、零行为变化。
         fields,
       });
       // 审查修复（架构🔴1）：本端点**不加** ticket.manage 权限点——
@@ -504,8 +521,10 @@ router.post('/open/work_order/:id/transition', async (req, res, next) => {
       // 无法单测，SAVEPOINT 修复零回归护栏）。行为与抽取前逐行等价，learn_error 语义不变。
       const learnStep = await runIncrementalLearnStep(client, tenantId, req.params.id, to, r.from);
       learnError = learnStep.learnError;
+      // F10：评价完成态由 def 派生（存在 satisfy 入边的目标态），不再写死 evaluated 这个名
+      const evaluatedSet = evaluatedStates(await getWorkflowDef(client, tenantId, 'work_order'));
       // 评价完成回写满意度评分（UOne 满意度颗粒度）
-      if (to === 'evaluated' && typeof score === 'number') {
+      if (evaluatedSet.includes(to) && typeof score === 'number') {
         await client.query(
           'UPDATE work_orders SET satisfaction_score = $1 WHERE id = $2 AND tenant_id = $3',
           [score, req.params.id, tenantId],
@@ -513,7 +532,7 @@ router.post('/open/work_order/:id/transition', async (req, res, next) => {
       }
       // E-9 BUG-004：评价流转自动生成结算草稿（draft，待 admin 确认）。
       // SAVEPOINT 隔离——结算故障不拖垮评价流转；幂等（已有明细则跳过）；失败经 settle_error 透出。
-      if (to === 'evaluated') {
+      if (evaluatedSet.includes(to)) {
         // created_by 固定留痕 'auto:evaluated'（与人工 POST /settlements 的 username 留痕相区分，FE 据此打「自动生成」标记）
         const settleStep = await runAutoSettleStep(client, tenantId, req.params.id);
         settleError = settleStep.settleError;
@@ -1045,20 +1064,28 @@ router.post('/open/work_order/:id/transpond', async (req, res, next) => {
   }
 });
 
-// GET /api/v1/open/claim-hall —— 抢单大厅：列出未分配(claim_hall/pending_dispatch)工单，可按部门过滤
+// GET /api/v1/open/claim-hall —— 抢单大厅：列出可被认领的工单（池态由流程派生），可按部门过滤
 router.get('/open/claim-hall', async (req, res, next) => {
   try {
     const tenantId = res.locals.auth.tenantId;
     const department = req.query.department as string | undefined;
-    const items = await withTenantClient(tenantId, (client) => {
-      const conds = ['tenant_id=$1', "status IN ('claim_hall','pending_dispatch')"];
-      const params: unknown[] = [tenantId];
+    const { items, def } = await withTenantClient(tenantId, async (client) => {
+      // F10：池态不再写死 ('claim_hall','pending_dispatch')——与认领端点守卫共用
+      //   claimableStates(def)（写在代码里的名单换成"能 claim 的态即池"的派生），
+      //   杜绝「列表查得到、认领却 409」的两份字面量漂移。
+      //   def 已含引擎机制注入；内置模板（RICH + 机制边）下结果逐字 = claim_hall/pending_dispatch。
+      const wdef = await getWorkflowDef(client, tenantId, 'work_order');
+      const poolSet = claimableStates(wdef);
+      if (poolSet.length === 0) return { items: [] as unknown[], def: wdef }; // 流程无认领边 = 无池，诚实返回空
+      const conds = ['tenant_id=$1', 'status = ANY($2::text[])'];
+      const params: unknown[] = [tenantId, poolSet];
       if (department) { params.push(department); conds.push(`department = $${params.length}`); }
-      return client
-        .query(`SELECT * FROM work_orders WHERE ${conds.join(' AND ')} ORDER BY created_at ASC LIMIT 500`, params)
-        .then((r) => r.rows);
+      const r = await client.query(
+        `SELECT * FROM work_orders WHERE ${conds.join(' AND ')} ORDER BY created_at ASC LIMIT 500`,
+        params,
+      );
+      return { items: r.rows, def: wdef };
     });
-    const def = await withTenantClient(tenantId, (client) => getWorkflowDef(client, tenantId, 'work_order'));
     const out = items.map((it: any) => ({
       ...it,
       code: it.order_no,
@@ -1073,70 +1100,32 @@ router.get('/open/claim-hall', async (req, res, next) => {
 });
 
 // POST /api/v1/open/work_order/:id/claim —— 抢单（人员认领未分配工单，部门不匹配驳回）
-// 门禁来源（架构🟡12）：本租户 workflow_def 的 claim 转移 allowedRoles（引擎 RICH def 默认
-// worker/admin/dispatcher/service_desk），不再在本文件硬编码角色数组。
-// ⚠️ 行为变更：此前硬编码多放了 operator → 现按引擎口径收口；operator 请用派单（dispatch.override）。
-// 需要放行的租户：到 业务规则设置台 给 claim 边 allowedRoles 加上 operator 即生效（配置即事实）。
+// F6（2026-10-19）：本体抽去 services/claimWorkOrder.ts，并入 transition() 主通道——
+//   客户配在认领边上的 allowedRoles/allowedPerms/requiredFields/sideEffects/自动审核
+//   全部生效（与此前自动派单 F4 同一次根治）；目标态从客户 def 的认领边派生。
+//   门禁单一事实源 = transition()（本文件不再另写角色白名单，两处口径不再漂移）。
 // C-2 身份根治：token userId 即 worker.id（id 同源），body workerId 不一致 403。
 router.post('/open/work_order/:id/claim', async (req, res, next) => {
   try {
     const tenantId = res.locals.auth.tenantId;
     const role = res.locals.auth.role;
-    const b = z.object({ workerId: z.string().min(1).optional(), department: z.string().optional() }).parse(req.body);
+    // passthrough：客户在认领边配 requiredFields 时，工人端透传的字段原样进 transition()
+    // （与通用 transition 端点同口径；workerId/department 是端点自有参数，剥离不进 fields）。
+    const b = z
+      .object({ workerId: z.string().min(1).optional(), department: z.string().optional() })
+      .passthrough()
+      .parse(req.body);
     // C-2 身份根治：token 的 userId 即 worker.id（worker 与 account_user id 同源）。
     // 服务端只信 token 身份；body.workerId 仅兼容旧客户端——若传且与 token 身份不一致 → 403（堵伪造/替抢）。
     const authUserId = res.locals.auth.userId;
     if (b.workerId && authUserId && b.workerId !== authUserId) {
       throw new AppError('FORBIDDEN', 'workerId mismatch with authenticated identity', 403);
     }
-    // P0 修复（2026-08-23 审查）：token 的 userId 是 account_user.id（uuid），而 worker.id 是业务编码。
-    // 必须经 worker.account_id 反查真实 worker.id，不能直接拿 userId 当 worker.id 查。
     const workerId = authUserId ?? b.workerId!; // 优先 token 身份；无 token 身份时回退 body（兼容）
-    const ticket = await withTenantClient(tenantId, async (client) => {
-      const def = await getWorkflowDef(client, tenantId, 'work_order');
-      const allowed = claimAllowedRoles(def);
-      if (role && !allowed.includes(role)) {
-        throw new AppError('FORBIDDEN', `role ${role} not allowed to claim`, 403);
-      }
-      const cur = await findOneForUpdate(client, tenantId, req.params.id);
-      if (!cur) throw new AppError('NOT_FOUND', 'work order not found', 404);
-      if (cur.status !== 'claim_hall' && cur.status !== 'pending_dispatch') {
-        throw new AppError('CONFLICT', `work order not in claim hall (status=${cur.status})`, 409);
-      }
-      const worker = await client.query(
-        'SELECT id, department FROM worker WHERE tenant_id=$2 AND (account_id=$1 OR id=$1) LIMIT 1',
-        [workerId, tenantId],
-      );
-      if (worker.rowCount === 0) throw new AppError('NOT_FOUND', 'worker not found', 404);
-      // P0 修复：assignee_id 统一存 worker.id（业务编码），与派单路径一致——不能用 token uuid
-      const realWorkerId = worker.rows[0].id;
-      const wDept = worker.rows[0].department;
-      const woDept = cur.department;
-      // 部门级抢单：工单与人员均有部门且不一致 → 驳回（保持简单，跨部由调度/管理员另行处理）
-      if (woDept && wDept && woDept !== wDept) {
-        throw new AppError('FORBIDDEN', `worker department ${wDept} mismatch work order department ${woDept}`, 403);
-      }
-      // 074 里程碑回填：抢单与自动派单同为 assigned 旁路写路径，同步回填 assigned_at（口径一致）。
-      await client.query(
-        'UPDATE work_orders SET status=$1, assignee_id=$2, auto_flow=false, updated_at=now(), assigned_at=now() WHERE id=$3 AND tenant_id=$4',
-        ['assigned', realWorkerId, req.params.id, tenantId],
-      );
-      await client.query('UPDATE worker SET load = load + 1 WHERE id=$1', [realWorkerId]);
-      await client.query(
-        `INSERT INTO ticket_event (tenant_id, work_order_id, type, from_status, to_status, actor, payload)
-         VALUES ($1,$2,'claim',$3,$4,'worker',$5)`,
-        [tenantId, req.params.id, cur.status, 'assigned', JSON.stringify({ worker_id: realWorkerId })],
-      );
-      await emitDomainEvent(client, { tenantId, entityType: 'work_order', entityId: req.params.id, type: 'assigned', actor: 'worker', payload: { worker_id: realWorkerId, via: 'claim' } });
-      // R12-F1：抢单也是"人工实际"派单信号 → 回填 dispatch 影子 actual
-      await resolveDispatchShadow(client, tenantId, String(req.params.id), String(realWorkerId));
-      await insertNotification(client, {
-        tenantId, recipient: realWorkerId, type: 'claim', workOrderId: req.params.id,
-        title: '您已抢到工单', body: `工单 ${cur.order_no} 已由您认领`,
-        payload: { order_no: cur.order_no, page: `pages/worker/task-detail/task-detail?id=${req.params.id}` },
-      });
-      return findOne(client, tenantId, req.params.id);
-    });
+    const { workerId: _w, department: _d, ...fields } = b;
+    const ticket = await withTenantClient(tenantId, (client) =>
+      claimWorkOrder(client, tenantId, { orderId: req.params.id, workerId, role, fields }),
+    );
     return res.json({ ok: true, code: 0, ticket });
   } catch (e) {
     next(e);
@@ -1194,13 +1183,27 @@ router.get('/open/me/summary', async (req, res, next) => {
       );
       if (w.rowCount === 0) return null;
       const workerId = w.rows[0].id; // 真实 worker.id（业务编码），后续统计/派单均用它
+      // 「在办 / 已完成」口径必须由客户流程派生（与 ticket.ts 的 load 净结算、slaScheduler
+      //   的 SLA 活跃集共用 activeStates/doneStates），杜绝三处口径漂移。
+      //   此前这里把 'completed'/'cancelled'/'claim_hall' 三个状态名写死在 SQL 里，后果：
+      //   ① 流程里的其它终态（closed / evaluated / 客户自定义的任意终态）**全被算成在办**
+      //      ——实测 t-verification 有 4 张 evaluated + 1 张 closed 正被报成「在办」；
+      //   ② 客户改完成态名 → done_count 恒 0，且那些单倒灌进 active_count（双重错）；
+      //   ③ 完全没排除挂起态 → 人已离场仍算在办（当前生产无挂起单，属未触发的隐患）。
+      // F10：机制态/池态不再写死 'claim_hall'/'pending_dispatch' 两个名字——它们语义上
+      //   不属于任何人名下，剔除口径统一取 claimableStates(def)（= 存在认领边的池态），
+      //   与 GET /open/claim-hall 列表、认领端点守卫三处同源。
+      const workerDef = await getWorkflowDef(client, tenantId, 'work_order');
+      const poolSet = claimableStates(workerDef);
+      const activeSet = activeStates(workerDef).filter((s) => !poolSet.includes(s));
+      const doneSet = doneStates(workerDef);
       const stats = await client.query(
         `SELECT
-           COUNT(*) FILTER (WHERE status NOT IN ('completed','cancelled','claim_hall')) AS active_count,
-           COUNT(*) FILTER (WHERE status IN ('completed')) AS done_count,
+           COUNT(*) FILTER (WHERE status = ANY($3::text[])) AS active_count,
+           COUNT(*) FILTER (WHERE status = ANY($4::text[])) AS done_count,
            COUNT(*) FILTER (WHERE created_at::date = CURRENT_DATE) AS today_new
          FROM work_orders WHERE tenant_id=$1 AND assignee_id=$2`,
-        [tenantId, workerId],
+        [tenantId, workerId, activeSet, doneSet],
       );
       return { worker: w.rows[0], stats: stats.rows[0] };
     });

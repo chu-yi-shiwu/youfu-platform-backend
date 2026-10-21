@@ -24,6 +24,13 @@ import { upsertWorkflowDefDraft } from '../engine/workflowDefChange.js';
 import { isAutoTuneEffective } from '../repo/tenantSettings.js';
 import { DEFAULT_WORK_ORDER_DEF, RICH_WORK_ORDER_DEF, type WorkflowDef } from '../engine/stateMachine.js';
 import { requirePermission } from '../middleware/role.js';
+import { assertWorkflowConfigEditableByTenant } from '../middleware/workflowConfigGuard.js';
+import {
+  getShadowReplayStats,
+  getAutoTuneRuleVersionAt,
+  summarizeShadowReplay,
+  shadowTuneThresholds,
+} from '../services/k2Shadow.js';
 
 const router = Router();
 
@@ -97,6 +104,11 @@ router.post('/optimize/generate-mining', async (req, res, next) => {
       await requirePermission(res.locals.auth, client, 'dashboard.view');
       const result = await processMining(client, tenantId, { entityType, days: daysRaw });
       const dec = generateMiningOptimizations(result);
+      // 097 归属闸门：本端点平时只生成建议（落 optimization_feedback），
+      //   但 autoTune 打开时会**顺手把建议直接写成 live 流程定义** —— 那就是「改流程」，
+      //   必须过同一道闸，否则客户开了自动改流程就能绕过收口。
+      //   放在 INSERT 之前：被拦时一个建议都不落（要么完整生成，要么整体不动）。
+      if (autoTune) await assertWorkflowConfigEditableByTenant(client);
       for (const d of dec) {
         await client.query(
           `INSERT INTO optimization_feedback (tenant_id, scope, target, recommendation, reason, status)
@@ -129,6 +141,52 @@ router.get('/optimize/list', async (req, res, next) => {
         .then((r) => r.rows),
     );
     return res.json({ ok: true, code: 0, items });
+  } catch (e) {
+    next(e);
+  }
+});
+
+// 影子回放只读出口（任务 #356 解挂判据）：ai_shadow_suggestions 此前只写不读，
+// 「影子达标才开 MODEL_AUTO_TUNE」没有机读通道，达标与否只能靠人跑 SQL 手算。
+// 本端点把判定变成一次 GET。只读端点，权限取 dashboard.view（与 generate-mining 同款只读语义）。
+// 双口径（2026-10-22）：dispatch=「人工派单可预测性」（事实描述，非缺陷）；新增
+//   auto_tune_dispatch=「AUTO_TUNE 派单一致性」（规则派单 vs 现网实际，AUTO_TUNE 验收目标），
+//   其统计带时间窗切分（只计入规则版本生成后创建的影子行，防同一批数据又当教材又当考卷）。
+// 阈值默认是**建议值**，响应里如实标注来源并支持 env 覆盖，不伪装成既定标准。
+router.get('/optimize/shadow-replay', async (req, res, next) => {
+  try {
+    const tenantId = res.locals.auth.tenantId;
+    const daysRaw = req.query.days;
+    const days = daysRaw === undefined || String(daysRaw) === '' ? undefined : Number(daysRaw);
+    if (days !== undefined && (!Number.isInteger(days) || days < 1 || days > 3650)) {
+      throw new AppError('VALIDATION_001', 'days 必须是 1~3650 的整数', 422);
+    }
+    const th = shadowTuneThresholds();
+    const { kinds, ready, reasons, auto_tune_criteria } = await withTenantClient(tenantId, async (client) => {
+      await requirePermission(res.locals.auth, client, 'dashboard.view');
+      // AUTO_TUNE 口径的时间窗基准：当前生效预测输入集（dispatch_rule + 模型）的版本时间。
+      const ruleVersionAt = await getAutoTuneRuleVersionAt(client, tenantId);
+      const rows = await getShadowReplayStats(client, tenantId, days, ruleVersionAt);
+      return summarizeShadowReplay(rows, th);
+    });
+    return res.json({
+      ok: true,
+      code: 0,
+      window_days: days ?? null,
+      thresholds: {
+        min_judged: th.minJudged,
+        category: th.category,
+        dispatch: th.dispatch,
+        auto_tune_dispatch: th.autoTuneDispatch,
+        source: '建议值（未经业务确认），可用 SHADOW_MIN_JUDGED / SHADOW_CATEGORY_HITRATE / SHADOW_DISPATCH_HITRATE / SHADOW_AUTOTUNE_HITRATE 覆盖',
+      },
+      ready,
+      ready_text: ready ? '影子达标，具备开启 MODEL_AUTO_TUNE 的数据条件' : '影子未达标，暂不具备开启 MODEL_AUTO_TUNE 的数据条件',
+      reasons,
+      kinds,
+      // AUTO_TUNE 一致性口径的单一状态通道（一行样本都没有时也如实给不达标，不许假绿）
+      auto_tune_criteria,
+    });
   } catch (e) {
     next(e);
   }
@@ -203,6 +261,9 @@ router.put('/workflow/def', async (req, res, next) => {
     // 不再能单人绕过提交→审核改 live（审批状态机的自审禁令/版本锚/权限分离重新闭合）。
     // 端点保留不删（兼容旧调用方），语义从「生效」变「存草稿」（FE/mp 现用主端点，零感知）。
     await withTenantClient(tenantId, async (client) => {
+      // 097 归属闸门：本端点与 workflowDef 写端点同为「改流程」，必须同一道闸——
+      //   否则客户 admin 从 /optimize 这条旁路就能改流程，收口形同虚设。
+      await assertWorkflowConfigEditableByTenant(client);
       await requirePermission(res.locals.auth, client, 'workflow.edit');
       await upsertWorkflowDefDraft(client, tenantId, entityType, cleanDef, {
         operator: res.locals.auth.username,
@@ -230,6 +291,9 @@ router.post('/optimize/apply-workflow', async (req, res, next) => {
       });
     }
     const result = await withTenantClient(tenantId, async (client) => {
+      // 097 归属闸门：applyWorkflowOptimizations 直写 live 流程定义，与 PUT /workflow/def
+      //   同为「改流程」。AUTO_TUNE 关闭时本端点早退（只记录不应用），开了就是真改，必须过闸。
+      await assertWorkflowConfigEditableByTenant(client);
       await requirePermission(res.locals.auth, client, 'optimize.tune');
       return applyWorkflowOptimizations(client, tenantId);
     });

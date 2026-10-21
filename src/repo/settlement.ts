@@ -5,9 +5,38 @@
 import type { PoolClient } from 'pg';
 import { AppError } from '../middleware/error.js';
 import { csvEscape } from '../services/csvUtil.js';
+import { getWorkflowDefOrDefault } from '../engine/workflowDef.js';
+import { RICH_WORK_ORDER_DEF, doneStates } from '../engine/stateMachine.js';
 
-/** 结算单可入账的工单状态口径（完成态口径，与 doneStates 富模板对齐）。 */
+/**
+ * 兜底口径锚（= RICH 内置模板的 doneStates）：仅在租户 def 派生出空清单时使用。
+ *
+ * F10：此前结算可入账状态就写死成这份 ['completed','closed','evaluated']，与
+ *   def.config.doneStates 是**两份事实源**——租户在流程配置里把完成态改成别的名字
+ *   （如 'settled'/'已验收'），结算侧不认：干完的单被判 bad_status，**钱结不出去**，
+ *   且报错只说"状态不符"，没人看得出根因是流程改名。
+ */
 export const SETTLEMENT_ELIGIBLE_STATUSES = ['completed', 'closed', 'evaluated'] as const;
+
+/**
+ * 结算可入账状态口径 = 租户工单流程的**完成态**（doneStates）——钱跟着客户的流程走。
+ * 零回归要点：租户无自定义 def 时回退 **RICH 模板**（其 doneStates 与上面旧常量逐字相同），
+ *   而非 DEFAULT 4 态图（那会把 closed/evaluated 排除掉，反向收紧结算范围）。
+ */
+export async function settlementEligibleStatuses(client: PoolClient, tenantId: string): Promise<string[]> {
+  try {
+    const def = await getWorkflowDefOrDefault(client, tenantId, 'work_order', RICH_WORK_ORDER_DEF);
+    const ds = doneStates(def);
+    if (ds.length > 0) return ds;
+  } catch (e) {
+    // 降级纪律（E3 不静默失败）：结算是钱的路径，不能因为读流程配置抖动就整体 500。
+    //   读不到 → 退回内置模板口径（= 历史常量）+ 留日志，管理员能在日志里看到降级发生过。
+    console.warn('[settlement] 读取租户工单流程失败，可入账口径降级为内置模板默认值', {
+      tenantId, err: (e as Error)?.message,
+    });
+  }
+  return [...(SETTLEMENT_ELIGIBLE_STATUSES as readonly string[])];
+}
 
 export interface ConflictItem {
   work_order_id: string;
@@ -94,12 +123,14 @@ export async function createSettlementDraft(
     [tenantId, workOrderIds],
   );
   const settledSet = new Set(settled.rows.map((r: any) => r.work_order_id));
+  // F10：可入账状态不再是写死的名单——取租户流程的完成态（见 settlementEligibleStatuses）。
+  const eligible = await settlementEligibleStatuses(client, tenantId);
   const conflicts: ConflictItem[] = [];
   for (const id of workOrderIds) {
     const row = foundMap.get(id);
     if (!row) {
       conflicts.push({ work_order_id: id, order_no: null, reason: 'not_found' });
-    } else if (!(SETTLEMENT_ELIGIBLE_STATUSES as readonly string[]).includes(row.status)) {
+    } else if (!eligible.includes(row.status)) {
       conflicts.push({ work_order_id: id, order_no: row.order_no, reason: 'bad_status', status: row.status });
     } else if (settledSet.has(id)) {
       conflicts.push({ work_order_id: id, order_no: row.order_no, reason: 'already_settled' });

@@ -108,7 +108,9 @@ for (const f of readdirSync(root).filter((x) => /^\d+_.*\.sql$/.test(x))) {
     /DROP FUNCTION IF EXISTS/i.test(sql) ||
     // DO $$ 匿名块 + 块内条件跳过（070 写法：先比对目标定义，一致则 RAISE NOTICE 跳过，
     // 不一致才删旧建新；终态收敛、可重跑）。QA 实测 070 连跑两次第二次 NOTICE 跳过。
-    /DO\s+\$\$[\s\S]*?IF[\s\S]*?THEN[\s\S]*?\$\$;\s*$/i.test(sql.trim());
+    // 091 修正：去掉原 `\s*$` 末尾锚定——DO 块位于文件中间（其后还有自证段）同样是幂等写法，
+    // 锚定到末尾属过严误判（会把 091 这种"条件性 UPDATE + IF 跳过"错杀成非幂等）。
+    /DO\s+\$\$[\s\S]*?IF[\s\S]*?THEN[\s\S]*?\$\$;/i.test(sql);
   if (!guarded) {
     console.error(`  非幂等迁移 ${f}（缺 IF NOT EXISTS / ON CONFLICT 等幂等保护）`);
     nonIdem++;

@@ -51,9 +51,11 @@ import acceptanceRouter from './routes/acceptance.js';// 注册制批次三 卡4
 import energyCollectionRouter from './routes/energyCollection.js';// T303a 能耗采集收单（能源平台 webhook + worker token + 只读列表）
 import platformRouter from './routes/platform.js';// 城市级平台层（E_min）
 import templateMarketRouter from './routes/templateMarket.js';// E2 模板市场（官方模板库/应用/效果）
+import platformWorkflowRouter from './routes/platformWorkflow.js';// 097：平台运维代客配置流程 + 归属开关
 import openApiRouter from './routes/openApi.js';// E0_open 开放 API（app_key 认证）
 import metaRouter from './routes/meta.js';// #938 展示标签字典（公开端点，挂 auth 之前）
 import intakeOptionsRouter from './routes/intakeOptions.js';// FE Intake 申报页配置聚合（租户级，挂 auth 之后）
+import metaTenantLabelRouter from './routes/metaTenantLabel.js';// R1-B：租户覆盖字典**写**端点（必须挂 auth 之后，写侧要 res.locals.auth.tenantId）
 import { startInspectionScheduler } from './scheduler/inspectionScheduler.js';// G3 真 cron 调度
 import { startSlaScheduler } from './scheduler/slaScheduler.js';// 拆雷三件套②：SLA 定时扫描+升级通知
 import { startTemplateEffectsScheduler } from './scheduler/templateEffectScheduler.js';// E2 效果回写 cron
@@ -144,6 +146,7 @@ app.use((req, res, next) => {
 // 平台管理员与租户账号两套体系互不干扰；登录公开，其余 platformAdminAuth 保护）。
 app.use('/api/v1/platform', platformRouter);
 app.use('/api/v1/platform', templateMarketRouter);
+app.use('/api/v1/platform', platformWorkflowRouter);
 
 // E0_open 开放 API（第三方/上级平台/ISV 凭 app_key 调聚合）：独立于租户/平台 JWT，
 // 走 openApiAuth（app_key+secret 双因子 + scopes + 调用审计）。
@@ -159,7 +162,9 @@ app.use('/api/v1', energyCollectionRouter);
 app.use('/api/v1', publicAiChatRouter);
 // ③ 微信 JSSDK 签名端点（免登录，挂 auth 之前；供 H5 在微信内录音前注入 wx.config）
 app.use('/api/v1/wechat', wechatRouter);
-// #938 展示标签字典（免登录，挂 auth 之前；展示标签非敏感，apiGuard 白名单已登记 meta）
+// #938 展示标签字典（免登录，挂 auth 之前；展示标签非敏感，apiGuard 白名单已登记 meta）。
+// 只有平台字典 GET /meta/labels 在此；租户覆盖字典 GET /meta/labels/me 已迁到
+// metaTenantLabelRouter（挂 auth 之后）——它要读 res.locals.auth.tenantId，挂这里会恒 401。
 app.use('/api/v1', metaRouter);
 
 // 认证/租户（生产化①：AUTH_MODE=dev|prod，prod 强制 JWT）：仅对 /api 生效，
@@ -201,6 +206,10 @@ app.use('/api/v1', tenantInfoRouter);
 app.use('/api/v1/workflow-defs', workflowDefRouter);
 app.use('/api/v1', basicDataRouter);
 app.use('/api/v1', intakeOptionsRouter);// FE Intake 申报页配置聚合（租户级，需登录；经 authMiddleware 得 tenantId）
+// R1-B 租户覆盖字典**读+写**（GET /meta/labels/me、PUT /meta/labels/me/{scope}/{key}）：
+// 必须挂在 authMiddleware **之后**——两者都要 res.locals.auth.tenantId，而 meta.ts 的
+// 免鉴权挂载点（GET /meta/labels，FE/mp 启动即拉）在 auth 之前，挂那里恒 401。
+app.use('/api/v1', metaTenantLabelRouter);
 app.use('/api/v1', adminAiChatRouter);// 管理对话：POST /admin/ai-chat（Bearer JWT + admin/operator）
 app.use('/api/v1', equipmentRouter);// P4 设备管理（设备 / 设备类型 / 设备厂商，主数据 CRUD，对齐 UOne C 族）
 app.use('/api/v1/flow', businessFlowRouter);

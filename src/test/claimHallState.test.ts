@@ -51,7 +51,9 @@ describe('ensureClaimHallState（纯函数 · 与 acceptanceEdges 同构）', ()
     const { def, addedStates, added } = ensureClaimHallState(FOUR_STATE_DEF as any);
     expect(def.states).toContain('claim_hall');
     expect(addedStates).toEqual(['claim_hall']);
-    expect(added.map((e) => e.event).sort()).toEqual(['cancel', 'claim', 'dispatch']);
+    // F8：新增入厅边（draft --enter_hall--> claim_hall）——落大厅从此走 transition() 主通道，
+    //   不再旁路手写 UPDATE（与 F4 派单、F6 抢单同源的最后一段）。
+    expect(added.map((e) => e.event).sort()).toEqual(['cancel', 'claim', 'dispatch', 'enter_hall']);
     for (const edge of CLAIM_HALL_EDGES) {
       const t = def.transitions.find((x: any) => x.from === CLAIM_HALL_STATE && x.event === edge.event)!;
       expect(t).toBeDefined();
@@ -90,9 +92,14 @@ describe('ensureClaimHallState（纯函数 · 与 acceptanceEdges 同构）', ()
 
 describe('端到端：4 态 def 租户 派单未命中 → 落大厅 → transition 出厅', () => {
   it('派单未命中（无工人）→ 真实 autoDispatchAfterCreate 落 claim_hall（读路径注入不影响落厅行为）', async () => {
-    const { client, calls } = makeClient(async (text: string) => {
+    // F8：落大厅改走 transition() 主通道 → mock 必须提供工单行锁读（FOR UPDATE）与 UPDATE RETURNING
+    //   （此前旁路直接 UPDATE，不需要读行；这正是"旁路不校验任何东西"的副作用之一）。
+    const WO = { id: 'wo-hall-1', tenant_id: 't-4state', status: 'draft', assignee_id: null, ext: {}, priority: 'normal', catalog: null };
+    const { client, calls } = makeClient(async (text: string, params?: any[]) => {
       if (text.includes('FROM worker WHERE tenant_id')) return { rows: [] };
       if (text.includes('SELECT def FROM workflow_def')) return { rows: [] }; // 无 def 行 → DEFAULT → 注入
+      if (text.includes('FOR UPDATE')) return { rows: [WO], rowCount: 1 };
+      if (text.includes('UPDATE work_orders SET status')) return { rows: [{ ...WO, status: params?.[0] }], rowCount: 1 };
       return { rows: [] };
     });
     const r = await autoDispatchAfterCreate(

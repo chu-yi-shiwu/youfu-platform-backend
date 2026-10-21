@@ -8,7 +8,9 @@ vi.mock('../db/pool.js', () => ({
 let clientForTest: any = {};
 const listMock = vi.fn(async (_c: unknown, _t: string, _f: unknown): Promise<{ items: any[]; total: number }> => ({ items: [], total: 0 }));
 vi.mock('../repo/ticket.js', () => ({ list: (...a: unknown[]) => (listMock as any)(...a) }));
-vi.mock('../engine/workflowDef.js', () => ({ getWorkflowDef: async () => ({ key: 'work_order', states: [] }) }));
+// F10：租户流程的状态集合做成可变量——"原话关键词→状态名"的翻译必须按它过滤
+const hDef = vi.hoisted(() => ({ states: [] as string[] }));
+vi.mock('../engine/workflowDef.js', () => ({ getWorkflowDef: async () => ({ key: 'work_order', states: hDef.states }) }));
 vi.mock('../engine/stateMachine.js', () => ({ doneStates: () => ['completed', 'closed', 'evaluated'] }));
 
 import { makeAdminToolExecutor } from '../services/adminAgentTools.js';
@@ -38,6 +40,24 @@ describe('query_tickets（sanitize 复洗 + 关键词兜底）', () => {
     await executor('query_tickets', {}, '查一下处理中的单');
     const f = listMock.mock.calls[0][2] as any;
     expect(f.status).toBe('assigned,processing');
+  });
+
+  it('F10：租户流程没有 assigned/processing 时，不再硬翻成这两个名字去查（旧口径必然查 0 单）', async () => {
+    hDef.states = ['inbox', 'doing', 'finish'];
+    listMock.mockClear();
+    await executor('query_tickets', {}, '查一下处理中的单');
+    const f = listMock.mock.calls[0][2] as any;
+    expect(f.status).toBeUndefined(); // 不再臆造状态名；查全量由 list 自己按可见范围给
+    hDef.states = [];
+  });
+
+  it('F10：租户流程含 assigned/processing 时行为逐字不变（零回归）', async () => {
+    hDef.states = ['draft', 'assigned', 'processing', 'completed'];
+    listMock.mockClear();
+    await executor('query_tickets', {}, '查一下处理中的单');
+    const f = listMock.mock.calls[0][2] as any;
+    expect(f.status).toBe('assigned,processing');
+    hDef.states = [];
   });
 
   it('模型给了合法条件则不覆盖：args.status=pending + 消息含「处理中」→ 不追加', async () => {

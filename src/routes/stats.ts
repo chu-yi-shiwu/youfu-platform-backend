@@ -3,7 +3,7 @@
 // 诚实口径：满意度数据后端暂无，大屏不显示或标注"待满意度模块接入"，禁止编造（见 repo/stats.ts）。
 import { Router } from 'express';
 import { withTenantClient } from '../db/pool.js';
-import { processMetrics } from '../repo/stats.js';
+import { processMetrics, workerLoadDrift } from '../repo/stats.js';
 import { qualityReport } from '../services/dataQuality.js';
 import { getWorkflowDef } from '../engine/workflowDef.js';
 import { doneStates } from '../engine/stateMachine.js';
@@ -100,6 +100,23 @@ router.get('/stats/overdue', async (req, res, next) => {
       };
     });
     return res.json({ ok: true, code: 0, overdue: out });
+  } catch (e) {
+    next(e);
+  }
+});
+
+// worker.load 漂移对账（2026-10-19 · 只读诊断端点）
+// load 是派单负载均衡的**唯一输入**，历史上出现过与真实在身单长期背离（存量脏数据）。
+// 这里只**读**不写：把每位工人的「系统记的在身数 vs 真实在身单数」摆出来，
+// 让失真可见、可复核。校正（写库）不在本端点职责内，须人工批准另做。
+router.get('/stats/worker-load-drift', async (req, res, next) => {
+  try {
+    const tenantId = res.locals.auth.tenantId;
+    const items = await withTenantClient(tenantId, async (client) => {
+      await requirePermission(res.locals.auth, client, 'dashboard.view');
+      return workerLoadDrift(client, tenantId);
+    });
+    return res.json({ ok: true, code: 0, items });
   } catch (e) {
     next(e);
   }

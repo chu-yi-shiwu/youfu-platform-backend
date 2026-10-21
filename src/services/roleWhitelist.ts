@@ -16,6 +16,26 @@ export const ROLE_CHECK_SQL =
   ` WHERE conrelid = 'role_permission'::regclass AND contype = 'c'`;
 
 /**
+ * 090 是否已记账（migrate 记账表 _migrations）。
+ * 090_role_def.sql 为支持「租户自建岗位」，有意 DROP 掉 account_user.role / role_permission.role
+ * 上的内置 6 角色枚举 CHECK 且**不替换**——角色合法性改由应用层 isRoleUsable（内置 ROLES ∪
+ * 本租户 role_def）兜底。因此 090 应用后「role_permission 无 CHECK」是**预期终态**，
+ * 本启动门若仍按 070 口径断言"CHECK 必须含 6 角色"，服务会在 090 应用后必然拒绝启动
+ * （2026-10-17 生产实测复现：重启后 5s 失败重启循环）。
+ */
+export const MIG_090_SQL = `SELECT 1 FROM _migrations WHERE name = '090_role_def.sql' LIMIT 1`;
+
+/** 090 是否已应用（表不存在 / 查询失败 → false，保守回到 fail-fast）。 */
+async function isMigration090Applied(client: PoolClient): Promise<boolean> {
+  try {
+    const r = await client.query(MIG_090_SQL);
+    return (r.rowCount ?? 0) > 0;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * 纯函数：从 CHECK 约束定义文本解析出**有效放行**的角色集合（语义感知版）。
  *
  * pg_get_constraintdef 渲染形态：
@@ -151,12 +171,24 @@ function splitTopLevelAnd(text: string): string[] {
  */
 export async function checkRoleWhitelist(
   client: PoolClient,
-): Promise<{ ok: boolean; missing: string[]; constraints: Array<{ conname: string; def: string }> }> {
+): Promise<{
+  ok: boolean;
+  missing: string[];
+  constraints: Array<{ conname: string; def: string }>;
+  relaxedBy090: boolean;
+}> {
   const r = await client.query(ROLE_CHECK_SQL);
   const constraints = r.rows.map((row: { conname: string; def: string }) => ({
     conname: row.conname,
     def: row.def ?? '',
   }));
+
+  // 090 有意放宽且当前确实没有任何角色 CHECK → 预期终态，放行（角色合法性由应用层兜底）。
+  // 只在「无 CHECK」这一分支查 _migrations：有 CHECK 的老库零额外查询。
+  if (constraints.length === 0 && (await isMigration090Applied(client))) {
+    return { ok: true, missing: [], constraints, relaxedBy090: true };
+  }
+
   // 多条 CHECK 约束在 PG 中是 AND 关系：一条约束放行的角色必须在**每条**约束里都被放行。
   // （早期实现取并集是错的：A 允 4 角色 + B 仅允 reviewer，DB 实际只允许写 reviewer。）
   // 解析失败/无角色条件的约束 → 空集 → 交集为空 → missing 全部（fail-closed）。
@@ -172,7 +204,7 @@ export async function checkRoleWhitelist(
     }
   }
   const missing = ROLES.filter((role) => !allow.has(role));
-  return { ok: missing.length === 0, missing, constraints };
+  return { ok: missing.length === 0, missing, constraints, relaxedBy090: false };
 }
 
 // 连接超时护栏：DB 不可达时自检最多等 10s 后放弃（不炸、不阻塞调度器启动）。
@@ -206,6 +238,10 @@ export async function verifyRoleWhitelist(): Promise<void> {
           `拒绝启动（新租户开通会整体回滚）。` +
           `修复：在数据库服务器以 superuser 执行 sudo -u postgres psql youfu -f 070_role_permission_roles_widen.sql，然后重启本服务。` +
           `（当前 CHECK：${res.constraints.map((c) => `${c.conname}: ${c.def}`).join(' | ') || '无 CHECK 约束'}）`,
+      );
+    } else if (res.relaxedBy090) {
+      console.log(
+        '[startup] role_permission.role 无内置枚举 CHECK（090 已放宽，自定义岗位由 role_def + 应用层 isRoleUsable 兜底），自检通过',
       );
     } else {
       console.log('[startup] role_permission.role CHECK 含全部 6 角色白名单，自检通过');

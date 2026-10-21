@@ -11,6 +11,9 @@ import { llmConfigured, llmInferCategory, llmGenConfig, embeddingConfigured, emb
 import { withTenantClient } from '../db/pool.js';
 import { getAiFeaturesEnabled, setAiFeaturesEnabled } from '../repo/tenantSettings.js';
 import { requireConfigRole } from './config.js';
+import { getWorkflowDefOrDefault } from '../engine/workflowDef.js';
+import { doneStates } from '../engine/stateMachine.js';
+import { builtinDefFor } from '../engine/themes.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -149,7 +152,11 @@ router.post('/preview', async (req, res, next) => {
 });
 
 // 处置建议检索：/ai/similar { description?, category? } → top3 相似案例
-// 知识源：uone_knowledge（UOne 10 万条历史，离线预灌）+ 租户自身已完成单（增量）
+// 知识源：uone_knowledge（UOne 10 万条历史，纯离线预灌的全局知识库，**无租户维度、未启用 RLS**）。
+//   租户自身已完成单的增量走 **ai_case_embeddings**（有 tenant_id + RLS），不是写进 uone_knowledge。
+//   ⚠️ 旧注释曾写「+ 租户自身已完成单（增量）」——那是假的：本文件从不向 uone_knowledge 写入，
+//   若照旧注释把租户数据灌进这张无租户维度的全局表，即为跨租户泄露。护栏：
+//   src/test/uoneKnowledgeBoundary.test.ts
 const similarSchema = z.object({
   description: z.string().max(500).optional(),
   category: z.string().max(100).optional(),
@@ -158,6 +165,54 @@ const similarSchema = z.object({
 
 // 相似案例项（K2 在原有字段上附加 score；前端按契约只读 title/desc/category/priority/source）
 interface SimilarItem { title: string; desc: string; category: string; priority: string; source: string; knowledgeId?: number; score?: number; }
+
+/**
+ * F10：业务流任务「已完成」样本口径改由**各业务流的完成态**派生。
+ *
+ * 【修正了什么】此前两处 SQL 写死 `status IN ('completed','closed')`：
+ *   · transport_task 内置流程的完成态是 **done**（themes.TRANSPORT_DEF）
+ *     ——'completed'/'closed' 两个名字在这条流程里根本不存在 ⇒ 运送类样本**恒为 0 条**
+ *     （AI 相似建议少一整路证据源，且表现为"运送单从不给相似建议"的静默偏差）；
+ *   · emergency_plan 完成态 = ['resolved','closed'] ⇒ 'resolved' 的单**漏采**；
+ *   · 租户在配置中心自定义的业务流（完成态随他起名）⇒ 完全取不到样本。
+ *   同一条道理（与 F8 挂起态 / F9 统计口径同源）：状态名属于租户流程，不属于代码。
+ *
+ * 【口径】按 business_flow_tasks 里实际出现的 entity_type 逐类取 def 的 doneStates，
+ *   组合成 OR 条件。上限 MAX_ENTITY_TYPES 防止 SQL 参数爆炸；命中上限时告警（不静默丢弃）。
+ */
+const MAX_ENTITY_TYPES = 10;
+async function doneSampleClause(
+  client: { query: (t: string, p?: unknown[]) => Promise<{ rows: any[] }> },
+  tenantId: string,
+  startIndex: number,
+  prefix: string,
+): Promise<{ clause: string; params: unknown[] }> {
+  const types = await client.query(
+    `SELECT DISTINCT entity_type FROM business_flow_tasks WHERE tenant_id=$1 ORDER BY entity_type LIMIT 50`,
+    [tenantId],
+  );
+  const params: unknown[] = [];
+  const parts: string[] = [];
+  let i = startIndex;
+  let truncated = 0;
+  for (const row of types.rows) {
+    const et = String(row.entity_type);
+    if (parts.length >= MAX_ENTITY_TYPES) { truncated += 1; continue; }
+    const def = await getWorkflowDefOrDefault(client as never, tenantId, et, builtinDefFor(et));
+    const ds = doneStates(def);
+    if (ds.length === 0) continue; // 该流程没声明完成态 → 诚实不采样，不猜名字
+    parts.push(`(${prefix}entity_type = $${i} AND ${prefix}status = ANY($${i + 1}::text[]))`);
+    params.push(et, ds);
+    i += 2;
+  }
+  if (truncated > 0) {
+    console.warn('[aiPreview] entity_type 种类超过样本上限，本次只覆盖前 N 类（诚实告警，不静默丢弃）', {
+      tenantId, truncated, limit: MAX_ENTITY_TYPES,
+    });
+  }
+  // 无任何已完成的业务流类型 → 该数据源本就为空；返回 FALSE 让 SQL 语义诚实（不用 1=0 之类绕写法）
+  return { clause: parts.length === 0 ? 'AND FALSE' : `AND (${parts.join(' OR ')})`, params };
+}
 
 // K2 背景预热：把本机构尚未向量化且未在向量库中的历史单补嵌入（best-effort，不阻塞响应）。
 // 覆盖两类数据源：① work_orders（报修工单，试点主数据）；② business_flow_tasks（业务流任务）。
@@ -192,16 +247,17 @@ async function warmUpTenantEmbeddings(tenantId: string): Promise<void> {
   }
   // 2) 业务流任务 business_flow_tasks（原有逻辑）
   const bft = await withTenantClient(tenantId, async (client) => {
+    const { clause, params } = await doneSampleClause(client, tenantId, 2, 'bft.');
     const r = await client.query(
       `SELECT bft.id, bft.title, COALESCE(bft.data->>'desc','') AS d, bft.entity_type
        FROM business_flow_tasks bft
-       WHERE bft.tenant_id=$1 AND bft.status IN ('completed','closed')
+       WHERE bft.tenant_id=$1 ${clause}
          AND NOT EXISTS (
            SELECT 1 FROM ai_case_embeddings e
            WHERE e.tenant_id=$1 AND e.ref_type='business_flow_task' AND e.ref_id=bft.id::text
          )
        ORDER BY bft.updated_at DESC LIMIT 20`,
-      [tenantId],
+      [tenantId, ...params],
     );
     return r.rows;
   });
@@ -308,10 +364,11 @@ router.post('/similar', async (req, res, next) => {
         }
       }
       if (out.length < 3) {
+        const { clause, params } = await doneSampleClause(client, tenantId, 2, '');
         const r = await client.query(
           `SELECT title, COALESCE(data->>'desc', '') AS d, entity_type FROM business_flow_tasks
-           WHERE tenant_id=$1 AND status IN ('completed','closed') ORDER BY updated_at DESC LIMIT 2`,
-          [tenantId],
+           WHERE tenant_id=$1 ${clause} ORDER BY updated_at DESC LIMIT 2`,
+          [tenantId, ...params],
         );
         r.rows.forEach((row) => out.push({ title: row.title, desc: row.d, category: row.entity_type, priority: '', source: '本机构' }));
       }

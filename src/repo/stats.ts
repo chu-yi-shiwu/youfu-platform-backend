@@ -8,7 +8,7 @@
 //   此处不编造"演示自动完成"数据（已消除演示自动置 completed 的旧问题）。
 import type { PoolClient } from 'pg';
 import { getWorkflowDef } from '../engine/workflowDef.js';
-import { doneStates, terminalStates } from '../engine/stateMachine.js';
+import { doneStates, terminalStates, activeStates, cancelledStates } from '../engine/stateMachine.js';
 
 // P-5：统计聚合短 TTL 缓存（单进程部署足够；对齐 DataScreen 30s 刷新，降低重复聚合压力）。
 // 按租户键隔离；仅缓存最终计算结果，不影响 RLS（结果已按租户算出）。
@@ -56,6 +56,8 @@ export async function ticketStats(client: PoolClient, tenantId: string): Promise
   // 富模板下不漏计 closed/evaluated，且不把 cancelled 算完成。
   const def = await getWorkflowDef(client, tenantId, 'work_order');
   const done = doneStates(def);
+  // 取消态口径同源派生（不入这一格则客户改流程后 cancelled 恒为 0）。
+  const cancelledStatesList = cancelledStates(def);
   const r = await client.query<{
     total: string;
     completed: string;
@@ -68,13 +70,13 @@ export async function ticketStats(client: PoolClient, tenantId: string): Promise
     `SELECT
        COUNT(*)::text                                          AS total,
        COUNT(*) FILTER (WHERE status = ANY($2::text[]))::text  AS completed,
-       COUNT(*) FILTER (WHERE status = 'cancelled')::text      AS cancelled,
+       COUNT(*) FILTER (WHERE status = ANY($3::text[]))::text      AS cancelled,
        COUNT(*) FILTER (WHERE auto_flow = true)::text          AS auto_dispatched,
        COUNT(*) FILTER (WHERE auto_flow = true AND status = ANY($2::text[]))::text AS auto_closed,
        AVG(satisfaction_score)::text                          AS satisfaction_avg,
        COUNT(satisfaction_score)::text                        AS satisfaction_count
      FROM work_orders WHERE tenant_id = $1`,
-    [tenantId, done],
+    [tenantId, done, cancelledStatesList],
   );
   const row = r.rows[0];
   const total = Number(row.total);
@@ -266,4 +268,54 @@ export async function processMetrics(client: PoolClient, tenantId: string): Prom
     bottleneck: bottleneckArr,
   };
   return storeResult(cacheKey, result);
+}
+
+// ── worker.load 漂移对账（2026-10-19 · 只读诊断）──────────────────────────────
+// 背景：worker.load 是**派单负载均衡的唯一输入**（engine/dispatch.ts 的 least_load 与
+//   模型评分都按它排序）。它是累加字段，历史上曾出现"只增不减"导致与真实在身单数
+//   长期背离（t-phasea 实证：某工人记 9、实际 1；另一人记 1、实际 9）——
+//   后果是派单均衡持续把单派给已经闲着的人、压着真正忙的人。
+//   2026-08-31 起流转已做净结算（R32），**新发生的流转不会再产生偏差**，
+//   但存量偏差不会自愈。本函数只做**只读对账**，把背离暴露出来供人工决策，
+//   绝不自动改数据（校正写库必须由人批准）。
+export interface WorkerLoadDrift {
+  worker_id: string;
+  name: string;
+  /** 系统记的在身数（派单均衡实际使用的数）。 */
+  load: number;
+  /** 按流程口径重算的真实在身单数（活跃态且 assignee 是本工人）。 */
+  active_orders: number;
+  /** 差值 = load − active_orders；非 0 即失真（正=虚高会被少派，负=虚低会被多派）。 */
+  drift: number;
+}
+
+/**
+ * 只读对账：逐工人比对 worker.load 与真实在身单数。
+ * 活跃态口径与 load 净结算同源（activeStates(def)），杜绝两处口径漂移。
+ */
+export async function workerLoadDrift(client: PoolClient, tenantId: string): Promise<WorkerLoadDrift[]> {
+  const def = await getWorkflowDef(client, tenantId, 'work_order');
+  const active = activeStates(def);
+  const r = await client.query<{ id: string; name: string; load: number; c: string }>(
+    `SELECT w.id, w.name, w.load, COALESCE(a.cnt, 0)::text AS c
+       FROM worker w
+       LEFT JOIN (
+         SELECT assignee_id, COUNT(*) AS cnt FROM work_orders
+          WHERE tenant_id = $1 AND status = ANY($2::text[])
+          GROUP BY assignee_id
+       ) a ON a.assignee_id = w.id
+      WHERE w.tenant_id = $1
+      ORDER BY ABS(w.load - COALESCE(a.cnt, 0)) DESC, w.id`,
+    [tenantId, active],
+  );
+  return r.rows.map((x) => {
+    const activeOrders = Number(x.c);
+    return {
+      worker_id: x.id,
+      name: x.name,
+      load: Number(x.load) || 0,
+      active_orders: activeOrders,
+      drift: (Number(x.load) || 0) - activeOrders,
+    };
+  });
 }

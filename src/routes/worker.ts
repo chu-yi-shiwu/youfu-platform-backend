@@ -9,6 +9,8 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { withTenantClient } from '../db/pool.js';
 import { AppError } from '../middleware/error.js';
+import { getWorkflowDef } from '../engine/workflowDef.js';
+import { activeStates } from '../engine/stateMachine.js';
 import { requireConfigRole, canAssignRole, type Role } from '../middleware/role.js';
 import { hashPassword } from '../account.js';
 import { generateAdminPassword } from '../repo/tenantProvision.js';
@@ -128,10 +130,16 @@ router.delete('/workers/:id', async (req, res, next) => {
     requireConfigRole(req, res);
     const tenantId = res.locals.auth.tenantId;
     const n = await withTenantClient(tenantId, async (client) => {
-      // 在途工单（已派单且未完成）仍指向该人员时拒绝删除，避免孤儿引用
+      // 在途工单（指派的工单仍处于活跃态）仍指向该人员时拒绝删除，避免孤儿引用。
+      // 口径由客户流程派生（activeStates = 全态 − 完成 − 终态 − 挂起），此前写死
+      // `status <> 'completed'`：① 客户改完成态名 → 凡是"真完成"的单都算在途 → 永远删不掉人；
+      // ② 已 cancelled / closed / evaluated 的单同样被误判成在途 → 误拒绝删人。
+      // 守卫方向是保守的（不会放行本该拦住的单），所以历史表现是"该删删不掉"而非孤儿引用。
+      const delDef = await getWorkflowDef(client, tenantId, 'work_order');
+      const inFlightSet = activeStates(delDef);
       const inFlight = await client.query(
-        `SELECT 1 FROM work_orders WHERE tenant_id=$1 AND assignee_id=$2 AND status <> 'completed' LIMIT 1`,
-        [tenantId, req.params.id],
+        `SELECT 1 FROM work_orders WHERE tenant_id=$1 AND assignee_id=$2 AND status = ANY($3::text[]) LIMIT 1`,
+        [tenantId, req.params.id, inFlightSet],
       );
       if (inFlight.rowCount && inFlight.rowCount > 0) {
         throw new AppError('CONFLICT', '该人员仍关联在途工单，无法删除', 409);

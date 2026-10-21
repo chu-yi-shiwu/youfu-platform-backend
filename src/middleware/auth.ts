@@ -35,8 +35,24 @@ export let AUTH_MODE: 'dev' | 'prod' = 'prod';
 // 默认租户（与种子数据对齐）。集中一处，避免 't-verification' 字面量散落多处（C-1）。
 export const DEFAULT_TENANT_ID = 't-verification';
 
+/**
+ * F7（2026-10-19）：AUTH_MODE 改 fail-closed 默认。
+ *
+ * 【为什么改】此前 `process.env.AUTH_MODE ?? 'dev'`——环境变量忘配就静默降级 dev，
+ * dev 模式下所有权限门恒放行（role.ts 同类问题在登录闸 D2 已修过一次：查不到登记行
+ * 从 fail-open 改 fail-closed）。新环境漏一个变量 = 全系统无门禁，是埋给未来的雷。
+ * 与 D2 同源纪律：**缺省必须是最安全的那一侧**。
+ *
+ * 【影响面】生产/ECS 的 .env 已显式 AUTH_MODE=prod（2026-10-19 只读核实），不受影响；
+ * 本地联调若不配 AUTH_MODE，将从"无门禁"变为"全门禁 + 租户登记校验"——
+ * 本地开发需显式 AUTH_MODE=dev（.env 或启动环境变量），dev 模式下会打警告日志。
+ */
 export function refreshAuthMode(): void {
-  AUTH_MODE = (process.env.AUTH_MODE ?? 'dev').toLowerCase() === 'prod' ? 'prod' : 'dev';
+  const raw = process.env.AUTH_MODE;
+  AUTH_MODE = (raw ?? 'prod').toLowerCase() === 'prod' ? 'prod' : 'dev';
+  if (AUTH_MODE === 'dev' && process.env.NODE_ENV !== 'test') {
+    console.warn('[auth] AUTH_MODE=dev：权限门禁全部放行（仅限本地联调，生产环境必须显式 AUTH_MODE=prod）');
+  }
 }
 
 // 默认按当前环境计算一次；server.ts 在 dotenv 加载后会再次刷新
@@ -224,7 +240,7 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction) 
 
 /**
  * S-2：登录速率限制（内存滑动窗口，单进程部署足够）。
- * 仅 prod 生效；dev 放行以免干扰本地联调与测试。
+ * 仅 prod 生效；dev 放行以免干扰本地联调。
  */
 // 登录限流计数（内存）。上限保护防长期运行内存无限增长（🔴 审查修复 F-D2）。
 export const loginAttempts = new Map<string, number[]>();
@@ -237,9 +253,22 @@ export function __setLoginIpCapForTest(n: number): void {
 export function __setAuthModeForTest(mode: 'dev' | 'prod'): void {
   AUTH_MODE = mode;
 }
+/**
+ * F7 配套（2026-10-19）：限流器在测试跑法下默认 inert。
+ * 【为什么】AUTH_MODE 改 fail-closed 缺省后，限流器从"dev 缺省跳过"变为恒生效；
+ *   存量全量绿一直隐式依赖"dev 缺省 = 限流器不跑"——测试文件内累计的模拟登录
+ *   （worker-sim/admin-sim/repair-report 等）会触发 429 误伤（单跑不炸、全量炸）。
+ *   测试要的不是"限流器永远不跑"，而是"不被自己的调用量误伤"：默认 inert，
+ *   需要锁定限流/驱逐逻辑的测试（securityFixes F-D2）显式打开。
+ * 生产/预发（NODE_ENV 非 test）恒真，不受影响。
+ */
+let rateLimitEnabled = process.env.NODE_ENV !== 'test';
+export function __setRateLimitEnabledForTest(on: boolean): void {
+  rateLimitEnabled = on;
+}
 export function loginRateLimit(max = 10, windowMs = 60_000) {
   return (req: Request, res: Response, next: NextFunction) => {
-    if (AUTH_MODE !== 'prod') return next();
+    if (AUTH_MODE !== 'prod' || !rateLimitEnabled) return next();
     const ip = (req.ip || req.socket.remoteAddress || 'unknown') as string;
     const now = Date.now();
     const arr = (loginAttempts.get(ip) ?? []).filter((t) => now - t < windowMs);
@@ -271,7 +300,7 @@ export function loginRateLimit(max = 10, windowMs = 60_000) {
 const trialIpAttempts = new Map<string, number[]>();
 export function trialRateLimit(max = 5, windowMs = 24 * 3600 * 1000) {
   return (req: Request, res: Response, next: NextFunction) => {
-    if (AUTH_MODE !== 'prod') return next();
+    if (AUTH_MODE !== 'prod' || !rateLimitEnabled) return next();
     const ip = (req.ip || req.socket.remoteAddress || 'unknown') as string;
     const now = Date.now();
     const arr = (trialIpAttempts.get(ip) ?? []).filter((t) => now - t < windowMs);

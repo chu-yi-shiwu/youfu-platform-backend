@@ -11,10 +11,17 @@ import type { PoolClient } from 'pg';
 import { signJwt } from './middleware/auth.js';
 import { ROLES } from './middleware/role.js';
 import { withTenantClient } from './db/pool.js';
+import { isRoleUsable } from './repo/roleDef.js';
+import { AppError } from './middleware/error.js';
 
 // 账户角色派生自 middleware/role.ts 的 ROLES 单一事实源（AL-002：含 reviewer/service_desk，
 // 与 stateMachine allowedRoles / workflow_def 对齐；DB 侧 CHECK 由 069 迁移同步放宽）。
-export type AccountRole = (typeof ROLES)[number];
+//
+// 地基第二步：角色**不再只有内置 6 个**——090 迁移放宽了 account_user.role 的枚举 CHECK，
+// 租户可经 role_def 自建岗位（如"维修组长"）。此处同步放宽类型：
+//   `(string & {})` 保留内置字面量的 IDE 补全，同时接受任意自定义 code（两者都是 string）。
+// 收紧的一面由运行期保证：code 形状（ROLE_CODE_RE）+ 存在性（isRoleUsable：内置 OR role_def 启用中）。
+export type AccountRole = (typeof ROLES)[number] | (string & {});
 
 export interface AccountUser {
   id: string;
@@ -101,11 +108,21 @@ export async function createUser(
   tenantId: string,
   input: CreateUserInput,
 ): Promise<AccountUser> {
+  // 地基第二步补漏②（2026-10-17 二轮审查）：退场角色闸门下沉到**公共建号路径**。
+  // 此前 isRoleUsable 只装在 accounts.ts 的三个路由上，而 POST /auth/users 走的是本函数，
+  // 于是"两个角色已拿掉"在 HTTP 入口层根本不成立——任何调用方仍能建出 dispatcher（201）。
+  // 装在 createUser 而不是调用它的路由上，是为了让所有建号路径（auth / invite redeem /
+  // 未来任何新增入口）都被同一道闸覆盖，杜绝再漏。
+  // 错误码沿用 accounts.ts:425/470 的 BAD_PARAM，前端无需新增分支。
+  const role = input.role ?? 'operator';
+  if (!(await isRoleUsable(client, tenantId, role))) {
+    throw new AppError('BAD_PARAM', `unknown role: ${role}`, 400);
+  }
   const r = await client.query<AccountUser>(
     `INSERT INTO account_user (tenant_id, username, password_hash, display_name, role, active)
      VALUES ($1, $2, $3, $4, $5, true)
      RETURNING id, tenant_id, username, display_name, role, active`,
-    [tenantId, input.username, hashPassword(input.password), input.display_name ?? null, input.role ?? 'operator'],
+    [tenantId, input.username, hashPassword(input.password), input.display_name ?? null, role],
   );
   return r.rows[0];
 }

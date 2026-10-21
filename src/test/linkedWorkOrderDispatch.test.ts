@@ -4,10 +4,12 @@
 // 范式与 autoDispatch.test.ts 相同：mock client + SQL 子串分流（无真实 PG）；createWithIdem mock。
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-vi.mock('../repo/ticket.js', () => ({ createWithIdem: vi.fn() }));
+// F4（2026-10-19）：派中段改走 transition() 主通道——mock 必须暴露 transition；
+// transition 内部的门禁/副作用/自动审核由 repo 层测试守护，本文件只管 linkedWorkOrder 编排。
+vi.mock('../repo/ticket.js', () => ({ createWithIdem: vi.fn(), transition: vi.fn() }));
 
 const { createLinkedWorkOrder } = await import('../services/linkedWorkOrder.js');
-const { createWithIdem } = await import('../repo/ticket.js');
+const { createWithIdem, transition } = await import('../repo/ticket.js');
 
 type QueryFn = (text: string, params?: any[]) => Promise<{ rows: any[]; rowCount?: number }>;
 
@@ -59,6 +61,8 @@ function basePayload(over: Record<string, unknown> = {}) {
 
 describe('linkedWorkOrder 派单未命中兜底（纵切② P0-3/P0-4）', () => {
   beforeEach(() => {
+    (transition as any).mockReset();
+    (transition as any).mockResolvedValue({ row: {}, transition: null, from: 'draft' });
     (createWithIdem as any).mockReset();
     (createWithIdem as any).mockResolvedValue({
       row: { id: WO_ID, order_no: ORDER_NO, auto_flow: false, assignee_id: null },
@@ -72,32 +76,31 @@ describe('linkedWorkOrder 派单未命中兜底（纵切② P0-3/P0-4）', () =>
     expect(r.created).toBe(true);
     expect(r.autoFlow).toBe(false);
     expect(r.assignee).toBeNull();
-    // 状态落抢单大厅（auto_flow=false）
-    const statusUpd = calls.find((c) => c.text.includes('UPDATE work_orders SET status'));
-    expect(statusUpd).toBeTruthy();
-    expect(statusUpd?.params?.[0]).toBe('claim_hall');
-    expect(statusUpd?.params?.[1]).toBe(WO_ID);
-    // enter_hall 事件：type/actor 内联，from=initial(draft) → to=claim_hall，payload reason 逐字对齐样板
-    const evt = calls.find((c) => c.text.includes('INSERT INTO ticket_event'));
-    expect(evt?.text).toContain("'enter_hall'");
-    expect(evt?.text).toContain("'system'");
-    expect(evt?.params?.[2]).toBe('draft');
-    expect(evt?.params?.[3]).toBe('claim_hall');
+    // F8（2026-10-19）：落大厅由旁路 UPDATE 改为 transition() 主通道——
+    //   ① 不再有任何旁路 UPDATE status（否则就是又开了后门）；
+    //   ② transition 目标态 = claim_hall、事件类型 = enter_hall、系统 actor 跳过人类门禁；
+    //   ③ 失配原因 reason 经 payloadExtra 携带（GET /stats 的 claim_hall_reasons 聚合口径保住）。
+    expect(calls.find((c) => c.text.includes('UPDATE work_orders SET status'))).toBeUndefined();
+    expect(calls.find((c) => c.text.includes('INSERT INTO ticket_event'))).toBeUndefined();
+    expect(transition).toHaveBeenCalledTimes(1);
+    const tArgs = (transition as any).mock.calls[0];
+    expect(tArgs[2]).toBe(WO_ID);
+    expect(tArgs[3]).toBe('claim_hall');
+    expect(tArgs[4]).toMatchObject({ actor: 'auto_dispatch', autoFlow: false, systemAuto: true, eventLogType: 'enter_hall' });
     // V2-F3（派单纵切 P0-8）：无任何工人 → 容量问题口径 no_available_worker
-    expect(JSON.parse(String(evt?.params?.[4]))).toEqual({ reason: 'no_available_worker' });
+    expect(tArgs[4].payloadExtra).toEqual({ reason: 'no_available_worker' });
   });
 
   it('V2-F3：有在岗工人但技能失配（规则/兜底都没接住）→ reason=no_rule_matched（P0-8 失配观测口）', async () => {
-    const { client, calls } = makeClient(
+    const { client } = makeClient(
       linkedHandler({ workerRows: [{ id: 'w-linked-2', skill_tags: '["cleaning"]', load: 0, active: true }] }),
     );
     const r = await createLinkedWorkOrder(client, basePayload({ skillTags: ['inspection'] }));
     expect(r.autoFlow).toBe(false);
     expect(r.assignee).toBeNull();
-    const evt = calls.find((c) => c.text.includes('INSERT INTO ticket_event'));
-    expect(evt?.text).toContain("'enter_hall'");
     // 有 active 工人却没派出去 → 配置/技能失配口径 no_rule_matched（正是「空调单派给电工」类事故的观测口）
-    expect(JSON.parse(String(evt?.params?.[4]))).toEqual({ reason: 'no_rule_matched' });
+    expect((transition as any).mock.calls[0][4]).toMatchObject({ eventLogType: 'enter_hall' });
+    expect((transition as any).mock.calls[0][4].payloadExtra).toEqual({ reason: 'no_rule_matched' });
   });
 
   it('P0-4：picked=null + 有 active admin → 账号通知落库（文案含「抢单大厅」）', async () => {
@@ -127,7 +130,8 @@ describe('linkedWorkOrder 派单未命中兜底（纵切② P0-3/P0-4）', () =>
     });
     const r = await createLinkedWorkOrder(client, basePayload());
     expect(r.created).toBe(true); // 主流程未被通知故障阻断
-    expect(calls.find((c) => c.text.includes('UPDATE work_orders SET status'))?.params?.[0]).toBe('claim_hall');
+    // F8：落大厅走主通道（通知段失败不影响 transition 已完成的落厅）
+    expect((transition as any).mock.calls[0][3]).toBe('claim_hall');
     expect(calls.filter((c) => c.text.includes('INSERT INTO notification')).length).toBe(0);
     // QA-P1：SAVEPOINT 隔离——失败段被 ROLLBACK TO 回滚（事务恢复可用），且不误发 RELEASE
     expect(calls.find((c) => c.text.includes('SAVEPOINT dispatch_notify_sp'))).toBeTruthy();
@@ -143,7 +147,14 @@ describe('linkedWorkOrder 派单未命中兜底（纵切② P0-3/P0-4）', () =>
     const r = await createLinkedWorkOrder(client, basePayload({ skillTags: ['inspection'] }));
     expect(r.autoFlow).toBe(true);
     expect(r.assignee).toBe(WORKER_ID);
-    expect(calls.find((c) => c.text.includes('UPDATE work_orders SET status'))?.params?.[0]).not.toBe('claim_hall');
+    // F4：派中走 transition() 主通道（DEFAULT def：draft→assigned assign 边），
+    //   系统 actor + autoFlow=true + eventLogType='assign' 钉死口径
+    expect(transition).toHaveBeenCalledTimes(1);
+    const tArgs = (transition as any).mock.calls[0];
+    expect(tArgs[2]).toBe(WO_ID);
+    expect(tArgs[3]).toBe('assigned');
+    expect(tArgs[4]).toMatchObject({ actor: 'auto_dispatch', autoFlow: true, eventLogType: 'assign' });
+    expect(tArgs[4].fields).toMatchObject({ assignee: WORKER_ID });
     // picked 分支无 enter_hall / 无 admin 通知
     expect(calls.find((c) => c.text.includes("'enter_hall'"))).toBeUndefined();
     expect(calls.find((c) => c.text.includes('INSERT INTO notification'))).toBeUndefined();

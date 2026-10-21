@@ -12,6 +12,7 @@
 // ───────────────────────────────────────────────────────────────────────────
 import { chatCompletion, type ChatMsg } from './llm.js';
 import { isConfigRole } from '../middleware/role.js';
+import { activeStates, type WorkflowDef } from '../engine/stateMachine.js';
 
 export const ADMIN_TOOL_NAMES = ['parse_intent', 'query_tickets', 'get_stats'] as const;
 export const READONLY_TOOL_NAMES = ['query_tickets', 'get_stats'] as const;
@@ -61,8 +62,34 @@ export function parseAdminAction(raw: string): AdminAgentAction | null {
 // P4 失稳迭代（2026-09-08）：live 探针实锤模型低频不调工具直接回话，根因两层——
 //   ①只读角色工具编号写死 3/4 起跳（清单断裂）；②输出契约只有末尾一句、零示例。
 // 修复：动态编号 + 显式输出协议段 + 判断流程①②③ + 按角色 few-shot 示例 + 硬规则强化。
-export function buildAdminSystemPrompt(allowedTools: readonly string[] = ADMIN_TOOL_NAMES): string {
+// ───────────────────────────────────────────────────────────────────────────
+// R2-C（2026-10-21）：提示词的状态词汇必须跟随租户自己的流程定义。
+//   此前 few-shot 把 "assigned,processing" 写死在提示词里（模型被样例教着输出这两个名字），
+//   租户自定义流程根本没有这两个状态时，执行侧（adminAgentTools F10 白名单）会把它们过滤成
+//   空条件 ⇒ 查什么都是 0 单，且对话里看不出原因——拦住了错，却没教会对。
+//   现在：传 def → 注入本机构可用状态行 + few-shot 的 status 取该租户真实活跃态；
+//        不传 def（既有调用）→ 逐字保持旧提示词，零回归。
+export interface AdminPromptOptions {
+  /** 租户流程定义（work_order）；不传 → 回退内置示例（旧行为逐字不变）。 */
+  def?: WorkflowDef | null;
+}
+
+/** 纯函数：提示词 few-shot 该用的状态名 = 活跃态剔除初态后的前两个。
+ *  剔除初态：初态是"刚建单未流转"，不该作为「处理中的单」的示例状态。
+ *  无 def / 无任何活跃态 → []（调用方据此切换为不带 status 的示例）。 */
+export function promptStatusNames(def: WorkflowDef | null | undefined): string[] {
+  if (!def || !Array.isArray(def.states) || def.states.length === 0) return [];
+  const act = activeStates(def);
+  const pool = act.filter((s) => s !== def.initial);
+  return (pool.length > 0 ? pool : act).slice(0, 2);
+}
+
+export function buildAdminSystemPrompt(
+  allowedTools: readonly string[] = ADMIN_TOOL_NAMES,
+  opts?: AdminPromptOptions,
+): string {
   const canCreate = allowedTools.includes('parse_intent');
+  const statusNames = promptStatusNames(opts?.def);
   const lines: string[] = [
     '你是优服家管理后台的 AI 管家。你绝不直接创建或修改任何数据：创建类操作只输出「建议卡」JSON（由用户确认后提交），查询类操作只调用只读工具。你的每一条输出都必须是一个 JSON 对象，以 { 开头、以 } 结尾。',
     '可用工具（必须以 JSON 输出调用）：',
@@ -82,6 +109,10 @@ export function buildAdminSystemPrompt(allowedTools: readonly string[] = ADMIN_T
       `${++n}. query_tickets {"status":"...","priority":"urgent|normal|low","department":"...","service_desk":"...","source":"...","today_only":true,"limit":5} —— 只读查询工单：`,
       '   各参数只放用户明确说出的条件，不用的字段省略；status 可逗号分隔多个；limit 建议 5，最大 10。',
     );
+    // R2-C：把本机构真实的状态名摆到模型面前，杜绝它照抄内置模板名造出本租户不存在的状态
+    if (opts?.def && opts.def.states.length > 0) {
+      lines.push(`   本机构可用状态：${opts.def.states.join(',')}（status 只能取这些名字，不要凭空造状态名）。`);
+    }
   }
   if (allowedTools.includes('get_stats')) {
     lines.push(
@@ -109,7 +140,14 @@ export function buildAdminSystemPrompt(allowedTools: readonly string[] = ADMIN_T
     );
   }
   if (allowedTools.includes('query_tickets')) {
-    lines.push('用户：查一下处理中的单 → {"action":"tool","tool":"query_tickets","args":{"status":"assigned,processing","limit":5}}');
+    // R2-C：示例的 status 用租户真实存在的活跃态；无任何活跃态时改给不带 status 的示例
+    if (!opts?.def) {
+      lines.push('用户：查一下处理中的单 → {"action":"tool","tool":"query_tickets","args":{"status":"assigned,processing","limit":5}}');
+    } else if (statusNames.length > 0) {
+      lines.push(`用户：查一下处理中的单 → {"action":"tool","tool":"query_tickets","args":{"status":"${statusNames.join(',')}","limit":5}}`);
+    } else {
+      lines.push('用户：查一下今天的单 → {"action":"tool","tool":"query_tickets","args":{"today_only":true,"limit":5}}');
+    }
   }
   if (allowedTools.includes('get_stats')) {
     lines.push('用户：今天整体情况怎么样 → {"action":"tool","tool":"get_stats","args":{}}');
@@ -306,6 +344,8 @@ export interface AdminTurnOptions {
   role?: string;
   contextPage?: string;
   toolExecutor?: AdminToolExecutor;
+  /** 租户流程定义（R2-C）：传给提示词构造器，让状态词汇跟随本机构流程；不传 → 旧提示词。 */
+  def?: WorkflowDef | null;
 }
 
 export interface AdminTurnResult {
@@ -344,7 +384,7 @@ export async function runAdminTurn(tenantId: string, message: string, opts?: Adm
   const allowed = toolsForRole(opts?.role);
   const page = opts?.contextPage ? `[用户当前页面：${opts.contextPage.slice(0, 200)}]\n` : '';
   const messages: ChatMsg[] = [
-    { role: 'system', content: buildAdminSystemPrompt(allowed) },
+    { role: 'system', content: buildAdminSystemPrompt(allowed, { def: opts?.def }) },
     { role: 'user', content: page + message.slice(0, 1000) },
   ];
   const result = await chatCompletion({

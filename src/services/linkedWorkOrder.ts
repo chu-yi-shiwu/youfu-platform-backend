@@ -6,15 +6,15 @@
 //    保持 M1-M3 已验证行为，不破坏既有工单生命周期。
 //  - 不改动已验证的 workOrder.ts；本文件为增量新增。
 import type { PoolClient } from 'pg';
-import { createWithIdem } from '../repo/ticket.js';
+import { createWithIdem, transition } from '../repo/ticket.js';
 import { pickWorker, resolveDispatch, getActiveRules } from '../engine/dispatch.js';
-import { autoRouteFor, timestampColumnFor } from '../engine/stateMachine.js';
+import { resolveDispatchTarget, type WorkOrderStatus } from '../engine/stateMachine.js';
 import { getWorkflowDef } from '../engine/workflowDef.js';
+import { CLAIM_HALL_STATE } from '../engine/claimHallEdges.js'; // F8：落抢单大厅走主通道（机制态单一事实源）
 import { setSlaDueAt } from '../engine/sla.js';
-import { emitDomainEvent } from '../db/eventBus.js';
+import { AppError } from '../middleware/error.js';
 // R12-F1（十轮审查）：K2 dispatch 影子回填——自动派单也是"人工实际"信号源（模型建议 vs 实际派单），
 // 此前仅 transition() 人工派单回填，导致 dispatch 影子 actual 永远空置（R12 live 查证 7/7 NULL）。
-import { resolveDispatchShadow } from './k2Shadow.js';
 // 2026-09-14 纵切② P0-4：派单未命中通知管理员（与 workOrder.ts / slaScheduler.ts 同源 notify 抽象层）
 import { insertNotification } from './notify.js';
 
@@ -92,8 +92,27 @@ export async function createLinkedWorkOrder(
   // ④⑤ 模数共振：读 workflow_def.autoRoutes，决定本租户自动派发的目标态与策略（缺省保持旧行为：落 assigned、规则优先）
   const def = await getWorkflowDef(client, p.tenantId, 'work_order');
   const initial = def.initial;
-  const route = autoRouteFor(def, initial);
-  const dispatchTarget = route?.to ?? 'assigned';
+  const route = resolveDispatchTarget(def, initial);
+  // 2026-10-19 对齐审查修复（F1）：与 routes/workOrder.ts autoDispatchAfterCreate 同口径——
+  // 租户未配 autoRoutes 时不再硬编码回退 'assigned'（def 可能没有该态，写未知态=造失管单），
+  // 无可用派单路径 → 422 明确拒绝；解析边要求系统无法提供的必填字段 → 422，不静默跳门禁。
+  const dispatchTarget = route;
+  if (!dispatchTarget) {
+    throw new AppError(
+      'BAD_REQUEST',
+      '本租户流程未配置可用的自动派单路径：请在工作流配置里设置 autoRoutes（如 draft → assigned），或为初始态配置一条非终态转移边',
+      422,
+    );
+  }
+  const dispatchEdge = (def.transitions ?? []).find((t) => t.from === initial && t.to === dispatchTarget);
+  const unmetFields = (dispatchEdge?.requiredFields ?? []).filter((f) => f !== 'assignee');
+  if (unmetFields.length > 0) {
+    throw new AppError(
+      'BAD_REQUEST',
+      `自动派单目标转移要求必填字段 ${unmetFields.join(',')}，系统派单无法提供；请调整流程配置或改用人工派单`,
+      422,
+    );
+  }
   // 2026-09-14 纵切② P0-1：strategy:'least_load' 不再短路规则匹配（t-phasea 实证规则被静默废掉；
   // 规则未命中时 resolveDispatch 返回 null，自然落 pickWorker 兜底，无规则租户行为不变）。
   // dispatchTarget（route?.to）逻辑不动：目标态仍由 autoRoutes 决定。
@@ -106,26 +125,23 @@ export async function createLinkedWorkOrder(
     autoFlow = true;
     assignee = picked.id;
     reason = resolved ? resolved.reason : 'auto dispatched by least_load fallback';
-    // 074 里程碑回填：本函数为自动派单旁路（不走 transition()），按 dispatchTarget 同步回填
-    // 里程碑列（映射与 transition() 同源 stateMachine.STATUS_TIMESTAMP_COLUMNS，口径一致）。
-    const milestoneCol = timestampColumnFor(dispatchTarget);
-    await client.query(
-      `UPDATE work_orders SET status = $1, assignee_id = $2, auto_flow = true, updated_at = now()${milestoneCol ? `, ${milestoneCol} = now()` : ''} WHERE id = $3`,
-      [dispatchTarget, picked.id, row.id],
-    );
-    await client.query('UPDATE worker SET load = load + 1 WHERE id = $1', [picked.id]);
-    await client.query(
-      `INSERT INTO ticket_event (tenant_id, work_order_id, type, from_status, to_status, actor, payload)
-       VALUES ($1,$2,'assign',$3,$4,'auto_dispatch',$5)`,
-      [p.tenantId, row.id, initial, dispatchTarget, JSON.stringify({ worker_id: picked.id })],
-    );
-    // ④ 口径对齐 workOrder.ts:180：自动派单补写 domain_event，闭环过程挖掘数据源（R25-004）。
-    // 注：本函数已用 autoRouteFor(def, initial) 走 workflow_def 状态机决定 dispatchTarget，
-    // 故不强行套用 transitionEntity（其 ALLOWED_TABLES 仅含 business_flow_tasks/inspection_task，
-    // 不含 work_orders，硬塞会直接抛 BAD_REQUEST）；缺的是 domain_event 这一条，此处补齐。
-    await emitDomainEvent(client, { tenantId: p.tenantId, entityType: 'work_order', entityId: row.id, type: dispatchTarget, actor: 'auto_dispatch', payload: { worker_id: picked.id } });
-    // R12-F1：自动派单回填 dispatch 影子 actual（best-effort，内部吞错不影响主链路）
-    await resolveDispatchShadow(client, p.tenantId, String(row.id), String(picked.id));
+    // F4（2026-10-19 根治）：与 routes/workOrder.ts autoDispatchAfterCreate 同口径——
+    //   派单从旁路手写 UPDATE 改为走 transition() 主通道，客户配在派单边上的
+    //   requiredFields / sideEffects / 自动审核规则在自动路径同样生效；
+    //   F4 深修（systemActor）：allowedRoles/allowedPerms 是人类门禁，系统 actor 无角色
+    //   可谈；客户配 autoRoutes（授权系统）+ allowedRoles（约束人）不矛盾，系统只跳过
+    //   人类门禁（拓扑/必填/副作用/自动审核一个不跳）。生产实证与完整论证见
+    //   routes/workOrder.ts 同段注释 + src/test/dispatchSystemActor.test.ts。
+    await transition(client, p.tenantId, row.id, dispatchTarget as WorkOrderStatus, {
+      actor: 'auto_dispatch',
+      fields: { assignee: picked.id },
+      autoFlow: true,
+      systemAuto: true,
+      eventLogType: 'assign',
+      eventOverride: dispatchEdge?.event,
+    });
+    // 注意：联动单派中不单独发工人通知（存量行为逐字保留——主路径 workOrder.ts 的 A5
+    //   fan-out 不覆盖本函数；"联动单派中是否该通知工人"另账评估，不在本次门禁修复里夹带）。
   } else {
     // 2026-09-14 纵切② P0-3：联动单派单未命中此前无 else 分支——工单无声卡死在 draft，
     // 无人可见、无人派发（断链）。逐行对齐 routes/workOrder.ts 的抢单大厅样板：
@@ -135,15 +151,17 @@ export async function createLinkedWorkOrder(
     const hallReason = workers.rows.some((w: { active: boolean }) => w.active)
       ? 'no_rule_matched'
       : 'no_available_worker';
-    await client.query(
-      'UPDATE work_orders SET status = $1, auto_flow = false, updated_at = now() WHERE id = $2',
-      ['claim_hall', row.id],
-    );
-    await client.query(
-      `INSERT INTO ticket_event (tenant_id, work_order_id, type, from_status, to_status, actor, payload)
-       VALUES ($1,$2,'enter_hall',$3,$4,'system',$5)`,
-      [p.tenantId, row.id, initial, 'claim_hall', JSON.stringify({ reason: hallReason })],
-    );
+    // F8（2026-10-19）：与 routes/workOrder.ts 落大厅同口径——由旁路手写 UPDATE 改为走
+    //   transition() 主通道（入厅边由 claimHallEdges 机制注入）。事件 type 仍 'enter_hall'、
+    //   payload 仍带 reason（GET /stats 的 claim_hall_reasons 聚合口径逐字不变）。
+    await transition(client, p.tenantId, row.id, CLAIM_HALL_STATE as WorkOrderStatus, {
+      actor: 'auto_dispatch',
+      autoFlow: false,
+      systemAuto: true,
+      eventLogType: 'enter_hall',
+      eventOverride: 'enter_hall',
+      payloadExtra: { reason: hallReason },
+    });
     // 2026-09-14 纵切② P0-4：派单未命中通知管理员（镜像 slaScheduler.ts admin fan-out 模式）。
     // QA-P1 修正（2026-09-14）：withTenantClient 是 BEGIN→fn→COMMIT（db/pool.ts），通知段 SQL
     // 一旦真出错，整个 PG 事务进入 aborted 态——单纯 try/catch 吞错后外层 COMMIT 实为 ROLLBACK，

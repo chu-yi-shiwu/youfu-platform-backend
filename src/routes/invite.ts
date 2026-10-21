@@ -12,7 +12,8 @@ import z from 'zod';
 import crypto from 'node:crypto';
 import pool, { withTenantClient } from '../db/pool.js';
 import { AUTH_MODE, loginRateLimit, requireRole, type AuthLocals } from '../middleware/auth.js';
-import { listPerms, ROLES } from '../middleware/role.js';
+import { listPerms, ROLE_CODE_RE } from '../middleware/role.js';
+import { isRoleUsable } from '../repo/roleDef.js';
 import {
   createUser,
   findUserByUsername,
@@ -84,7 +85,8 @@ function requireAdminAuth(res: { locals: { auth?: AuthLocals } }): AuthLocals {
 const inviteCreateSchema = z.object({
   username: z.string().regex(/^[a-z0-9_-]{2,64}$/i, '用户名 2-64 位字母数字下划线'),
   display_name: z.string().max(64).optional(),
-  role: z.enum(ROLES).optional(),
+  // 地基第二步：放宽为 code 形状校验（内置 6 角色 + 租户自建 role_def 岗位）
+  role: z.string().regex(ROLE_CODE_RE, 'invalid role code').optional(),
 });
 
 // ---- POST /api/v1/invites —— admin：生成邀请码（明文仅本次响应返回一次；重发先作废旧码） ----
@@ -96,6 +98,16 @@ router.post('/invites', async (req, res, next) => {
     const code = randomInviteCode();
     const expiresAt = new Date(Date.now() + INVITE_TTL_HOURS * 3600 * 1000);
     const row = await withTenantClient(tenantId, async (client) => {
+      // 地基第二步补漏②（2026-10-17 二轮审查）：退场角色闸门。
+      // 此前本端点只有 inviteCreateSchema 的 ROLE_CODE_RE **形状**校验，没有"这个岗位还能不能用"
+      // 的存在性校验 → 能开出 role='dispatcher' 的邀请码（201 OK，页面显示「调度人员」）。
+      // 而兑换时（invite.ts:282）isRoleUsable=false 会把它**静默** fallback 成 operator：
+      // dispatcher 5 个权限点 → operator 11 个，等于"意图拿掉、实际静默升权"，全程零报错。
+      // 闸门装在最前面（写入前），杜绝"先落库再靠兑换端兜底"。
+      const role = b.role ?? 'operator';
+      if (!(await isRoleUsable(client, tenantId, role))) {
+        throw new AppError('BAD_PARAM', `unknown role: ${role}`, 400);
+      }
       // 预定账号名不得与既有账号重名（激活时建号会撞 UNIQUE(tenant_id, username)）
       const existing = await findUserByUsername(client, tenantId, b.username);
       if (existing) throw new AppError('USER_EXISTS', '该用户名在本机构已存在', 409);
@@ -275,7 +287,11 @@ router.post('/invites/redeem', loginRateLimit(10), async (req, res, next) => {
         username: invite.username,
         password: b.password,
         display_name: invite.display_name,
-        role: (ROLES as readonly string[]).includes(invite.role) ? (invite.role as AccountRole) : 'operator',
+        // 地基第二步：内置角色照用；自定义岗位须仍在 role_def 中启用，否则兜底 operator
+        // （不得静默降级为 operator 后放行——原逻辑对自定义角色一律降级，等于自建岗失效）。
+        role: (await isRoleUsable(client, tenantId, invite.role))
+          ? (invite.role as AccountRole)
+          : 'operator',
       });
       const permissions = await listPerms(
         { tenantId, requestId: '', role: user.role, authMode: 'prod' },

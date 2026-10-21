@@ -3,7 +3,7 @@
 import { Router } from 'express';
 import z from 'zod';
 import { AUTH_MODE, DEFAULT_TENANT_ID, loginRateLimit, requireRole, type AuthLocals } from '../middleware/auth.js';
-import { listPerms, ROLES } from '../middleware/role.js';
+import { listPerms, ROLE_CODE_RE } from '../middleware/role.js';
 import { code2Session } from '../services/wechatMp.js';
 import {
   createUser,
@@ -56,16 +56,26 @@ router.post('/auth/login', loginRateLimit(), async (req, res, next) => {
     const reg = await withTenantClient(tenantId, (client) =>
       client.query(`SELECT status FROM tenant_registry WHERE tenant_id=$1`, [tenantId]),
     );
-    if (reg.rowCount && reg.rowCount > 0) {
-      const regStatus = reg.rows[0].status as string;
-      // 既有口径不动：suspended → TENANT_SUSPENDED
-      if (regStatus === 'suspended') {
-        return res.status(403).json({ ok: false, code: 'TENANT_SUSPENDED', message: 'tenant suspended by platform' });
-      }
-      // 八件增量 BE-2：审批制开通的租户在激活前禁止登录（pending → TENANT_PENDING）
-      if (regStatus === 'pending') {
-        return res.status(403).json({ ok: false, code: 'TENANT_PENDING', message: '租户待激活，请联系平台管理员' });
-      }
+    // fail-closed（2026-10-19）：登记行是登录的前置条件。
+    // 原口径 `if (reg.rowCount && reg.rowCount > 0)` 查不到行就整段跳过 = fail-open：
+    // 账号在 account_user、登记行不在（人工删库漏尾，2026-09-05 probe 实证 2 个）的租户
+    // 可绕过平台封禁登录，且平台侧统计/封禁/对账全看不见。
+    // 生产已补登记（孤儿差集=0），本改动对在册租户零影响；未登记租户由静默放行改明确拒绝。
+    if (!reg.rowCount || reg.rowCount === 0) {
+      return res.status(403).json({
+        ok: false,
+        code: 'TENANT_NOT_REGISTERED',
+        message: '租户未在平台登记，请联系平台管理员',
+      });
+    }
+    const regStatus = reg.rows[0].status as string;
+    // 既有口径不动：suspended → TENANT_SUSPENDED
+    if (regStatus === 'suspended') {
+      return res.status(403).json({ ok: false, code: 'TENANT_SUSPENDED', message: 'tenant suspended by platform' });
+    }
+    // 八件增量 BE-2：审批制开通的租户在激活前禁止登录（pending → TENANT_PENDING）
+    if (regStatus === 'pending') {
+      return res.status(403).json({ ok: false, code: 'TENANT_PENDING', message: '租户待激活，请联系平台管理员' });
     }
 
     const user = await withTenantClient(tenantId, (client) => findUserByUsername(client, tenantId, username));
@@ -169,8 +179,8 @@ const createUserSchema = z.object({
   username: z.string().min(1).max(64),
   password: z.string().min(6).max(200),
   display_name: z.string().max(64).optional(),
-  // AL-002：枚举改引 ROLES 单一事实源（含 reviewer/service_desk）
-  role: z.enum(ROLES).optional(),
+  // 地基第二步：放宽为 code 形状校验（内置 6 角色 + 租户自建 role_def 岗位）
+  role: z.string().regex(ROLE_CODE_RE, 'invalid role code').optional(),
 });
 
 // POST /api/v1/auth/users —— admin：创建账户（同租户）

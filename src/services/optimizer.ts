@@ -371,7 +371,10 @@ export async function applyDispatchOptimizations(
     const businessType = String(d.recommendation.business_type ?? '');
     const newWeight = Number(d.recommendation.new_weight ?? WEIGHT_MIN);
     const up = await client.query(
-      `UPDATE dispatch_rule SET weight = $1 WHERE tenant_id = $2 AND match_json->>'business_type' = $3`,
+      // updated_at=now()：AUTO_TUNE 写回必须推进 dispatch_rule.updated_at——双口径改造后，
+      // 它是 AUTO_TUNE 一致性影子的「规则版本标识」来源（getAutoTuneRuleVersionAt 取
+      // max(updated_at)）。少了它，写回不留痕 ⇒ 时间窗切分失效 ⇒ 同一批数据又当教材又当考卷。
+      `UPDATE dispatch_rule SET weight = $1, updated_at = now() WHERE tenant_id = $2 AND match_json->>'business_type' = $3`,
       [newWeight, tenantId, businessType],
     );
     const status = (up.rowCount ?? 0) > 0 ? 'applied' : 'no_match';
@@ -416,18 +419,29 @@ export function applyRecommendationToDef(def: WorkflowDef, decision: Optimizatio
     transitions: def.transitions.map((t) => ({ ...t })),
     config: { ...(def.config ?? {}) },
   };
+  // F10：注入前先看这条边挂钩的 from/to 是否真实存在于本租户流程——
+  //   建议里的 'assigned'/'processing' 是「内置模板的状态名」，客户自定义流程可能根本没有它们。
+  //   旧实现无条件 push：① 造出 from/to 不在 states 里的**悬空边**（validateWorkflowDef 会 422，
+  //   前端 availableTransitions 会算出看不见的跳转）；② 更要命的是 addState 补进来的孤立态
+  //   （recheck / escalated）没有任何出边 → 被 terminalStates 当成终态 → doneStates/activeStates
+  //   派生全线污染（工单一旦落进去 = 既不算在办也不算完成，"游标卡死"同款静默事故）。
+  //   现在：**边挂不上就不加状态**，宁可这条优化建议不生效，也不把客户流程写坏。
   const hasState = (s: string) => next.states.includes(s);
   const addState = (s: string) => { if (!hasState(s)) next.states.push(s); };
   const hasTransition = (from: string, to: string, event: string) =>
     next.transitions.some((t) => t.from === from && t.to === to && t.event === event);
   const addTransition = (from: string, to: string, event: string) => {
-    if (!hasTransition(from, to, event)) next.transitions.push({ from, to, event });
+    if (hasTransition(from, to, event)) return;
+    next.transitions.push({ from, to, event });
   };
 
   if (decision.target === 'work_order:recheck_gate') {
-    addState('recheck');
-    addTransition('assigned', 'recheck', 'recheck_open');
-    addTransition('recheck', 'processing', 'recheck_pass');
+    // 前置：assigned 与 processing 都在该租户流程里，才谈得上"在 assigned 之后加一道复核"。
+    if (hasState('assigned') && hasState('processing')) {
+      addState('recheck');
+      addTransition('assigned', 'recheck', 'recheck_open');
+      addTransition('recheck', 'processing', 'recheck_pass');
+    }
   } else if (decision.target === 'work_order:sla_tighten') {
     const cur = Number(decision.recommendation.current_sla_rate ?? 0);
     next.config = {
@@ -437,8 +451,11 @@ export function applyRecommendationToDef(def: WorkflowDef, decision: Optimizatio
       target_sla_rate: Number(Math.min(0.95, Math.max(0.8, cur * 1.1)).toFixed(2)),
     };
   } else if (decision.target.endsWith(':auto_escalate')) {
-    addState('escalated');
-    addTransition('processing', 'escalated', 'auto_escalate');
+    // 前置同理：processing 不在流程里就不加 escalated（否则又是一个"无入边的孤岛终态"）。
+    if (hasState('processing')) {
+      addState('escalated');
+      addTransition('processing', 'escalated', 'auto_escalate');
+    }
     next.config = { ...next.config, auto_escalate: true };
   }
   return next;

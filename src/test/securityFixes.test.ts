@@ -166,6 +166,7 @@ describe('F-D2 loginRateLimit 内存上限保护（防 Map 无限增长）', () 
   it('大量独立 IP 请求后 loginAttempts 仍受上限约束', () => {
     const prevMode = authMod.AUTH_MODE;
     authMod.__setAuthModeForTest('prod');
+    authMod.__setRateLimitEnabledForTest(true); // F7：测试跑法默认 inert，锁定驱逐逻辑须显式打开
     authMod.__setLoginIpCapForTest(50);
     authMod.loginAttempts.clear();
     const mw = authMod.loginRateLimit(10, 60_000);
@@ -183,6 +184,22 @@ describe('F-D2 loginRateLimit 内存上限保护（防 Map 无限增长）', () 
     // 还原，避免污染其它测试
     authMod.loginAttempts.clear();
     authMod.__setLoginIpCapForTest(100_000);
+    authMod.__setRateLimitEnabledForTest(false);
     authMod.__setAuthModeForTest(prevMode);
+  });
+
+  it('F7 契约：测试跑法下限流器默认 inert（NODE_ENV=test，免被自身调用量误伤）', () => {
+    authMod.__setAuthModeForTest('prod'); // 即便 prod 模式
+    authMod.__setRateLimitEnabledForTest(false); // 测试默认关
+    authMod.loginAttempts.clear();
+    const mw = authMod.loginRateLimit(1, 60_000); // 上限 1 次
+    let nextCalls = 0;
+    const next = () => { nextCalls++; };
+    const mkRes = () => ({ status: () => ({ json: () => {} }) }) as any;
+    const req: any = { ip: '10.9.9.9', socket: { remoteAddress: '10.9.9.9' } };
+    mw(req, mkRes(), next as any);
+    mw(req, mkRes(), next as any); // 第二次也放行（inert），不记数
+    expect(nextCalls).toBe(2);
+    expect(authMod.loginAttempts.size).toBe(0); // 完全不记数
   });
 });

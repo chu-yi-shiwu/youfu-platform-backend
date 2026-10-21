@@ -104,14 +104,20 @@ export async function upsertWorkflowDefDraft(
   return { rev: Number(r.rows[0]?.rev ?? 1) };
 }
 
-/** 读在途变更行；无则 null。 */
+/**
+ * 读在途变更行；无则 null。
+ * 099 起同一业务流**可有多份草稿**（放开表级 UNIQUE，改部分唯一索引约束 submitted），
+ * 所以"取哪一行"必须有确定性：submitted 优先（审批视角看的就是待审那份），其次最新草稿（id 最大）。
+ * 放开前每业务流只有一行，此排序对既有行为零影响。
+ */
 export async function getWorkflowDefChange(
   client: PoolClient,
   tenantId: string,
   entityType: string,
 ): Promise<WorkflowDefChange | null> {
   const r = await client.query(
-    'SELECT * FROM workflow_def_change WHERE tenant_id = $1 AND entity_type = $2',
+    `SELECT * FROM workflow_def_change WHERE tenant_id = $1 AND entity_type = $2
+     ORDER BY (status = 'submitted') DESC, id DESC`,
     [tenantId, entityType],
   );
   return r.rows[0] ? mapChange(r.rows[0]) : null;
@@ -120,20 +126,40 @@ export async function getWorkflowDefChange(
 /**
  * 提交审核（draft→submitted）：记录 submitted_by 与提交时刻的 live 版本（防脏写锚点）。
  * 仅 draft 行可提交（submitted 行返回 null，由路由层区分 NO_DRAFT / CHANGE_NOT_DRAFT）。
+ *
+ * 099 起可有多份草稿，因此：
+ *   · 指定 opts.changeId ⇒ 精确提交那一份；
+ *   · 未指定 ⇒ 仅在草稿恰好一份时提交（向后兼容既有前端），多份时抛 409 要求显式指定
+ *     ——否则 UPDATE 会把全部草稿置为 submitted，撞上部分唯一索引直接 500。
  */
 export async function submitWorkflowDefChange(
   client: PoolClient,
   tenantId: string,
   entityType: string,
-  opts: { submittedBy: string },
+  opts: { submittedBy: string; changeId?: number },
 ): Promise<WorkflowDefChange | null> {
   const baseVersion = await liveVersion(client, tenantId, entityType);
+  if (opts.changeId === undefined) {
+    const cnt = await client.query<{ c: number }>(
+      `SELECT COUNT(*)::int AS c FROM workflow_def_change
+       WHERE tenant_id = $1 AND entity_type = $2 AND status = 'draft'`,
+      [tenantId, entityType],
+    );
+    if (Number(cnt.rows[0]?.c ?? 0) > 1) {
+      throw new AppError(
+        'CHANGE_ID_REQUIRED',
+        'multiple drafts in flight for this flow; specify change_id to choose which one to submit',
+        409,
+      );
+    }
+  }
   const r = await client.query(
     `UPDATE workflow_def_change
      SET status = 'submitted', submitted_by = $3, submitted_at = now(), base_version = $4, updated_at = now()
      WHERE tenant_id = $1 AND entity_type = $2 AND status = 'draft'
+       AND ($5::bigint IS NULL OR id = $5::bigint)
      RETURNING *`,
-    [tenantId, entityType, opts.submittedBy, baseVersion],
+    [tenantId, entityType, opts.submittedBy, baseVersion, opts.changeId ?? null],
   );
   return r.rows[0] ? mapChange(r.rows[0]) : null;
 }
@@ -167,14 +193,20 @@ export async function listSubmittedWorkflowDefChanges(
   return r.rows.map(mapChange);
 }
 
-/** 删除变更行（approve 生效后调用；审计由 workflow_def_history reason='approve' 承担）。 */
+/**
+ * 删除变更行（approve 生效后调用；审计由 workflow_def_history reason='approve' 承担）。
+ *
+ * ⚠️ changeId **必传**：099 放开多草稿后，按 (tenant_id, entity_type) 删除会连
+ * 同业务流下其他人的草稿一起删掉 —— 属于静默数据丢失，必须按 id 精确删被生效的那一行。
+ */
 export async function deleteWorkflowDefChange(
   client: PoolClient,
   tenantId: string,
   entityType: string,
+  changeId: number,
 ): Promise<void> {
-  await client.query('DELETE FROM workflow_def_change WHERE tenant_id = $1 AND entity_type = $2', [
-    tenantId,
-    entityType,
-  ]);
+  await client.query(
+    'DELETE FROM workflow_def_change WHERE tenant_id = $1 AND entity_type = $2 AND id = $3',
+    [tenantId, entityType, changeId],
+  );
 }

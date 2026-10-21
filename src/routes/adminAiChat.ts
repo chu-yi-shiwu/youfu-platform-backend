@@ -12,6 +12,8 @@ import { AppError } from '../middleware/error.js';
 import { conversationAvailable } from '../services/conversationAgent.js';
 import { runAdminTurn } from '../services/adminAgent.js';
 import { makeAdminToolExecutor } from '../services/adminAgentTools.js';
+import { withTenantClient } from '../db/pool.js';
+import { getWorkflowDef } from '../engine/workflowDef.js';
 
 const router = Router();
 
@@ -24,7 +26,9 @@ const adminChatSchema = z.object({
 });
 
 // AI 助理可见角色（worker 不开放——移动端自有对话通道，最小权限）
-const AI_CHAT_ROLES: readonly string[] = ['admin', 'operator', 'reviewer', 'service_desk'];
+// 【用户要求①】摘除退场的 service_desk（AI 对话是"权限属性"而非"某一岗位"，
+// 需要开放给自建岗位时，由租户经 role_permission 授予对应权限点，不再靠内置角色名单）。
+const AI_CHAT_ROLES: readonly string[] = ['admin', 'operator', 'reviewer'];
 
 router.post('/admin/ai-chat', async (req, res, next) => {
   try {
@@ -43,10 +47,16 @@ router.post('/admin/ai-chat', async (req, res, next) => {
     }
 
     const conversationId = b.conversation_id ?? crypto.randomUUID();
+    // R2-C：提示词必须跟随本租户流程取真实状态名——否则 few-shot 会教模型输出本机构
+    // 根本不存在的状态（如 assigned/processing），被工具层白名单过滤后变成空条件、答非所问。
+    const def = await withTenantClient(tenantId, (client) =>
+      getWorkflowDef(client, tenantId, 'work_order'),
+    );
     const { reply, confirm_card, result_card } = await runAdminTurn(tenantId, b.message, {
       role,
       contextPage: b.context?.page,
       toolExecutor: makeAdminToolExecutor(tenantId),
+      def,
     });
     return res.json({ ok: true, code: 0, conversation_id: conversationId, reply, confirm_card, result_card });
   } catch (e) {

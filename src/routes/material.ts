@@ -14,7 +14,7 @@ import { requireConfigRole, requirePermission } from '../middleware/role.js';
 import { applyStockAction } from '../services/inventory.js';
 import { emitDomainEvent } from '../db/eventBus.js';
 import { parseCsv, csvEscape } from '../services/csvUtil.js';
-import { RICH_WORK_ORDER_DEF, doneStates as wfDoneStates } from '../engine/stateMachine.js';
+import { RICH_WORK_ORDER_DEF, doneStates as wfDoneStates, cancelledStates } from '../engine/stateMachine.js';
 import { getWorkflowDefOrDefault } from '../engine/workflowDef.js';
 import { syncMaterialCostRows } from '../repo/settlement.js';
 
@@ -392,8 +392,12 @@ export const CONSUME_BLOCKED_STATUSES: readonly string[] = [
 /** §13 裁决2：动态终态口径 = 租户 workflow_def 的 doneStates ∪ {completed, cancelled}（单一事实源）。 */
 async function consumeBlockedStatuses(client: import('pg').PoolClient, tenantId: string): Promise<Set<string>> {
   // 无 workflow_def 行的租户回退富模板（与历史行为一致：completed/closed/evaluated 均拦）
+  // F10：取消态不再写死 'cancelled' 一个名字——改由 cancelledStates(def) 从「入边 event=cancel」派生。
+  //   客户把撤销态起别的名（如 'voided'/'作废'）时，旧口径漏拦 ⇒ 已撤销的单还能登记耗材。
+  //   'completed' 是 §13 裁决2 的**产品兜底**（终态口径恒含"已完工"语义），有
+  //   e9AutoSettleConsume 用例锚定，不随 def 走——本轮不动它，只修"漏的那半个"。
   const def = await getWorkflowDefOrDefault(client, tenantId, 'work_order', RICH_WORK_ORDER_DEF);
-  return new Set<string>([...wfDoneStates(def), 'completed', 'cancelled']);
+  return new Set<string>([...wfDoneStates(def), 'completed', ...cancelledStates(def)]);
 }
 
 /**

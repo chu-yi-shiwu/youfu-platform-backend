@@ -54,7 +54,14 @@ function describeConds(q: { status?: string; priority?: string; department?: str
 /** 确定性关键词兜底（live 探针 P2/P4 教训：模型丢条件）：
  *  用户原话里的"urgent/紧急/今天/处理中"等确定性信号直接落到查询参数，
  *  模型 args 与原话冲突时以原话为准（确定性优先，模型只做补充）。 */
-function augmentArgsFromMessage(msg: string | undefined, q: TicketQueryArgs): TicketQueryArgs {
+/**
+ * F10：候选状态名先过一遍租户 def 的白名单。
+ *   此前这里按内置模板的名字硬推 assigned/processing/completed/closed/evaluated——
+ *   租户自定义流程里根本没有这些名字时，AI 客服会把用户原话里的「处理中/已完成」
+ *   翻译成**本租户不存在的状态**，list() 按它去过滤 ⇒ 查什么都是 0 单（且对话里看不出原因）。
+ *   现在：命中关键词后只保留真实存在于该租户流程里的状态；knownStates 缺省时保持旧行为。
+ */
+function augmentArgsFromMessage(msg: string | undefined, q: TicketQueryArgs, knownStates?: readonly string[]): TicketQueryArgs {
   if (!msg) return q;
   // 优先级：原话关键词强信号直接覆盖模型 args（原话为准）；弱信号仅在缺失时补
   if (/urgent|紧急/i.test(msg)) q.priority = 'urgent';
@@ -62,11 +69,13 @@ function augmentArgsFromMessage(msg: string | undefined, q: TicketQueryArgs): Ti
   else if (!q.priority && /普通|normal/i.test(msg)) q.priority = 'normal';
   if (!q.today_only && /今天|今日|当天/.test(msg)) q.today_only = true;
   if (!q.status) {
+    const keep = (names: string[]) =>
+      knownStates && knownStates.length > 0 ? names.filter((n) => knownStates.includes(n)) : names;
     const st: string[] = [];
-    if (/待处理|待派|待接|待审核|pending/.test(msg)) st.push('pending');
-    if (/已派|处理中|进行中|assigned|processing/.test(msg)) st.push('assigned', 'processing');
-    if (/已完成|已完工|completed/.test(msg)) st.push('completed');
-    if (/已关闭|已评价|closed|evaluated/.test(msg)) st.push('closed', 'evaluated');
+    if (/待处理|待派|待接|待审核|pending/.test(msg)) st.push(...keep(['pending']));
+    if (/已派|处理中|进行中|assigned|processing/.test(msg)) st.push(...keep(['assigned', 'processing']));
+    if (/已完成|已完工|completed/.test(msg)) st.push(...keep(['completed']));
+    if (/已关闭|已评价|closed|evaluated/.test(msg)) st.push(...keep(['closed', 'evaluated']));
     if (st.length) q.status = [...new Set(st)].slice(0, 4).join(',');
   }
   return q;
@@ -75,9 +84,10 @@ function augmentArgsFromMessage(msg: string | undefined, q: TicketQueryArgs): Ti
 async function queryTickets(tenantId: string, rawArgs: Record<string, unknown>, message?: string): Promise<{ reply: string; card: TicketResultCard } | null> {
   const base = sanitizeTicketQueryArgs(rawArgs);
   if (!base) return null;
-  const q = augmentArgsFromMessage(message, base);
-  if (!q) return null;
   return withTenantClient(tenantId, async (client) => {
+    // F10：先读租户 def —— 原话关键词→状态名的翻译必须按该租户真实的状态集合来做
+    const def = await getWorkflowDef(client, tenantId, 'work_order');
+    const q = augmentArgsFromMessage(message, base, def.states);
     const { items, total } = await list(client, tenantId, {
       status: q.status as never,
       priority: q.priority,

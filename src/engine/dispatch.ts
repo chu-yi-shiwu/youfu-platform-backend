@@ -21,7 +21,10 @@ export interface DispatchRule {
   name: string;
   priority: number;
   match: { business_type?: string; skill_tags?: string[]; priority?: string };
-  strategy: { type: 'skill_match' | 'load_balance'; skill_tags?: string[] };
+  // type 不再是代码枚举：合法值来自 DISPATCH_STRATEGY_REGISTRY 的注册项
+  // （内置 skill_match / load_balance），新增种类只需往注册表里注册一个函数。
+  // 未注册的 type 不会让派单失败，而是 fail-safe 回退到 pickWorker 兜底并打日志。
+  strategy: { type: string; skill_tags?: string[] };
   weight?: number; // 模型学习权重（自适应写回 surface），默认 1
   score?: number; // 模型对该规则的整体评分，默认 0
 }
@@ -45,6 +48,36 @@ export function pickWorker(
   // least_load：负载最低的优先（[...] 避免原地排序污染入参）
   return [...matched].sort((a, b) => a.load - b.load)[0];
 }
+
+// 策略函数：在已按 active + 需求技能过滤后的候选集里"选一个人"。
+// 新增派单种类 = 往 DISPATCH_STRATEGY_REGISTRY 里加一个这样的函数，引擎与路由层都不用改。
+// 返回 null 表示"该策略选不出人"，交给上层继续尝试下一条规则（绝不误派）。
+export type DispatchStrategy = (
+  candidates: WorkerRow[],
+  need: Need,
+  cfg: DispatchRule['strategy'],
+  ctx: { rule: DispatchRule; model?: ModelBackend },
+) => WorkerRow | null;
+
+// 历史内置行为：有模型时按 规则权×模型分×负载因子 排序，否则 least_load。
+// skill_match 与 load_balance 当前共用这一套选人算法（都要求技能全命中、再 least_load），
+// 拆成两个注册项是为了保留各自语义出口：以后单独替换任一个实现，不影响另一个。
+function selectByLoadOrModel(
+  candidates: WorkerRow[],
+  need: Need,
+  ctx: { rule: DispatchRule; model?: ModelBackend },
+): WorkerRow | null {
+  if (candidates.length === 0) return null;
+  return ctx.model
+    ? rankByModel(candidates, ctx.rule, need.business_type ?? '', ctx.model)
+    : [...candidates].sort((a, b) => a.load - b.load)[0];
+}
+
+// 派单策略注册表：type 字符串 → 选人函数。新增种类在此注册（唯一扩展点）。
+export const DISPATCH_STRATEGY_REGISTRY: Record<string, DispatchStrategy> = {
+  skill_match: (candidates, need, _cfg, ctx) => selectByLoadOrModel(candidates, need, ctx),
+  load_balance: (candidates, need, _cfg, ctx) => selectByLoadOrModel(candidates, need, ctx),
+};
 
 // 纯函数：规则是否命中 need（AND 语义；未填的匹配维度视为通配）
 export function matchRule(rule: DispatchRule, need: Need): boolean {
@@ -73,10 +106,12 @@ export function resolveDispatch(
       (w) => w.active && needTags.every((t) => w.skill_tags.includes(t)),
     );
     if (candidates.length === 0) continue;
-    // 模型评分排序（分 = 规则权 × 模型分）；未提供模型则 least_load 兜底（向后兼容）
-    const picked = model
-      ? rankByModel(candidates, rule, need.business_type ?? '', model)
-      : [...candidates].sort((a, b) => a.load - b.load)[0];
+    // 按 strategy.type 查表选人；未注册的 type 不抛错，fail-safe 回退 pickWorker 兜底并打 warn。
+    const type = rule.strategy?.type ?? '';
+    const strategy = DISPATCH_STRATEGY_REGISTRY[type];
+    const picked = strategy
+      ? strategy(candidates, need, rule.strategy ?? { type }, { rule, model })
+      : fallbackPick(candidates, needTags, rule, type);
     if (picked) {
       return {
         worker: picked,
@@ -86,6 +121,21 @@ export function resolveDispatch(
     }
   }
   return null;
+}
+
+// fail-safe：strategy.type 未在 DISPATCH_STRATEGY_REGISTRY 注册时，不抛错、不静默失败——
+// 回退到 pickWorker 兜底（active + 技能全命中 + least_load），并打 warn 让配置错误可观测。
+function fallbackPick(
+  candidates: WorkerRow[],
+  needTags: string[],
+  rule: DispatchRule,
+  type: string,
+): WorkerRow | null {
+  console.warn(
+    `[dispatch] unknown dispatch strategy type "${type}" on rule ${rule.id} ("${rule.name}"), ` +
+      `fallback to pickWorker (least_load)`,
+  );
+  return pickWorker(candidates, { skillTags: needTags });
 }
 
 // 纯函数：按 规则权 × 模型分 × 负载因子 降序返回最优候选（上下文 bandit 选臂）。

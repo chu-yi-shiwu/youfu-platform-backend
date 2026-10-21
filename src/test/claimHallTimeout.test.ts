@@ -22,7 +22,11 @@ const { claimHallTimeoutMinutes, runClaimHallTimeoutScanForTenant } = await impo
 const TENANT = 't-verification';
 const WO = '66666666-6666-4666-8666-666666666666';
 const ADMIN = 'admin-001';
+const OPERATOR = 'operator-001';
+// 【用户要求①】dispatcher 退场后，调度运维通知面改为 admin + operator；
+// 存量 dispatcher 仍留在 SQL 的 IN 列表里（只加不删），避免存量账号突然收不到通知而失联。
 const DISPATCHER = 'dispatcher-001';
+const STAFF_ROLE_SQL = "role IN ('admin','operator','dispatcher')";
 
 type QueryFn = (text: string, params?: any[]) => Promise<{ rows: any[]; rowCount?: number }>;
 
@@ -31,9 +35,9 @@ function makeClient(scanRows: any[]) {
   const client = {
     query: (async (text: string, params?: any[]) => {
       calls.push({ text, params });
-      if (text.includes("w.status = 'claim_hall'") && text.includes('make_interval')) return { rows: scanRows };
-      if (text.includes("role IN ('admin','dispatcher')")) {
-        return { rows: [{ id: ADMIN }, { id: DISPATCHER }] };
+      if (text.includes('w.status = $2') && text.includes('make_interval')) return { rows: scanRows };
+      if (text.includes(STAFF_ROLE_SQL)) {
+        return { rows: [{ id: ADMIN }, { id: OPERATOR }, { id: DISPATCHER }] };
       }
       return { rows: [] }; // INSERT ticket_event / domain_event / notification
     }) as QueryFn,
@@ -76,7 +80,7 @@ describe('runClaimHallTimeoutScanForTenant（P0-5 大厅超时感知闭环）', 
     delete process.env.CLAIM_HALL_TIMEOUT_MIN;
   });
 
-  it('🔴 核心回归：超时大厅单 → claim_hall_timeout 事件 + domain_event + admin/dispatcher 双通知', async () => {
+  it('🔴 核心回归：超时大厅单 → claim_hall_timeout 事件 + domain_event + 调度面三通知（admin/operator/存量 dispatcher）', async () => {
     const { client, calls } = makeClient([staleHallRow]);
     h.client = client;
     const hits = await runClaimHallTimeoutScanForTenant(TENANT);
@@ -91,11 +95,12 @@ describe('runClaimHallTimeoutScanForTenant（P0-5 大厅超时感知闭环）', 
     expect(evtPayload.wait_minutes).toBeGreaterThanOrEqual(40);
     // domain_event 闭环（过程挖掘数据源）
     expect(calls.find((c) => c.text.includes('INSERT INTO domain_event'))).toBeTruthy();
-    // 通知面：admin + dispatcher 各一条（V2-F2 扩展——大厅积压是调度职责）
+    // 通知面：admin + operator + 存量 dispatcher 各一条（大厅积压是调度职责）
     const notes = calls.filter((c) => c.text.includes('INSERT INTO notification'));
-    expect(notes).toHaveLength(2);
+    expect(notes).toHaveLength(3);
     const allParams = JSON.stringify(notes.map((n) => n.params));
     expect(allParams).toContain(ADMIN);
+    expect(allParams).toContain(OPERATOR);
     expect(allParams).toContain(DISPATCHER);
     expect(allParams).toContain('抢单大厅工单超时');
     expect(allParams).toContain('WO-HALL-1');
@@ -125,7 +130,9 @@ describe('runClaimHallTimeoutScanForTenant（P0-5 大厅超时感知闭环）', 
     h.client = client;
     await runClaimHallTimeoutScanForTenant(TENANT);
     const scan = calls.find((c) => c.text.includes('make_interval'));
-    expect(scan?.params?.[1]).toBe(10);
+    // F10：SQL 里不再出现 'claim_hall' 字面量（改为常量同源传参），阈值位随之后移一位
+    expect(scan?.params?.[1]).toBe('claim_hall');
+    expect(scan?.params?.[2]).toBe(10);
   });
 });
 
@@ -134,8 +141,8 @@ function clientOf(calls: Array<{ text: string; params?: any[] }>): any {
   return {
     query: async (text: string, params?: any[]) => {
       calls.push({ text, params });
-      if (text.includes("w.status = 'claim_hall'") && text.includes('make_interval')) return { rows: [] };
-      if (text.includes("role IN ('admin','dispatcher')")) return { rows: [] };
+      if (text.includes('w.status = $2') && text.includes('make_interval')) return { rows: [] };
+      if (text.includes(STAFF_ROLE_SQL)) return { rows: [] };
       return { rows: [] };
     },
   };
