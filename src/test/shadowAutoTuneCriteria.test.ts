@@ -432,11 +432,21 @@ CREATE TABLE model_state (
   created_at  timestamptz NOT NULL DEFAULT now(),
   updated_at  timestamptz NOT NULL DEFAULT now()
 );
+-- 与生产 001_init.sql / 033_fault_category.sql / 075 对齐（catalog、skill_tags 真实存在）
 CREATE TABLE work_orders (
   id            text PRIMARY KEY,
   tenant_id     text NOT NULL,
   business_type text,
+  catalog       text,
   priority      text NOT NULL DEFAULT 'normal'
+);
+CREATE TABLE fault_category (
+  id          text PRIMARY KEY,
+  tenant_id   text NOT NULL,
+  code        text NOT NULL,
+  name        text NOT NULL,
+  enabled     boolean NOT NULL DEFAULT true,
+  skill_tags  jsonb
 );
 CREATE TABLE worker (
   id         text PRIMARY KEY,

@@ -163,21 +163,32 @@ describe('B. 当前同源：影子预测与「不带 skill_tags 的实派」命�
 // ─────────────────────────────────────────────────────────────────────────────
 // C. 契约可机读：影子侧 need 不含 skill_tags，且源码写明原因
 // ─────────────────────────────────────────────────────────────────────────────
-describe('C. 契约守卫：影子侧 need 不含 skill_tags 且留有说明（改一侧必须改另一侧）', () => {
-  const src = readFileSync(join(ROOT, 'src/services/k2Shadow.ts'), 'utf8');
+// ⚠️ 本组契约已于 2026-10-22 **升级**，不是放宽：
+// 旧契约是「影子侧 need 字面量不含 skill_tags」——那是**靠人记住**的承诺，
+// 一旦建单侧开始带技能就会静默失真。新契约把两侧收敛到同一个 resolveNeed 入口，
+// 于是「分叉」从"靠测试看守"升级为"结构上不可能"。下面的断言守的是**新契约**。
+describe('C. 契约守卫：影子与实派共用 resolveNeed（结构上不可能分叉）', () => {
+  const shadowSrc = readFileSync(join(ROOT, 'src/services/k2Shadow.ts'), 'utf8');
+  const woSrc = readFileSync(join(ROOT, 'src/routes/workOrder.ts'), 'utf8');
 
-  it('传给 resolveDispatch 的 need 字面量里不含 skill_tags', () => {
-    const m = src.match(/resolveDispatch\(\s*workerRows\s*,\s*rules\s*,\s*\{([\s\S]*?)\}\s*,\s*model\s*\)/);
-    expect(m, '未找到影子侧 resolveDispatch 调用——若已重构，请同步更新本守卫').not.toBeNull();
-    expect(m![1]).not.toMatch(/skill_tags/);
+  it('C1 影子侧不再手写 need 字面量，而是调用 resolveNeed', () => {
+    expect(shadowSrc).toMatch(/await\s+resolveNeed\(/);
+    const m = shadowSrc.match(/resolveDispatch\(\s*workerRows\s*,\s*rules\s*,\s*\{[\s\S]*?\}\s*,\s*model\s*\)/);
+    expect(m, '影子侧仍在手写 need 字面量——同源契约被破坏').toBeNull();
   });
 
-  it('源码注释如实写明「skill_tags 不落工单表，诚实留空」——不装作维度齐全', () => {
-    expect(src).toMatch(/skill_tags\s*不落工单表/);
+  it('C2 实派侧同样调用 resolveNeed（两侧同一入口）', () => {
+    expect(woSrc).toMatch(/await\s+resolveNeed\(/);
+    const m = woSrc.match(/resolveDispatch\(\s*workerRows\s*,\s*rules\s*,\s*\{[\s\S]*?\}\s*,\s*model\s*\)/);
+    expect(m, '实派侧仍在手写 need 字面量——同源契约被破坏').toBeNull();
   });
 
-  it('契约说明：若将来建单侧带上 skill_tags，影子必须同步（注释里写明这条约束）', () => {
-    // 与 autoDispatchAfterCreate 同口径的承诺写在 recordAutoTuneShadow 的文档注释里
-    expect(src).toMatch(/与\s*autoDispatchAfterCreate\s*同一条/);
+  it('C3 两侧实体类型一致（同一条解析器链）', () => {
+    expect(shadowSrc).toMatch(/entityType:\s*'work_order'/);
+    expect(woSrc).toMatch(/entityType:\s*'work_order'/);
+  });
+
+  it('C4 影子侧读得到 catalog（否则派生不出技能，与实派输入不同源）', () => {
+    expect(shadowSrc).toMatch(/SELECT business_type, priority, catalog FROM work_orders/);
   });
 });

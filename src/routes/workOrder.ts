@@ -10,6 +10,7 @@ import { withTenantClient } from '../db/pool.js';
 import { createWithIdem, transition, list, findOne, findOneForUpdate } from '../repo/ticket.js';
 import { ticketStats } from '../repo/stats.js';
 import { pickWorker, resolveDispatch, getActiveRules } from '../engine/dispatch.js';
+import { resolveNeed } from '../engine/dispatch/needResolver.js';
 import { AppError } from '../middleware/error.js';
 import { requirePermission, requireAnyPermission, assertOpsRole } from '../middleware/role.js';
 import { resolveScanFromDb } from '../scan.js';
@@ -120,7 +121,20 @@ export async function autoDispatchAfterCreate(
   // 自动派单：优先按 dispatch_rule 配置匹配；无命中降级 least_load 兜底（保持 M1-M3 已验证行为）
   const workers = await client.query('SELECT id, skill_tags, load, active FROM worker WHERE tenant_id = $1', [tenantId]);
   const workerRows = workers.rows.map((w: any) => ({ ...w, skill_tags: safeParseJsonb(w.skill_tags) ?? [] }));
-  const needPayload = { business_type: need.business_type, skill_tags: need.skill_tags ?? undefined, priority: prio };
+  // 需求走解析器链（engine/dispatch/needResolver.ts），不再在路由里写死"技能只能由调用方传"：
+  // 调用方显式传了 → 以显式为准；没传 → 由目录/故障分类上配的技能派生（运营可配，用户零感知）。
+  // 与影子回放共用同一个 resolveNeed，两侧不可能各造各的口径。
+  const needPayload = await resolveNeed(
+    {
+      tenantId,
+      entityType: 'work_order',
+      business_type: need.business_type,
+      priority: prio,
+      skill_tags: need.skill_tags ?? undefined,
+      catalog: need.catalog ?? undefined,
+    },
+    client,
+  );
   const rules = await getActiveRules(client, tenantId);
   // ④⑤ 模数共振：读 workflow_def 决定本租户自动派发的目标态（resolveDispatchTarget：
   //   autoRoutes 优先 → 初态首条非终态转移 → 都没有则 422，绝不硬编码回退 'assigned'——
