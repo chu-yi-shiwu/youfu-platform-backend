@@ -371,7 +371,10 @@ export async function applyDispatchOptimizations(
     const businessType = String(d.recommendation.business_type ?? '');
     const newWeight = Number(d.recommendation.new_weight ?? WEIGHT_MIN);
     const up = await client.query(
-      `UPDATE dispatch_rule SET weight = $1 WHERE tenant_id = $2 AND match_json->>'business_type' = $3`,
+      // updated_at=now()：AUTO_TUNE 写回必须推进 dispatch_rule.updated_at——双口径改造后，
+      // 它是 AUTO_TUNE 一致性影子的「规则版本标识」来源（getAutoTuneRuleVersionAt 取
+      // max(updated_at)）。少了它，写回不留痕 ⇒ 时间窗切分失效 ⇒ 同一批数据又当教材又当考卷。
+      `UPDATE dispatch_rule SET weight = $1, updated_at = now() WHERE tenant_id = $2 AND match_json->>'business_type' = $3`,
       [newWeight, tenantId, businessType],
     );
     const status = (up.rowCount ?? 0) > 0 ? 'applied' : 'no_match';

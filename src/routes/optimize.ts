@@ -27,6 +27,7 @@ import { requirePermission } from '../middleware/role.js';
 import { assertWorkflowConfigEditableByTenant } from '../middleware/workflowConfigGuard.js';
 import {
   getShadowReplayStats,
+  getAutoTuneRuleVersionAt,
   summarizeShadowReplay,
   shadowTuneThresholds,
 } from '../services/k2Shadow.js';
@@ -148,6 +149,9 @@ router.get('/optimize/list', async (req, res, next) => {
 // 影子回放只读出口（任务 #356 解挂判据）：ai_shadow_suggestions 此前只写不读，
 // 「影子达标才开 MODEL_AUTO_TUNE」没有机读通道，达标与否只能靠人跑 SQL 手算。
 // 本端点把判定变成一次 GET。只读端点，权限取 dashboard.view（与 generate-mining 同款只读语义）。
+// 双口径（2026-10-22）：dispatch=「人工派单可预测性」（事实描述，非缺陷）；新增
+//   auto_tune_dispatch=「AUTO_TUNE 派单一致性」（规则派单 vs 现网实际，AUTO_TUNE 验收目标），
+//   其统计带时间窗切分（只计入规则版本生成后创建的影子行，防同一批数据又当教材又当考卷）。
 // 阈值默认是**建议值**，响应里如实标注来源并支持 env 覆盖，不伪装成既定标准。
 router.get('/optimize/shadow-replay', async (req, res, next) => {
   try {
@@ -158,9 +162,11 @@ router.get('/optimize/shadow-replay', async (req, res, next) => {
       throw new AppError('VALIDATION_001', 'days 必须是 1~3650 的整数', 422);
     }
     const th = shadowTuneThresholds();
-    const { kinds, ready, reasons } = await withTenantClient(tenantId, async (client) => {
+    const { kinds, ready, reasons, auto_tune_criteria } = await withTenantClient(tenantId, async (client) => {
       await requirePermission(res.locals.auth, client, 'dashboard.view');
-      const rows = await getShadowReplayStats(client, tenantId, days);
+      // AUTO_TUNE 口径的时间窗基准：当前生效预测输入集（dispatch_rule + 模型）的版本时间。
+      const ruleVersionAt = await getAutoTuneRuleVersionAt(client, tenantId);
+      const rows = await getShadowReplayStats(client, tenantId, days, ruleVersionAt);
       return summarizeShadowReplay(rows, th);
     });
     return res.json({
@@ -171,12 +177,15 @@ router.get('/optimize/shadow-replay', async (req, res, next) => {
         min_judged: th.minJudged,
         category: th.category,
         dispatch: th.dispatch,
-        source: '建议值（未经业务确认），可用 SHADOW_MIN_JUDGED / SHADOW_CATEGORY_HITRATE / SHADOW_DISPATCH_HITRATE 覆盖',
+        auto_tune_dispatch: th.autoTuneDispatch,
+        source: '建议值（未经业务确认），可用 SHADOW_MIN_JUDGED / SHADOW_CATEGORY_HITRATE / SHADOW_DISPATCH_HITRATE / SHADOW_AUTOTUNE_HITRATE 覆盖',
       },
       ready,
       ready_text: ready ? '影子达标，具备开启 MODEL_AUTO_TUNE 的数据条件' : '影子未达标，暂不具备开启 MODEL_AUTO_TUNE 的数据条件',
       reasons,
       kinds,
+      // AUTO_TUNE 一致性口径的单一状态通道（一行样本都没有时也如实给不达标，不许假绿）
+      auto_tune_criteria,
     });
   } catch (e) {
     next(e);

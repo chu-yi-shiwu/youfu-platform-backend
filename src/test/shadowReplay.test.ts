@@ -117,7 +117,9 @@ describe('影子回放 · SQL 口径（真库，不用 mock）', () => {
 });
 
 // ---------------- B. 达标判定（纯函数） ----------------
-const TH = { minJudged: 200, category: 0.6, dispatch: 0.5 };
+// 双口径改造后 ShadowTuneThresholds 增加必填字段 autoTuneDispatch（AUTO_TUNE 派单一致性
+// 口径阈值，建议值 0.5）。本文件的断言逐字未动，仅补齐阈值对象的新字段。
+const TH = { minJudged: 200, category: 0.6, dispatch: 0.5, autoTuneDispatch: 0.5 };
 const row = (kind: string, judged: number, hits: number, total?: number): ShadowReplayRow => ({
   kind,
   total: total ?? judged,
