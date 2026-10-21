@@ -14,7 +14,7 @@
 //       ③ **平台字典不被写穿**（真库逐值比对 label_dict + src 静态护栏双重卡）
 //       ④ 非法 scope / 空 label / 超长 label → 400
 //       ⑤ 请求里带 tenant_id 无效：仍写 auth 的 tenantId（防越权改别人字典）
-//       ⑥ 无 workflow.edit 权限 → 403
+//       ⑥ 无 basicdata.edit 权限 → 403；operator 默认矩阵含它 → 200（锁权限点，防改回 workflow.edit）
 //       ⑦ 写后读 /meta/labels/me 立刻是新值（缓存必须失效）
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
 import express from 'express';
@@ -243,10 +243,16 @@ describe('PUT /api/v1/meta/labels/me/:scope/:key（租户覆盖字典写，PGlit
     expect(await overrideOf('T1', 'wo_status', 'rated')).toBe('已评价');
   });
 
-  it('无 workflow.edit 权限 → 403', async () => {
+  it('无 basicdata.edit 权限（worker 默认矩阵不含）→ 403', async () => {
     const r = await putLabel('wo_status', 'rated', { label: '已评价' }, 'tenant=T1&role=worker');
     expect(r.status).toBe(403);
     expect(await overrideOf('T1', 'wo_status', 'rated')).toBe('rated'); // 未落库
+  });
+
+  it('operator 默认矩阵含 basicdata.edit → 200（权限点若被改回 workflow.edit 这条红）', async () => {
+    const r = await putLabel('wo_status', 'rated', { label: '已评价' }, 'tenant=T1&role=operator');
+    expect(r.status).toBe(200);
+    expect(await overrideOf('T1', 'wo_status', 'rated')).toBe('已评价');
   });
 
   it('改完再读 /meta/labels/me 立刻是新值（写侧必须失效租户缓存，不然改了不生效）', async () => {
