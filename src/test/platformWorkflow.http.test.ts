@@ -36,8 +36,11 @@ function makeClient() {
       return { rows: [], rowCount: 1 };
     }
     if (s.includes('FROM platform_config')) return { rows: [{ value: box.owner }], rowCount: 1 };
-    if (s.includes('SELECT version FROM workflow_def')) {
-      return { rows: [{ version: box.liveVersion }], rowCount: 1 };
+    // T0 后 saveWorkflowDef 自己会先 SELECT version, def（判断是否有当前行 + 取版本做历史快照），
+    // 桩必须一并应答；只认 'SELECT version FROM workflow_def' 会导致 cur 为空 ⇒ 条件更新判定
+    // "期望某版本但该流程不存在" ⇒ 抛 DRAFT_STALE ⇒ 审批全线 409（桩落后于生产 SQL 的假红）。
+    if (s.includes('SELECT version FROM workflow_def') || s.includes('SELECT version, def FROM workflow_def')) {
+      return { rows: [{ version: box.liveVersion, def: DEF }], rowCount: 1 };
     }
     if (s.includes('FROM workflow_def_change') && s.trim().startsWith('SELECT')) {
       // getWorkflowDefChange：无在途 → 空行
@@ -57,6 +60,16 @@ function makeClient() {
     }
     if (s.includes('INSERT INTO workflow_def_change')) return { rows: [{ rev: 1 }], rowCount: 1 };
     if (s.includes('DELETE FROM workflow_def_change')) return { rows: [], rowCount: 1 };
+    // T0：saveWorkflowDef 的 live 写入现在是单语句条件更新
+    //   INSERT ... ON CONFLICT DO UPDATE ... WHERE ($5::int IS NULL OR workflow_def.version = $5)
+    //   桩必须**如实模拟**这个 WHERE：传了 expectVersion 且 ≠ liveVersion ⇒ 0 行（上层抛 409 DRAFT_STALE）。
+    //   不模拟 ⇒ 桩永远返回 0 行 ⇒ 所有审批都变 409，本文件就失去意义了。
+    if (s.includes('INSERT INTO workflow_def (')) {
+      const expected = params[4] as number | null;
+      if (typeof expected === 'number' && expected !== box.liveVersion) return { rows: [], rowCount: 0 };
+      box.liveVersion += 1; // 版本自增（saveWorkflowDef 的语义）
+      return { rows: [], rowCount: 1 };
+    }
     if (s.includes('FROM platform_admin')) {
       return { rows: box.platformAdminRows, rowCount: box.platformAdminRows.length };
     }

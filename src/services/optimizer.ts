@@ -19,7 +19,8 @@ import type { ModelParams } from '../engine/model/ModelBackend.js';
 import type { ProcessMetrics } from '../repo/stats.js';
 import type { ProcessMiningResult } from '../repo/processMining.js';
 import type { WorkflowDef } from '../engine/stateMachine.js';
-import { ensureWorkflowDef, saveWorkflowDef } from '../engine/workflowDef.js';
+import { ensureWorkflowDef, saveWorkflowDef, getWorkflowDefVersion } from '../engine/workflowDef.js';
+import { AppError } from '../middleware/error.js';
 
 export interface OptimizationDecision {
   // 2026-09-06 任务⑦新增 'transport'：陪检线运力走廊建议（语义=运力调度，非流程改写）。
@@ -496,10 +497,39 @@ export async function applyWorkflowOptimizations(
     const newDef = applyRecommendationToDef(def, decision);
     // V3-D5：saveWorkflowDef opts 必填——飞轮直写强制留痕（operator='auto-tune'，reason='model-optimization'），
     // AUTO_TUNE 闸后的写入在 history 可归因（原调用不传 opts 会编译失败，本行即修复点）。
-    await saveWorkflowDef(client, tenantId, entityType, newDef, {
-      operator: 'auto-tune',
-      reason: 'model-optimization',
-    });
+    //
+    // T0：机器写也要带并发锚（expectVersion = 本次读到的版本）。
+    //   【为什么是"冲突重试 1 次"而不是"报 409 给人"】这是无人值守的自动飞轮，把 409 抛给
+    //   调用方没有意义（没有人会去点重试）；但**绝不能静默覆盖别人的改动**（总则 E3）——
+    //   所以：冲突时重读一次版本+def 再试，仍冲突 ⇒ 放弃本条建议并保持 pending，
+    //   让它在下个周期重新参与决策（绝不标记 applied，避免"建议被静默吞掉"的假闭环）。
+    try {
+      await saveWorkflowDef(client, tenantId, entityType, newDef, {
+        operator: 'auto-tune',
+        reason: 'model-optimization',
+        expectVersion: await getWorkflowDefVersion(client, tenantId, entityType),
+      });
+    } catch (e) {
+      const stale = e instanceof AppError && e.code === 'DRAFT_STALE';
+      if (!stale) throw e;
+      // 重试 1 次：基于最新的 def 重新套用建议（旧 def 已过期，直接重写的意义变了）
+      const latest = await ensureWorkflowDef(client, tenantId, entityType, 'auto-tune');
+      const retriedDef = applyRecommendationToDef(latest, decision);
+      try {
+        await saveWorkflowDef(client, tenantId, entityType, retriedDef, {
+          operator: 'auto-tune',
+          reason: 'model-optimization',
+          expectVersion: await getWorkflowDefVersion(client, tenantId, entityType),
+        });
+      } catch (e2) {
+        const stillStale = e2 instanceof AppError && e2.code === 'DRAFT_STALE';
+        if (!stillStale) throw e2;
+        console.warn(
+          `[auto-tune] 流程并发冲突，跳过本条建议（保持 pending，下周期重试）：${row.target}`,
+        );
+        continue; // 不标记 applied、不静默覆盖
+      }
+    }
     await client.query(
       `UPDATE optimization_feedback SET status = 'applied', applied_at = now() WHERE id = $1`,
       [row.id],

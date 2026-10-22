@@ -161,6 +161,7 @@ router.post('/tenants', async (req, res, next) => {
         category: b.category, // ④ 行业权限基线：preset ≠ 默认矩阵才落库定格，否则继承官方推荐基线
         adminUsername: b.admin_username,
         adminPassword: b.admin_password,
+        actor: admin.username, // T0：开通即写流程定义，留操作人
       });
       await client.query('COMMIT');
       // ④ 权限基线回执口径：inherited=继承官方推荐基线（随平台升级自动更新）；snapshot=行业基线已定格
@@ -607,6 +608,7 @@ router.post('/trial-applications/:id/review', async (req, res, next) => {
         sourceTenantId: src,
         category: application.category as 'hospital' | 'property' | 'school' | 'municipal' | 'other',
         adminUsername: b.admin_username,
+        actor: admin.username, // T0：开通即写流程定义，留操作人
       });
       await client.query(
         `UPDATE trial_applications

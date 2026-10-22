@@ -23,28 +23,34 @@ export interface LabelDictClient {
 
 /**
  * 把流程里的**自定义状态**补进租户覆盖表（幂等，只补不覆盖）。
+ *
+ * T0：新增落变更人（updated_by）。本函数的写入虽是"补缺失行"，但同样是**改动了租户可见配置**，
+ *   不留变更人 ⇒ 管理员看到一条来历不明的字典行，无从归因。
+ * @param actor 变更人（一般是触发保存流程的操作人）；不传 = 未知（落 NULL，不编造 'system' 掩盖未知）
  * @returns 本次**真正新增**的行数（已存在的不计）
  */
 export async function ensureTenantStateLabels(
   client: LabelDictClient | PoolClient,
   tenantId: string,
   states: string[],
+  actor?: string,
 ): Promise<number> {
   // 脏数据不静默写入：非字符串 / 空串 / 空白串一律剔除（def.states 来自用户 JSON，形状不可信）。
   const keys = [...new Set((states ?? []).filter((s) => typeof s === 'string' && s.trim() !== ''))];
   if (keys.length === 0) return 0;
   // 单条语句落全部：循环 INSERT 在 20 个状态的 def 下是 20 次往返，且仍需逐条判重。
+  // version 不显式写：走列默认 1（101 迁移给的 NOT NULL DEFAULT 1），与 workflow_def 初始版本同口径。
   const r = await (
     client as unknown as LabelDictClient
   ).query(
-    `INSERT INTO label_dict_tenant (tenant_id, scope, key, label, sort)
-     SELECT $1, 'wo_status', t.k, t.k, 0
+    `INSERT INTO label_dict_tenant (tenant_id, scope, key, label, sort, updated_by)
+     SELECT $1, 'wo_status', t.k, t.k, 0, $3
        FROM unnest($2::text[]) AS t(k)
       WHERE NOT EXISTS (
         SELECT 1 FROM label_dict WHERE scope = 'wo_status' AND key = t.k
       )
      ON CONFLICT (tenant_id, scope, key) DO NOTHING`,
-    [tenantId, keys],
+    [tenantId, keys, actor ?? null],
   );
   return Number(r?.rowCount ?? r?.affectedRows ?? 0) || 0;
 }

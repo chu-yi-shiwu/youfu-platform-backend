@@ -55,12 +55,14 @@ router.put('/tenant-info', async (req, res, next) => {
     const b = updateSchema.parse(req.body);
     const name = b.name;
     const hotline = b.hotline ?? '';
+    const actor = res.locals.auth?.username ?? null; // T0：留变更人（取不到写 NULL，不编造）
     await withTenantClient(tenantId, async (client) => {
       for (const [key, value] of [['brand_name', name], ['hotline', hotline]] as const) {
         await client.query(
-          `INSERT INTO system_config (tenant_id, key, value) VALUES ($1, $2, $3)
-           ON CONFLICT (tenant_id, key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`,
-          [tenantId, key, value],
+          `INSERT INTO system_config (tenant_id, key, value, updated_by) VALUES ($1, $2, $3, $4)
+           ON CONFLICT (tenant_id, key)
+           DO UPDATE SET value = EXCLUDED.value, updated_at = now(), updated_by = EXCLUDED.updated_by`,
+          [tenantId, key, value, actor],
         );
       }
     });

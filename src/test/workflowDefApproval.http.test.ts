@@ -201,6 +201,15 @@ function makeClient(db: WfDb, _tenant: string) {
         // saveWorkflowDef upsert / ensureWorkflowDef 首插：版本自增语义（首插=1）
         const key = `${params[0]}|${params[1]}`;
         const cur = db.defs.get(key);
+        // T0：单语句条件更新。SQL 形如
+        //   ... ON CONFLICT ... DO UPDATE SET ... WHERE ($5::int IS NULL OR workflow_def.version = $5)
+        // 桩必须**如实模拟**这个 WHERE：传了 expectVersion 且与当前版本不符 ⇒ 0 行 ⇒ 上层 409 DRAFT_STALE。
+        // 不模拟 ⇒ 本文件 ⑤「提交后 live 被 rollback 推进 → approve 409」就变成永远绿或永远红。
+        const guarded = /WHERE\s*\(\$5::int IS NULL OR workflow_def\.version = \$5\)/.test(text);
+        const expected = params[4] as number | null;
+        if (guarded && typeof expected === 'number' && cur && expected !== cur.version) {
+          return { rows: [], rowCount: 0 };
+        }
         const defObj = typeof params[2] === 'string' ? JSON.parse(params[2]) : params[2];
         db.defs.set(key, { version: cur ? cur.version + 1 : 1, def: defObj });
         return { rows: [], rowCount: 1 };

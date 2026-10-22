@@ -18,7 +18,7 @@ import { AppError } from '../middleware/error.js';
 import { platformAdminAuth } from '../middleware/platformAuth.js';
 import { recordPlatformAudit } from '../repo/platformAudit.js';
 import {
-  getWorkflowDef, getWorkflowDefVersion, saveWorkflowDef,
+  getWorkflowDef, saveWorkflowDef,
 } from '../engine/workflowDef.js';
 import {
   upsertWorkflowDefDraft, getWorkflowDefChange, submitWorkflowDefChange,
@@ -143,13 +143,12 @@ router.post('/tenants/:id/workflow-def/:entityType/approve', async (req, res, ne
       if (change.status !== 'submitted') {
         throw new AppError('CHANGE_NOT_SUBMITTED', 'change is not submitted for review', 409);
       }
-      const liveVersion = await getWorkflowDefVersion(client, tenantId, entityType);
-      if (change.baseVersion !== liveVersion) {
-        throw new AppError('DRAFT_STALE',
-          `base_version ${change.baseVersion} != live version ${liveVersion}; re-save and re-submit`, 409);
-      }
+      // T0：删掉 check-then-act（先读版本再比对再写，两条语句间无锁 ⇒ 并发可双双通过），
+      //   改用 saveWorkflowDef 的单语句条件更新（WHERE version = expectVersion），版本不符 ⇒ 409 DRAFT_STALE。
+      //   错误码/文案口径不变，前端零改动。
       await saveWorkflowDef(client, tenantId, entityType, change.def, {
         operator: actor, reason: 'approve', allowInflightLoss: b.confirm_inflight_loss === true,
+        expectVersion: change.baseVersion,
       });
       await deleteWorkflowDefChange(client, tenantId, entityType, change.id);
     });

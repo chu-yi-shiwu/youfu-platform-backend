@@ -46,6 +46,12 @@ async function freshDb() {
   const db = new PGlite();
   await db.exec(ddl());
   await db.exec(ddl073()); // 平台字典（空表）：种子由各用例按需插
+  // T0（101 迁移）：覆盖表新增 updated_by（变更人）+ version（并发锚）。
+  // 本文件的库必须跟生产迁移同形状，否则写语句引用了不存在的列 ⇒ 假红。
+  await db.exec(`
+    ALTER TABLE label_dict_tenant ADD COLUMN IF NOT EXISTS updated_by text;
+    ALTER TABLE label_dict_tenant ADD COLUMN IF NOT EXISTS version int NOT NULL DEFAULT 1;
+  `);
   return db;
 }
 

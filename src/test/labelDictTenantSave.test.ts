@@ -57,6 +57,13 @@ async function freshDb() {
     CREATE TABLE IF NOT EXISTS label_dict (scope text NOT NULL, key text NOT NULL, label text NOT NULL, sort int NOT NULL DEFAULT 0);
   `);
   await db.exec(ddl098());
+  // T0（101 迁移）：workflow_def + updated_by、label_dict_tenant + updated_by/version。
+  // 库形状必须与生产迁移一致，否则写语句引用不存在的列 ⇒ 假红。
+  await db.exec(`
+    ALTER TABLE workflow_def ADD COLUMN IF NOT EXISTS updated_by text;
+    ALTER TABLE label_dict_tenant ADD COLUMN IF NOT EXISTS updated_by text;
+    ALTER TABLE label_dict_tenant ADD COLUMN IF NOT EXISTS version int NOT NULL DEFAULT 1;
+  `);
   return db;
 }
 
@@ -155,6 +162,9 @@ describe('保存流程 → 状态名自动落进租户覆盖字典（saveWorkflo
         created_at timestamptz NOT NULL DEFAULT now(),
         UNIQUE (tenant_id, entity_type, version)
       );
+      -- 本用例模拟的是「098 未应用」（老环境），**不是**「101 未应用」：
+      -- 101 是本轮 T0 的地基迁移，生产一定已应用，故 workflow_def.updated_by 必须存在。
+      ALTER TABLE workflow_def ADD COLUMN IF NOT EXISTS updated_by text;
     `);
     await saveWorkflowDef(db as never, 'T1', 'work_order', def(['draft', 'rated']), {
       operator: 'alice',

@@ -90,13 +90,22 @@ const SCOPES = ['wo_status', 'source', 'business_type', 'priority'] as const;
 const KEY_MAX = 64;
 const LABEL_MAX = 64;
 
-/** body 校验：label 去空白后 1~64 字符。非法一律 400（zod 失败不外抛成 422，语义统一）。 */
+/**
+ * body 校验：label 去空白后 1~64 字符。非法一律 400（zod 失败不外抛成 422，语义统一）。
+ *
+ * expected_version（T0 并发锚，可选）：我这次改是**基于读到的哪个版本**改的。
+ *   不传 ⇒ 无条件覆盖写（T0 前的行为，向后兼容，老客户端零改动继续可用）；
+ *   传了但期间已被别人推进 ⇒ 409 VERSION_CONFLICT，**绝不静默覆盖**别人的译名。
+ *   用 version 而不是"旧 label 值"当锚：同 label 可重复（值锚有歧义）、
+ *   label 是业务值（不该承担并发控制职责）、且值锚表达不了"我改的是我读到的那一行"。
+ */
 const bodySchema = z.object({
   label: z
     .string({ required_error: 'label 必填', invalid_type_error: 'label 必须是字符串' })
     .trim()
     .min(1, 'label 去空白后不能为空')
     .max(LABEL_MAX, `label 去空白后长度上限 ${LABEL_MAX} 字符`),
+  expected_version: z.number().int().min(0).optional(),
 });
 
 router.put('/meta/labels/me/:scope/:key', async (req, res, next) => {
@@ -126,13 +135,31 @@ router.put('/meta/labels/me/:scope/:key', async (req, res, next) => {
       await requirePermission(auth, client, 'basicdata.edit');
       // UPSERT：没有就插（tenant_id 取 auth），有就改 label。
       // 单条语句完成——「先 SELECT 再 INSERT/UPDATE」在并发下会撞唯一索引 23505。
+      //
+      // T0：version 自增 + updated_by 留痕 + 可选版本锚（单语句 WHERE）。
+      //   `WHERE ($6::int IS NULL OR label_dict_tenant.version = $6)`：不传锚 = 恒真（向后兼容）；
+      //   传了但版本已被推进 ⇒ UPDATE 分支不命中、INSERT 因冲突不落 ⇒ RETURNING 空 ⇒ 409。
+      //   这是单语句完成的条件更新，不存在「先读后写」的 TOCTOU 窗口。
       const { rows } = await client.query<{ scope: string; key: string; label: string }>(
-        `INSERT INTO label_dict_tenant (tenant_id, scope, key, label, sort)
-         VALUES ($1, $2, $3, $4, 0)
-         ON CONFLICT (tenant_id, scope, key) DO UPDATE SET label = EXCLUDED.label, updated_at = now()
+        `INSERT INTO label_dict_tenant (tenant_id, scope, key, label, sort, updated_by)
+         VALUES ($1, $2, $3, $4, 0, $5)
+         ON CONFLICT (tenant_id, scope, key) DO UPDATE SET
+           label = EXCLUDED.label,
+           version = label_dict_tenant.version + 1,
+           updated_by = EXCLUDED.updated_by,
+           updated_at = now()
+         WHERE ($6::int IS NULL OR label_dict_tenant.version = $6)
          RETURNING scope, key, label`,
-        [tenantId, scope, key, label],
+        [tenantId, scope, key, label, auth.username ?? null, parsed.data.expected_version ?? null],
       );
+      if (!rows[0]) {
+        // 版本锚没命中：我基于的版本已经过期，拒写（不静默覆盖别人的译名）
+        throw new AppError(
+          'VERSION_CONFLICT',
+          `label ${scope}/${key} has been modified by someone else (expected_version ${parsed.data.expected_version} is stale); re-read and retry`,
+          409,
+        );
+      }
       return rows[0];
     });
 

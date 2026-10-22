@@ -174,11 +174,15 @@ export async function getWorkflowDef(
   return getWorkflowDefOrDefault(client, tenantId, entityType, DEFAULT_WORK_ORDER_DEF);
 }
 
-/** 确保状态图存在：无则 upsert 默认定义并返回；有则原样返回。 */
+/**
+ * 确保状态图存在：无则 upsert 默认定义并返回；有则原样返回。
+ * @param actor 变更人（T0）：自动补建默认流程也是一次配置写入，同样要留变更人。
+ */
 export async function ensureWorkflowDef(
   client: PoolClient,
   tenantId: string,
   entityType: string,
+  actor?: string,
 ): Promise<WorkflowDef> {
   const existing = await client.query<{ def: unknown }>(
     'SELECT def FROM workflow_def WHERE tenant_id = $1 AND entity_type = $2',
@@ -190,8 +194,8 @@ export async function ensureWorkflowDef(
   }
   const def = withMechanismStates(entityType, cloneDef(DEFAULT_WORK_ORDER_DEF));
   await client.query(
-    `INSERT INTO workflow_def (tenant_id, entity_type, def, version) VALUES ($1,$2,$3,1)`,
-    [tenantId, entityType, JSON.stringify(def)],
+    `INSERT INTO workflow_def (tenant_id, entity_type, def, version, updated_by) VALUES ($1,$2,$3,1,$4)`,
+    [tenantId, entityType, JSON.stringify(def), actor ?? null],
   );
   return def;
 }
@@ -215,6 +219,13 @@ export interface SaveWorkflowDefOpts {
   reason: string;
   /** V3-D4 逃生口：仅 approve/rollback 在请求体显式二次确认（confirm_inflight_loss:true）下传入。 */
   allowInflightLoss?: boolean;
+  /**
+   * T0 并发锚：我这次写入是**基于哪个版本**改的。
+   *   传了 ⇒ 单语句锚定版本，版本已被别人推进则 409 DRAFT_STALE，**绝不静默覆盖**；
+   *   不传 ⇒ 保持 T0 前的无条件覆盖写（向后兼容，现有调用点零改动即可继续跑）。
+   * 想让"防竞态"真正生效，写边**必须**传它；不传只能说明这条边被显式豁免（豁免理由写进调用点注释）。
+   */
+  expectVersion?: number;
 }
 
 /** 在途单按状态清点（V3-D4 纯查询函数）：扫描面按 entity_type 映射（与 transition.ts ALLOWED_TABLES 同源思想）。 */
@@ -302,13 +313,42 @@ export async function saveWorkflowDef(
       ],
     );
   }
-  await client.query(
-    `INSERT INTO workflow_def (tenant_id, entity_type, def, version)
-     VALUES ($1,$2,$3,1)
+  // ── T0 条件更新（防竞态）───────────────────────────────────────────────────
+  // 单语句锚定版本：`WHERE ($5::int IS NULL OR workflow_def.version = $5)`。
+  //   · 不传 expectVersion（$5 = NULL）⇒ 条件恒真 ⇒ 与 T0 前行为一致（向后兼容）；
+  //   · 传了但 live 已被别人推进 ⇒ UPDATE 分支不命中、INSERT 因冲突也不落 ⇒ rowCount = 0 ⇒ 409。
+  // 【为什么必须单语句】原 approve 路径是 check-then-act（先 getWorkflowDefVersion 比对、再写）：
+  //   两条语句之间没有锁，两个并发审批可以读到同一 liveVersion 然后双双通过。
+  //   单语句 WHERE 把这个 TOCTOU 窗口彻底消掉——这是 T0 选它的唯一理由。
+  const expectVersion = typeof opts.expectVersion === 'number' ? opts.expectVersion : null;
+  if (expectVersion !== null && !cur.rows[0]) {
+    // 期望某版本但该流程根本不存在 ⇒ 调用方看到的是过期事实，按冲突处理（不静默凭空创建一行）
+    throw new AppError(
+      'DRAFT_STALE',
+      `expected version ${expectVersion} but no def exists for ${entityType}; re-read and retry`,
+      409,
+    );
+  }
+  const r = await client.query(
+    `INSERT INTO workflow_def (tenant_id, entity_type, def, version, updated_by)
+     VALUES ($1,$2,$3,1,$4)
      ON CONFLICT (tenant_id, entity_type)
-     DO UPDATE SET def = EXCLUDED.def, version = workflow_def.version + 1, updated_at = now()`,
-    [tenantId, entityType, JSON.stringify(def)],
+     DO UPDATE SET def = EXCLUDED.def,
+                   version = workflow_def.version + 1,
+                   updated_by = EXCLUDED.updated_by,
+                   updated_at = now()
+     WHERE ($5::int IS NULL OR workflow_def.version = $5)`,
+    [tenantId, entityType, JSON.stringify(def), opts.operator, expectVersion],
   );
+  const affectedRaw =
+    (r as { rowCount?: number | null }).rowCount ?? (r as { affectedRows?: number | null }).affectedRows;
+  if (expectVersion !== null && Number(affectedRaw ?? -1) === 0) {
+    throw new AppError(
+      'DRAFT_STALE',
+      `expected version ${expectVersion} but live version is ${cur.rows[0]?.version}; re-read and retry`,
+      409,
+    );
+  }
   // #938-B：流程生效即把该 def 的状态名补进租户覆盖字典（098 label_dict_tenant，只补不覆盖既有译名），
   // 让租户自定义状态（如 rated）有中文名可改，而不是在界面上显示裸 key；读侧 GET /api/v1/meta/labels/me。
   //
@@ -320,7 +360,8 @@ export async function saveWorkflowDef(
   // 或权限缺失时，让"配不了流程"这种业务阻断去背展示层的锅是不可接受的降级顺序。
   // 此处失败 ⇒ 界面退化为裸 key（= 本次改动前的行为），流程照常生效。
   try {
-    await ensureTenantStateLabels(client, tenantId, def.states ?? []);
+    // T0：落字典也留变更人（本次保存的操作人，与 live 行的 updated_by 同源）
+    await ensureTenantStateLabels(client, tenantId, def.states ?? [], opts.operator);
   } catch (e) {
     console.warn(
       '[workflowDef] 状态名落租户覆盖字典失败（展示层退化为裸 key，流程已生效）:',

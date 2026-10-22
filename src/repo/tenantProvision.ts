@@ -37,6 +37,8 @@ export interface ProvisionInput {
   category?: IndustryCategory; // 行业（决定第④步权限基线；缺省 = 继承默认矩阵）
   adminUsername?: string; // 缺省 'admin'
   adminPassword?: string; // 缺省自动生成（base64url 12 位）
+  /** T0：开通动作的操作人（平台运维 username）。不传 ⇒ 落 'tenant-provision'（标记"由开租户例程写入"，不是某个人）。 */
+  actor?: string;
 }
 
 export interface ProvisionResult {
@@ -132,10 +134,13 @@ export async function provisionNewTenantContent(
     : ensureAcceptanceEdges(wfDefRaw as import('../engine/stateMachine.js').WorkflowDef).def;
   const wfDef = ensureClaimHallState(wfDefInjected).def;
   if (templateDef) workflowDefSource = 'template';
+  // T0：留变更人。本条是**创建**语义（ON CONFLICT DO NOTHING，绝不覆盖存量），
+  // 因此无需并发锚——不会吃掉任何人的改动；若将来改成覆盖式注入，**必须**补 expectVersion 条件更新。
   await client.query(
-    `INSERT INTO workflow_def (tenant_id, entity_type, def, version) VALUES ($1, 'work_order', $2, 1)
+    `INSERT INTO workflow_def (tenant_id, entity_type, def, version, updated_by)
+     VALUES ($1, 'work_order', $2, 1, $3)
      ON CONFLICT (tenant_id, entity_type) DO NOTHING`,
-    [input.tenantId, typeof wfDef === 'string' ? wfDef : JSON.stringify(wfDef)],
+    [input.tenantId, typeof wfDef === 'string' ? wfDef : JSON.stringify(wfDef), input.actor ?? 'tenant-provision'],
   );
 
   // ③ 机构管理员账号

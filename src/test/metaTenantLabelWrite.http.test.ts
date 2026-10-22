@@ -106,6 +106,11 @@ beforeAll(async () => {
   const db = new PGlite();
   await db.exec(ddl098());
   await db.exec(ddl073());
+  // T0（101 迁移）：覆盖表新增 updated_by + version，库形状须与生产迁移一致（否则写语句假红）
+  await db.exec(`
+    ALTER TABLE label_dict_tenant ADD COLUMN IF NOT EXISTS updated_by text;
+    ALTER TABLE label_dict_tenant ADD COLUMN IF NOT EXISTS version int NOT NULL DEFAULT 1;
+  `);
   h.db = db;
   const app = express();
   // 伪造鉴权：?tenant=T1 时注入 res.locals.auth（role 默认 admin），不传即未登录

@@ -175,7 +175,13 @@ router.post('/templates/:id/apply', async (req, res, next) => {
       }
 
       // 应用：存为新版本（旧版自动进历史 → R5 可回滚）；来源标记 template:<id>（G5 双轮不互斥）
-      await saveWorkflowDef(client, tenantId, entityType, tplDef, { operator: actor, reason: `template:${tpl.id}` });
+      // T0：带 expectVersion = 应用前读到的 beforeVersion —— 应用模板是**覆盖写**，
+      //   期间若有人改过流程，必须 409 拒绝而不是把他的改动吃掉（模板应用没有"止血"豁免的理由）。
+      await saveWorkflowDef(client, tenantId, entityType, tplDef, {
+        operator: actor,
+        reason: `template:${tpl.id}`,
+        expectVersion: beforeVersion,
+      });
       const afterVersion = await getWorkflowDefVersion(client, tenantId, entityType);
       // 记录 apply（移入事务：#7 原子性）
       const ins = await client.query(

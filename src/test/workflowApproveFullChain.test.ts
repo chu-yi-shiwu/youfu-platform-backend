@@ -151,6 +151,10 @@ beforeAll(async () => {
   process.env.WORKFLOW_CONFIG_OWNER = 'tenant'; // 097：本文件验证的是「归属放开」后的流程语义（审批链/乐观锁/删态硬闸）
   box.db = new PGlite();
   await (box.db as unknown as { exec: (s: string) => Promise<void> }).exec(DDL);
+  // T0（101 迁移）：workflow_def 新增 updated_by；库形状须与生产迁移一致（否则写语句假红）
+  await (box.db as unknown as { exec: (s: string) => Promise<void> }).exec(
+    `ALTER TABLE workflow_def ADD COLUMN IF NOT EXISTS updated_by text;`,
+  );
 
   const app = express();
   app.use(express.json());

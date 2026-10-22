@@ -151,6 +151,11 @@ beforeAll(async () => {
   `);
   await db.exec(SQL098);
   await db.exec(ddl073());
+  // T0（101 迁移）：覆盖表新增 updated_by + version，库形状须与生产迁移一致（否则写语句假红）
+  await db.exec(`
+    ALTER TABLE label_dict_tenant ADD COLUMN IF NOT EXISTS updated_by text;
+    ALTER TABLE label_dict_tenant ADD COLUMN IF NOT EXISTS version int NOT NULL DEFAULT 1;
+  `);
   // assertTenantActive（authMiddleware 热路径）与 hasPerm（权限门）要查的两张表：
   // 形状取最小可用集，GRANT 与 046/079 生产迁移同口径（youfu_app 可读、role_permission 可读写）。
   await db.exec(`

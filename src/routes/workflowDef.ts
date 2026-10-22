@@ -340,19 +340,16 @@ router.post('/:entityType/approve', async (req, res, next) => {
           ],
         );
       }
-      const liveVersion = await getWorkflowDefVersion(client, tenantId, entityType);
-      if (change.baseVersion !== liveVersion) {
-        throw new AppError(
-          'DRAFT_STALE',
-          `base_version ${change.baseVersion} != live version ${liveVersion}; re-save and re-submit`,
-          409,
-        );
-      }
-      // 生效复用 saveWorkflowDef：版本自增、history 快照（reason='approve'）、审计全免费，不新造写入机制。
+      // T0：原 check-then-act（先 getWorkflowDefVersion 比对、再写）已删除——
+      //   两条语句之间无锁，两个并发审批可以读到同一 liveVersion 然后双双通过。
+      //   改为把 baseVersion 当 expectVersion 交给 saveWorkflowDef 的**单语句**条件更新
+      //   （INSERT ... ON CONFLICT DO UPDATE ... WHERE version = $n）：版本不符 ⇒ 0 行 ⇒ 409 DRAFT_STALE。
+      //   错误码沿用 DRAFT_STALE + 文案沿用旧口径（前端已按此处理，零改动）。
       await saveWorkflowDef(client, tenantId, entityType, change.def, {
         operator: auth.username ?? '', // username 缺失时由 saveWorkflowDef 运行期 422 兜底（留痕不为空）
         reason: 'approve',
         allowInflightLoss: b.confirm_inflight_loss === true,
+        expectVersion: change.baseVersion,
       });
       await deleteWorkflowDefChange(client, tenantId, entityType, change.id);
     });

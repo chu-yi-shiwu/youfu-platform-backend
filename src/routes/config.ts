@@ -272,17 +272,20 @@ router.put('/config/system', async (req, res, next) => {
   try {
     requireConfigRole(req, res);
     const tenantId = res.locals.auth.tenantId;
+    // T0：配置变更留变更人。取不到操作人时写 NULL —— 留痕的意义是**可信**，不是"填满"；
+    // 编一个 'system' 进去等于把"不知道是谁改的"伪装成"系统改的"，比 NULL 更有害。
+    const actor = res.locals.auth.username ?? null;
     const body = z.object({ items: z.array(systemItemSchema) }).parse(req.body);
     const items = await withTenantClient(tenantId, async (client) => {
       const out: any[] = [];
       for (const it of body.items) {
         const r = await client.query(
-          `INSERT INTO system_config (tenant_id, key, value, updated_at)
-           VALUES ($1,$2,$3,now())
+          `INSERT INTO system_config (tenant_id, key, value, updated_at, updated_by)
+           VALUES ($1,$2,$3,now(),$4)
            ON CONFLICT (tenant_id, key)
-           DO UPDATE SET value = EXCLUDED.value, updated_at = now()
+           DO UPDATE SET value = EXCLUDED.value, updated_at = now(), updated_by = EXCLUDED.updated_by
            RETURNING *`,
-          [tenantId, it.key, it.value ?? null],
+          [tenantId, it.key, it.value ?? null, actor],
         );
         out.push(r.rows[0]);
       }
@@ -319,16 +322,17 @@ router.put('/config/ticket-require-service-desk', async (req, res, next) => {
   try {
     requireConfigRole(req, res);
     const tenantId = res.locals.auth.tenantId;
+    const actor = res.locals.auth.username ?? null; // T0：留变更人（取不到写 NULL，不编造）
     const body = z.object({ enabled: z.boolean() }).parse(req.body);
     const item = await withTenantClient(tenantId, (client) =>
       client
         .query(
-          `INSERT INTO system_config (tenant_id, key, value, updated_at)
-           VALUES ($1,$2,$3,now())
+          `INSERT INTO system_config (tenant_id, key, value, updated_at, updated_by)
+           VALUES ($1,$2,$3,now(),$4)
            ON CONFLICT (tenant_id, key)
-           DO UPDATE SET value = EXCLUDED.value, updated_at = now()
+           DO UPDATE SET value = EXCLUDED.value, updated_at = now(), updated_by = EXCLUDED.updated_by
            RETURNING id, key, value, updated_at`,
-          [tenantId, REQUIRE_DESK_KEY, String(body.enabled)],
+          [tenantId, REQUIRE_DESK_KEY, String(body.enabled), actor],
         )
         .then((r) => r.rows[0]),
     );
