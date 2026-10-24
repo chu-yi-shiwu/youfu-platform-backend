@@ -197,6 +197,38 @@ describe('T5/S3 transportAdapter —— 列表 / 详情 / 流转', () => {
     expect(String(upd!.text)).toMatch(/carrier = \$/);
   });
 
+  // 🔴 这两条钉的是 422 挡不住的那种静默丢：**键认识、但没被转发**。
+  //    早期版本把 `extra.carrier = ...` 写在 `event === 'dispatch'` 分支里 ⇒
+  //    非 dispatch 事件带 carrier 时：过得了 422（carrier 在 UNDERSTOOD 里），
+  //    却进 transitionOrder(extra={}) ⇒ **200 且数据丢了**。
+  //    200 但没落到 SQL 参数里 = 静默丢，必须红。
+  it('🔴 非 dispatch 事件带 carrier ⇒ 必须真落到 transport_order.carrier（不许 200 静默丢）', async () => {
+    // receive：assigned → transporting，def 上无 requiredFields，无需额外字段
+    const { client, calls } = makeClient({ orderStatus: 'assigned', carrier: 'w-1' });
+    const row = await transportAdapter.transition(ctxOf(client), ORDER_ID, {
+      event: 'receive',
+      data: { carrier: 'w-9' },
+    });
+    expect(row.status).toBe('transporting');
+
+    const upd = calls.find((c) => c.text.includes('UPDATE transport_order'));
+    expect(upd, '没发 UPDATE ⇒ 委派没跑到原生函数').toBeTruthy();
+    expect(String(upd!.text), 'UPDATE 里必须出现 carrier 的赋值位').toMatch(/carrier = \$/);
+    expect((upd!.params ?? []), 'carrier 的值必须真的出现在参数里（出现在 SQL 里但不出现在参数里 = 假转发）').toContain('w-9');
+  });
+
+  it('🔴 非 dispatch 事件带 assignee ⇒ 同样落到 carrier（R5 不随事件分支变化）', async () => {
+    const { client, calls } = makeClient({ orderStatus: 'assigned', carrier: 'w-1' });
+    await transportAdapter.transition(ctxOf(client), ORDER_ID, {
+      event: 'receive',
+      data: { assignee: 'w-9' },
+    });
+    const upd = calls.find((c) => c.text.includes('UPDATE transport_order'));
+    expect(upd).toBeTruthy();
+    expect(String(upd!.text)).toMatch(/carrier = \$/);
+    expect((upd!.params ?? [])).toContain('w-9');
+  });
+
   it('🔴 流转的 data 里出现无处可存的键 ⇒ 422（不静默丢）', async () => {
     const { client, calls } = makeClient({ orderStatus: 'pending' });
     await expect(

@@ -35,16 +35,22 @@ function stubAdapter(calls: string[]): FlowAdapter {
 }
 
 afterEach(() => {
-  // 任何往 registry 里塞的 entry 都必须清掉：本文件断言"registry 空"，
-  // 泄漏出去会污染同进程内其它断言（也让 S1 的"零行为改动"失去证据）。
+  // 任何往 registry 里塞的 entry 都必须清掉：本文件按"registry 只有 S5 登记的那一条"
+  // 来断言，泄漏出去会污染同进程内其它断言（也会让"未登记 ⇒ 走 business_flow_tasks"
+  // 那三条失去意义）。
   for (const k of Object.keys(FLOW_PROXY)) delete FLOW_PROXY[k];
 });
 
 describe('T5/S1 proxyFor —— 查表语义（registry 状态随 S5 变化）', () => {
-  // 🔴 这条断言在 S1 时是 `toBeUndefined()`（切换点尚未拨动）。S5 把 transport_task
-  //    写进 registry 后，它**必须跟着改成"已登记"**——这是断言随**目标状态**演进，
-  //    不是为了让红变绿而放宽：S5 的目的就是拨动这个切换点，钉住"未拨动"才是过时断言。
-  //    「S1 时 registry 为空」那一份证据已留在 S1 的 commit message 与 S2 的前后对照里。
+  // 🔴 【改断言留痕 · 必读】这条断言**被改过**，改的原因必须可追溯：
+  //    · S1 时本条是 `expect(proxyFor('transport_task')).toBeUndefined()`
+  //      —— 它钉的是"**切换点还没拨动**"，本质是**施工进度标记**，不是危害探针；
+  //    · S5（`3a812e8`）把 transport_task 写进 registry 后，继续钉"未拨动"会**永远红**，
+  //      而红的是"工程已完成" ⇒ 那是**假债**（与 T4 那次"改断言让红变绿"是两回事，
+  //      本条改的是**目标状态**，不是把危害探针放宽）；
+  //    · **S1 那份"registry 为空"的证据没有丢**：见 commit `3322db6` 的 message，
+  //      以及 S2（`b36f4fd`）message 里"前后两次跑同一把尺子、输出逐字一致"的那份对照。
+  //    ⇒ 看到这条被改过，先去读上面两个 commit，别只凭本文件的当前状态下结论。
   it('transport_task 已登记（★S5 切换点已拨动★）', () => {
     const a = proxyFor('transport_task');
     expect(a, 'transport_task 必须在 registry 里（S5 已切换）').toBeDefined();

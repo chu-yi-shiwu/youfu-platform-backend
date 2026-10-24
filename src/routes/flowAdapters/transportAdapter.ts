@@ -54,6 +54,16 @@ import {
 /**
  * transition 的 `data` 里**我们能落地或能理解**的键。
  * 其余键在 `transport_order` 上无处可存 ⇒ 422（R3 同一条纪律：不静默丢）。
+ *
+ * ⚠️ **进这个集合 = 承诺"一定转发"**，不是"认识一下就行"：
+ *   「认识但没转发」比「不认识」更坏——它过得了 422，却拿不到 200 之外的任何东西，
+ *   ⇒ 调用方收到 200，数据没了，跟静默丢弃一模一样（曾经 `carrier` 只在 dispatch
+ *   分支里转发，其余事件带 carrier 就是 200 + 丢数据）。所以每加一个键，
+ *   **必须同时在 `splitTransitionData` 里加转发**，且转发**不许挑事件**。
+ *
+ * 🔴 故意**不放** `depart_at` / `arrive_at` / `sign_at`：这三个是**系统自己写的
+ *   时间戳**（dispatch 写 depart_at=now()、complete 写 arrive_at/sign_at）。
+ *   放进集合等于允许调用方伪造时间戳 ⇒ 保持 422。
  */
 const UNDERSTOOD_TRANSITION_DATA_KEYS = new Set(['assignee', 'carrier', 'note', 'loc', 'lat', 'lng', 'photo']);
 
@@ -105,8 +115,20 @@ function assertTransitionDataUnderstood(data: Record<string, unknown>): void {
  * `/flow` 的 `data` → 原生 `transitionOrder` 的 extra/track。
  * extra 的键受 `ALLOWED_EXTRA_COLS` 白名单约束（F-A2 纵深防御），不在白名单里的键
  * 会被原生函数直接忽略 ⇒ 所以上面必须用 422 把"忽略"提前变成"报错"。
+ *
+ * 🔴 **carrier / assignee 的转发故意不挂在任何事件分支下**（R3 同源纪律）：
+ *   早期版本把 `extra.carrier = ...` 写在 `event === 'dispatch'` 分支里 ⇒
+ *   非 dispatch 事件带 `carrier` 时：过得了 422（它在 UNDERSTOOD 里），
+ *   却进 `transitionOrder(extra={})` ⇒ **200 且数据丢了**。
+ *   422 挡住了"不认识的键"，却放过了"认识但没转发的键"——后者正是 R3 要防的静默失效。
+ *   依据：原生侧 `filterTransportExtraCols` 的 `ALLOWED_EXTRA_COLS` 是**按事件无差别放行**
+ *   的（carrier 在任意事件都能写），代理侧必须与之一致。
+ *
+ * ⚠️ **刻意不把 `depart_at` / `arrive_at` / `sign_at` 收进 UNDERSTOOD**：
+ *   它们是**系统自己写的时间戳**（dispatch 写 depart_at='now()'、complete 写
+ *   arrive_at/sign_at='now()'），不是用户输入。保持 422，避免调用方伪造时间戳。
  */
-function splitTransitionData(data: Record<string, unknown>): {
+function mapTransitionData(data: Record<string, unknown>): {
   extra: Record<string, unknown>;
   track: { loc?: string; note?: string; lat?: number; lng?: number; photo?: string };
 } {
@@ -117,6 +139,9 @@ function splitTransitionData(data: Record<string, unknown>): {
   if (data.lat != null) track.lat = Number(data.lat);
   if (data.lng != null) track.lng = Number(data.lng);
   if (data.photo != null) track.photo = String(data.photo);
+  // R5：`assignee`（通用办理人）→ `carrier`（承运人），**任何事件**都转发
+  if (data.carrier != null) extra.carrier = String(data.carrier);
+  else if (data.assignee != null) extra.carrier = String(data.assignee);
   return { extra, track };
 }
 
@@ -168,12 +193,10 @@ export const transportAdapter: FlowAdapter = {
     const cur = await getOrder(ctx.client, ctx.tenantId, id);
     assertRequiredFields(def, String(cur.status), body.event, data);
 
-    const { extra, track } = splitTransitionData(data);
+    // carrier / assignee 的转发已在 mapTransitionData 里完成（不随事件分支变化）
+    const { extra, track } = mapTransitionData(data);
     if (body.event === 'dispatch') {
       extra.depart_at = 'now()';
-      // R5：`assignee` 是这次派单的承运人 ⇒ 落到 carrier（同时决定归属权）
-      const carrier = data.carrier ?? data.assignee;
-      if (carrier != null) extra.carrier = String(carrier);
     }
     if (body.event === 'complete') {
       extra.arrive_at = 'now()';
