@@ -14,14 +14,13 @@ import { AppError } from '../middleware/error.js';
 // 审查修复（架构🟡12）：requireConfigRole 曾在 role.ts 与 config.ts 各实现一份（双份角色白名单，
 // 改一处漏一处）。统一 re-export role.ts 的唯一实现，调用点零改动。
 // T8 第二批（2026-10-25）：config.ts 自身 8 处写端点已改用 requirePermission('basicdata.edit')。
-// `requireConfigRole` 的 import **仅为下方 re-export 保留** —— src/routes/aiPreview.ts:13 仍从
-// './config.js' 引它。这是过渡态：aiPreview 的守卫收敛属下一批（E6 一次只改一个变量），
-// 收敛后本 re-export 与该 import 一并删除。
-import { requireConfigRole, assertAdmin, requirePermission } from '../middleware/role.js';
+// T8 第七批（2026-10-25，commit 81bc9a3）：最后一个从 './config.js' 引 requireConfigRole 的
+//   调用方（src/routes/aiPreview.ts:13）已收敛为 requirePermission('ai.manage') ⇒ **过渡态结束**：
+//   本 re-export 与对应 import 一并删除。此后 requireConfigRole 的唯一定义仍在
+//   src/middleware/role.ts，所有调用点一律直接从那里引（不再有中间 re-export 层）。
+import { assertAdmin, requirePermission } from '../middleware/role.js';
 
 const router = Router();
-
-export { requireConfigRole };
 
 // ============ dispatch_rule ============
 const ruleSchema = z.object({
