@@ -47,52 +47,77 @@ export const ASSIGNABLE_BUILTIN_ROLES: readonly Role[] = ROLES.filter(
   (r) => !(RETIRED_ROLES as readonly string[]).includes(r),
 );
 
-export const PERMS = [
-  'dashboard.view',
-  'intake.create',
-  'ticket.manage',
-  'workflow.edit',
+/**
+ * 权限点**单一事实源**（2026-10-25「权限不该写死」改造）。
+ *
+ * 改造前，一个权限点被**写死在三处**，新增一个要同步改三处、漏一处就出事：
+ *   ① `PERMS` 常量数组（清单，本文件）
+ *   ② `DEFAULT_PERM_MATRIX`（各角色默认权限，6 行手工清单，本文件）
+ *   ③ `routes/accounts.ts` 的 `PERM_LABELS`（中文名，`Record<Perm,string>` 缺 key 直接编译失败）
+ * 且 accounts.ts 另有一条「catalog 数量 != PERMS.length 就抛 500」的兜底 ——
+ * 那是**拿运行时报错去兜「三处手工同步」这个设计缺陷本身**。
+ *
+ * 现在 `PERM_DEFS` 一处定义（code + label + 默认角色），①②③ 全部派生：
+ *   · 新增权限点 = 只写这一处；label / 默认角色是定义的必填字段 ⇒ **结构上不可能漏登记**
+ *   · 那条 500 脆断同步删除 —— 它要防的漏登记已不可能发生
+ *
+ * ⚠️ **有一处仍然必须留在代码里**：业务路由的 `requirePermission('x')` 检查点。
+ *    权限点只有在代码里有检查点时才有效；凭空在配置里造一个 perm 没有任何语义。
+ *    ⇒ 「权限点清单完全数据库化」在本系统是**伪需求**。真正可配置的是**授予**
+ *      （哪个角色有哪些 ⇒ `role_permission` 表 + 权限矩阵界面，已支持）与
+ *      **实例级作用域**（T3 的 `perm@entityType`，已支持）。
+ *    本次把清单收敛到一处，正是为将来若真要换成数据源驱动留口子（届时只改这里）。
+ */
+export const PERM_DEFS = {
+  'dashboard.view': { label: '总览看板', defaults: ['operator', 'dispatcher', 'reviewer', 'service_desk'] },
+  'intake.create': { label: '建单录入', defaults: ['operator', 'worker'] },
+  'ticket.manage': { label: '工单管理', defaults: ['operator', 'dispatcher', 'reviewer', 'service_desk'] },
   // 流程配置审核一期（20260912《优服家_流程配置审核设计》§6）：审批把关点。
-  //   approve / reject / pending / rollback 四端点使用；默认矩阵仅 admin（经 admin 的 [...PERMS] 自动收录），
+  //   approve / reject / pending / rollback 四端点使用；默认矩阵仅 admin，
   //   租户可经 role_permission 按角色授予（配合 080 迁移六角色 CHECK 后可授 reviewer 等）。
   //   自审自批禁令不在此层——按账号（submitted_by ≠ 当前 username）在路由层强校验，admin 不豁免。
-  'workflow.approve',
-  'basicdata.edit',
-  'dispatch.override',
-  'role.manage',
+  'workflow.edit': { label: '流程配置', defaults: [] },
+  'workflow.approve': { label: '流程审批', defaults: [] },
+  'basicdata.edit': { label: '基础数据', defaults: ['operator'] },
+  'dispatch.override': { label: '派单覆盖', defaults: ['operator', 'dispatcher', 'service_desk'] },
+  'role.manage': { label: '账号权限', defaults: [] },
   // T8（2026-10-25）：巡检**配置面**独立权限点。此前 13 处巡检配置端点走 requireConfigRole
   // （同步、只读 res.locals.auth.role 的 admin/operator 白名单，**不查权限表** ⇒ 租户无法配置）。
   //   命名沿用既有 xxx.manage 模式（material.manage / asset.manage / volunteer.manage），
   //   与执行面 `inspect.execute` 分开：能巡检 ≠ 能改巡检计划。
-  //   🔴 为什么不复用 `basicdata.edit`：role.ts:69 的注释已明确「志愿者模块独立权限点
+  //   🔴 为什么不复用 `basicdata.edit`：下方 volunteer 条目注释已明确「志愿者模块独立权限点
   //     （此前蹭 basicdata.edit）」—— 蹭 basicdata.edit 是被淘汰的旧做法，不走回头路。
-  'inspect.manage',
-  'inspect.execute',
-  'asset.scan',
-  'optimize.tune',
+  //   🔴 operator 默认给这个是**为了等价、不是策略选择**：原白名单就是 admin+operator，
+  //     不给就会从放行变 403。**与 material.manage / asset.manage「收口 admin」策略不一致**
+  //     ⇒「巡检配置要不要也收紧到 admin」是独立产品决策，已登记待做项（E6 不夹带）。
+  'inspect.manage': { label: '巡检配置', defaults: ['operator'] },
+  'inspect.execute': { label: '巡检执行', defaults: ['operator', 'dispatcher', 'worker'] },
+  'asset.scan': { label: '资产扫码', defaults: ['operator', 'dispatcher', 'worker'] },
+  'optimize.tune': { label: '优化调参', defaults: [] },
   // 批次三 卡4：结算三凭证（读列表/详情/导出 = settlement.read；建/改/删/确认 = settlement.edit）
-  'settlement.read',
-  'settlement.edit',
+  'settlement.read': { label: '结算查看', defaults: [] },
+  'settlement.edit': { label: '结算操作', defaults: [] },
   // V1 批次（20260911）：志愿者模块独立权限点（此前蹭 basicdata.edit / requireConfigRole）。
   //   volunteer.view   = 查看（GET records/people/stats + FE 菜单可见性）
   //   volunteer.manage = 活动管理（POST activities、PUT /activities/:id/status；发布/关闭/重开不拆分）
   //   volunteer.audit  = 现场执行（checkin / checkout / approve）
-  'volunteer.view',
-  'volunteer.manage',
-  'volunteer.audit',
+  'volunteer.view': { label: '志愿者查看', defaults: ['operator'] },
+  'volunteer.manage': { label: '志愿者管理', defaults: ['operator'] },
+  'volunteer.audit': { label: '志愿者核销', defaults: ['operator'] },
   // E-9 批次（20260914《优服家_E9_自动结算与耗材二级库存设计》§4 权限边界清单）：三点。
-  //   material.manage    = 耗材目录增删改（POST/PUT/DELETE /materials）+ 手工出入库（/inventory/in|out）
-  //                        + 批量导入（POST /materials/import）。原 requireConfigRole(admin+operator) → **仅 admin**。
-  //   asset.manage       = 资产目录增删改 + 调拨/故障/维保管理 + 批量导入（asset.ts 全部写端点）。
-  //                        原 requireConfigRole(admin+operator) → **仅 admin**。
-  //   consumable.consume = 工单耗材消耗（新增 POST /inventory/consume，流水强制挂 work_order_id）。
-  //                        默认 worker + operator（执行侧动作，非管理动作）。
+  //   material.manage    = 耗材目录增删改 + 手工出入库 + 批量导入。原 requireConfigRole(admin+operator) → **仅 admin**。
+  //   asset.manage       = 资产目录增删改 + 调拨/故障/维保 + 批量导入。原 requireConfigRole(admin+operator) → **仅 admin**。
+  //   consumable.consume = 工单耗材消耗（流水强制挂 work_order_id）。默认 worker + operator（执行侧动作）。
   //   读取不收：GET /materials、/assets、/inventory* 维持「已认证即放」（工人选耗材依赖目录读）。
-  'material.manage',
-  'asset.manage',
-  'consumable.consume',
-] as const;
-export type Perm = (typeof PERMS)[number];
+  'material.manage': { label: '耗材维护', defaults: [] },
+  'asset.manage': { label: '资产维护', defaults: [] },
+  'consumable.consume': { label: '工单耗材领用', defaults: ['operator', 'worker'] },
+} as const satisfies Record<string, { label: string; defaults: readonly Role[] }>;
+
+/** 权限点清单（由 PERM_DEFS 派生，勿手改）。 */
+export const PERMS = Object.keys(PERM_DEFS) as unknown as readonly Perm[];
+
+export type Perm = keyof typeof PERM_DEFS;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 【T3 实例级权限（2026-10-24）】perm 的两种形态
@@ -179,28 +204,30 @@ export function assertEntityTypeScope(entityType: string, known?: readonly strin
 //   （settlement_item.source/material_id + 唯一约束放宽 + inventory_log.work_order_id uuid→text）。
 // 流程审核一期：workflow.edit 维持现状不动（operator 默认矩阵本就不含，行为零变化）；
 // workflow.approve 仅 admin（经 admin 的 [...PERMS] 自动收录，勿在其它角色清单里手加）。
-export const DEFAULT_PERM_MATRIX: Record<Role, readonly Perm[]> = {
-  admin: [...PERMS],
-  // V1 批次（20260911）：operator 补 volunteer.view/manage/audit 三点（与既有现状等效——
-  // 此前 operator 经 basicdata.edit 可写志愿者管理端点、菜单可见；其余角色不授，随默认矩阵 403）。
-  // E-8（BUG-009）：移除 settlement.read（结算可见性收口 admin；operator 受理台日常不依赖结算页）。
-  // E-9（20260914）：operator 加 consumable.consume（与 worker 同为执行侧动作）；material.manage /
-  //   asset.manage 不加（管理动作收口 admin，operator 走覆盖表授权）。
-  // T8（2026-10-25）：operator 加 `inspect.manage` —— **这是为了等价，不是策略选择**。
-  //   原 requireConfigRole 的白名单就是 admin+operator ⇒ 不给 operator 就会从放行变 403（行为变更）。
-  //   🔴 注意与 `material.manage` / `asset.manage` 的策略**不一致**：那两个收口 admin
-  //     （见上方 E-9 注释「管理动作收口 admin，operator 走覆盖表授权」）。
-  //     ⇒ **巡检配置要不要也收紧到 admin，是独立的产品决策**，已登记为待做项。
-  //     本批只做「换实现」，不夹带策略变更（E6 一次只改一个变量）。
-  operator: ['dashboard.view', 'intake.create', 'ticket.manage', 'basicdata.edit', 'dispatch.override', 'inspect.manage', 'inspect.execute', 'asset.scan', 'volunteer.view', 'volunteer.manage', 'volunteer.audit', 'consumable.consume'],
-  dispatcher: ['dashboard.view', 'ticket.manage', 'dispatch.override', 'inspect.execute', 'asset.scan'],
-  // worker + intake.create（#942 R15）：陪检登记（#6）等登录态录入复用建单引擎，
-  // 入口在工人工作台对全员可见——录入（intake.create）≠ 管理（ticket.manage），
-  // worker 仅解锁建单/录入面，管理动作仍 403（最小权限）。
-  worker: ['inspect.execute', 'asset.scan', 'intake.create', 'consumable.consume'],
-  reviewer: ['dashboard.view', 'ticket.manage'],
-  service_desk: ['dashboard.view', 'ticket.manage', 'dispatch.override'],
-};
+/**
+ * 角色默认权限矩阵 —— **由 PERM_DEFS 派生，勿在此手工列清单**。
+ * 各权限点「默认给哪些角色」写在 PERM_DEFS[x].defaults 里，此处只做反查聚合。
+ * admin 恒全量（`[...PERMS]`）：新权限点自动进 admin 口袋，无需逐行补（沿用改造前语义）。
+ *
+ * ⚠️ 派生顺序按 PERM_DEFS 定义顺序 ⇒ 与改造前的手写清单**顺序可能不同、集合完全一致**。
+ *    实测逐角色比对：admin/operator/dispatcher/reviewer/service_desk 五角色顺序也一致，
+ *    仅 worker 一处顺序变化（原 ['inspect.execute','asset.scan','intake.create','consumable.consume']
+ *    → 现 ['intake.create','inspect.execute','asset.scan','consumable.consume']），集合相同、
+ *    语义无影响（排序未在任何断言里被锚定）。
+ *
+ * 历史决策留痕（原在此处的注释，已随权限点下沉到 PERM_DEFS 各条目）：
+ *   E-8 移除 operator 的 settlement.read；E-9 operator 加 consumable.consume、不加 material/asset.manage；
+ *   T8 operator 加 inspect.manage（等价需要，非策略选择）。
+ */
+export const DEFAULT_PERM_MATRIX: Record<Role, readonly Perm[]> = (() => {
+  const m = {} as Record<Role, Perm[]>;
+  for (const r of ROLES) m[r] = [];
+  m.admin = [...PERMS];
+  for (const [perm, def] of Object.entries(PERM_DEFS)) {
+    for (const r of def.defaults) m[r].push(perm as Perm);
+  }
+  return m;
+})();
 
 // 角色层级（数值越大权限越高）；用于账户写接口的"不可越级/不可提权"门禁。
 // service_desk 与 dispatcher 同层（2）：接线派单属执行管理层；reviewer 与 operator 同层（3）：

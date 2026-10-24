@@ -20,7 +20,7 @@ import crypto from 'node:crypto';
 import pool, { withTenantClient } from '../db/pool.js';
 import { AppError } from '../middleware/error.js';
 // ROLES 已不再直接引用：下拉改走 ASSIGNABLE_BUILTIN_ROLES（退场角色不可新建/分配）。
-import { PERMS, DEFAULT_PERM_MATRIX, canAssignRole, requirePermission, ROLE_CODE_RE, ASSIGNABLE_BUILTIN_ROLES, RETIRED_ROLES, isRetiredRole, permBase, assertEntityTypeScope, type Role, type Perm } from '../middleware/role.js';
+import { PERM_DEFS, PERMS, DEFAULT_PERM_MATRIX, canAssignRole, requirePermission, ROLE_CODE_RE, ASSIGNABLE_BUILTIN_ROLES, RETIRED_ROLES, isRetiredRole, permBase, assertEntityTypeScope, type Role, type Perm } from '../middleware/role.js';
 // T3/S5：实例级权限的 entityType 名单校验复用 `/flow/entities` 的同一份来源
 // （内置主题 ∪ 租户 workflow_def 已配置），**不另造第二套名单**。
 import { listEntityTypes } from './businessFlow.js';
@@ -78,31 +78,13 @@ const accountUpdateSchema = z.object({
 
 // ============ RBAC：租户角色权限（批次 A2） ============
 
-// 权限点中文标签（G6 单一事实源）：新增 PERMS 项时必须同步登记 label，
-// perm-catalog 数量断言（PERMS vs labels）会在测试里拦漏登记。
-const PERM_LABELS: Record<Perm, string> = {
-  'dashboard.view': '总览看板',
-  'intake.create': '建单录入',
-  'ticket.manage': '工单管理',
-  'workflow.edit': '流程配置',
-  'workflow.approve': '流程审批',
-  'basicdata.edit': '基础数据',
-  'dispatch.override': '派单覆盖',
-  'role.manage': '账号权限',
-  'inspect.manage': '巡检配置',
-  'inspect.execute': '巡检执行',
-  'asset.scan': '资产扫码',
-  'optimize.tune': '优化调参',
-  'settlement.read': '结算查看',
-  'settlement.edit': '结算操作',
-  'volunteer.view': '志愿者查看',
-  'volunteer.manage': '志愿者管理',
-  'volunteer.audit': '志愿者核销',
-  // E-9（20260914）：耗材/资产维护收口 + 工单耗材消耗三点（G6 单一事实源：新增 PERMS 必须同步登记）
-  'material.manage': '耗材维护',
-  'asset.manage': '资产维护',
-  'consumable.consume': '工单耗材领用',
-};
+// 权限点中文标签 —— **由 role.ts 的 PERM_DEFS 单一事实源派生**（2026-10-25）。
+// 此前此处是一份 20 项的 `Record<Perm, string>` 硬编码：新增权限点漏登记 → 编译失败，
+// 且 catalog 还挂了「数量 != PERMS.length 就抛 500」的运行时脆断兜底。
+// 现在 label 是 PERM_DEFS 条目的必填字段 ⇒ 漏登记在结构上不可能发生，两处兜底均删除。
+const PERM_LABELS: Record<Perm, string> = Object.fromEntries(
+  PERMS.map((p) => [p, PERM_DEFS[p].label]),
+) as Record<Perm, string>;
 
 // GET /api/v1/accounts/roles/perm-catalog —— G6：权限点全集 + 中文名（role.manage）。
 // FE 权限矩阵 tab 以此渲染列头，不再硬编码权限点清单。
@@ -113,10 +95,9 @@ router.get('/accounts/roles/perm-catalog', async (req, res, next) => {
       await requirePermission(auth, client, 'role.manage');
       return PERMS.map((perm) => ({ perm, label: PERM_LABELS[perm] ?? perm }));
     });
-    // 防漏登记：label 缺失回退 perm 名，但数量必须与 PERMS 全集一致
-    if (items.length !== PERMS.length) {
-      throw new AppError('INTERNAL', 'perm-catalog 数量与 PERMS 全集不一致（新权限点漏登记 label）', 500);
-    }
+    // 2026-10-25：原「items.length !== PERMS.length 就抛 500」的防漏登记断言已删除。
+    // 它兜的是「PERMS 与 PERM_LABELS 两份硬编码手工同步」这个设计缺陷；现在 PERM_LABELS
+    // 由 PERM_DEFS 派生、label 是定义的必填字段 ⇒ 漏登记在结构上不可能发生，无需运行时兜底。
     return res.json({ ok: true, code: 0, items });
   } catch (e) {
     next(e);
