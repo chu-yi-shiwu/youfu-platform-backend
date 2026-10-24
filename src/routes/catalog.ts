@@ -1,12 +1,15 @@
 // ② 主数据补全：商品目录(product_catalog) CRUD。
 // 表由 024_master_data_catalog.sql 新建（租户内 code 唯一，RLS 已建）。
-// 风格对齐 material.ts：withTenantClient 注入租户/RLS；写操作 requireConfigRole；COALESCE 更新避免误清空。
+// 风格对齐 material.ts：withTenantClient 注入租户/RLS；写操作 requirePermission('basicdata.edit')；COALESCE 更新避免误清空。
+//   T8 第八批（2026-10-25）：3 处写端点由配置角色白名单收敛为权限点。
+//   **复用 basicdata.edit、不新增**：产品目录是字典类主数据，先例见 metaTenantLabel.ts:16-17
+//   （展示标签字典归属「基础数据」）与 config.ts 术语配置（批 2）。
 import { Router } from 'express';
 import { z } from 'zod';
 import { randomUUID } from 'crypto';
 import { withTenantClient } from '../db/pool.js';
 import { AppError } from '../middleware/error.js';
-import { requireConfigRole } from '../middleware/role.js';
+import { requirePermission } from '../middleware/role.js';
 
 const router = Router();
 
@@ -64,11 +67,11 @@ router.get('/product-catalog/:id', async (req, res, next) => {
 // ============ 新建商品目录项 ============
 router.post('/product-catalog', async (req, res, next) => {
   try {
-    requireConfigRole(req, res);
     const tenantId = res.locals.auth.tenantId;
     const b = catalogSchema.parse(req.body);
-    const item = await withTenantClient(tenantId, (client) =>
-      client
+    const item = await withTenantClient(tenantId, async (client) => {
+      await requirePermission(res.locals.auth, client, 'basicdata.edit');
+      return client
         .query(
           `INSERT INTO product_catalog (id, tenant_id, code, name, category, unit, price, enabled, description)
            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`,
@@ -84,8 +87,8 @@ router.post('/product-catalog', async (req, res, next) => {
             b.description ?? null,
           ],
         )
-        .then((r) => r.rows[0]),
-    );
+        .then((r) => r.rows[0]);
+    });
     return res.status(201).json({ ok: true, code: 0, item });
   } catch (e) {
     next(e);
@@ -95,10 +98,10 @@ router.post('/product-catalog', async (req, res, next) => {
 // ============ 更新商品目录项 ============
 router.put('/product-catalog/:id', async (req, res, next) => {
   try {
-    requireConfigRole(req, res);
     const tenantId = res.locals.auth.tenantId;
     const b = catalogSchema.partial().parse(req.body);
     const item = await withTenantClient(tenantId, async (client) => {
+      await requirePermission(res.locals.auth, client, 'basicdata.edit');
       const cur = await client.query(`SELECT * FROM product_catalog WHERE id=$1 AND tenant_id=$2`, [req.params.id, tenantId]);
       if (cur.rowCount === 0) throw new AppError('NOT_FOUND', 'product_catalog not found', 404);
       const r = await client.query(
@@ -130,13 +133,13 @@ router.put('/product-catalog/:id', async (req, res, next) => {
 // ============ 删除商品目录项（无台账外键约束，直接删；编码唯一保证安全） ============
 router.delete('/product-catalog/:id', async (req, res, next) => {
   try {
-    requireConfigRole(req, res);
     const tenantId = res.locals.auth.tenantId;
-    const n = await withTenantClient(tenantId, (client) =>
-      client
+    const n = await withTenantClient(tenantId, async (client) => {
+      await requirePermission(res.locals.auth, client, 'basicdata.edit');
+      return client
         .query(`DELETE FROM product_catalog WHERE id=$1 AND tenant_id=$2`, [req.params.id, tenantId])
-        .then((r) => r.rowCount ?? 0),
-    );
+        .then((r) => r.rowCount ?? 0);
+    });
     if (n === 0) throw new AppError('NOT_FOUND', 'product_catalog not found', 404);
     return res.json({ ok: true, code: 0 });
   } catch (e) {
