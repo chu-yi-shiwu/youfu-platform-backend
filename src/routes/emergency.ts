@@ -1,12 +1,13 @@
 // 应急模块（P2 第二刀）：应急预案库（知识库/目录）+ 预警中心（告警）。
-// 风格对齐 inspection.ts：withTenantClient 注入租户/RLS；写操作 requireConfigRole；占位符防注入。
+// 风格对齐 inspection.ts：withTenantClient 注入租户/RLS；占位符防注入。
+// 写操作 requirePermission：预案库 → emergency.manage；预警处置 → emergency.handle（T8 第四批）。
 // 预警深化：巡检异常（inspection.ts 调用 createAlert）等业务异常统一落入 alert，前端预警中心统一处理。
 import { Router } from 'express';
 import { z } from 'zod';
 import { randomUUID } from 'crypto';
 import { withTenantClient } from '../db/pool.js';
 import { AppError } from '../middleware/error.js';
-import { requireConfigRole } from '../middleware/role.js';
+import { requirePermission } from '../middleware/role.js';
 import { emitDomainEvent } from '../db/eventBus.js';
 import { createLinkedWorkOrder } from '../services/linkedWorkOrder.js';
 
@@ -91,10 +92,10 @@ router.get('/plans/:id', async (req, res, next) => {
 
 router.post('/plans', async (req, res, next) => {
   try {
-    requireConfigRole(req, res);
     const tenantId = res.locals.auth.tenantId;
     const b = planSchema.parse(req.body);
     const item = await withTenantClient(tenantId, async (client) => {
+      await requirePermission(res.locals.auth, client, 'emergency.manage');
       const r = await client.query(
         `INSERT INTO emergency_plan (tenant_id, code, title, category, level, content, steps, owner, contact_phone, enabled, applicable_scene, trigger_condition, response_org, materials, related_asset_area, drill_record)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING *`,
@@ -129,10 +130,10 @@ router.post('/plans', async (req, res, next) => {
 
 router.put('/plans/:id', async (req, res, next) => {
   try {
-    requireConfigRole(req, res);
     const tenantId = res.locals.auth.tenantId;
     const b = planSchema.partial().parse(req.body);
     const item = await withTenantClient(tenantId, async (client) => {
+      await requirePermission(res.locals.auth, client, 'emergency.manage');
       const cur = await client.query(`SELECT * FROM emergency_plan WHERE id = $1 AND tenant_id = $2`, [
         req.params.id,
         tenantId,
@@ -183,16 +184,16 @@ router.put('/plans/:id', async (req, res, next) => {
 
 router.delete('/plans/:id', async (req, res, next) => {
   try {
-    requireConfigRole(req, res);
     const tenantId = res.locals.auth.tenantId;
-    const n = await withTenantClient(tenantId, (client) =>
-      client
+    const n = await withTenantClient(tenantId, async (client) => {
+      await requirePermission(res.locals.auth, client, 'emergency.manage');
+      return client
         .query(`DELETE FROM emergency_plan WHERE id = $1 AND tenant_id = $2`, [
           req.params.id,
           tenantId,
         ])
-        .then((r) => r.rowCount ?? 0),
-    );
+        .then((r) => r.rowCount ?? 0);
+    });
     if (n === 0) throw new AppError('NOT_FOUND', 'plan not found', 404);
     return res.json({ ok: true, code: 0 });
   } catch (e) {
@@ -265,10 +266,10 @@ router.get('/alerts', async (req, res, next) => {
 
 router.post('/alerts', async (req, res, next) => {
   try {
-    requireConfigRole(req, res);
     const tenantId = res.locals.auth.tenantId;
     const b = alertSchema.parse(req.body);
     const item = await withTenantClient(tenantId, async (client) => {
+      await requirePermission(res.locals.auth, client, 'emergency.handle');
       const row = await createAlert(client, tenantId, {
         source_type: b.source_type,
         source_id: b.source_id,
@@ -288,10 +289,10 @@ router.post('/alerts', async (req, res, next) => {
 // 处理 / 忽略预警（状态机：pending → handling → handled / ignored）
 router.post('/alerts/:id/handle', async (req, res, next) => {
   try {
-    requireConfigRole(req, res);
     const tenantId = res.locals.auth.tenantId;
     const b = z.object({ status: z.enum(['handling', 'handled', 'ignored']), handler: z.string().optional() }).parse(req.body);
     const item = await withTenantClient(tenantId, async (client) => {
+      await requirePermission(res.locals.auth, client, 'emergency.handle');
       const cur = await client.query(`SELECT * FROM alert WHERE id = $1 AND tenant_id = $2`, [
         req.params.id,
         tenantId,
@@ -314,10 +315,10 @@ router.post('/alerts/:id/handle', async (req, res, next) => {
 // 预警关联应急预案（预警深化：异常 → 人工/自动匹配预案）
 router.post('/alerts/:id/link-plan', async (req, res, next) => {
   try {
-    requireConfigRole(req, res);
     const tenantId = res.locals.auth.tenantId;
     const b = z.object({ plan_id: z.string().uuid() }).parse(req.body);
     const item = await withTenantClient(tenantId, async (client) => {
+      await requirePermission(res.locals.auth, client, 'emergency.handle');
       const cur = await client.query(`SELECT * FROM alert WHERE id = $1 AND tenant_id = $2`, [
         req.params.id,
         tenantId,
@@ -344,9 +345,9 @@ router.post('/alerts/:id/link-plan', async (req, res, next) => {
 // 颗粒度对齐 monitor convert：business_type=emergency_alert、sourceType=emergency_alert（幂等键 linked:emergency_alert:<alertId>）
 router.post('/alerts/:id/convert', async (req, res, next) => {
   try {
-    requireConfigRole(req, res);
     const tenantId = res.locals.auth.tenantId;
     const result = await withTenantClient(tenantId, async (client) => {
+      await requirePermission(res.locals.auth, client, 'emergency.handle');
       const cur = await client.query(
         `SELECT a.*, p.title AS plan_title FROM alert a LEFT JOIN emergency_plan p ON p.id = a.related_plan_id
          WHERE a.id = $1 AND a.tenant_id = $2`,

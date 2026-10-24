@@ -124,6 +124,16 @@ export const PERM_DEFS = {
   //   🔴 operator 默认给这个是**为了等价、不是策略选择**：原白名单就是 admin+operator，
   //     不给就会从放行变 403。是否收紧到 admin 属独立产品决策，不在本批夹带（E6）。
   'equipment.manage': { label: '设备维护', defaults: ['operator'] },
+  // T8 第四批（2026-10-25）：应急模块**拆两个权限点**——照 inspect.manage / inspect.execute 的既有先例
+  //   （配置面 vs 执行面分开：能改预案库 ≠ 能处置预警）。
+  //   emergency.manage = 应急预案库 CRUD（plans 3 处）——知识库 / 目录，配置性质
+  //   emergency.handle = 预警处置（alerts 创建 / 处置 / 关联预案 / 转工单 4 处）——执行面动作
+  //   🔴 两者都默认给 operator 是**为了等价**（原 requireConfigRole 白名单就是 admin+operator），
+  //     不是策略选择；是否收紧属独立产品决策，不在本批夹带（E6）。
+  //   ⚠️ 已知待决（登记，未做）：worker 当前**不能处置预警**（等价迁移保留了原行为）。
+  //     收敛后租户可自行授予 emergency.handle —— 这正是本次收敛兑现的价值。
+  'emergency.manage': { label: '应急预案库', defaults: ['operator'] },
+  'emergency.handle': { label: '预警处置', defaults: ['operator'] },
 } as const satisfies Record<string, { label: string; defaults: readonly Role[] }>;
 
 /** 权限点清单（由 PERM_DEFS 派生，勿手改）。 */
