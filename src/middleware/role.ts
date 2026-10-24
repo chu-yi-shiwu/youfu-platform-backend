@@ -301,8 +301,23 @@ export function hasPermDefault(role: string | undefined, perm: string): boolean 
 /**
  * 租户级权限判定：role_permission 表有该租户该角色的行 → 用覆盖集合；
  * 无覆盖行 → 回退默认矩阵。admin 恒 true；dev 恒 true。
+ *
+ * 【T3 实例级作用域（2026-10-24）】新增第 4 参 `entityType`：
+ *   - 不传 ⇒ 纯全局判定（**存量调用点行为完全不变**）。
+ *   - 传了 ⇒ 命中顺序：① 全局 `ticket.manage` 优先放行；② 否则查 `ticket.manage@<entityType>`。
+ *     ⇒ 租户可以只把 `workflow.approve@transport_task` 授给某人，他能批运送流程、批不了巡检。
+ *
+ * ⚠️ **已知边界（不是 bug，是当前语义，改动前必须重读）**：
+ *   默认矩阵路径（无覆盖行）只判**全局形态**，entityType 不参与。因为默认矩阵是平台内置、
+ *   只含全局 perm，实例级授权只能由租户显式写 role_permission 行产生。
+ *   ⇒ 若将来往 DEFAULT_PERM_MATRIX 里塞 `x@entity` 形态，此处必须同步改，否则静默失效。
  */
-export async function hasPerm(auth: AuthLocals, client: PoolClient, perm: string): Promise<boolean> {
+export async function hasPerm(
+  auth: AuthLocals,
+  client: PoolClient,
+  perm: string,
+  entityType?: string,
+): Promise<boolean> {
   if (auth.authMode === 'dev') return true;
   if (auth.role === 'admin') return true;
   const r = await client.query(
@@ -311,7 +326,11 @@ export async function hasPerm(auth: AuthLocals, client: PoolClient, perm: string
   );
   if (r.rowCount && r.rowCount > 0) {
     const set = new Set(r.rows.map((x: { perm: string }) => x.perm));
-    return set.has(perm);
+    // ① 全局授权：命中即放行（存量行全是这个形态 ⇒ 存量行为不变）
+    if (set.has(perm)) return true;
+    // ② 实例级授权：`perm@entityType` 只在作用域匹配时放行
+    if (entityType) return set.has(`${perm}@${entityType}`);
+    return false;
   }
   return hasPermDefault(auth.role, perm);
 }
@@ -335,9 +354,16 @@ export async function listPerms(auth: AuthLocals, client: PoolClient): Promise<s
  * 审查修复（架构🔴1⑤）：参数类型由 string 收紧为 Perm——编译期就暴露拼错/未登记的权限点
  * （此前传入 'settlment.read' 这类错字也能通过编译，运行期恒 403 且难排查）。
  */
-export async function requirePermission(auth: AuthLocals, client: PoolClient, perm: Perm): Promise<void> {
-  if (!(await hasPerm(auth, client, perm))) {
-    throw new AppError('FORBIDDEN', `permission denied: ${perm}`, 403);
+export async function requirePermission(
+  auth: AuthLocals,
+  client: PoolClient,
+  perm: Perm,
+  entityType?: string,
+): Promise<void> {
+  if (!(await hasPerm(auth, client, perm, entityType))) {
+    // 403 消息带上作用域，否则"为什么批不了这个流程"在日志里查不出来（E3 不静默失败）
+    const scope = entityType ? `${perm}@${entityType}` : perm;
+    throw new AppError('FORBIDDEN', `permission denied: ${scope}`, 403);
   }
 }
 
@@ -348,7 +374,12 @@ export async function requirePermission(auth: AuthLocals, client: PoolClient, pe
  * 陪检登记复用建单引擎，此前仅挂 ticket.manage 把工人登记陪检当场 403）。
  * 覆盖表模式：role_permission 行的权限集合与 perms 有交集即放行。
  */
-export async function hasPermAny(auth: AuthLocals, client: PoolClient, perms: readonly Perm[]): Promise<boolean> {
+export async function hasPermAny(
+  auth: AuthLocals,
+  client: PoolClient,
+  perms: readonly Perm[],
+  entityType?: string,
+): Promise<boolean> {
   if (auth.authMode === 'dev') return true;
   if (auth.role === 'admin') return true;
   const r = await client.query(
@@ -357,7 +388,8 @@ export async function hasPermAny(auth: AuthLocals, client: PoolClient, perms: re
   );
   if (r.rowCount && r.rowCount > 0) {
     const set = new Set(r.rows.map((x: { perm: string }) => x.perm));
-    return perms.some((p) => set.has(p));
+    // 与 hasPerm 同口径：全局命中优先，否则查 `perm@entityType`
+    return perms.some((p) => set.has(p) || (entityType ? set.has(`${p}@${entityType}`) : false));
   }
   return perms.some((p) => hasPermDefault(auth.role, p));
 }
@@ -366,8 +398,9 @@ export async function requireAnyPermission(
   auth: AuthLocals,
   client: PoolClient,
   perms: readonly Perm[],
+  entityType?: string,
 ): Promise<void> {
-  if (!(await hasPermAny(auth, client, perms))) {
+  if (!(await hasPermAny(auth, client, perms, entityType))) {
     throw new AppError('FORBIDDEN', `permission denied: ${perms.join('|')}`, 403);
   }
 }

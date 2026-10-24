@@ -20,7 +20,10 @@ import crypto from 'node:crypto';
 import pool, { withTenantClient } from '../db/pool.js';
 import { AppError } from '../middleware/error.js';
 // ROLES 已不再直接引用：下拉改走 ASSIGNABLE_BUILTIN_ROLES（退场角色不可新建/分配）。
-import { PERMS, DEFAULT_PERM_MATRIX, canAssignRole, requirePermission, ROLE_CODE_RE, ASSIGNABLE_BUILTIN_ROLES, RETIRED_ROLES, isRetiredRole, type Role, type Perm } from '../middleware/role.js';
+import { PERMS, DEFAULT_PERM_MATRIX, canAssignRole, requirePermission, ROLE_CODE_RE, ASSIGNABLE_BUILTIN_ROLES, RETIRED_ROLES, isRetiredRole, permBase, assertEntityTypeScope, type Role, type Perm } from '../middleware/role.js';
+// T3/S5：实例级权限的 entityType 名单校验复用 `/flow/entities` 的同一份来源
+// （内置主题 ∪ 租户 workflow_def 已配置），**不另造第二套名单**。
+import { listEntityTypes } from './businessFlow.js';
 import type { AuthLocals } from '../middleware/auth.js';
 import { hashPassword, toPublic } from '../account.js';
 import { recordPlatformAudit } from '../repo/platformAudit.js';
@@ -160,7 +163,10 @@ router.put('/accounts/roles/:role/permissions', async (req, res, next) => {
     if (!ROLE_CODE_RE.test(role)) throw new AppError('BAD_PARAM', `invalid role code: ${role}`, 400);
     const body = z.object({ perms: z.array(z.string().min(1).max(64)) }).parse(req.body);
     const permSet = new Set<string>(PERMS);
-    const illegal = body.perms.filter((p) => !permSet.has(p));
+    // T3：perm 允许两种形态——全局 `ticket.manage` / 实例级 `ticket.manage@transport_task`。
+    // 这里只校 **base 部分 ∈ PERMS**（拼错立即 400，禁错字静默落库——G5 的原有纪律）；
+    // `@` 后面的 entityType 需要查库才能判名单 ⇒ 挪到事务内（见下方 assertPermScopes）。
+    const illegal = body.perms.filter((p) => !permSet.has(permBase(p)));
     if (illegal.length > 0) {
       throw new AppError('BAD_PERM', `非法权限点：${illegal.join('、')}（可用清单见 GET /accounts/roles/perm-catalog）`, 400);
     }
@@ -172,6 +178,16 @@ router.put('/accounts/roles/:role/permissions', async (req, res, next) => {
       // 地基第二步：自定义岗位同样可配权限——存在性 = 内置 OR 本租户 role_def 启用中。
       if (!(await isRoleUsable(client, auth.tenantId, role))) {
         throw new AppError('BAD_PARAM', `unknown role: ${role}`, 400);
+      }
+      // T3/S5：实例级权限（含 `@`）的 entityType 必须过运行时白名单——
+      //   ① 形状（ENTITY_RE）；② 在 `/flow/entities` 的实体清单内。
+      //   ⇒ 否则 `ticket.manage@随便写` 能落库，权限配置变成不可控的垃圾。
+      const scoped = body.perms.filter((p) => p.includes('@'));
+      if (scoped.length > 0) {
+        const known = (await listEntityTypes(client, auth.tenantId)).map((e) => e.entityType);
+        for (const p of scoped) {
+          assertEntityTypeScope(p.slice(p.indexOf('@') + 1), known);
+        }
       }
       await client.query(`DELETE FROM role_permission WHERE tenant_id=$1 AND role=$2`, [auth.tenantId, role]);
       // 2026-09-14 纵切① P0-1：保存默认矩阵 = 解除定格。

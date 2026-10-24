@@ -296,7 +296,11 @@ router.post('/:entityType/approve', async (req, res, next) => {
     let selfApproved = false; // F16：单 admin 自批豁免标记（响应透出 + audit 已强制留痕）
     await withTenantClient(tenantId, async (client) => {
       await assertWorkflowConfigEditableByTenant(client); // 097 归属闸门：platform 时租户侧（含 admin）一律 403
-      await requirePermission(auth, client, 'workflow.approve');
+      // T3/S7 样板接入：把路径里的 entityType 作为**实例级作用域**透传进去。
+      //   ⇒ 租户可以把 `workflow.approve@transport_task` 只授给"只管运送流程审批"的人，
+      //     他批得了运送流程、批不了巡检流程（以前要么全都能批、要么全都不能）。
+      //   🟢 向后兼容：只授全局 `workflow.approve`（无 @）的存量租户 ⇒ 回退全局判定 ⇒ 行为不变。
+      await requirePermission(auth, client, 'workflow.approve', entityType);
       const change = await getWorkflowDefChange(client, tenantId, entityType);
       if (!change) throw new AppError('NO_DRAFT', `no in-flight change for ${entityType}`, 404);
       if (change.status !== 'submitted') {
