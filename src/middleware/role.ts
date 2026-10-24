@@ -144,6 +144,15 @@ export const PERM_DEFS = {
   //     收敛后租户可自行授予 monitor.handle。
   'monitor.manage': { label: '监控设备', defaults: ['operator'] },
   'monitor.handle': { label: '告警处置', defaults: ['operator'] },
+  // T8 第六批（2026-10-25）：人员（worker 档案）主数据维护。**只用一个点、不拆**：
+  //   4 处全是「人员主数据维护」——档案 CRUD 3 处 + 一键入驻（建账号 + 档案）1 处，
+  //   没有配置面 / 执行面之分（不像 inspection / emergency / monitor 那样要拆 manage + handle）。
+  //   命名 `worker.manage`、label 用「人员档案」，避免被误读成「worker 角色的权限」。
+  //   🔴 operator 默认给是**为了等价**（原 requireConfigRole 白名单 admin+operator），非策略选择。
+  //   ⚠️ POST /workers/with-account 之后还有一层 canAssignRole(auth.role,'worker')（事务外同步），
+  //     worker.ts:180 注释自述「当前矩阵恒真」（ROLE_RANK.worker=1 最低，所有角色均 ≥1）
+  //     ⇒ 守卫移入事务内导致的顺序反转不改变实际行为，本批不动它。
+  'worker.manage': { label: '人员档案', defaults: ['operator'] },
 } as const satisfies Record<string, { label: string; defaults: readonly Role[] }>;
 
 /** 权限点清单（由 PERM_DEFS 派生，勿手改）。 */

@@ -1,7 +1,7 @@
 // ② 主数据补全：人员(worker) CRUD。
 // worker 表已在 001_init.sql 建好（text 主键 id=业务工号，RLS 已建），此前仅有内部种子与派单读取，
 // 缺管理路由。本文件补齐 list/create/update/delete，风格对齐 asset.ts/material.ts：
-//   withTenantClient 注入租户/RLS；写操作 requireConfigRole；占位符防注入。
+//   withTenantClient 注入租户/RLS；写操作 requirePermission('worker.manage')；占位符防注入。
 // 技能匹配派单依赖 skill_tags / load / active，故暴露这些字段供管理员维护候选池。
 // 注册制批次一（卡2）：新增 POST /workers/with-account —— 员工一键入驻：
 //   单事务内同时建 account_user（登录账号，role=worker）+ worker（业务档案），密码一次性透出。
@@ -11,7 +11,7 @@ import { withTenantClient } from '../db/pool.js';
 import { AppError } from '../middleware/error.js';
 import { getWorkflowDef } from '../engine/workflowDef.js';
 import { activeStates } from '../engine/stateMachine.js';
-import { requireConfigRole, canAssignRole, type Role } from '../middleware/role.js';
+import { requirePermission, canAssignRole, type Role } from '../middleware/role.js';
 import { hashPassword } from '../account.js';
 import { generateAdminPassword } from '../repo/tenantProvision.js';
 
@@ -73,18 +73,18 @@ router.get('/workers/:id', async (req, res, next) => {
 // ============ 新建人员 ============
 router.post('/workers', async (req, res, next) => {
   try {
-    requireConfigRole(req, res);
     const tenantId = res.locals.auth.tenantId;
     const b = workerSchema.parse(req.body);
-    const item = await withTenantClient(tenantId, (client) =>
-      client
+    const item = await withTenantClient(tenantId, async (client) => {
+      await requirePermission(res.locals.auth, client, 'worker.manage');
+      return client
         .query(
           `INSERT INTO worker (id, tenant_id, name, skill_tags, load, active, account_id)
            VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *`,
           [b.id, tenantId, b.name, b.skill_tags ?? [], b.load ?? 0, b.active ?? true, b.account_id ?? null],
         )
-        .then((r) => r.rows[0]),
-    );
+        .then((r) => r.rows[0]);
+    });
     return res.status(201).json({ ok: true, code: 0, item });
   } catch (e) {
     next(e);
@@ -94,10 +94,10 @@ router.post('/workers', async (req, res, next) => {
 // ============ 更新人员 ============
 router.put('/workers/:id', async (req, res, next) => {
   try {
-    requireConfigRole(req, res);
     const tenantId = res.locals.auth.tenantId;
     const b = workerSchema.partial().parse(req.body);
     const item = await withTenantClient(tenantId, async (client) => {
+      await requirePermission(res.locals.auth, client, 'worker.manage');
       const cur = await client.query(`SELECT * FROM worker WHERE id=$1 AND tenant_id=$2`, [req.params.id, tenantId]);
       if (cur.rowCount === 0) throw new AppError('NOT_FOUND', 'worker not found', 404);
       const sets: string[] = [];
@@ -127,9 +127,9 @@ router.put('/workers/:id', async (req, res, next) => {
 // ============ 删除人员（保护：在途工单孤儿引用） ============
 router.delete('/workers/:id', async (req, res, next) => {
   try {
-    requireConfigRole(req, res);
     const tenantId = res.locals.auth.tenantId;
     const n = await withTenantClient(tenantId, async (client) => {
+      await requirePermission(res.locals.auth, client, 'worker.manage');
       // 在途工单（指派的工单仍处于活跃态）仍指向该人员时拒绝删除，避免孤儿引用。
       // 口径由客户流程派生（activeStates = 全态 − 完成 − 终态 − 挂起），此前写死
       // `status <> 'completed'`：① 客户改完成态名 → 凡是"真完成"的单都算在途 → 永远删不掉人；
@@ -182,7 +182,6 @@ async function generateWorkerId(client: { query: Function }, tenantId: string): 
 
 router.post('/workers/with-account', async (req, res, next) => {
   try {
-    requireConfigRole(req, res); // 写操作同款门禁：仅 admin/operator
     const auth = res.locals.auth;
     // R15-005 统一口径：管理角色铸 worker 档案也过角色分配门禁
     if (!canAssignRole(auth.role as Role | undefined, 'worker')) {
@@ -193,6 +192,7 @@ router.post('/workers/with-account', async (req, res, next) => {
     // 一次性密码（明文仅本次响应透出，与平台登记新机构同口径；DB 只存 scrypt 哈希）
     const oneTimePassword = generateAdminPassword();
     const result = await withTenantClient(tenantId, async (client) => {
+      await requirePermission(res.locals.auth, client, 'worker.manage');
       // ① 查重（先账号名后工号，均租户内唯一）
       const dupAcc = await client.query(
         `SELECT 1 FROM account_user WHERE tenant_id=$1 AND username=$2 LIMIT 1`,
