@@ -153,6 +153,13 @@ export const PERM_DEFS = {
   //     worker.ts:180 注释自述「当前矩阵恒真」（ROLE_RANK.worker=1 最低，所有角色均 ≥1）
   //     ⇒ 守卫移入事务内导致的顺序反转不改变实际行为，本批不动它。
   'worker.manage': { label: '人员档案', defaults: ['operator'] },
+  // T8 第七批（2026-10-25）：I4 灰度总开关（租户级 AI 能力生杀）。**读+写共用一个点**：
+  //   GET /ai/features 虽是读端点，但原实现就带配置角色守卫 —— 它属**管理面配置读取**
+  //   （小程序侧印证：只有 pages/admin/agents/ 调它），不是业务数据读取 ⇒ 等价迁移保留读守卫，不摘。
+  //   不复用 basicdata.edit：AI 能力总开关是独立功能域，与「基础数据」不是一回事
+  //   （role.ts:69 已把"蹭 basicdata.edit"定为淘汰做法）；判据沿用批 3 equipment：独立模块 → 独立点。
+  //   🔴 operator 默认给是**为了等价**（原白名单 admin+operator），非策略选择。
+  'ai.manage': { label: 'AI 功能', defaults: ['operator'] },
 } as const satisfies Record<string, { label: string; defaults: readonly Role[] }>;
 
 /** 权限点清单（由 PERM_DEFS 派生，勿手改）。 */

@@ -10,7 +10,7 @@ import { dirname, join } from 'path';
 import { llmConfigured, llmInferCategory, llmGenConfig, embeddingConfigured, embedText, embeddingModel, cosineSimilarity } from '../services/llm.js';
 import { withTenantClient } from '../db/pool.js';
 import { getAiFeaturesEnabled, setAiFeaturesEnabled } from '../repo/tenantSettings.js';
-import { requireConfigRole } from './config.js';
+import { requirePermission } from '../middleware/role.js';
 import { getWorkflowDefOrDefault } from '../engine/workflowDef.js';
 import { doneStates } from '../engine/stateMachine.js';
 import { builtinDefFor } from '../engine/themes.js';
@@ -474,9 +474,13 @@ router.post('/gen-config', async (req, res, next) => {
 // PUT /ai/features { enabled }（翻转开关，落库 tenant_settings.settings.ai_features_enabled）
 router.get('/features', async (req, res, next) => {
   try {
-    requireConfigRole(req, res); // 守卫：仅 admin/operator
     const tenantId = res.locals.auth.tenantId;
-    const enabled = await getAiFeaturesEnabled(tenantId);
+    // 守卫移入事务内：requirePermission 需查 role_permission，必须有 client（与批 3~6 同款改法）。
+    // GET 也收口是**等价迁移**：它原本就带配置角色守卫 —— 属管理面配置读取，不是业务数据读取。
+    const enabled = await withTenantClient(tenantId, async (client) => {
+      await requirePermission(res.locals.auth, client, 'ai.manage');
+      return getAiFeaturesEnabled(tenantId, client);
+    });
     return res.json({ ok: true, code: 0, enabled });
   } catch (e) {
     next(e);
@@ -485,10 +489,13 @@ router.get('/features', async (req, res, next) => {
 
 router.put('/features', async (req, res, next) => {
   try {
-    requireConfigRole(req, res); // 守卫：仅 admin/operator
     const tenantId = res.locals.auth.tenantId;
     const s = z.object({ enabled: z.boolean() }).parse(req.body);
-    const enabled = await setAiFeaturesEnabled(tenantId, s.enabled);
+    // 守卫与写入**同事务**：先在事务内判权限（403 直接抛 ⇒ 写操作根本不会执行）再落库。
+    const enabled = await withTenantClient(tenantId, async (client) => {
+      await requirePermission(res.locals.auth, client, 'ai.manage');
+      return setAiFeaturesEnabled(tenantId, s.enabled, client);
+    });
     return res.json({ ok: true, code: 0, enabled });
   } catch (e) {
     next(e);
