@@ -78,6 +78,14 @@ function makeClient(opts: { orderStatus: string }) {
       if (text.includes('INSERT INTO business_flow_tasks')) {
         return { rows: [{ id: 'bft-1', status: 'draft' }], rowCount: 1 };
       }
+      // 🔴 S5 起必须补这一条：`/flow/transport_task` 走代理后，建单真的发
+      //    `INSERT INTO transport_order ... RETURNING *`。缺这条 ⇒ 桩回空行 ⇒
+      //    `r.rows[0]` 为 undefined ⇒ 路由 500 ⇒ 本文件的红变成"端点跑不通"，
+      //    按文件头写的判断顺序（"先看对照用例绿不绿…跑不通先修夹具"），
+      //    这属于**夹具该修**，不是口径结论。**本改动只动桩，不动任何断言口径。**
+      if (text.includes('INSERT INTO transport_order')) {
+        return { rows: [{ id: 'to-new', status: TRANSPORT_DEF.initial }], rowCount: 1 };
+      }
       if (text.includes('INSERT INTO domain_event')) {
         return { rows: [], rowCount: 1 };
       }
@@ -203,19 +211,25 @@ describe('T5-探针：同一笔运送业务的 domain_event.entityType 必须一
     expect(entityTypeOf(evA[0])).toBe('transport_order');
   });
 
-  it('对照（现状实拍·绿）：通用业务流通道记的是路由参数 transport_task', async () => {
+  // 🔴 本条原名为「对照（现状实拍·绿）：通用业务流通道记的是路由参数 transport_task」，
+  //    断言的是**修复前**的行为（transport_task）。T5/S5 之后通用通道走代理、发
+  //    `transport_order` ⇒ 旧断言必然转红——它红的不是"新缺陷"，是"旧缺陷被修好了"。
+  //    ⇒ 按"覆盖面收缩必须留痕"：用例**保留**，只把断言改成修复后的目标值，
+  //      并把改名原因写在这里。它现在与 S6b 的 t5TransportProxy.http.test.ts 同向。
+  it('对照（修复后实拍·绿）：通用业务流通道记的已是原生口径 transport_order', async () => {
     const b = makeClient({ orderStatus: 'draft' });
     h.client = b.client;
     const appB = await listen(appWith(businessFlowRouter, '/flow'));
-    await fetch(`${appB.url}/flow/transport_task`, {
+    const res = await fetch(`${appB.url}/flow/transport_task`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ title: '送标本到 3 楼检验科' }),
     });
     appB.server.close();
+    expect(res.status, '/flow 建单应当跑通（不跑通是端点/夹具问题，不是口径结论）').toBe(201);
     const evB = domainEventParams(b.calls);
     expect(evB.length).toBe(1);
-    expect(entityTypeOf(evB[0])).toBe('transport_task');
+    expect(entityTypeOf(evB[0])).toBe('transport_order');
   });
 
   it('🔴 同一条运送路由内部：查 workflow_def 用的 entity_type 与发事件用的必须一致', async () => {
