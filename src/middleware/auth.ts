@@ -325,9 +325,24 @@ export function trialRateLimit(max = 5, windowMs = 24 * 3600 * 1000) {
 }
 
 /**
- * C-2：统一角色守卫（纯函数）。prod 下要求 auth.role ∈ roles；dev 放行。
+ * C-2：角色白名单守卫（纯函数、同步、返回 boolean）。prod 下要求 auth.role ∈ roles；dev 放行。
  * 用法：if (!requireRole(auth, 'admin')) return res.status(403)...；
- *      取代散落的 requireAdmin / requireConfigRole 重复实现。
+ *
+ * ⚠️ 【2026-10-24 如实改写：原文在这里撒了很久的谎】
+ *   此注释原文写的是"**取代散落的 requireAdmin / requireConfigRole 重复实现**"。
+ *   实测（排除定义行与 `src/test/`）分布是：
+ *       `requirePermission(`  **87** 处  ← 真正主力（按权限点判定，走默认矩阵 + 租户覆盖表）
+ *       `requireConfigRole(`  **73** 处  ← 管理类写端点（建/改/删配置、字典、账户）
+ *       `requireRole(`        **5** 处   ← 就是本函数
+ *   ⇒ 本函数**既没有取代谁，也没有被谁取代**：三套守卫至今**并存**，
+ *     "统一"这个说法是愿望不是事实。（收敛动作已单独登记为骨架文档 **F2**，
+ *     与 T3「实例级权限」是**两件不同的事**：T3 只往 `requirePermission` 一条链上加
+ *     entityType 维度，按 E6 不得顺手收敛另外两套。）
+ *
+ * 🟡 什么时候用哪一个：
+ *   · 管"**能不能做这类管理动作**"（改字典、改账户、删配置）⇒ `requireConfigRole`；
+ *   · 管"**有没有这个权限点**"（可租户覆盖、可细分到单据类型）⇒ `requirePermission`；
+ *   · 本函数只在**需要临时按角色名硬判**、且不涉及权限点体系的地方用，别再新增调用点。
  */
 export function requireRole(auth: AuthLocals, ...roles: string[]): boolean {
   if (auth.authMode === 'dev') return true;
