@@ -22,7 +22,8 @@ import { availableTransitions, type WorkflowDef } from '../engine/stateMachine.j
 import { transitionEntity } from '../engine/transition.js';
 import { TRANSPORT_DEF, EMERGENCY_DEF, themeLabel } from '../engine/themes.js';
 import { emitDomainEvent } from '../db/eventBus.js';
-import { assertRequiredFields, proxyFor, type FlowProxyCtx } from '../engine/flowProxy.js';
+import { proxyFor, type FlowProxyCtx } from '../engine/flowProxy.js';
+import { assertRequiredFields } from '../engine/flowRequiredFields.js';
 
 // entity_type → 内置兜底 def（与 themes.ts 保持一致；租户经配置中心生成后优先用 DB 定义）。
 const ENTITY_DEF: Record<string, WorkflowDef> = {

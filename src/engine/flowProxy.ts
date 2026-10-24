@@ -98,8 +98,9 @@
 
 import type { PoolClient } from 'pg';
 import type { AuthLocals } from '../middleware/auth.js';
-import { AppError } from '../middleware/error.js';
-import type { WorkflowDef } from './stateMachine.js';
+// ⚠️ 通用通道的必填字段校验**不在本文件**，见 `engine/flowRequiredFields.ts` 文件头：
+//   本文件（S5 起）要按值引入 adapter，若校验也放这儿，adapter 就得反向按值 import 本文件
+//   ⇒ 运行时循环依赖 ⇒ 生产启动阶段 ReferenceError（已实测）。别把它搬回来。
 
 /** 代理层与路由之间传递的行对象（原生表行 + adapter 补的 `available` 等派生字段）。 */
 export type FlowRow = Record<string, unknown>;
@@ -183,6 +184,12 @@ export interface FlowAdapter {
  *    保证"加骨架"与"切换行为"是两笔可独立回滚的改动。
  * ⚠️ 填写 entry 的那一笔**必须单独 commit**（回退时才能 `git revert` 单笔）。
  */
+/**
+ * ★S5：唯一切换点已拨动★
+ *   `transport_task` 写进 registry ⇒ `/flow/transport_task*` 改走原生表 `transport_order`；
+ *   从这里删掉这一行 ⇒ `/flow` 立即回到 `business_flow_tasks`（无数据迁移，秒级）。
+ *   🔴 回退前先读文件头的「回退（E1）」段：要先落代理窗口内新建行的 id 清单。
+ */
 export const FLOW_PROXY: Record<string, FlowAdapter> = {};
 
 /**
@@ -201,32 +208,4 @@ export function proxyFor(entityType: string): FlowAdapter | undefined {
   return FLOW_PROXY[entityType];
 }
 
-/**
- * 「通用通道」的必填字段校验（原 `businessFlow.ts:177-185` 的内联块，**逐字搬出**）。
- *
- * 为什么放在这里而不是留在路由里：`/flow` 走代理时，四个 handler 在**开头**就分派给
- * adapter 了，路由里那段校验**根本执行不到**——若不在 adapter 里接着做，
- * 代理就等于**悄悄取消了一道校验**（比原 bug 更隐蔽）。
- * ⇒ 收口到本文件，让「未代理路径（businessFlow）」与「代理路径（adapter）」
- *   **共用同一份实现**，校验语义不随路由分叉而分叉。
- *
- * @param def            状态图（def 口径）
- * @param currentStatus  实体当前状态（用于定位是哪条 transition）
- * @param event          本次事件名
- * @param data           调用方传的 data（必填字段从这里取值）
- */
-export function assertRequiredFields(
-  def: WorkflowDef,
-  currentStatus: string,
-  event: string,
-  data: Record<string, unknown>,
-): void {
-  const tr = def.transitions.find((x) => x.from === currentStatus && x.event === event);
-  if (!tr) throw new AppError('BAD_STATE', `illegal transition ${currentStatus} --${event}-->`, 422);
-  if (tr.requiredFields && tr.requiredFields.length) {
-    const missing = tr.requiredFields.filter((f) => data[f] == null || data[f] === '');
-    if (missing.length) {
-      throw new AppError('BAD_REQUEST', `missing required field: ${missing.join(',')}`, 422);
-    }
-  }
-}
+/** 必填字段校验见 `../engine/flowRequiredFields.js`（同文件头写了为什么不在本文件）。 */

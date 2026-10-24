@@ -265,4 +265,30 @@ describe('T5/S3 形状护栏：adapter 不许自己写 SQL', () => {
     expect(transportAdapter.entityType).toBe('transport_task');
     expect(transportAdapter.nativeEntityType).toBe('transport_order');
   });
+
+  it('🔴 循环依赖护栏：adapter 引用 engine/flowProxy.js 的 import 必须是 import type', () => {
+    // 为什么守这条：`flowProxy.ts` 按值引入本文件的 transportAdapter（registry 要它）。
+    // 若本文件再按值反向 import flowProxy ⇒ 运行时成环 ⇒ **生产启动阶段**
+    // `ReferenceError: Cannot access 'transportAdapter' before initialization`。
+    // ⚠️ vitest 下**不炸**（模块执行顺序不同）⇒ 单测全绿会骗人，只能靠这条静态护栏兜住。
+    // 已实测：成环版在 `npx tsx` 下 adapter-first 加载顺序必崩。
+    const file = join(process.cwd(), 'src', 'routes', 'flowAdapters', 'transportAdapter.ts');
+    let src = '';
+    try {
+      src = readFileSync(file, 'utf8');
+    } catch (e) {
+      throw new Error(`[循环依赖护栏] 读不到 ${file} ⇒ 护栏目标消失，必须修：${String(e)}`);
+    }
+    const codeLines = src
+      .split('\n')
+      .filter((l) => !l.trimStart().startsWith('//') && !l.trimStart().startsWith('*'));
+    const refs = codeLines.filter((l) => l.includes('engine/flowProxy.js'));
+    expect(refs.length, 'adapter 应当只从 flowProxy 取类型（一条都找不到 ⇒ 类型引用被改没了）').toBeGreaterThan(0);
+    for (const line of refs) {
+      expect(
+        line.trim(),
+        'adapter 出现了按值 import flowProxy ⇒ 循环依赖 ⇒ 生产启动崩（改成 import type）',
+      ).toMatch(/^import type\b/);
+    }
+  });
 });

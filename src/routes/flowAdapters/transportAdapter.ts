@@ -35,7 +35,13 @@ import { AppError } from '../../middleware/error.js';
 import { getWorkflowDefOrDefault } from '../../engine/workflowDef.js';
 import { availableTransitions } from '../../engine/stateMachine.js';
 import { TRANSPORT_DEF } from '../../engine/themes.js';
-import { assertRequiredFields, type FlowAdapter, type FlowCreateBody, type FlowProxyCtx, type FlowRow, type FlowTransitionBody } from '../../engine/flowProxy.js';
+// ⚠️ 对 `engine/flowProxy.js` **只能 import type**：该文件按值引入了本文件的
+//    `transportAdapter`，若这里再按值反向 import 它 ⇒ 运行时循环依赖 ⇒
+//    生产启动阶段 `ReferenceError: Cannot access 'transportAdapter' before initialization`
+//    （已实测；vitest 下不炸，所以单测全绿不代表没问题）。
+//    本文件有护栏断言守着这条不变式。
+import type { FlowAdapter, FlowCreateBody, FlowProxyCtx, FlowRow, FlowTransitionBody } from '../../engine/flowProxy.js';
+import { assertRequiredFields } from '../../engine/flowRequiredFields.js';
 import {
   createOrder,
   getOrder,
