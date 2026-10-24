@@ -123,7 +123,12 @@ export async function transitionOrder(
 const router = Router();
 
 // ============ 运送订单 ============
-const orderSchema = z.object({
+/**
+ * 建单入参 schema。导出是为了让代理层（`flowAdapters/transportAdapter.ts`）走**同一份
+ * 默认值与校验**，而不是在 adapter 里再抄一份 `priority: 'normal'` / `order_type: 'scheduled'`
+ * ——抄一份就等于给自己埋一个"两边默认值漂移"的雷。
+ */
+export const orderSchema = z.object({
   item_name: z.string().min(1),
   from_loc: z.string().optional(),
   to_loc: z.string().optional(),

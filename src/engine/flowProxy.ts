@@ -98,6 +98,8 @@
 
 import type { PoolClient } from 'pg';
 import type { AuthLocals } from '../middleware/auth.js';
+import { AppError } from '../middleware/error.js';
+import type { WorkflowDef } from './stateMachine.js';
 
 /** 代理层与路由之间传递的行对象（原生表行 + adapter 补的 `available` 等派生字段）。 */
 export type FlowRow = Record<string, unknown>;
@@ -197,4 +199,34 @@ export function proxyFor(entityType: string): FlowAdapter | undefined {
   if (!entityType) return undefined;
   if (!Object.prototype.hasOwnProperty.call(FLOW_PROXY, entityType)) return undefined;
   return FLOW_PROXY[entityType];
+}
+
+/**
+ * 「通用通道」的必填字段校验（原 `businessFlow.ts:177-185` 的内联块，**逐字搬出**）。
+ *
+ * 为什么放在这里而不是留在路由里：`/flow` 走代理时，四个 handler 在**开头**就分派给
+ * adapter 了，路由里那段校验**根本执行不到**——若不在 adapter 里接着做，
+ * 代理就等于**悄悄取消了一道校验**（比原 bug 更隐蔽）。
+ * ⇒ 收口到本文件，让「未代理路径（businessFlow）」与「代理路径（adapter）」
+ *   **共用同一份实现**，校验语义不随路由分叉而分叉。
+ *
+ * @param def            状态图（def 口径）
+ * @param currentStatus  实体当前状态（用于定位是哪条 transition）
+ * @param event          本次事件名
+ * @param data           调用方传的 data（必填字段从这里取值）
+ */
+export function assertRequiredFields(
+  def: WorkflowDef,
+  currentStatus: string,
+  event: string,
+  data: Record<string, unknown>,
+): void {
+  const tr = def.transitions.find((x) => x.from === currentStatus && x.event === event);
+  if (!tr) throw new AppError('BAD_STATE', `illegal transition ${currentStatus} --${event}-->`, 422);
+  if (tr.requiredFields && tr.requiredFields.length) {
+    const missing = tr.requiredFields.filter((f) => data[f] == null || data[f] === '');
+    if (missing.length) {
+      throw new AppError('BAD_REQUEST', `missing required field: ${missing.join(',')}`, 422);
+    }
+  }
 }
