@@ -37,10 +37,18 @@ let anomalyPts: any[] = [];
 // feedback 夹具
 let fbFound = true;
 let lastTenant = '';
+// T8 第九批：租户级权限覆盖（role_permission 行）。空 ⇒ 回退默认矩阵
+let permGrants: Record<string, string[]> = {};
 
 const fakeClient = {
   query: vi.fn(async (text: unknown, params?: unknown[]) => {
     const sql = String(text);
+    // —— 权限（requirePermission 查租户覆盖行；无行 ⇒ 回退默认矩阵）——
+    if (sql.includes('SELECT perm FROM role_permission')) {
+      const role = String(params?.[1] ?? '');
+      const set = permGrants[role] ?? [];
+      return { rows: set.map((p) => ({ perm: p })), rowCount: set.length };
+    }
     // —— material ——（细节分支优先）
     if (sql.includes('SELECT 1 FROM inventory WHERE material_id')) return { rows: invExists ? [{ '?column?': 1 }] : [], rowCount: invExists ? 1 : 0 };
     if (sql.includes('SELECT 1 FROM inventory_log WHERE material_id')) return { rows: logExists ? [{ '?column?': 1 }] : [], rowCount: logExists ? 1 : 0 };
@@ -126,7 +134,7 @@ beforeEach(() => {
   pointExists = true; taskFound = true;
   taskRow = { id: 'pt-1', tenant_id: TENANT, title: '夜间巡更', status: 'pending', point_ids: ['p1', 'p2'], checkins: [] };
   missedRows = []; anomalyPts = [];
-  fbFound = true; lastTenant = '';
+  fbFound = true; lastTenant = ''; permGrants = {};
   fakeClient.query.mockClear();
   emitDomainEvent.mockClear();
   createAlert.mockClear();
@@ -385,7 +393,8 @@ describe('feedback.ts · 反馈提交/回复/统计', () => {
     expect(evArg().payload.rating).toBe(5);
   });
 
-  it('⑲POST /:id/reply → status=replied；（worker）→ 403；不存在 → 404', async () => {
+  it('⑲POST /:id/reply → status=replied；（worker · prod）→ 403；不存在 → 404', async () => {
+    authMode = 'prod'; // 🔴 requirePermission 在 dev 恒放行 ⇒ 不切 prod，这条 403 是恒绿的假绿
     const r = await req('POST', '/api/v1/feedback/fb-1/reply', { reply: '已处理' });
     expect(r.status).toBe(200);
     const j = (await r.json()) as any;
@@ -406,7 +415,8 @@ describe('feedback.ts · 反馈提交/回复/统计', () => {
     expect(j.stats.replied_count).toBe(4);
   });
 
-  it('㉑GET /feedback/export → BOM+表头；（worker）→ 403', async () => {
+  it('㉑GET /feedback/export → BOM+表头；（worker · prod）→ 403', async () => {
+    authMode = 'prod'; // 同上：dev 恒放行会让这条 403 断言恒绿
     const r = await req('GET', '/api/v1/feedback/export');
     expect(r.status).toBe(200);
     const buf = new Uint8Array(await r.arrayBuffer());
@@ -414,5 +424,18 @@ describe('feedback.ts · 反馈提交/回复/统计', () => {
     expect(new TextDecoder('utf-8').decode(buf.slice(3)).startsWith('created_at,type,content')).toBe(true);
     authRole = 'worker';
     expect((await req('GET', '/api/v1/feedback/export')).status).toBe(403);
+  });
+
+  // T8 第九批 B 组：这就是收敛的全部价值 —— requireConfigRole 只读角色白名单、根本不查权限表，
+  // ⇒ 租户把 feedback.manage 授给 reviewer 也放不了行。改前这条必红（403），改后绿。
+  it('㉒（prod · reviewer）授 feedback.manage ⇒ reply 200 + export 200', async () => {
+    authMode = 'prod';
+    authRole = 'reviewer';
+    permGrants['reviewer'] = ['feedback.manage'];
+    const r1 = await req('POST', '/api/v1/feedback/fb-1/reply', { reply: '已处理' });
+    expect(r1.status).toBe(200);
+    expect(((await r1.json()) as any).item.status).toBe('replied');
+    const r2 = await req('GET', '/api/v1/feedback/export');
+    expect(r2.status).toBe(200);
   });
 });

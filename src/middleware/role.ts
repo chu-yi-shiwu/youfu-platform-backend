@@ -160,6 +160,16 @@ export const PERM_DEFS = {
   //   （role.ts:69 已把"蹭 basicdata.edit"定为淘汰做法）；判据沿用批 3 equipment：独立模块 → 独立点。
   //   🔴 operator 默认给是**为了等价**（原白名单 admin+operator），非策略选择。
   'ai.manage': { label: 'AI 功能', defaults: ['operator'] },
+  // T8 第九批（2026-10-25）：服务反馈模块独立权限点。**只用一个点、不拆**（照批 6 worker 判据）：
+  //   2 处端点 —— POST /:id/reply（回复处置）+ GET /export（CSV 导出，R9-F1 认定属管理面）——
+  //   同属「处理服务反馈」一件事的两面，没有配置面 / 执行面之分（不像 emergency / monitor 要拆
+  //   manage + handle）。拆成 reply / export 两个点会得到一对几乎总是一起授予的点 = 伪粒度。
+  // 🔴 为什么不复用 ticket.manage：它 defaults 含 dispatcher/reviewer/service_desk，
+  //    复用会把这三个角色从 403 变放行（破坏等价），且反馈不是工单。
+  // 🔴 为什么不蹭 basicdata.edit：见 inspect.manage 注释——蹭基础数据是淘汰做法；
+  //    反馈是独立业务域（自有 feedback 表 + PRD §D + 事件总线）。
+  // 🔴 operator 默认给是**为了等价**（原白名单 admin+operator），非策略选择。
+  'feedback.manage': { label: '服务反馈', defaults: ['operator'] },
 } as const satisfies Record<string, { label: string; defaults: readonly Role[] }>;
 
 /** 权限点清单（由 PERM_DEFS 派生，勿手改）。 */

@@ -1,11 +1,12 @@
 // 服务反馈模块（批次 B · PRD §D）：满意度/意见提交，轻量无派单，后台统计归类。
-// 提交仅需登录（患者/用户），回复需 admin/operator。契约 snake_case 对齐 013 表（含 reply 列）。
+// 提交仅需登录（患者/用户），回复/导出需 feedback.manage（默认 admin/operator，租户可按角色授予）。
+// 契约 snake_case 对齐 013 表（含 reply 列）。
 // B1 统一事件总线：提交/回复 emit domain_event（过程挖掘统一数据源）。
 import { Router } from 'express';
 import { z } from 'zod';
 import { withTenantClient } from '../db/pool.js';
 import { AppError } from '../middleware/error.js';
-import { requireConfigRole } from '../middleware/role.js';
+import { requirePermission } from '../middleware/role.js';
 import { emitDomainEvent } from '../db/eventBus.js';
 import { csvEscape } from '../services/csvUtil.js';
 
@@ -80,10 +81,10 @@ router.post('/', async (req, res, next) => {
 
 router.post('/:id/reply', async (req, res, next) => {
   try {
-    requireConfigRole(req, res);
     const tenantId = res.locals.auth.tenantId;
-    const b = z.object({ reply: z.string().min(1) }).parse(req.body);
     const item = await withTenantClient(tenantId, async (client) => {
+      await requirePermission(res.locals.auth, client, 'feedback.manage');
+      const b = z.object({ reply: z.string().min(1) }).parse(req.body);
       const cur = await client.query(`SELECT * FROM feedback WHERE id = $1 AND tenant_id = $2`, [req.params.id, tenantId]);
       if (cur.rowCount === 0) throw new AppError('NOT_FOUND', 'feedback not found', 404);
       const r = await client.query(
@@ -127,13 +128,13 @@ router.get('/stats', async (req, res, next) => {
 const FEEDBACK_CSV_COLS = ['created_at', 'type', 'content', 'rating', 'status', 'channel', 'reply', 'replied_at'];
 router.get('/export', async (req, res, next) => {
   try {
-    requireConfigRole(req, res); // R9-F1：导出属管理面，仅 admin/operator
     const tenantId = res.locals.auth.tenantId;
-    const items = await withTenantClient(tenantId, (client) =>
-      client
+    const items = await withTenantClient(tenantId, async (client) => {
+      await requirePermission(res.locals.auth, client, 'feedback.manage'); // R9-F1：导出属管理面
+      return client
         .query(`SELECT * FROM feedback WHERE tenant_id=$1 ORDER BY created_at DESC`, [tenantId])
-        .then((r) => r.rows),
-    );
+        .then((r) => r.rows);
+    });
     const lines = [FEEDBACK_CSV_COLS.join(',')];
     for (const row of items) {
       lines.push(FEEDBACK_CSV_COLS.map((h) => csvEscape((row as any)[h])).join(','));
