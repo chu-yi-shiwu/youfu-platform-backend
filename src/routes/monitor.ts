@@ -1,12 +1,13 @@
 // 网管监控模块（批次 B · PRD §G）：设备状态 + 告警；告警可转标准工单（不混监控流程）。
-// 风格对齐；写操作 requireConfigRole；转单复用 services/linkedWorkOrder。
+// 风格对齐；转单复用 services/linkedWorkOrder。
+// 写操作 requirePermission：设备台账 → monitor.manage；告警处置 → monitor.handle（T8 第五批）。
 // B1 统一事件总线：设备新增/告警/解决/转工单 emit domain_event（过程挖掘统一数据源）。
 import { Router } from 'express';
 import { z } from 'zod';
 import { randomUUID } from 'crypto';
 import { withTenantClient } from '../db/pool.js';
 import { AppError } from '../middleware/error.js';
-import { requireConfigRole } from '../middleware/role.js';
+import { requirePermission } from '../middleware/role.js';
 import { createLinkedWorkOrder } from '../services/linkedWorkOrder.js';
 import { emitDomainEvent } from '../db/eventBus.js';
 
@@ -43,10 +44,11 @@ router.get('/devices', async (req, res, next) => {
 
 router.post('/devices', async (req, res, next) => {
   try {
-    requireConfigRole(req, res);
     const tenantId = res.locals.auth.tenantId;
     const b = deviceSchema.parse(req.body);
     const item = await withTenantClient(tenantId, async (client) => {
+      await requirePermission(res.locals.auth, client, 'monitor.manage');
+
       const r = await client.query(
         `INSERT INTO monitor_device (tenant_id, name, ip, category, status) VALUES ($1,$2,$3,$4,$5) RETURNING *`,
         [tenantId, b.name, b.ip ?? null, b.category ?? null, b.status],
@@ -63,7 +65,6 @@ router.post('/devices', async (req, res, next) => {
 
 router.put('/devices/:id', async (req, res, next) => {
   try {
-    requireConfigRole(req, res);
     const tenantId = res.locals.auth.tenantId;
     const b = z
       .object({
@@ -75,6 +76,7 @@ router.put('/devices/:id', async (req, res, next) => {
       })
       .parse(req.body);
     const item = await withTenantClient(tenantId, async (client) => {
+      await requirePermission(res.locals.auth, client, 'monitor.manage');
       const cur = await client.query(`SELECT * FROM monitor_device WHERE id = $1 AND tenant_id = $2`, [req.params.id, tenantId]);
       if (cur.rowCount === 0) throw new AppError('NOT_FOUND', 'device not found', 404);
       const r = await client.query(
@@ -102,10 +104,11 @@ router.put('/devices/:id', async (req, res, next) => {
 // ============ 告警 ============
 router.post('/devices/:id/alert', async (req, res, next) => {
   try {
-    requireConfigRole(req, res);
     const tenantId = res.locals.auth.tenantId;
     const b = z.object({ level: z.enum(['info', 'warning', 'critical']).default('warning'), message: z.string().min(1) }).parse(req.body);
     const item = await withTenantClient(tenantId, async (client) => {
+      await requirePermission(res.locals.auth, client, 'monitor.handle');
+
       const dev = await client.query(`SELECT id FROM monitor_device WHERE id = $1 AND tenant_id = $2`, [req.params.id, tenantId]);
       if (dev.rowCount === 0) throw new AppError('NOT_FOUND', 'device not found', 404);
       const r = await client.query(
@@ -147,9 +150,9 @@ router.get('/alerts', async (req, res, next) => {
 
 router.post('/alerts/:id/resolve', async (req, res, next) => {
   try {
-    requireConfigRole(req, res);
     const tenantId = res.locals.auth.tenantId;
     const item = await withTenantClient(tenantId, async (client) => {
+      await requirePermission(res.locals.auth, client, 'monitor.handle');
       const cur = await client.query(`SELECT * FROM monitor_alert WHERE id = $1 AND tenant_id = $2`, [req.params.id, tenantId]);
       if (cur.rowCount === 0) throw new AppError('NOT_FOUND', 'alert not found', 404);
       const r = await client.query(
@@ -169,9 +172,10 @@ router.post('/alerts/:id/resolve', async (req, res, next) => {
 // 告警转工单：复用共享服务（告警 → 标准工单，进入派单流；critical 提级 urgent）
 router.post('/alerts/:id/convert', async (req, res, next) => {
   try {
-    requireConfigRole(req, res);
     const tenantId = res.locals.auth.tenantId;
     const result = await withTenantClient(tenantId, async (client) => {
+      await requirePermission(res.locals.auth, client, 'monitor.handle');
+
       const cur = await client.query(
         `SELECT a.*, d.name AS device_name FROM monitor_alert a JOIN monitor_device d ON d.id = a.device_id
          WHERE a.id = $1 AND a.tenant_id = $2`,
