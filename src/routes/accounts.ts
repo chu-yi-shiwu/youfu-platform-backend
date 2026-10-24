@@ -89,6 +89,7 @@ const PERM_LABELS: Record<Perm, string> = {
   'basicdata.edit': '基础数据',
   'dispatch.override': '派单覆盖',
   'role.manage': '账号权限',
+  'inspect.manage': '巡检配置',
   'inspect.execute': '巡检执行',
   'asset.scan': '资产扫码',
   'optimize.tune': '优化调参',

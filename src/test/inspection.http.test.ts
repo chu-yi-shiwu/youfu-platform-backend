@@ -152,11 +152,15 @@ describe('inspection.ts · 点位与检查项', () => {
     let r = await req('GET', '/api/v1/inspection/points');
     expect(r.status).toBe(200);
     expect(callParams(0)[0]).toBe(TENANT);
-    authRole = 'worker';
+    // T8（2026-10-25）：配置面守卫由 requireConfigRole（角色白名单）收敛为
+    // requirePermission('inspect.manage')。requirePermission 在 dev 模式恒放行（role.ts:396），
+    // 继续用 dev 跑这条等于恒绿 ⇒ 切 prod 走真实权限点路径，护栏比改前更强。
+    authRole = 'worker'; authMode = 'prod';
     expect((await req('POST', '/api/v1/inspection/points', { name: '锅炉房' })).status).toBe(403);
     authRole = 'operator';
     r = await req('POST', '/api/v1/inspection/points', { name: '锅炉房', lng: 110.1, lat: 30.1 });
-    expect(r.status).toBe(201);
+    expect(r.status).toBe(201); // operator 默认矩阵含 inspect.manage
+    authMode = 'dev';
     const ev = evArg();
     expect(ev.entityType).toBe('inspection_point');
     expect(ev.type).toBe('create');
@@ -227,9 +231,10 @@ describe('inspection.ts · 巡检单 CRUD 与列表', () => {
     expect(String(JSON.parse(String(callParams(insIdx)[6]))[0].name)).toBe('温度');
   });
 
-  it('⑩POST /tasks（worker）→ 403（requireConfigRole 真 403）', async () => {
-    authRole = 'worker';
+  it('⑩POST /tasks（worker）→ 403（inspect.manage 真 403）', async () => {
+    authRole = 'worker'; authMode = 'prod'; // 同①：dev 恒放行，切 prod 才走真实权限点路径
     expect((await req('POST', '/api/v1/inspection/tasks', { title: 'x' })).status).toBe(403);
+    authMode = 'dev';
   });
 });
 
@@ -382,8 +387,11 @@ describe('inspection.ts · 统计与导出', () => {
   });
 
   it('㉔GET /export：worker → 403；CSV 带 BOM（EF BB BF）；Content-Disposition month 白名单（CRLF 注入回落 all）；R5-001 公式注入前置引号', async () => {
-    authRole = 'worker';
+    authRole = 'worker'; authMode = 'prod'; // 同①：dev 恒放行，切 prod 才走真实权限点路径
     expect((await req('GET', '/api/v1/inspection/export?month=2026-08')).status).toBe(403);
+    // 复位 dev：下面的 mockImplementationOnce 夹具是按「CSV 查询」注入的，守卫移到事务首行后
+    // 会抢先消费掉它 ⇒ operator 段留在 dev，不改夹具语义（operator 放行已由①的 prod 断言覆盖）。
+    authMode = 'dev';
     authRole = 'operator';
     taskRow.items_json = [{ item_id: 'u1', passed: true }, { item_id: 'u2', passed: false }];
     taskRow.title = '=cmd|\' /c calc!';

@@ -1,5 +1,9 @@
 // 巡检模块（批次 B · PRD §6.1）：点位 + 巡检单 + 定位签到 + 异常转工单。
-// 风格对齐 config.ts：withTenantClient 注入租户/RLS；写操作 requireConfigRole；占位符防注入。
+// 风格对齐 config.ts：withTenantClient 注入租户/RLS；占位符防注入。
+// T8（2026-10-25）：配置面守卫已由 requireConfigRole（admin/operator 角色白名单）收敛为
+//   requirePermission('inspect.manage')，且必须在 withTenantClient 内调用（要查 role_permission）。
+//   ⇒ 本文件不再有 requireConfigRole 调用点；执行面（checkin/records/complete/exception/
+//     transition）仍是 requirePermission('inspect.execute') + requireAssigneeOrConfig 归属守卫。
 // 转单复用 services/linkedWorkOrder（巡检异常 → 标准维修工单，进入既有派单流）。
 // B1 统一事件总线：关键业务动作 emit domain_event（过程挖掘统一数据源）。
 import { Router } from 'express';
@@ -7,7 +11,7 @@ import { z } from 'zod';
 import { randomUUID } from 'crypto';
 import { withTenantClient } from '../db/pool.js';
 import { AppError } from '../middleware/error.js';
-import { requireConfigRole, requireAssigneeOrConfig, requirePermission } from '../middleware/role.js';
+import { requireAssigneeOrConfig, requirePermission } from '../middleware/role.js';
 import { createLinkedWorkOrder } from '../services/linkedWorkOrder.js';
 import { emitDomainEvent } from '../db/eventBus.js';
 import { getWorkflowDefOrDefault } from '../engine/workflowDef.js';
@@ -97,10 +101,10 @@ router.get('/points', async (req, res, next) => {
 
 router.post('/points', async (req, res, next) => {
   try {
-    requireConfigRole(req, res);
     const tenantId = res.locals.auth.tenantId;
     const b = pointSchema.parse(req.body);
     const item = await withTenantClient(tenantId, async (client) => {
+      await requirePermission(res.locals.auth, client, 'inspect.manage');
       const r = await client.query(
         `INSERT INTO inspection_point (tenant_id, name, code, lng, lat, asset_id) VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`,
         [tenantId, b.name, b.code ?? null, b.lng ?? null, b.lat ?? null, b.asset_id ?? null],
@@ -117,10 +121,10 @@ router.post('/points', async (req, res, next) => {
 
 router.put('/points/:id', async (req, res, next) => {
   try {
-    requireConfigRole(req, res);
     const tenantId = res.locals.auth.tenantId;
     const b = pointSchema.partial().parse(req.body);
     const item = await withTenantClient(tenantId, async (client) => {
+      await requirePermission(res.locals.auth, client, 'inspect.manage');
       const cur = await client.query(`SELECT * FROM inspection_point WHERE id = $1 AND tenant_id = $2`, [
         req.params.id,
         tenantId,
@@ -141,13 +145,13 @@ router.put('/points/:id', async (req, res, next) => {
 
 router.delete('/points/:id', async (req, res, next) => {
   try {
-    requireConfigRole(req, res);
     const tenantId = res.locals.auth.tenantId;
-    const n = await withTenantClient(tenantId, (client) =>
-      client
+    const n = await withTenantClient(tenantId, async (client) => {
+      await requirePermission(res.locals.auth, client, 'inspect.manage');
+      return client
         .query(`DELETE FROM inspection_point WHERE id = $1 AND tenant_id = $2`, [req.params.id, tenantId])
-        .then((r) => r.rowCount ?? 0),
-    );
+        .then((r) => r.rowCount ?? 0);
+    });
     if (n === 0) throw new AppError('NOT_FOUND', 'point not found', 404);
     return res.json({ ok: true, code: 0 });
   } catch (e) {
@@ -212,10 +216,10 @@ router.get('/items', async (req, res, next) => {
 
 router.post('/items', async (req, res, next) => {
   try {
-    requireConfigRole(req, res);
     const tenantId = res.locals.auth.tenantId;
     const b = itemTemplateSchema.parse(req.body);
     const item = await withTenantClient(tenantId, async (client) => {
+      await requirePermission(res.locals.auth, client, 'inspect.manage');
       const r = await client.query(
         `INSERT INTO inspection_item (tenant_id, name, type, standard_value, unit, category, device_type, device_tag, trigger_mode)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`,
@@ -233,10 +237,10 @@ router.post('/items', async (req, res, next) => {
 
 router.put('/items/:id', async (req, res, next) => {
   try {
-    requireConfigRole(req, res);
     const tenantId = res.locals.auth.tenantId;
     const b = itemTemplateSchema.partial().parse(req.body);
     const item = await withTenantClient(tenantId, async (client) => {
+      await requirePermission(res.locals.auth, client, 'inspect.manage');
       const cur = await client.query(`SELECT * FROM inspection_item WHERE id = $1 AND tenant_id = $2`, [req.params.id, tenantId]);
       if (cur.rowCount === 0) throw new AppError('NOT_FOUND', 'item not found', 404);
       const c = cur.rows[0];
@@ -254,13 +258,13 @@ router.put('/items/:id', async (req, res, next) => {
 
 router.delete('/items/:id', async (req, res, next) => {
   try {
-    requireConfigRole(req, res);
     const tenantId = res.locals.auth.tenantId;
-    const n = await withTenantClient(tenantId, (client) =>
-      client
+    const n = await withTenantClient(tenantId, async (client) => {
+      await requirePermission(res.locals.auth, client, 'inspect.manage');
+      return client
         .query(`DELETE FROM inspection_item WHERE id = $1 AND tenant_id = $2`, [req.params.id, tenantId])
-        .then((r: any) => r.rowCount ?? 0),
-    );
+        .then((r: any) => r.rowCount ?? 0);
+    });
     if (n === 0) throw new AppError('NOT_FOUND', 'item not found', 404);
     return res.json({ ok: true, code: 0 });
   } catch (e) {
@@ -346,10 +350,10 @@ router.get('/tasks/:id', async (req, res, next) => {
 
 router.post('/tasks', async (req, res, next) => {
   try {
-    requireConfigRole(req, res);
     const tenantId = res.locals.auth.tenantId;
     const b = taskSchema.parse(req.body);
     const item = await withTenantClient(tenantId, async (client) => {
+      await requirePermission(res.locals.auth, client, 'inspect.manage');
       const snapshot = await seedItemsSnapshot(client, tenantId, b.item_ids ?? []);
       const r = await client.query(
         `INSERT INTO inspection_task (tenant_id, plan_id, point_id, type, title, assignee, scheduled_at, status, items_json)
@@ -685,10 +689,10 @@ export function generatePlanTasks(
 
 router.post('/generate', async (req, res, next) => {
   try {
-    requireConfigRole(req, res);
     const tenantId = res.locals.auth.tenantId;
     const b = z.object({ point_ids: z.array(z.string().uuid()), scheduled_at: z.string().optional(), item_ids: z.array(z.string().uuid()).optional() }).parse(req.body);
     const created = await withTenantClient(tenantId, async (client) => {
+      await requirePermission(res.locals.auth, client, 'inspect.manage');
       const snapshot = await seedItemsSnapshot(client, tenantId, b.item_ids ?? []);
       const rows = generatePlanTasks(
         b.point_ids.map((id) => ({ id })),
@@ -716,9 +720,9 @@ router.post('/generate', async (req, res, next) => {
 // 异常转工单：复用共享服务（巡检异常 → 标准维修工单，进入派单流）
 router.post('/tasks/:id/convert', async (req, res, next) => {
   try {
-    requireConfigRole(req, res);
     const tenantId = res.locals.auth.tenantId;
     const result = await withTenantClient(tenantId, async (client) => {
+      await requirePermission(res.locals.auth, client, 'inspect.manage');
       const cur = await client.query(`SELECT * FROM inspection_task WHERE id = $1 AND tenant_id = $2`, [
         req.params.id,
         tenantId,
@@ -765,7 +769,6 @@ router.get('/plans', async (req, res, next) => {
 
 router.post('/plans', async (req, res, next) => {
   try {
-    requireConfigRole(req, res);
     const tenantId = res.locals.auth.tenantId;
     const b = planSchema.parse(req.body);
     const interval_n = b.interval_n ?? 1;
@@ -773,6 +776,7 @@ router.post('/plans', async (req, res, next) => {
     const startFrom = b.start_from ? new Date(b.start_from) : new Date();
     const id = randomUUID();
     const created = await withTenantClient(tenantId, async (client) => {
+      await requirePermission(res.locals.auth, client, 'inspect.manage');
       await client.query(
         `INSERT INTO inspection_plan (id, tenant_id, name, point_ids, frequency, interval_n, paused, next_run_at, item_ids)
          VALUES ($1,$2,$3,$4,$5,$6,false,$7,$8) RETURNING *`,
@@ -796,10 +800,10 @@ router.post('/plans', async (req, res, next) => {
 
 router.put('/plans/:id', async (req, res, next) => {
   try {
-    requireConfigRole(req, res);
     const tenantId = res.locals.auth.tenantId;
     const b = planUpdateSchema.parse(req.body);
     const item = await withTenantClient(tenantId, async (client) => {
+      await requirePermission(res.locals.auth, client, 'inspect.manage');
       const cur = await client.query(`SELECT * FROM inspection_plan WHERE id=$1 AND tenant_id=$2`, [req.params.id, tenantId]);
       if (cur.rowCount === 0) throw new AppError('NOT_FOUND', 'plan not found', 404);
       const sets: string[] = [];
@@ -832,9 +836,9 @@ router.put('/plans/:id', async (req, res, next) => {
 // 手动生成下一期（暂停则拒绝）；生成后推进 next_run_at。
 router.post('/plans/:id/generate', async (req, res, next) => {
   try {
-    requireConfigRole(req, res);
     const tenantId = res.locals.auth.tenantId;
     const created = await withTenantClient(tenantId, async (client) => {
+      await requirePermission(res.locals.auth, client, 'inspect.manage');
       const cur = await client.query(`SELECT * FROM inspection_plan WHERE id=$1 AND tenant_id=$2`, [req.params.id, tenantId]);
       if (cur.rowCount === 0) throw new AppError('NOT_FOUND', 'plan not found', 404);
       const plan = cur.rows[0];
@@ -924,11 +928,11 @@ router.get('/stats', async (req, res, next) => {
 // 巡检月报 CSV 导出（含点位名、完成时间）。text/csv + BOM，前端直接下载。
 router.get('/export', async (req, res, next) => {
   try {
-    requireConfigRole(req, res); // R9-F1：导出属管理面，仅 admin/operator
     const tenantId = res.locals.auth.tenantId;
     const { month } = req.query as Record<string, string>;
-    const rows = await withTenantClient(tenantId, (client) =>
-      client
+    const rows = await withTenantClient(tenantId, async (client) => {
+      await requirePermission(res.locals.auth, client, 'inspect.manage'); // R9-F1：导出属管理面，仅 admin/operator
+      return client
         .query(
           `SELECT t.id, t.title, t.type, t.status, t.assignee, p.name AS point_name,
                   t.scheduled_at, t.done_at, t.created_at, t.items_json
@@ -937,8 +941,8 @@ router.get('/export', async (req, res, next) => {
            ORDER BY t.scheduled_at ASC NULLS LAST, t.created_at DESC`,
           month ? [tenantId, month] : [tenantId],
         )
-        .then((r) => r.rows),
-    );
+        .then((r) => r.rows);
+    });
     // R30-F7：删除本地 esc（缺 R5-001 公式注入防护），统一走 csvUtil.csvEscape；
     // Date 列由 GMT 字符串变为 ISO 格式（csvEscape 对对象 JSON.stringify），机器可读性更好。
     const header = ['工单ID', '标题', '类型', '状态', '负责人', '点位', '计划时间', '完成时间', '创建时间', '检查项数量', '合格项数', '不合格项数'];

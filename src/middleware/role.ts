@@ -60,6 +60,13 @@ export const PERMS = [
   'basicdata.edit',
   'dispatch.override',
   'role.manage',
+  // T8（2026-10-25）：巡检**配置面**独立权限点。此前 13 处巡检配置端点走 requireConfigRole
+  // （同步、只读 res.locals.auth.role 的 admin/operator 白名单，**不查权限表** ⇒ 租户无法配置）。
+  //   命名沿用既有 xxx.manage 模式（material.manage / asset.manage / volunteer.manage），
+  //   与执行面 `inspect.execute` 分开：能巡检 ≠ 能改巡检计划。
+  //   🔴 为什么不复用 `basicdata.edit`：role.ts:69 的注释已明确「志愿者模块独立权限点
+  //     （此前蹭 basicdata.edit）」—— 蹭 basicdata.edit 是被淘汰的旧做法，不走回头路。
+  'inspect.manage',
   'inspect.execute',
   'asset.scan',
   'optimize.tune',
@@ -179,7 +186,13 @@ export const DEFAULT_PERM_MATRIX: Record<Role, readonly Perm[]> = {
   // E-8（BUG-009）：移除 settlement.read（结算可见性收口 admin；operator 受理台日常不依赖结算页）。
   // E-9（20260914）：operator 加 consumable.consume（与 worker 同为执行侧动作）；material.manage /
   //   asset.manage 不加（管理动作收口 admin，operator 走覆盖表授权）。
-  operator: ['dashboard.view', 'intake.create', 'ticket.manage', 'basicdata.edit', 'dispatch.override', 'inspect.execute', 'asset.scan', 'volunteer.view', 'volunteer.manage', 'volunteer.audit', 'consumable.consume'],
+  // T8（2026-10-25）：operator 加 `inspect.manage` —— **这是为了等价，不是策略选择**。
+  //   原 requireConfigRole 的白名单就是 admin+operator ⇒ 不给 operator 就会从放行变 403（行为变更）。
+  //   🔴 注意与 `material.manage` / `asset.manage` 的策略**不一致**：那两个收口 admin
+  //     （见上方 E-9 注释「管理动作收口 admin，operator 走覆盖表授权」）。
+  //     ⇒ **巡检配置要不要也收紧到 admin，是独立的产品决策**，已登记为待做项。
+  //     本批只做「换实现」，不夹带策略变更（E6 一次只改一个变量）。
+  operator: ['dashboard.view', 'intake.create', 'ticket.manage', 'basicdata.edit', 'dispatch.override', 'inspect.manage', 'inspect.execute', 'asset.scan', 'volunteer.view', 'volunteer.manage', 'volunteer.audit', 'consumable.consume'],
   dispatcher: ['dashboard.view', 'ticket.manage', 'dispatch.override', 'inspect.execute', 'asset.scan'],
   // worker + intake.create（#942 R15）：陪检登记（#6）等登录态录入复用建单引擎，
   // 入口在工人工作台对全员可见——录入（intake.create）≠ 管理（ticket.manage），
