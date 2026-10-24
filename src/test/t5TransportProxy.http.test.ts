@@ -239,6 +239,49 @@ describe('T5/S6b 写入落点 + 事件口径', () => {
     ).toBe(0);
   });
 
+  it('🔴 D2：emergency_plan 收口 —— GET/POST /flow/emergency_plan 返回 410 Gone 并指路', async () => {
+    // 🔴 为什么是 410 不是代理、也不是加列：`034_emergency_transport.sql:7-21` 建的
+    //    emergency_plan 表**没有 status 列**（只有 enabled 布尔），而 EMERGENCY_DEF 是
+    //    6 态状态机 ⇒ 代理**无落点**；且应急预案本质是知识库目录，不是带状态的业务流。
+    //    🔴 **明确否决"加 status 列"**：那是生产库 DDL，与"不动存量"冲突。
+    const g = makeClient();
+    h.client = g.client;
+    const appG = await listen(appWith(businessFlowRouter, '/flow'));
+    // ⚠️ 别把局部变量命名成 `get` / `post`：本文件顶部有同名 helper（TDZ 会让它们互相遮蔽）
+    const got = await fetch(`${appG.url}/flow/emergency_plan`);
+    const getBody: any = await got.json().catch(() => ({}));
+    appG.server.close();
+
+    expect(got.status, 'GET /flow/emergency_plan 必须 410 Gone（不再是 200 空列表）').toBe(410);
+    expect(String(getBody.code ?? ''), '错误码要能一眼看出是"这个入口没了"').toBe('GONE');
+    expect(
+      JSON.stringify(getBody),
+      '响应体必须指路到 /emergency/plans —— 只给 410 不给去处，调用方无从改起',
+    ).toMatch(/\/emergency\/plans/);
+
+    const p = makeClient();
+    h.client = p.client;
+    const appP = await listen(appWith(businessFlowRouter, '/flow'));
+    const created = await post(`${appP.url}/flow/emergency_plan`, { title: '火灾应急预案' });
+    appP.server.close();
+
+    expect(created.status).toBe(410);
+    expect(
+      countSql(p.calls, 'INSERT INTO business_flow_tasks'),
+      '收口实体不许再建行（410 必须拦在写库之前，不能"报了错也照样写进去"）',
+    ).toBe(0);
+  });
+
+  it('🔴 D2：/flow/emergency_plan/:id/transition 同样 410（收口要收干净，不留半个入口）', async () => {
+    const t = makeClient();
+    h.client = t.client;
+    const app = await listen(appWith(businessFlowRouter, '/flow'));
+    const res = await post(`${app.url}/flow/emergency_plan/ep-1/transition`, { event: 'activate' });
+    app.server.close();
+    expect(res.status).toBe(410);
+    expect(countSql(t.calls, 'UPDATE business_flow_tasks')).toBe(0);
+  });
+
   it('对照（现状实拍·绿）：原生运送路由照旧写 transport_order', async () => {
     const native = makeClient();
     h.client = native.client;
