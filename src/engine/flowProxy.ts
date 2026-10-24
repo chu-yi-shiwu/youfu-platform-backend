@@ -101,6 +101,7 @@ import type { AuthLocals } from '../middleware/auth.js';
 // ⚠️ 通用通道的必填字段校验**不在本文件**，见 `engine/flowRequiredFields.ts` 文件头：
 //   本文件（S5 起）要按值引入 adapter，若校验也放这儿，adapter 就得反向按值 import 本文件
 //   ⇒ 运行时循环依赖 ⇒ 生产启动阶段 ReferenceError（已实测）。别把它搬回来。
+import { transportAdapter } from '../routes/flowAdapters/transportAdapter.js';
 
 /** 代理层与路由之间传递的行对象（原生表行 + adapter 补的 `available` 等派生字段）。 */
 export type FlowRow = Record<string, unknown>;
@@ -190,7 +191,9 @@ export interface FlowAdapter {
  *   从这里删掉这一行 ⇒ `/flow` 立即回到 `business_flow_tasks`（无数据迁移，秒级）。
  *   🔴 回退前先读文件头的「回退（E1）」段：要先落代理窗口内新建行的 id 清单。
  */
-export const FLOW_PROXY: Record<string, FlowAdapter> = {};
+export const FLOW_PROXY: Record<string, FlowAdapter> = {
+  transport_task: transportAdapter,
+};
 
 /**
  * 查表：该实体是否被代理。

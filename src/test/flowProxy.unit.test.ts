@@ -40,9 +40,16 @@ afterEach(() => {
   for (const k of Object.keys(FLOW_PROXY)) delete FLOW_PROXY[k];
 });
 
-describe('T5/S1 proxyFor —— registry 空 ⇒ 恒未代理', () => {
-  it('transport_task 未代理（★S1 验收项：切换点尚未拨动）', () => {
-    expect(proxyFor('transport_task')).toBeUndefined();
+describe('T5/S1 proxyFor —— 查表语义（registry 状态随 S5 变化）', () => {
+  // 🔴 这条断言在 S1 时是 `toBeUndefined()`（切换点尚未拨动）。S5 把 transport_task
+  //    写进 registry 后，它**必须跟着改成"已登记"**——这是断言随**目标状态**演进，
+  //    不是为了让红变绿而放宽：S5 的目的就是拨动这个切换点，钉住"未拨动"才是过时断言。
+  //    「S1 时 registry 为空」那一份证据已留在 S1 的 commit message 与 S2 的前后对照里。
+  it('transport_task 已登记（★S5 切换点已拨动★）', () => {
+    const a = proxyFor('transport_task');
+    expect(a, 'transport_task 必须在 registry 里（S5 已切换）').toBeDefined();
+    expect(a?.entityType).toBe('transport_task');
+    expect(a?.nativeEntityType).toBe('transport_order');
   });
 
   it('其它业务实体同样未代理（默认路径 = business_flow_tasks）', () => {
