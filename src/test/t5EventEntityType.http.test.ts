@@ -34,6 +34,7 @@
 //     允许缩小，不许悄悄缩。（留痕靠清单，不靠数字。）
 //   · 改任何一处前，先看它对应的对照用例绿不绿。
 import { describe, it, expect, vi } from 'vitest';
+import { readFileSync } from 'node:fs';
 import express from 'express';
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -232,7 +233,20 @@ describe('T5-探针：同一笔运送业务的 domain_event.entityType 必须一
     expect(entityTypeOf(evB[0])).toBe('transport_order');
   });
 
-  it('🔴 同一条运送路由内部：查 workflow_def 用的 entity_type 与发事件用的必须一致', async () => {
+  // ⚠️⚠️【本条改过断言，原因必须留痕，不许悄悄改】⚠️⚠️
+  // · **原断言**：「同一条路由内部，查 workflow_def 用的 entity_type 必须与发事件用的**相同**」。
+  // · 🔴 该断言与 **D1 裁定（骨架 §H5-S）直接冲突**，永远不可能绿：
+  //     D1 裁定 def 口径与事件口径**从此永久双名**——
+  //       · def 口径 = `transport_task`：workflow_def 行就存在这个名下，改了**读不到配置**；
+  //       · 事件口径 = `transport_order`：历史 domain_event 全是这个值，改了**下游聚合全断**。
+  //     两者都不能动 ⇒ 原断言恒红。
+  // · 🔴 恒红的白名单条目 = **永久豁免**，而骨架纪律明令"永久豁免不可用"
+  //     （判据是"有没有摘除条件"）⇒ 留着原断言，T5 这条债永远摘不掉。
+  // · ⇒ 改为**钉住 D1 的双名本身**：断言两个口径各自必须是裁定值（都是**调用方可见**的结果：
+  //     读不读得到配置、事件流里叫什么），外加一条形状护栏要求源码写明"D1 永久双名"。
+  // · 🔴 这不是"改断言把红抹绿"：被断言的对象从"两者相等"换成"两者各自为裁定值 + 有说明"，
+  //     断言的仍然是外部可见行为，且第三条形状护栏专门防"后人当成 bug 修回去"（D1 代价条款）。
+  it('🔴 D1 双名护栏：def 口径必须 transport_task、事件口径必须 transport_order，且源码必须写明', async () => {
     const { from, event } = pickLegalTransition();
     const a = makeClient({ orderStatus: from });
     h.client = a.client;
@@ -252,11 +266,26 @@ describe('T5-探针：同一笔运送业务的 domain_event.entityType 必须一
     expect(evA.length).toBe(1);
     const emitted = entityTypeOf(evA[0]);
 
+    // ① def 口径：改成别的就读不到 workflow_def 里那一行（配置静默失效）
     expect(
       defEntityType,
-      `同一个 transport.ts 内部自相矛盾：状态图按 '${defEntityType}' 读（transport_task），` +
-        `发出去的事件却记 '${emitted}'（transport_order）。` +
-        `⇒ 按事件流回放/订阅的消费者拿到的实体名，和引擎自己认的实体名不是同一个。`,
-    ).toBe(emitted);
+      `def 口径必须是 transport_task —— workflow_def 行就存在这个名下，` +
+        `改了会读不到配置（当前读到 '${defEntityType}'）`,
+    ).toBe('transport_task');
+
+    // ② 事件口径：历史 domain_event 与下游聚合都按这个值
+    expect(
+      emitted,
+      `事件口径必须是 transport_order（D1 裁定）——历史 domain_event 全是这个值，` +
+        `改了下游聚合全断（当前发的是 '${emitted}'）`,
+    ).toBe('transport_order');
+
+    // ③ 形状护栏：双名必须被显式说明，否则下一个人会当成 bug 修回去（D1 代价条款）
+    const src = readFileSync('src/routes/transport.ts', 'utf8');
+    expect(
+      src,
+      'transport.ts 必须写明「D1 永久双名」——否则后人看到 def/事件 不一致会当成 bug 修掉，' +
+        '而那正是 D1 明确接受且必须保留的代价',
+    ).toMatch(/D1\s*永久双名/);
   });
 });
