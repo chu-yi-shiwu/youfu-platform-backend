@@ -1,5 +1,14 @@
 import { describe, it, expect, vi } from 'vitest';
-import { canAssignRole, ROLE_RANK, hasPermDefault, requireAnyPermission } from '../middleware/role.js';
+import {
+  canAssignRole,
+  ROLE_RANK,
+  hasPermDefault,
+  requireAnyPermission,
+  hasPerm,
+  requirePermission,
+  permBase,
+  assertEntityTypeScope,
+} from '../middleware/role.js';
 
 describe('role: 层级定义', () => {
   it('ROLE_RANK 严格递增 worker<dispatcher<operator<admin', () => {
@@ -101,5 +110,73 @@ describe('role: 建单权限（#942 R15 陪检登记 403 修复）', () => {
     const client = { query: vi.fn(async () => ({ rows: [{ perm: 'intake.create' }], rowCount: 1 })) } as any;
     const auth = { authMode: 'prod', role: 'worker', tenantId: 't-demo' } as any;
     await expect(requireAnyPermission(auth, client, ['intake.create', 'ticket.manage'])).resolves.toBeUndefined();
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// T3 实例级权限（2026-10-24）：`perm@entityType` 只对指定单据类型生效。
+// 验收重心是 **向后兼容**（存量只授全局的租户行为必须不变）与 **无权限放大**
+//（只授实例级的人，在别的单据类型 / 无单据上下文时必须被拦）。
+// ─────────────────────────────────────────────────────────────────────────────
+describe('role/T3: permBase 与 entityType 白名单', () => {
+  it('permBase：无 @ 原样返回；有 @ 去掉后缀', () => {
+    expect(permBase('ticket.manage')).toBe('ticket.manage');
+    expect(permBase('ticket.manage@transport_task')).toBe('ticket.manage');
+  });
+
+  it('assertEntityTypeScope：形状非法（大写/中文/空）⇒ 400，不静默放行', () => {
+    expect(() => assertEntityTypeScope('Transport_Task')).toThrow(/invalid entity_type/);
+    expect(() => assertEntityTypeScope('随便写')).toThrow(/invalid entity_type/);
+    expect(() => assertEntityTypeScope('')).toThrow(/invalid entity_type/);
+  });
+
+  it('assertEntityTypeScope：形状合法但不在 known 清单 ⇒ 400（防"写错但合法"的垃圾进库）', () => {
+    expect(() => assertEntityTypeScope('transport_tesk', ['transport_task'])).toThrow(/unknown entity_type/);
+  });
+
+  it('assertEntityTypeScope：形状合法且在 known 清单 ⇒ 放行', () => {
+    expect(() => assertEntityTypeScope('transport_task', ['transport_task'])).not.toThrow();
+    // 不传 known 时只校形状（调用方拿不到库连接时的降级口径）
+    expect(() => assertEntityTypeScope('transport_task')).not.toThrow();
+  });
+});
+
+describe('role/T3: hasPerm 实例级作用域判定', () => {
+  const mkClient = (perms: string[]) =>
+    ({ query: vi.fn(async () => ({ rows: perms.map((perm) => ({ perm })), rowCount: perms.length })) }) as any;
+  const mkAuth = () => ({ authMode: 'prod', role: 'operator', tenantId: 't-demo' } as any);
+
+  it('只授实例级 ⇒ 匹配的单据放行', async () => {
+    await expect(hasPerm(mkAuth(), mkClient(['workflow.approve@transport_task']), 'workflow.approve', 'transport_task')).resolves.toBe(true);
+  });
+
+  it('只授实例级 ⇒ 别的单据被拦（无权限放大，这是本特性的全部意义）', async () => {
+    await expect(hasPerm(mkAuth(), mkClient(['workflow.approve@transport_task']), 'workflow.approve', 'inspection_task')).resolves.toBe(false);
+  });
+
+  it('只授实例级 ⇒ 无单据上下文时也被拦（列表等全局端点不放行）', async () => {
+    await expect(hasPerm(mkAuth(), mkClient(['workflow.approve@transport_task']), 'workflow.approve')).resolves.toBe(false);
+  });
+
+  it('🟢 向后兼容①：存量只授全局 ⇒ 传不传 entityType 都放行（行为不变）', async () => {
+    await expect(hasPerm(mkAuth(), mkClient(['workflow.approve']), 'workflow.approve', 'transport_task')).resolves.toBe(true);
+    await expect(hasPerm(mkAuth(), mkClient(['workflow.approve']), 'workflow.approve')).resolves.toBe(true);
+  });
+
+  it('🟢 向后兼容②：全局与实例级同时存在 ⇒ 全局优先，任何单据都放行', async () => {
+    await expect(hasPerm(mkAuth(), mkClient(['workflow.approve', 'workflow.approve@transport_task']), 'workflow.approve', 'inspection_task')).resolves.toBe(true);
+  });
+
+  it('admin / dev 恒放行（不被实例级配置削弱）', async () => {
+    const admin = { authMode: 'prod', role: 'admin', tenantId: 't-demo' } as any;
+    const dev = { authMode: 'dev', role: 'operator', tenantId: 't-demo' } as any;
+    await expect(hasPerm(admin, mkClient(['workflow.approve@transport_task']), 'workflow.approve', 'inspection_task')).resolves.toBe(true);
+    await expect(hasPerm(dev, mkClient(['workflow.approve@transport_task']), 'workflow.approve', 'inspection_task')).resolves.toBe(true);
+  });
+
+  it('requirePermission 被拦时 403 消息带作用域（否则日志查不出"为什么批不了")', async () => {
+    await expect(
+      requirePermission(mkAuth(), mkClient(['workflow.approve@transport_task']), 'workflow.approve', 'inspection_task'),
+    ).rejects.toThrow(/permission denied: workflow\.approve@inspection_task/);
   });
 });

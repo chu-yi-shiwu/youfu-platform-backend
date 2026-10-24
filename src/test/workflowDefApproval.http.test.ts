@@ -553,3 +553,52 @@ describe('X-13：rollback 404 文案区分（两例锚定）', () => {
     expect(String(r.json.message)).toContain('不存在');
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// T3/S7 样板接入的**行为级**验收（roleCap.test.ts 只验了 hasPerm 函数，没验端点真接上了）。
+// 场景：租户把 `workflow.approve@transport_task` 只授给某人 ⇒ 他批得了运送流程、批不了巡检。
+// 这两条是 T3 的全部业务价值，必须走真 HTTP、真 403，不能停留在单测层面。
+// ─────────────────────────────────────────────────────────────────────────────
+describe('T3/S7：实例级审批权限（workflow.approve@<entityType>）端到端', () => {
+  it('只授 workflow.approve@transport_task ⇒ 运送流程批得过（200），巡检流程批不过（403）', async () => {
+    // 第一步：用有 workflow.edit 的账号把两个流程都提交到 submitted
+    // （approve 需要对得上 live def 的 base_version，故先 seedLive，与用例③同准备手法）
+    db.permRows = [{ perm: 'workflow.edit' }];
+    const editor = makeToken('operator', 'op-editor');
+    for (const entity of ['transport_task', 'inspection_task']) {
+      seedLive(entity, { initial: 'draft', states: ['draft'], transitions: [], config: { name: `旧${entity}` } });
+      const put = await api('PUT', `/${entity}/draft`, editor, draftBody(`${entity} 流程`));
+      expect(put.status, `PUT /${entity}/draft`).toBe(200);
+      const submit = await api('POST', `/${entity}/submit`, editor);
+      expect(submit.status, `POST /${entity}/submit`).toBe(200);
+    }
+
+    // 第二步：换成只授实例级 approve 的账号（换人 ⇒ 不触发自审自批）
+    db.permRows = [{ perm: 'workflow.approve@transport_task' }];
+    const scoped = makeToken('operator', 'op-scoped');
+
+    const ok = await api('POST', '/transport_task/approve', scoped);
+    expect(ok.status, `期望 200，实际 ${ok.status} / ${JSON.stringify(ok.json)}`).toBe(200);
+
+    const denied = await api('POST', '/inspection_task/approve', scoped);
+    expect(denied.status, `期望 403，实际 ${denied.status}`).toBe(403);
+    expect(denied.json.code).toBe('FORBIDDEN');
+    // 403 消息必须带作用域，否则运维查不出"到底哪个流程批不了"
+    expect(String(denied.json.message)).toContain('workflow.approve@inspection_task');
+  });
+
+  it('🟢 向后兼容：存量大租户只授全局 workflow.approve ⇒ 任意流程都批得过（行为不变）', async () => {
+    // seedLive 必须在 submit 之前：submit 会把当时的 live version 记成 base_version，
+    // 之后才播种 ⇒ approve 判定 base_version 对不上（DRAFT_STALE），掩盖真正的权限语义。
+    seedLive('inspection_task', { initial: 'draft', states: ['draft'], transitions: [], config: { name: '旧巡检' } });
+    db.permRows = [{ perm: 'workflow.edit' }];
+    const editor = makeToken('operator', 'op-editor');
+    await api('PUT', '/inspection_task/draft', editor, draftBody('巡检流程'));
+    await api('POST', '/inspection_task/submit', editor);
+
+    db.permRows = [{ perm: 'workflow.approve' }]; // 存量形态：无 @
+    const legacy = makeToken('operator', 'op-legacy');
+    const r = await api('POST', '/inspection_task/approve', legacy);
+    expect(r.status, `期望 200，实际 ${r.status} / ${JSON.stringify(r.json)}`).toBe(200);
+  });
+});
