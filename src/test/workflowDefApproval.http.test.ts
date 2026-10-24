@@ -587,6 +587,25 @@ describe('T3/S7：实例级审批权限（workflow.approve@<entityType>）端到
     expect(String(denied.json.message)).toContain('workflow.approve@inspection_task');
   });
 
+  it('只授 workflow.edit@transport_task ⇒ 改运送草稿 200、改巡检草稿 403（edit 侧也要生效）', async () => {
+    db.permRows = [{ perm: 'workflow.edit@transport_task' }];
+    const scoped = makeToken('operator', 'op-scoped-edit');
+
+    const ok = await api('PUT', '/transport_task/draft', scoped, draftBody('运送流程'));
+    expect(ok.status, `期望 200，实际 ${ok.status} / ${JSON.stringify(ok.json)}`).toBe(200);
+
+    const denied = await api('PUT', '/inspection_task/draft', scoped, draftBody('巡检流程'));
+    expect(denied.status, `期望 403，实际 ${denied.status}`).toBe(403);
+    expect(String(denied.json.message)).toContain('workflow.edit@inspection_task');
+  });
+
+  it('🟢 向后兼容：存量大租户只授全局 workflow.edit ⇒ 任意流程都改得过（行为不变）', async () => {
+    db.permRows = [{ perm: 'workflow.edit' }]; // 存量形态：无 @
+    const legacy = makeToken('operator', 'op-legacy-edit');
+    const r = await api('PUT', '/inspection_task/draft', legacy, draftBody('巡检流程'));
+    expect(r.status, `期望 200，实际 ${r.status} / ${JSON.stringify(r.json)}`).toBe(200);
+  });
+
   it('🟢 向后兼容：存量大租户只授全局 workflow.approve ⇒ 任意流程都批得过（行为不变）', async () => {
     // seedLive 必须在 submit 之前：submit 会把当时的 live version 记成 base_version，
     // 之后才播种 ⇒ approve 判定 base_version 对不上（DRAFT_STALE），掩盖真正的权限语义。

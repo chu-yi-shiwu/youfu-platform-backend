@@ -64,6 +64,11 @@ router.get('/pending', async (req, res, next) => {
     const auth = res.locals.auth;
     const tenantId = auth.tenantId;
     const items = await withTenantClient(tenantId, async (client) => {
+      // 🔴 T3 实例级作用域**故意不接**这里（不是遗漏，别当 bug 修）：
+      // `/pending` 是**跨所有 entityType 的全局待审列表**，加 `@entityType` 必须连带改
+      // `listSubmittedWorkflowDefChanges` 的查询按 entityType 过滤 —— 那是「待审列表按流程隔离」
+      // 这个功能本身，不是加个参数的事 ⇒ 本次不动，维持全局 `workflow.approve` 口径。
+      // 后果（当前语义）：只授了实例级 `workflow.approve@transport_task` 的人进这里会 403。
       await requirePermission(auth, client, 'workflow.approve');
       const changes = await listSubmittedWorkflowDefChanges(client, tenantId);
       return changes.map((c: WorkflowDefChange) => ({
@@ -185,7 +190,7 @@ router.put('/:entityType', async (req, res, next) => {
     const b = defSchema.parse(req.body);
     const { rev } = await withTenantClient(tenantId, async (client) => {
       await assertWorkflowConfigEditableByTenant(client); // 097 归属闸门：platform 时租户侧（含 admin）一律 403
-      await requirePermission(auth, client, 'workflow.edit');
+      await requirePermission(auth, client, 'workflow.edit', entityType);
       return upsertWorkflowDefDraft(client, tenantId, entityType, mergeDef(b), {
         operator: auth.username,
         note: b.note,
@@ -208,7 +213,7 @@ router.put('/:entityType/draft', async (req, res, next) => {
     const b = defSchema.parse(req.body);
     const { rev } = await withTenantClient(tenantId, async (client) => {
       await assertWorkflowConfigEditableByTenant(client); // 097 归属闸门：platform 时租户侧（含 admin）一律 403
-      await requirePermission(auth, client, 'workflow.edit');
+      await requirePermission(auth, client, 'workflow.edit', entityType);
       return upsertWorkflowDefDraft(client, tenantId, entityType, mergeDef(b), {
         operator: auth.username,
         note: b.note,
@@ -251,7 +256,7 @@ router.post('/:entityType/submit', async (req, res, next) => {
     const b = z.object({ change_id: z.number().int().positive().optional() }).parse(req.body ?? {});
     const submitted = await withTenantClient(tenantId, async (client) => {
       await assertWorkflowConfigEditableByTenant(client); // 097 归属闸门：platform 时租户侧（含 admin）一律 403
-      await requirePermission(auth, client, 'workflow.edit');
+      await requirePermission(auth, client, 'workflow.edit', entityType);
       return submitWorkflowDefChange(client, tenantId, entityType, {
         submittedBy: auth.username ?? '',
         changeId: b.change_id,
@@ -373,7 +378,7 @@ router.post('/:entityType/reject', async (req, res, next) => {
     const b = z.object({ comment: z.string().min(1) }).parse(req.body);
     const rejected = await withTenantClient(tenantId, async (client) => {
       await assertWorkflowConfigEditableByTenant(client); // 097 归属闸门：platform 时租户侧（含 admin）一律 403
-      await requirePermission(auth, client, 'workflow.approve');
+      await requirePermission(auth, client, 'workflow.approve', entityType);
       return rejectWorkflowDefChange(client, tenantId, entityType, b.comment);
     });
     if (!rejected) {
@@ -464,7 +469,8 @@ router.post('/generate-from-theme', async (req, res, next) => {
     const merged: WorkflowDef = { ...tpl.def, config: { ...(tpl.def.config ?? {}), name: tpl.name } } as WorkflowDef;
     await withTenantClient(tenantId, async (client) => {
       await assertWorkflowConfigEditableByTenant(client); // 097 归属闸门：platform 时租户侧（含 admin）一律 403
-      await requirePermission(auth, client, 'workflow.edit');
+      // T3：entityType 来自 **body**（:461 已 zod 解析），不是 req.params —— 别改成 req.params
+      await requirePermission(auth, client, 'workflow.edit', entityType);
       await upsertWorkflowDefDraft(client, tenantId, entityType, merged, {
         operator: auth.username,
         note: `从主题模板「${tpl.name}」生成`,
@@ -487,7 +493,7 @@ router.post('/:entityType/enable-acceptance', async (req, res, next) => {
     assertEntityType(entityType);
     const result = await withTenantClient(tenantId, async (client) => {
       await assertWorkflowConfigEditableByTenant(client); // 097 归属闸门：platform 时租户侧（含 admin）一律 403
-      await requirePermission(auth, client, 'workflow.edit');
+      await requirePermission(auth, client, 'workflow.edit', entityType);
       // 无 def 行的租户先落引擎默认图（显式落库后再注入，保证升级可追溯）
       const cur = await ensureWorkflowDef(client, tenantId, entityType);
       const { def, added } = ensureAcceptanceEdges(cur);
@@ -604,7 +610,7 @@ router.post('/:entityType/versions/:version/rollback', async (req, res, next) =>
     }
     await withTenantClient(tenantId, async (client) => {
       await assertWorkflowConfigEditableByTenant(client); // 097 归属闸门：platform 时租户侧（含 admin）一律 403
-      await requirePermission(auth, client, 'workflow.approve');
+      await requirePermission(auth, client, 'workflow.approve', entityType);
       await saveWorkflowDef(client, tenantId, entityType, target, {
         operator: auth.username ?? '', // username 缺失时由 saveWorkflowDef 运行期 422 兜底（留痕不为空）
         reason: `rollback-to-${version}`,
@@ -644,7 +650,7 @@ router.post('/:entityType/import', async (req, res, next) => {
     const b = defSchema.parse(req.body);
     await withTenantClient(tenantId, async (client) => {
       await assertWorkflowConfigEditableByTenant(client); // 097 归属闸门：platform 时租户侧（含 admin）一律 403
-      await requirePermission(auth, client, 'workflow.edit');
+      await requirePermission(auth, client, 'workflow.edit', entityType);
       await upsertWorkflowDefDraft(client, tenantId, entityType, mergeDef(b), {
         operator: auth.username,
         note: b.note ?? '导入外部文件',
@@ -723,9 +729,9 @@ router.put('/:entityType/auto-rules', async (req, res, next) => {
     const b = autoRuleSchema.parse(req.body);
     const item = await withTenantClient(tenantId, async (client) => {
       await assertWorkflowConfigEditableByTenant(client); // 097 归属闸门：platform 时租户侧（含 admin）一律 403
-      await requirePermission(auth, client, 'workflow.edit');
+      await requirePermission(auth, client, 'workflow.edit', entityType);
       // 启用自动审核是把关人级别的决定：额外要 workflow.approve（关掉只需 workflow.edit）
-      if (b.enabled) await requirePermission(auth, client, 'workflow.approve');
+      if (b.enabled) await requirePermission(auth, client, 'workflow.approve', entityType);
       const def = await getWorkflowDef(client, tenantId, entityType as never);
       // 红线闸②：按本租户真实流程解析目标态，指向终态直接 422 拒绝保存
       const { to } = assertAutoRuleSavable(def, { fromState: b.from_state, event: b.event });
@@ -762,7 +768,7 @@ router.delete('/:entityType/auto-rules/:fromState/:event', async (req, res, next
     assertEntityType(entityType);
     const ok = await withTenantClient(tenantId, async (client) => {
       await assertWorkflowConfigEditableByTenant(client); // 097 归属闸门：platform 时租户侧（含 admin）一律 403
-      await requirePermission(auth, client, 'workflow.edit');
+      await requirePermission(auth, client, 'workflow.edit', entityType);
       return deleteAutoRule(client, tenantId, entityType, fromState, event);
     });
     if (!ok) throw new AppError('NOT_FOUND', `auto rule not found: ${fromState}/${event}`, 404);
