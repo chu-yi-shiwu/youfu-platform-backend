@@ -16,7 +16,7 @@ import { z } from 'zod';
 import type { PoolClient } from 'pg';
 import { withTenantClient } from '../db/pool.js';
 import { AppError } from '../middleware/error.js';
-import { requireConfigRole } from '../middleware/role.js';
+import { requireConfigRole, ENTITY_RE } from '../middleware/role.js';
 import { getWorkflowDefOrDefault } from '../engine/workflowDef.js';
 import { availableTransitions, type WorkflowDef } from '../engine/stateMachine.js';
 import { transitionEntity } from '../engine/transition.js';
@@ -30,7 +30,10 @@ const ENTITY_DEF: Record<string, WorkflowDef> = {
   transport_task: TRANSPORT_DEF,
   emergency_plan: EMERGENCY_DEF,
 };
-const ENTITY_RE = /^[a-z][a-z0-9_]*$/;
+// 🔴 ENTITY_RE **不再在本文件定义**——已上收到 middleware/role.ts（全仓唯一一份）。
+// 原因：T3 实例级权限要在 role.ts 里校验 `perm@entityType` 的 entityType 形状，
+// 而 businessFlow 已 import role ⇒ role 不能反向 import businessFlow（运行时循环依赖），
+// 只能把正则放在依赖上游。两份副本迟早漂移（此处曾与 role.ts 各留一份）。
 
 // D2 收口名单：这些 entityType **不走通用业务流通道**，命中即 410 Gone + 指路。
 // 🔴 理由（写在这里，别当小事）：`034_emergency_transport.sql:7-21` 建的 `emergency_plan`

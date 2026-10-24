@@ -87,6 +87,76 @@ export const PERMS = [
 ] as const;
 export type Perm = (typeof PERMS)[number];
 
+// ─────────────────────────────────────────────────────────────────────────────
+// 【T3 实例级权限（2026-10-24）】perm 的两种形态
+//
+//   全局授权：   ticket.manage                 ← 存量行全是这个形态
+//   实例级授权： ticket.manage@transport_task  ← 新增：只对某类单据生效
+//
+// 🔴 **为什么用模板字面量 `${Perm}@${string}` 而不是直接放宽成 `string`**：
+//   `requirePermission(..., perm: Perm)` 的参数类型是 `Perm`，这是架构🔴1⑤ 的修复成果
+//   ——**权限点拼错在编译期就炸**（此前传 'settlment.read' 这种错字也能编译过，
+//     运行期恒 403 且极难排查）。放宽成 `string` ⇒ 这个收益当场归零。
+//   模板字面量能让 **`@` 前面的 base 部分继续受 PERMS 约束**：
+//     ✅ 'ticket.manage@transport_task'   （base 合法）
+//     ❌ 'ticket.mange@transport_task'    （拼错 ⇒ 编译期报错，这正是 V4 要验的）
+//
+// ⚠️ **`@` 后面（entityType）编译期管不了**：`${string}` 什么都收。
+//   ⇒ 必须有 **S5 的运行时白名单**兜住，否则 `ticket.manage@随便写` 能进库，
+//     权限配置变成不可控的垃圾。详见下方 `assertEntityTypeScope()`。
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** 实例级权限 key：`权限点@单据类型`，如 `ticket.manage@transport_task`。 */
+export type PermScope = `${Perm}@${string}`;
+
+/** 落库/判定时的 perm 形态：全局 或 实例级。 */
+export type PermKey = Perm | PermScope;
+
+/** 取权限点的 base 部分（去掉 `@单据类型` 后缀）：`ticket.manage@transport_task` ⇒ `ticket.manage`。 */
+export function permBase(perm: string): string {
+  const at = perm.indexOf('@');
+  return at < 0 ? perm : perm.slice(0, at);
+}
+
+/**
+ * 🔴 实体类型形状（**全仓唯一一份**，routes/businessFlow.ts 也从这里引）。
+ *
+ * 为什么放在 middleware 而不是留在 businessFlow：S5 的运行时白名单要在本文件里校验
+ * entityType，而 `role.ts → businessFlow.ts` 会形成**运行时循环依赖**（businessFlow 已
+ * import 本文件的 requireConfigRole）⇒ 只能把这份正则放在依赖方向的上游。
+ * ⚠️ 因此 **businessFlow.ts 不许再自己留一份副本**——两个正则迟早漂移。
+ */
+export const ENTITY_RE = /^[a-z][a-z0-9_]*$/;
+
+/**
+ * S5 运行时白名单：entityType 部分编译期管不了（`${string}` 什么都收），
+ * 不校验的话 `ticket.manage@随便写` 能进库 ⇒ 权限配置变成不可控。
+ *
+ * 校验两件事：
+ *   ① 形状（ENTITY_RE）——不合法直接 400，**不静默放行**；
+ *   ② 可选：是否在 `listEntityTypes()` 内（调用方传入 known 集合时才判）。
+ *
+ * @param entityType 单据类型
+ * @param known      可选：合法的实体类型全集（`businessFlow.ts` 的 `listEntityTypes` 结果）。
+ *                   传了 ⇒ 不在集合内也 400（防"写错但形状合法"的垃圾进库）。
+ */
+export function assertEntityTypeScope(entityType: string, known?: readonly string[]): void {
+  if (!ENTITY_RE.test(entityType)) {
+    throw new AppError(
+      'BAD_PARAM',
+      `invalid entity_type for permission scope: ${JSON.stringify(entityType)}（只允许 ${ENTITY_RE.source}）`,
+      400,
+    );
+  }
+  if (known && !known.includes(entityType)) {
+    throw new AppError(
+      'BAD_PARAM',
+      `unknown entity_type for permission scope: ${entityType}（可用清单见 GET /flow/entities）`,
+      400,
+    );
+  }
+}
+
 // 默认权限矩阵（内置；租户可经 role_permission 表覆盖）。
 // 新角色按最小权限给默认：reviewer 审核工单（看板+工单）；service_desk 接线派单（+派单覆盖）。
 // 批次三：settlement.read（列表/详情/导出）默认 admin/operator；settlement.edit 仅 admin；
