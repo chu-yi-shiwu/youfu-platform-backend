@@ -1,11 +1,11 @@
 // 服务台模块（批次 C）：服务台管理 + 客服人员 + 来电弹屏代申告。
-// 风格对齐既有路由：withTenantClient 注入租户/RLS；写操作 requireConfigRole。
+// 风格对齐既有路由：withTenantClient 注入租户/RLS；写操作 requirePermission('servicedesk.manage')。
 // 代申告复用 repo.createWithIdem（不强制全局幂等，仅 sessionId 防双击，见 services/serviceDeskTicket.ts）。
 import { Router } from 'express';
 import { z } from 'zod';
 import { withTenantClient } from '../db/pool.js';
 import { AppError } from '../middleware/error.js';
-import { requireConfigRole, requirePermission } from '../middleware/role.js';
+import { requirePermission } from '../middleware/role.js';
 import { createWithIdem } from '../repo/ticket.js';
 import { buildServiceDeskTicket } from '../services/serviceDeskTicket.js';
 
@@ -32,18 +32,18 @@ router.get('/service-desks', async (req, res, next) => {
 
 router.post('/service-desks', async (req, res, next) => {
   try {
-    requireConfigRole(req, res);
     const tenantId = res.locals.auth.tenantId;
-    const b = deskSchema.parse(req.body);
-    const item = await withTenantClient(tenantId, (client) =>
-      client
+    const item = await withTenantClient(tenantId, async (client) => {
+      await requirePermission(res.locals.auth, client, 'servicedesk.manage');
+      const b = deskSchema.parse(req.body);
+      return client
         .query(`INSERT INTO service_desk (tenant_id, name, template) VALUES ($1,$2,$3) RETURNING *`, [
           tenantId,
           b.name,
           b.template ?? null,
         ])
-        .then((r) => r.rows[0]),
-    );
+        .then((r) => r.rows[0]);
+    });
     return res.status(201).json({ ok: true, code: 0, item });
   } catch (e) {
     next(e);
@@ -52,10 +52,10 @@ router.post('/service-desks', async (req, res, next) => {
 
 router.put('/service-desks/:id', async (req, res, next) => {
   try {
-    requireConfigRole(req, res);
     const tenantId = res.locals.auth.tenantId;
-    const b = deskSchema.partial().parse(req.body);
     const item = await withTenantClient(tenantId, async (client) => {
+      await requirePermission(res.locals.auth, client, 'servicedesk.manage');
+      const b = deskSchema.partial().parse(req.body);
       const cur = await client.query(`SELECT * FROM service_desk WHERE id=$1 AND tenant_id=$2`, [req.params.id, tenantId]);
       if (cur.rowCount === 0) throw new AppError('NOT_FOUND', 'service desk not found', 404);
       const r = await client.query(
@@ -86,10 +86,10 @@ router.get('/service-desks/:id/agents', async (req, res, next) => {
 
 router.post('/service-desks/:id/agents', async (req, res, next) => {
   try {
-    requireConfigRole(req, res);
     const tenantId = res.locals.auth.tenantId;
-    const b = z.object({ user_id: z.string().min(1), name: z.string().min(1) }).parse(req.body);
     const item = await withTenantClient(tenantId, async (client) => {
+      await requirePermission(res.locals.auth, client, 'servicedesk.manage');
+      const b = z.object({ user_id: z.string().min(1), name: z.string().min(1) }).parse(req.body);
       const desk = await client.query(`SELECT id FROM service_desk WHERE id=$1 AND tenant_id=$2`, [req.params.id, tenantId]);
       if (desk.rowCount === 0) throw new AppError('NOT_FOUND', 'service desk not found', 404);
       const r = await client.query(
@@ -107,13 +107,13 @@ router.post('/service-desks/:id/agents', async (req, res, next) => {
 
 router.delete('/service-desks/:id/agents/:agentId', async (req, res, next) => {
   try {
-    requireConfigRole(req, res);
     const tenantId = res.locals.auth.tenantId;
-    const n = await withTenantClient(tenantId, (client) =>
-      client
+    const n = await withTenantClient(tenantId, async (client) => {
+      await requirePermission(res.locals.auth, client, 'servicedesk.manage');
+      return client
         .query(`DELETE FROM service_desk_agent WHERE tenant_id=$1 AND desk_id=$2 AND id=$3`, [tenantId, req.params.id, req.params.agentId])
-        .then((r) => r.rowCount ?? 0),
-    );
+        .then((r) => r.rowCount ?? 0);
+    });
     if (n === 0) throw new AppError('NOT_FOUND', 'agent not found', 404);
     return res.json({ ok: true, code: 0 });
   } catch (e) {

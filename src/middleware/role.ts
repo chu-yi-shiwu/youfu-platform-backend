@@ -178,6 +178,16 @@ export const PERM_DEFS = {
   //   （PatrolPage vs InspectionPage + InspectionPlansPage）⇒ 复用会「只管巡检的人顺带能改巡更任务」。
   // 🔴 operator 默认给是**为了等价**（原 requireConfigRole 白名单 admin+operator），非策略选择。
   'patrol.manage': { label: '巡更配置', defaults: ['operator'] },
+  // T8 第十一批（2026-10-25）：服务台模块独立权限点。**只用一个点、不拆**：
+  //   4 处全是**配置面** —— 服务台主数据（POST/PUT /service-desks）+ 客服人员编排
+  //   （POST/DELETE /service-desks/:id/agents）；**代申告 POST /tickets 不在内**
+  //   （它是坐席执行动作，早已走 intake.create，本批不动）。
+  // 🔴 为什么不复用 `basicdata.edit`：**两套表**（service_desk + service_desk_agent）、
+  //   独立业务域（批次 C，自带代申告通道与幂等键），且蹭基础数据是已淘汰做法。
+  //   ⚠️ 服务台配置入口确在 `BasicData.tsx` / `AdminPage.tsx`，但那只是**页面归属**，
+  //      不是权限点归属 —— 按页面判会把服务台和字典/术语捆成"要么都给要么都不给"。
+  // 🔴 operator 默认给是**为了等价**（原 requireConfigRole 白名单 admin+operator），非策略选择。
+  'servicedesk.manage': { label: '服务台配置', defaults: ['operator'] },
 } as const satisfies Record<string, { label: string; defaults: readonly Role[] }>;
 
 /** 权限点清单（由 PERM_DEFS 派生，勿手改）。 */

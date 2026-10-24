@@ -51,7 +51,9 @@ const DESK = '11111111-1111-4111-8111-111111111111';
 const AGENT_ROW = { id: 'ag-1', tenant_id: T, desk_id: DESK, user_id: 'u-9', name: '坐席九' };
 const DESK_ROW = { id: DESK, tenant_id: T, name: '一楼服务台', template: null, created_at: '2026-09-01T00:00:00Z' };
 
-function deskHandlers(opts: { deskExists?: boolean; idemGrabbed?: boolean; existingWo?: Record<string, unknown> | null } = {}): Handler[] {
+function deskHandlers(
+  opts: { deskExists?: boolean; idemGrabbed?: boolean; existingWo?: Record<string, unknown> | null; permGrant?: string[] } = {},
+): Handler[] {
   const deskExists = opts.deskExists ?? true;
   const idemGrabbed = opts.idemGrabbed ?? true;
   return [
@@ -77,7 +79,8 @@ function deskHandlers(opts: { deskExists?: boolean; idemGrabbed?: boolean; exist
     // 建单 INSERT
     { match: (t) => t.startsWith('INSERT INTO work_orders'), reply: (_t, p) => ({ rows: [{ id: p[0], tenant_id: p[1], order_no: p[2], business_type: p[3], title: p[7], status: 'draft' }], rowCount: 1 }) },
     // hasPerm 覆盖查询（operator/service_desk 角色走查库路径）
-    { match: (t) => t.includes('SELECT perm FROM role_permission WHERE tenant_id = $1 AND role = $2'), reply: () => ({ rows: [{ perm: 'settlement.edit' }] }) },
+    // T8 第十一批：传 permGrant 才返回 rowCount>0 的真覆盖行；不传维持原样（无 rowCount ⇒ hasPerm 走默认矩阵回退）
+    { match: (t) => t.includes('SELECT perm FROM role_permission WHERE tenant_id = $1 AND role = $2'), reply: () => (opts.permGrant ? { rows: opts.permGrant.map((p) => ({ perm: p })), rowCount: opts.permGrant.length } : { rows: [{ perm: 'settlement.edit' }] }) },
   ];
 }
 
@@ -280,6 +283,32 @@ describe('来电弹屏代申告（POST /tickets）', () => {
     expect(res.status).toBe(403);
     const body = (await res.json()) as { message: string };
     expect(body.message).toContain('intake.create');
+    currentRole = 'admin';
+  });
+});
+
+describe('T8 第十一批 · 服务台配置权限收敛', () => {
+  // A 组：等价性。原 requireConfigRole 白名单 admin+operator ⇒ worker 必须继续 403。
+  // 改前改后都应绿（这是"行为不变"的钉子，不是新功能断言）。
+  it('A 组：worker 对 PUT /service-desks/:id、POST/DELETE agents 均 403', async () => {
+    currentRole = 'worker';
+    h.client = makeClient(deskHandlers()).client;
+    expect((await put(`/service-desks/${DESK}`, { name: '越权台' })).status).toBe(403);
+    expect((await post(`/service-desks/${DESK}/agents`, { user_id: 'u-9', name: '越权坐席' })).status).toBe(403);
+    expect((await del(`/service-desks/${DESK}/agents/ag-1`)).status).toBe(403);
+    currentRole = 'admin';
+  });
+
+  // B 组：这就是收敛的全部价值 —— requireConfigRole 只读角色白名单、根本不查权限表，
+  // ⇒ 租户把 servicedesk.manage 授给 reviewer 也放不了行。改前这条必红（403），改后绿。
+  it('B 组（prod · reviewer）授 servicedesk.manage ⇒ 4 处配置端点全放行', async () => {
+    currentRole = 'reviewer';
+    const grant = ['servicedesk.manage'];
+    h.client = makeClient(deskHandlers({ permGrant: grant })).client;
+    expect((await post('/service-desks', { name: '三号台' })).status).toBe(201);
+    expect((await put(`/service-desks/${DESK}`, { name: '四号台' })).status).toBe(200);
+    expect((await post(`/service-desks/${DESK}/agents`, { user_id: 'u-9', name: '坐席九' })).status).toBe(201);
+    expect((await del(`/service-desks/${DESK}/agents/ag-1`)).status).toBe(200);
     currentRole = 'admin';
   });
 });
