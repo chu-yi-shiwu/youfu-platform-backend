@@ -85,6 +85,91 @@
 // S0：本文件首版**只有这段注释 + 空 registry**（裁决先落地，代码由 S1 补）。
 //     registry 为空 ⇒ `proxyFor()` 恒返回 undefined ⇒ `/flow` 行为与改动前完全一致
 //     ⇒ **S1 单独落地也不会改变任何线上行为**（★唯一切换点是 S5★）。
+//
+// S1：补代理骨架（**仍然零行为改动**——registry 依旧是空的，`/flow` 没有任何调用方变化）。
+//     本步只定义契约：Ctx / adapter 四方法 / 查表函数。adapter 实现由 S3 补，
+//     `/flow` 路由侧的查表分派由 S4 补，写 registry 由 S5 补。
+//
+// 【为什么四方法 = list / create / detail / transition】
+//   与 `routes/businessFlow.ts` 的四个端点一一对应（`/:entityType` GET / POST、
+//   `/:entityType/:id` GET、`/:entityType/:id/transition` POST）。
+//   ⚠️ **不含** `tracks` 与 `work_order` 回显：那是 `transport.ts` 原生端点专属能力，
+//   `/flow` 侧本来就没有，按 X6 结论**不新增**（不借代理层偷偷扩 `/flow` 的能力面）。
+
+import type { PoolClient } from 'pg';
+import type { AuthLocals } from '../middleware/auth.js';
+
+/** 代理层与路由之间传递的行对象（原生表行 + adapter 补的 `available` 等派生字段）。 */
+export type FlowRow = Record<string, unknown>;
+
+/**
+ * 一次代理调用的上下文（四方法共用）。
+ *
+ * ⚠️ `client` 必须是 `withTenantClient` 事务内的 client（已 SET LOCAL 租户与受限角色），
+ *    adapter 内**不得**再开新连接——否则丢掉 RLS 与事务原子性。
+ */
+export interface FlowProxyCtx {
+  /** 事务内 client（租户隔离 + RLS 已生效）。 */
+  client: PoolClient;
+  tenantId: string;
+  /**
+   * **def 口径**实体名（如 `transport_task`）。
+   * 🔴 它不是事件口径名——事件口径见 `FlowAdapter.nativeEntityType`（D1 永久双名）。
+   */
+  entityType: string;
+  /** 请求身份（守卫要读 `role` / `userId` / `authMode`）。 */
+  auth: AuthLocals;
+  /** 事件与审计用的操作者标识（与 `businessFlow.authInfo()` 同口径：userId ?? username ?? 'user'）。 */
+  actor: string;
+}
+
+/** 列表查询参数（与 `GET /flow/:entityType` 现有 query 同口径，只认 `status`）。 */
+export interface FlowListQuery {
+  status?: string;
+}
+
+/** 建单入参（与 `POST /flow/:entityType` 现有 zod schema 同口径）。 */
+export interface FlowCreateBody {
+  title: string;
+  data?: Record<string, unknown>;
+  assignee?: string;
+  location?: string;
+  scheduled_at?: string;
+}
+
+/** 流转入参（与 `POST /flow/:entityType/:id/transition` 现有 zod schema 同口径）。 */
+export interface FlowTransitionBody {
+  event: string;
+  data?: Record<string, unknown>;
+}
+
+/**
+ * 业务流代理适配器：**字段映射 + 委派原生实现**，adapter 内**不写 SQL**。
+ *
+ * 职责边界（S3 实现时必须守住）：
+ *   · 把 `/flow` 的通用字段（title/data/assignee/location/scheduled_at）映射成原生表字段；
+ *   · 真正的读写**复用原生模块的既有函数**（运送即 `transport.ts` 的 `listOrders`/`getOrder`/
+ *     `createOrder`/`transitionOrder`），**不复制一份 SQL**——复制就意味着双份逻辑各自漂移。
+ *   · 守卫（角色门禁 / 归属守卫）由原生实现自带，adapter **不得**绕过（R4：收紧是预期的）。
+ */
+export interface FlowAdapter {
+  /** def 口径名（registry 的 key 必须与此相同）。 */
+  entityType: string;
+  /**
+   * 事件口径名（D1：统一到原生名，如 `transport_order`）。
+   * 🔴 **永久不等于 `entityType`**——别再试图合并这两个名字（见文件头 D1）。
+   */
+  nativeEntityType: string;
+
+  /** 列表：返回值每行须自带 `available`（与 `business_flow_tasks` 侧同外壳）。 */
+  list(ctx: FlowProxyCtx, query: FlowListQuery): Promise<FlowRow[]>;
+  /** 建单：返回新建行（自带 `available`）。 */
+  create(ctx: FlowProxyCtx, body: FlowCreateBody): Promise<FlowRow>;
+  /** 详情：找不到须抛 `AppError('NOT_FOUND', ..., 404)`；返回行自带 `available`。 */
+  detail(ctx: FlowProxyCtx, id: string): Promise<FlowRow>;
+  /** 流转：事件非法须抛 422；返回流转后行（自带 `available`）。 */
+  transition(ctx: FlowProxyCtx, id: string, body: FlowTransitionBody): Promise<FlowRow>;
+}
 
 /**
  * 代理 registry：entityType → adapter。
@@ -96,4 +181,20 @@
  *    保证"加骨架"与"切换行为"是两笔可独立回滚的改动。
  * ⚠️ 填写 entry 的那一笔**必须单独 commit**（回退时才能 `git revert` 单笔）。
  */
-export const FLOW_PROXY: Record<string, unknown> = {};
+export const FLOW_PROXY: Record<string, FlowAdapter> = {};
+
+/**
+ * 查表：该实体是否被代理。
+ *
+ * 返回 `undefined` = **走原 `business_flow_tasks` 逻辑**（这是默认路径，也是最安全的一侧）。
+ *
+ * 🔴 用 `hasOwnProperty` 而非裸下标：registry 的 key 来自**代码**，但 `entityType` 来自
+ *    **URL 路径**（`/flow/:entityType`），`toString` / `constructor` / `__proto__`
+ *    这类原型链键若走裸下标会命中 `Object.prototype` 上的东西 ⇒ 查表"命中"了
+ *    一个根本不存在的 adapter。fail-closed 到"未代理"这一侧。
+ */
+export function proxyFor(entityType: string): FlowAdapter | undefined {
+  if (!entityType) return undefined;
+  if (!Object.prototype.hasOwnProperty.call(FLOW_PROXY, entityType)) return undefined;
+  return FLOW_PROXY[entityType];
+}
