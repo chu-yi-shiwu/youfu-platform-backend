@@ -249,4 +249,46 @@ describe('T5/S6b 写入落点 + 事件口径', () => {
     expect(countSql(native.calls, 'INSERT INTO transport_order')).toBe(1);
     expect(countSql(native.calls, 'INSERT INTO business_flow_tasks')).toBe(0);
   });
+
+  // ── D2 收口：`emergency_plan` 不再走 /flow（410 + 指路）────────────────────
+  // 【为什么钉这条】`emergency_plan` 表**没有 status 列**（`034_emergency_transport.sql:7-21`
+  //   只有 `enabled` 布尔），而 `themes.ts:38-51 EMERGENCY_DEF` 是 6 态状态机 ⇒
+  //   **代理无落点**；加列要碰生产库 DDL，与"不动存量"冲突 ⇒ 显式把这个误配入口关掉。
+  // 🔴 这三条是**行为级**：断言的是调用方收到的状态码与响应体，不是内部标志位。
+  it('🔴 D2 收口：GET /flow/emergency_plan ⇒ 410 Gone，且响应体指路 /emergency/plans', async () => {
+    h.client = makeClient().client;
+    const app = await listen(appWith(businessFlowRouter, '/flow'));
+    const res = await fetch(`${app.url}/flow/emergency_plan`);
+    const body = await res.json().catch(() => ({}));
+    app.server.close();
+    expect(res.status).toBe(410);
+    expect(
+      JSON.stringify(body),
+      '410 必须带指路信息，否则调用方只知道"没了"、不知道该去哪',
+    ).toContain('/emergency/plans');
+  });
+
+  it('🔴 D2 收口：POST /flow/emergency_plan ⇒ 410，且不许写任何 INSERT', async () => {
+    const flow = makeClient();
+    h.client = flow.client;
+    const app = await listen(appWith(businessFlowRouter, '/flow'));
+    const res = await post(`${app.url}/flow/emergency_plan`, { title: '消防演练' });
+    app.server.close();
+    expect(res.status).toBe(410);
+    expect(
+      countSql(flow.calls, 'INSERT INTO'),
+      '收口入口不许写任何 INSERT —— 写了说明 410 拦截没生效，单还建进去了',
+    ).toBe(0);
+  });
+
+  it('对照（哨兵·绿）：只收口 emergency_plan，work_order 不许被连带挡掉', async () => {
+    h.client = makeClient().client;
+    const app = await listen(appWith(businessFlowRouter, '/flow'));
+    const res = await post(`${app.url}/flow/work_order`, { title: '报修' });
+    app.server.close();
+    expect(
+      res.status,
+      'RETIRED_FLOW_ENDPOINT 若被写成通配，未收口实体会一起 410 —— 那是"关错了门"',
+    ).not.toBe(410);
+  });
 });

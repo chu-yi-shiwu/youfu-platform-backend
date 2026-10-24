@@ -46,6 +46,38 @@ function authInfo(res: any): { actor: string } {
 }
 
 /**
+ * 【D2 收口】已废弃的"通用业务流入口"：命中即 **410 Gone**，并在响应体里指路到正确端点。
+ *
+ * 🔴 **为什么是 410 而不是代理、也不是加列**：
+ *   · `034_emergency_transport.sql:7-21` 建的 `emergency_plan` 表**没有 status 列**
+ *     （只有 `enabled` 布尔），而 `themes.ts:38-51 EMERGENCY_DEF` 是 6 态状态机
+ *     ⇒ **代理无落点**：状态写不进去，流转也无意义。
+ *   · 🔴 **明确否决"给 emergency_plan 加 status 列"**：那是生产库 DDL，与"不动存量"冲突。
+ *   · 应急预案本质是**知识库目录**，不是带状态的业务流；给它配 EMERGENCY_DEF 是历史误配。
+ *   ⇒ 走 410 = 把这个误配**显式关掉**，而不是继续装作它能跑。
+ *
+ * ⚠️ 已知连带问题（**本次不一并改，留给下一步决策**）：
+ *   `listEntityTypes()`（本文件 :40）的 builtins 来自 `ENTITY_DEF`，仍**包含** emergency_plan
+ *   ⇒ `GET /flow/entities` 仍会把它列出来 ⇒ mp 宫格 / admin「进入业务流」入口里
+ *   仍有一个点进去就 410 的入口。要不要从清单里摘掉（会改 UI 可见项），需单独拍板。
+ */
+const RETIRED_FLOW_ENDPOINT: Record<string, string> = {
+  emergency_plan: '/emergency/plans',
+};
+
+/** 命中废弃入口 ⇒ 410 Gone + 指路（放在四个 handler 校验之后、业务逻辑之前）。 */
+function assertFlowEndpointAlive(entityType: string): void {
+  const replacement = RETIRED_FLOW_ENDPOINT[entityType];
+  if (!replacement) return;
+  throw new AppError(
+    'GONE',
+    `${entityType} 不再走通用业务流通道 /flow（应急预案是知识库目录，不是带状态的业务流；` +
+      `emergency_plan 表没有 status 列，状态机对它无落点）。请改用 ${replacement}`,
+    410,
+  );
+}
+
+/**
  * 组装代理调用上下文（四个 handler 共用）。
  * ⚠️ `client` 必须是 `withTenantClient` 事务内的那个（租户隔离 + RLS 已生效），
  *    adapter 内不得再开新连接。
@@ -95,6 +127,7 @@ router.get('/:entityType', async (req, res, next) => {
   try {
     const entityType = req.params.entityType;
     if (!ENTITY_RE.test(entityType)) throw new AppError('BAD_REQUEST', 'invalid entity_type', 400);
+    assertFlowEndpointAlive(entityType); // D2：废弃入口（emergency_plan）⇒ 410 + 指路
     const tenantId = res.locals.auth.tenantId;
     const { status } = req.query as Record<string, string>;
     // S4 分派：命中代理 ⇒ 走原生表（响应外壳不变：仍带 label）
@@ -130,6 +163,7 @@ router.post('/:entityType', async (req, res, next) => {
   try {
     const entityType = req.params.entityType;
     if (!ENTITY_RE.test(entityType)) throw new AppError('BAD_REQUEST', 'invalid entity_type', 400);
+    assertFlowEndpointAlive(entityType); // D2：废弃入口（emergency_plan）⇒ 410 + 指路
     requireConfigRole(req, res);
     const tenantId = res.locals.auth.tenantId;
     const b = z
@@ -182,6 +216,7 @@ router.get('/:entityType/:id', async (req, res, next) => {
   try {
     const entityType = req.params.entityType;
     if (!ENTITY_RE.test(entityType)) throw new AppError('BAD_REQUEST', 'invalid entity_type', 400);
+    assertFlowEndpointAlive(entityType); // D2：废弃入口（emergency_plan）⇒ 410 + 指路
     const tenantId = res.locals.auth.tenantId;
     // S4 分派：命中代理 ⇒ 走原生表（响应外壳不变：{ok, code, item}）
     const adapter = proxyFor(entityType);
@@ -212,6 +247,7 @@ router.post('/:entityType/:id/transition', async (req, res, next) => {
   try {
     const entityType = req.params.entityType;
     if (!ENTITY_RE.test(entityType)) throw new AppError('BAD_REQUEST', 'invalid entity_type', 400);
+    assertFlowEndpointAlive(entityType); // D2：废弃入口（emergency_plan）⇒ 410 + 指路
     const tenantId = res.locals.auth.tenantId;
     const b = z
       .object({ event: z.string().min(1), data: z.record(z.any()).optional() })
