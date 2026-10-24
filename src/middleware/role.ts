@@ -170,6 +170,14 @@ export const PERM_DEFS = {
   //    反馈是独立业务域（自有 feedback 表 + PRD §D + 事件总线）。
   // 🔴 operator 默认给是**为了等价**（原白名单 admin+operator），非策略选择。
   'feedback.manage': { label: '服务反馈', defaults: ['operator'] },
+  // T8 第十批（2026-10-25）：巡更模块独立权限点。**只用一个点、不拆**：
+  //   4 处全是**配置面** —— 点位 CRUD 3 处（POST/PUT/DELETE /points）+ 任务创建 1 处（POST /tasks）；
+  //   执行面（checkin / miss）本来就无守卫 ⇒ 不新增 patrol.execute（YAGNI：没有检查点的权限点是空头支票）。
+  // 🔴 为什么不复用 `inspect.manage`（巡检配置）：**两套表**（patrol_point / patrol_task
+  //    vs inspection_plan / _task / _point / _item / _record 六张）、**两个前端页面**
+  //   （PatrolPage vs InspectionPage + InspectionPlansPage）⇒ 复用会「只管巡检的人顺带能改巡更任务」。
+  // 🔴 operator 默认给是**为了等价**（原 requireConfigRole 白名单 admin+operator），非策略选择。
+  'patrol.manage': { label: '巡更配置', defaults: ['operator'] },
 } as const satisfies Record<string, { label: string; defaults: readonly Role[] }>;
 
 /** 权限点清单（由 PERM_DEFS 派生，勿手改）。 */

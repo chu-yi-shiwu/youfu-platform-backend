@@ -291,7 +291,8 @@ describe('material.ts · 流水/CSV 导出导入', () => {
 });
 
 describe('patrol.ts · 巡更点位与任务', () => {
-  it('⑪points：GET 列表 / POST 201+事件 / PUT 空体 400 / PUT 不存在 404 / DELETE ok+404', async () => {
+  it('⑪points：GET 列表 / POST 201+事件 / PUT 空体 400 / PUT 不存在 404 / DELETE ok+404；（worker · prod）→ 403', async () => {
+    authMode = 'prod'; // 🔴 requirePermission 在 dev 恒放行 ⇒ 不切 prod，下面的 403 断言是恒绿的假绿
     expect((await req('GET', '/api/v1/patrol/points')).status).toBe(200);
     const p = await req('POST', '/api/v1/patrol/points', { name: '东门', seq: 1 });
     expect(p.status).toBe(201);
@@ -303,18 +304,29 @@ describe('patrol.ts · 巡更点位与任务', () => {
     expect((await req('DELETE', '/api/v1/patrol/points/none')).status).toBe(404);
     pointExists = true;
     expect((await req('DELETE', '/api/v1/patrol/points/pp-1')).status).toBe(200);
+    authRole = 'worker';
+    expect((await req('POST', '/api/v1/patrol/points', { name: '西门', seq: 2 })).status).toBe(403);
+    expect((await req('PUT', '/api/v1/patrol/points/pp-1', { name: 'x' })).status).toBe(403);
+    expect((await req('DELETE', '/api/v1/patrol/points/pp-1')).status).toBe(403);
   });
 
-  it('⑫POST /tasks（operator）→ 201 point_ids 数组入库；GET /tasks 列表过滤；GET /tasks/:id 不存在 → 404', async () => {
+  it('⑫POST /tasks（operator · prod）→ 201 point_ids 数组入库；GET /tasks 列表过滤；GET /tasks/:id 不存在 → 404；（worker · prod）→ 403', async () => {
+    authMode = 'prod'; // 同上：dev 恒放行会让权限断言恒绿
     const r = await req('POST', '/api/v1/patrol/tasks', { title: '早班巡更', point_ids: ['11111111-1111-4111-8111-111111111111'] });
     expect(r.status).toBe(201);
-    expect(callParams(0)[3]).toEqual(['11111111-1111-4111-8111-111111111111']);
+    // T8 第十批：守卫移入事务内后，calls()[0] 变成 role_permission 查询 ⇒ 必须按 SQL 定位，不能写死下标
+    const insIdx = calls().findIndex((s) => s.includes('INSERT INTO patrol_task'));
+    expect(callParams(insIdx)[3]).toEqual(['11111111-1111-4111-8111-111111111111']);
+    fakeClient.query.mockClear();
     const gl = await req('GET', '/api/v1/patrol/tasks?assignee=u-1&status=pending');
     expect(gl.status).toBe(200);
-    expect(calls()[1]).toContain('assignee = $2');
-    expect(calls()[1]).toContain('status = $3');
+    const listIdx = calls().findIndex((s) => s.includes('SELECT * FROM patrol_task WHERE'));
+    expect(calls()[listIdx]).toContain('assignee = $2');
+    expect(calls()[listIdx]).toContain('status = $3');
     taskFound = false;
     expect((await req('GET', '/api/v1/patrol/tasks/none')).status).toBe(404);
+    authRole = 'worker';
+    expect((await req('POST', '/api/v1/patrol/tasks', { title: 'x', point_ids: ['11111111-1111-4111-8111-111111111111'] })).status).toBe(403);
   });
 
   it('⑬checkin 部分签 → in_progress + checkins JSON 追加 + checkin 事件；重复点 → 409', async () => {
@@ -369,6 +381,18 @@ describe('patrol.ts · 巡更点位与任务', () => {
     const r2 = await req('POST', '/api/v1/patrol/tasks/pt-1/miss', {});
     expect(r2.status).toBe(200); // P2 飞轮异常不阻断 miss 主流程
     createAlert.mockImplementation(async (..._a: unknown[]) => null);
+  });
+
+  // T8 第十批 B 组：这就是收敛的价值 —— requireConfigRole 只读角色白名单、根本不查权限表，
+  // ⇒ 租户把 patrol.manage 授给 reviewer 也放不了行。改前这条必红（403），改后绿。
+  it('patrol 权限 B 组（prod · reviewer）授 patrol.manage ⇒ 4 处配置端点全放行', async () => {
+    authMode = 'prod';
+    authRole = 'reviewer';
+    permGrants['reviewer'] = ['patrol.manage'];
+    expect((await req('POST', '/api/v1/patrol/points', { name: '东门', seq: 1 })).status).toBe(201);
+    expect((await req('PUT', '/api/v1/patrol/points/pp-1', { name: '东门2' })).status).toBe(200);
+    expect((await req('DELETE', '/api/v1/patrol/points/pp-1')).status).toBe(200);
+    expect((await req('POST', '/api/v1/patrol/tasks', { title: '夜班巡更', point_ids: ['11111111-1111-4111-8111-111111111111'] })).status).toBe(201);
   });
 });
 

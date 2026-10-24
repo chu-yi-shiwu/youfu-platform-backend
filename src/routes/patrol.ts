@@ -5,13 +5,14 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { withTenantClient } from '../db/pool.js';
 import { AppError } from '../middleware/error.js';
-import { requireConfigRole } from '../middleware/role.js';
+import { requirePermission } from '../middleware/role.js';
 import { emitDomainEvent } from '../db/eventBus.js';
 import { createAlert } from './emergency.js';
 
 const router = Router();
 
 // ============ 巡更点（配置端） ============
+// 写操作（POST/PUT/DELETE）需 requirePermission('patrol.manage')；读取维持已认证即放。
 const pointSchema = z.object({
   name: z.string().min(1),
   location: z.string().optional(),
@@ -32,10 +33,10 @@ router.get('/points', async (req, res, next) => {
 
 router.post('/points', async (req, res, next) => {
   try {
-    requireConfigRole(req, res);
     const tenantId = res.locals.auth.tenantId;
-    const b = pointSchema.parse(req.body);
     const item = await withTenantClient(tenantId, async (client) => {
+      await requirePermission(res.locals.auth, client, 'patrol.manage');
+      const b = pointSchema.parse(req.body);
       const r = await client.query(
         `INSERT INTO patrol_point (tenant_id, name, location, seq, enabled) VALUES ($1,$2,$3,$4,$5) RETURNING *`,
         [tenantId, b.name, b.location ?? null, b.seq ?? 0, b.enabled ?? true],
@@ -50,38 +51,38 @@ router.post('/points', async (req, res, next) => {
 
 router.put('/points/:id', async (req, res, next) => {
   try {
-    requireConfigRole(req, res);
     const tenantId = res.locals.auth.tenantId;
-    const b = pointSchema.partial().parse(req.body);
-    const sets: string[] = [];
-    const params: unknown[] = [tenantId, req.params.id];
-    if (b.name !== undefined) { params.push(b.name); sets.push(`name = $${params.length}`); }
-    if (b.location !== undefined) { params.push(b.location); sets.push(`location = $${params.length}`); }
-    if (b.seq !== undefined) { params.push(b.seq); sets.push(`seq = $${params.length}`); }
-    if (b.enabled !== undefined) { params.push(b.enabled); sets.push(`enabled = $${params.length}`); }
-    if (!sets.length) throw new AppError('BAD_REQUEST', 'no fields to update', 400);
-    params.push(new Date().toISOString());
-    sets.push('updated_at = $' + params.length);
-    const item = await withTenantClient(tenantId, (client) =>
-      client.query(
+    const item = await withTenantClient(tenantId, async (client) => {
+      await requirePermission(res.locals.auth, client, 'patrol.manage');
+      const b = pointSchema.partial().parse(req.body);
+      const sets: string[] = [];
+      const params: unknown[] = [tenantId, req.params.id];
+      if (b.name !== undefined) { params.push(b.name); sets.push(`name = $${params.length}`); }
+      if (b.location !== undefined) { params.push(b.location); sets.push(`location = $${params.length}`); }
+      if (b.seq !== undefined) { params.push(b.seq); sets.push(`seq = $${params.length}`); }
+      if (b.enabled !== undefined) { params.push(b.enabled); sets.push(`enabled = $${params.length}`); }
+      if (!sets.length) throw new AppError('BAD_REQUEST', 'no fields to update', 400);
+      params.push(new Date().toISOString());
+      sets.push('updated_at = $' + params.length);
+      return client.query(
         `UPDATE patrol_point SET ${sets.join(', ')} WHERE tenant_id=$1 AND id=$2 RETURNING *`,
         params,
       ).then((r) => {
         if (r.rowCount === 0) throw new AppError('NOT_FOUND', 'patrol point not found', 404);
         return r.rows[0];
-      }),
-    );
+      });
+    });
     return res.json({ ok: true, code: 0, item });
   } catch (e) { next(e); }
 });
 
 router.delete('/points/:id', async (req, res, next) => {
   try {
-    requireConfigRole(req, res);
     const tenantId = res.locals.auth.tenantId;
-    const r = await withTenantClient(tenantId, (client) =>
-      client.query('DELETE FROM patrol_point WHERE tenant_id=$1 AND id=$2 RETURNING id', [tenantId, req.params.id]),
-    );
+    const r = await withTenantClient(tenantId, async (client) => {
+      await requirePermission(res.locals.auth, client, 'patrol.manage');
+      return client.query('DELETE FROM patrol_point WHERE tenant_id=$1 AND id=$2 RETURNING id', [tenantId, req.params.id]);
+    });
     if (r.rowCount === 0) throw new AppError('NOT_FOUND', 'patrol point not found', 404);
     return res.json({ ok: true, code: 0 });
   } catch (e) { next(e); }
@@ -128,10 +129,10 @@ router.get('/tasks/:id', async (req, res, next) => {
 
 router.post('/tasks', async (req, res, next) => {
   try {
-    requireConfigRole(req, res);
     const tenantId = res.locals.auth.tenantId;
-    const b = taskSchema.parse(req.body);
     const item = await withTenantClient(tenantId, async (client) => {
+      await requirePermission(res.locals.auth, client, 'patrol.manage');
+      const b = taskSchema.parse(req.body);
       const r = await client.query(
         `INSERT INTO patrol_task (tenant_id, title, assignee, point_ids, note) VALUES ($1,$2,$3,$4,$5) RETURNING *`,
         [tenantId, b.title, b.assignee ?? null, b.point_ids, b.note ?? null],
