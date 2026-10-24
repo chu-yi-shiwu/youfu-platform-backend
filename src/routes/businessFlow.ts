@@ -2,8 +2,18 @@
 // 一张 business_flow_tasks 表 + 按 entity_type 区分，流转内核统一由 workflow_def 引擎驱动。
 // 当前支持：transport_task(运送) / emergency_plan(应急预案)。cycle_check 等经 config 中心生成 def 后亦可接入。
 // 所有响应均附 available（availableTransitions(def, status)），前端据此动态渲染动作按钮，不硬编码状态机。
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// 【S4：四个 handler 开头加查表分派】
+//   `proxyFor(entityType)` 命中 registry ⇒ 走 adapter（读写该业务的**原生表**）；
+//   未命中 ⇒ **原样**走 business_flow_tasks 逻辑。
+//   🔴 **响应外壳 {ok, code, items/item, label} 一律不变**——代理是"换数据源"，
+//      不是"换接口"；前端 BusinessFlowPage 不应感知到任何差别。
+//   🔴 **未命中路径零改动**：本笔对未代理实体的行为必须逐字节不变
+//      （`t5TransportProxy.http.test.ts` 里的 cycle_check 对照用例守着这点）。
 import { Router } from 'express';
 import { z } from 'zod';
+import type { PoolClient } from 'pg';
 import { withTenantClient } from '../db/pool.js';
 import { AppError } from '../middleware/error.js';
 import { requireConfigRole } from '../middleware/role.js';
@@ -12,6 +22,7 @@ import { availableTransitions, type WorkflowDef } from '../engine/stateMachine.j
 import { transitionEntity } from '../engine/transition.js';
 import { TRANSPORT_DEF, EMERGENCY_DEF, themeLabel } from '../engine/themes.js';
 import { emitDomainEvent } from '../db/eventBus.js';
+import { assertRequiredFields, proxyFor, type FlowProxyCtx } from '../engine/flowProxy.js';
 
 // entity_type → 内置兜底 def（与 themes.ts 保持一致；租户经配置中心生成后优先用 DB 定义）。
 const ENTITY_DEF: Record<string, WorkflowDef> = {
@@ -31,6 +42,21 @@ function fallbackFor(entityType: string): WorkflowDef {
 function authInfo(res: any): { actor: string } {
   const a = res.locals?.auth as any;
   return { actor: a?.userId ?? a?.username ?? 'user' };
+}
+
+/**
+ * 组装代理调用上下文（四个 handler 共用）。
+ * ⚠️ `client` 必须是 `withTenantClient` 事务内的那个（租户隔离 + RLS 已生效），
+ *    adapter 内不得再开新连接。
+ */
+function proxyCtx(client: PoolClient, res: any, entityType: string): FlowProxyCtx {
+  return {
+    client,
+    tenantId: res.locals.auth.tenantId,
+    entityType,
+    auth: res.locals.auth,
+    actor: authInfo(res).actor,
+  };
 }
 
 const router = Router();
@@ -70,6 +96,14 @@ router.get('/:entityType', async (req, res, next) => {
     if (!ENTITY_RE.test(entityType)) throw new AppError('BAD_REQUEST', 'invalid entity_type', 400);
     const tenantId = res.locals.auth.tenantId;
     const { status } = req.query as Record<string, string>;
+    // S4 分派：命中代理 ⇒ 走原生表（响应外壳不变：仍带 label）
+    const adapter = proxyFor(entityType);
+    if (adapter) {
+      const items = await withTenantClient(tenantId, (client) =>
+        adapter.list(proxyCtx(client, res, entityType), { status }),
+      );
+      return res.json({ ok: true, code: 0, items, label: themeLabel(entityType) });
+    }
     const items = await withTenantClient(tenantId, async (client) => {
       const def = await getWorkflowDefOrDefault(client, tenantId, entityType, fallbackFor(entityType));
       const clauses = ['tenant_id = $1', 'entity_type = $2'];
@@ -107,6 +141,14 @@ router.post('/:entityType', async (req, res, next) => {
       })
       .parse(req.body);
     const { actor } = authInfo(res);
+    // S4 分派：命中代理 ⇒ 走原生表（响应外壳不变：201 + {ok, code, item}）
+    const adapter = proxyFor(entityType);
+    if (adapter) {
+      const item = await withTenantClient(tenantId, (client) =>
+        adapter.create(proxyCtx(client, res, entityType), b),
+      );
+      return res.status(201).json({ ok: true, code: 0, item });
+    }
     const item = await withTenantClient(tenantId, async (client) => {
       const def = await getWorkflowDefOrDefault(client, tenantId, entityType, fallbackFor(entityType));
       const r = await client.query(
@@ -140,6 +182,14 @@ router.get('/:entityType/:id', async (req, res, next) => {
     const entityType = req.params.entityType;
     if (!ENTITY_RE.test(entityType)) throw new AppError('BAD_REQUEST', 'invalid entity_type', 400);
     const tenantId = res.locals.auth.tenantId;
+    // S4 分派：命中代理 ⇒ 走原生表（响应外壳不变：{ok, code, item}）
+    const adapter = proxyFor(entityType);
+    if (adapter) {
+      const item = await withTenantClient(tenantId, (client) =>
+        adapter.detail(proxyCtx(client, res, entityType), req.params.id),
+      );
+      return res.json({ ok: true, code: 0, item });
+    }
     const item = await withTenantClient(tenantId, async (client) => {
       const def = await getWorkflowDefOrDefault(client, tenantId, entityType, fallbackFor(entityType));
       const r = await client.query(
@@ -166,6 +216,17 @@ router.post('/:entityType/:id/transition', async (req, res, next) => {
       .object({ event: z.string().min(1), data: z.record(z.any()).optional() })
       .parse(req.body);
 
+    // S4 分派：命中代理 ⇒ 走原生表（响应外壳不变：{ok, code, item}）
+    // ⚠️ 分派在本 handler 的**最前**（业务校验之前）——代理侧自己会做
+    //   requiredFields 校验（同一个 assertRequiredFields），不会少一道。
+    const adapter = proxyFor(entityType);
+    if (adapter) {
+      const item = await withTenantClient(tenantId, (client) =>
+        adapter.transition(proxyCtx(client, res, entityType), req.params.id, b),
+      );
+      return res.json({ ok: true, code: 0, item });
+    }
+
     const item = await withTenantClient(tenantId, async (client) => {
       const def = await getWorkflowDefOrDefault(client, tenantId, entityType, fallbackFor(entityType));
       // requiredFields 校验（引用 data 内字段）
@@ -174,15 +235,7 @@ router.post('/:entityType/:id/transition', async (req, res, next) => {
         [req.params.id, tenantId, entityType],
       );
       if (cur.rowCount === 0) throw new AppError('NOT_FOUND', 'not found', 404);
-      const tr = def.transitions.find((x) => x.from === cur.rows[0].status && x.event === b.event);
-      if (!tr) throw new AppError('BAD_STATE', `illegal transition ${cur.rows[0].status} --${b.event}-->`, 422);
-      if (tr.requiredFields && tr.requiredFields.length) {
-        const data = b.data ?? {};
-        const missing = tr.requiredFields.filter((f) => data[f] == null || data[f] === '');
-        if (missing.length) {
-          throw new AppError('BAD_REQUEST', `missing required field: ${missing.join(',')}`, 422);
-        }
-      }
+      assertRequiredFields(def, cur.rows[0].status, b.event, b.data ?? {});
       const { actor } = authInfo(res);
       const row = await transitionEntity(client, tenantId, {
         table: 'business_flow_tasks',
