@@ -1,13 +1,23 @@
 // 配置路由（批次 A）：派单规则 / 术语(各院叫法) / 系统(品牌) 三类自助配置 CRUD。
 // 全部按租户隔离（withTenantClient 注入 tenant_id + RLS）。
-// 权限：仅 admin/operator 可写（dev 模式默认 role=admin，prod 由 JWT role 控制）。
+// 权限（T8 第二批 2026-10-25）：配置写端点已由 requireConfigRole（admin/operator 角色白名单，
+// **不查权限表** ⇒ 租户无法配置）收敛为 requirePermission('basicdata.edit')。
+//   · **复用现成权限点、不新增**：派单规则/术语/系统配置本就属「基础数据」，且 basicdata.edit
+//     默认已给 operator ⇒ 与原 admin+operator 白名单天然等价，零新增权限点、零改默认矩阵。
+//   · 收敛后这些端点**终于可由租户授权**（权限矩阵界面给任意角色勾 basicdata.edit 即生效）。
+//   · 已知差异（同第一批）：requirePermission 在 dev 模式恒放行（role.ts:396），生产无 dev 模式。
+//   · 只读端点（GET /config/*）维持「已认证即放」，不收口。
 import { Router } from 'express';
 import { z } from 'zod';
 import { withTenantClient } from '../db/pool.js';
 import { AppError } from '../middleware/error.js';
 // 审查修复（架构🟡12）：requireConfigRole 曾在 role.ts 与 config.ts 各实现一份（双份角色白名单，
 // 改一处漏一处）。统一 re-export role.ts 的唯一实现，调用点零改动。
-import { requireConfigRole, assertAdmin } from '../middleware/role.js';
+// T8 第二批（2026-10-25）：config.ts 自身 8 处写端点已改用 requirePermission('basicdata.edit')。
+// `requireConfigRole` 的 import **仅为下方 re-export 保留** —— src/routes/aiPreview.ts:13 仍从
+// './config.js' 引它。这是过渡态：aiPreview 的守卫收敛属下一批（E6 一次只改一个变量），
+// 收敛后本 re-export 与该 import 一并删除。
+import { requireConfigRole, assertAdmin, requirePermission } from '../middleware/role.js';
 
 const router = Router();
 
@@ -56,11 +66,11 @@ router.get('/config/dispatch-rules', async (req, res, next) => {
 
 router.post('/config/dispatch-rules', async (req, res, next) => {
   try {
-    requireConfigRole(req, res);
     const tenantId = res.locals.auth.tenantId;
     const body = ruleSchema.parse(req.body);
-    const item = await withTenantClient(tenantId, (client) =>
-      client
+    const item = await withTenantClient(tenantId, async (client) => {
+      await requirePermission(res.locals.auth, client, 'basicdata.edit');
+      return client
         .query(
           `INSERT INTO dispatch_rule (tenant_id, name, priority, match_json, strategy_json, enabled)
            VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`,
@@ -73,8 +83,8 @@ router.post('/config/dispatch-rules', async (req, res, next) => {
             body.enabled ?? true,
           ],
         )
-        .then((r) => r.rows[0]),
-    );
+        .then((r) => r.rows[0]);
+    });
     return res.status(201).json({ ok: true, code: 0, item });
   } catch (e) {
     next(e);
@@ -83,10 +93,10 @@ router.post('/config/dispatch-rules', async (req, res, next) => {
 
 router.put('/config/dispatch-rules/:id', async (req, res, next) => {
   try {
-    requireConfigRole(req, res);
     const tenantId = res.locals.auth.tenantId;
     const body = ruleSchema.partial().parse(req.body);
     const item = await withTenantClient(tenantId, async (client) => {
+      await requirePermission(res.locals.auth, client, 'basicdata.edit');
       const cur = await client.query(
         `SELECT * FROM dispatch_rule WHERE id = $1 AND tenant_id = $2`,
         [req.params.id, tenantId],
@@ -117,13 +127,13 @@ router.put('/config/dispatch-rules/:id', async (req, res, next) => {
 
 router.delete('/config/dispatch-rules/:id', async (req, res, next) => {
   try {
-    requireConfigRole(req, res);
     const tenantId = res.locals.auth.tenantId;
-    const n = await withTenantClient(tenantId, (client) =>
-      client
+    const n = await withTenantClient(tenantId, async (client) => {
+      await requirePermission(res.locals.auth, client, 'basicdata.edit');
+      return client
         .query(`DELETE FROM dispatch_rule WHERE id = $1 AND tenant_id = $2`, [req.params.id, tenantId])
-        .then((r) => r.rowCount ?? 0),
-    );
+        .then((r) => r.rowCount ?? 0);
+    });
     if (n === 0) throw new AppError('NOT_FOUND', 'dispatch rule not found', 404);
     return res.json({ ok: true, code: 0 });
   } catch (e) {
@@ -180,10 +190,12 @@ router.get('/config/terms', async (req, res, next) => {
 
 router.post('/config/terms', async (req, res, next) => {
   try {
-    requireConfigRole(req, res);
     const tenantId = res.locals.auth.tenantId;
     const body = termSchema.parse(req.body);
-    const item = await withTenantClient(tenantId, (client) => toTermRow(client, tenantId, body));
+    const item = await withTenantClient(tenantId, async (client) => {
+      await requirePermission(res.locals.auth, client, 'basicdata.edit');
+      return toTermRow(client, tenantId, body);
+    });
     return res.status(201).json({ ok: true, code: 0, item });
   } catch (e) {
     next(e);
@@ -192,10 +204,10 @@ router.post('/config/terms', async (req, res, next) => {
 
 router.put('/config/terms/:id', async (req, res, next) => {
   try {
-    requireConfigRole(req, res);
     const tenantId = res.locals.auth.tenantId;
     const body = termSchema.partial().parse(req.body);
     const item = await withTenantClient(tenantId, async (client) => {
+      await requirePermission(res.locals.auth, client, 'basicdata.edit');
       const cur = await client.query(`SELECT * FROM term WHERE id = $1 AND tenant_id = $2`, [
         req.params.id,
         tenantId,
@@ -226,13 +238,13 @@ router.put('/config/terms/:id', async (req, res, next) => {
 
 router.delete('/config/terms/:id', async (req, res, next) => {
   try {
-    requireConfigRole(req, res);
     const tenantId = res.locals.auth.tenantId;
-    const n = await withTenantClient(tenantId, (client) =>
-      client
+    const n = await withTenantClient(tenantId, async (client) => {
+      await requirePermission(res.locals.auth, client, 'basicdata.edit');
+      return client
         .query(`DELETE FROM term WHERE id = $1 AND tenant_id = $2`, [req.params.id, tenantId])
-        .then((r) => r.rowCount ?? 0),
-    );
+        .then((r) => r.rowCount ?? 0);
+    });
     if (n === 0) throw new AppError('NOT_FOUND', 'term not found', 404);
     return res.json({ ok: true, code: 0 });
   } catch (e) {
@@ -270,13 +282,13 @@ router.get('/config/system', async (req, res, next) => {
 // 批量 upsert 系统配置，body: { items: [{key, value}] }
 router.put('/config/system', async (req, res, next) => {
   try {
-    requireConfigRole(req, res);
     const tenantId = res.locals.auth.tenantId;
     // T0：配置变更留变更人。取不到操作人时写 NULL —— 留痕的意义是**可信**，不是"填满"；
     // 编一个 'system' 进去等于把"不知道是谁改的"伪装成"系统改的"，比 NULL 更有害。
     const actor = res.locals.auth.username ?? null;
     const body = z.object({ items: z.array(systemItemSchema) }).parse(req.body);
     const items = await withTenantClient(tenantId, async (client) => {
+      await requirePermission(res.locals.auth, client, 'basicdata.edit');
       const out: any[] = [];
       for (const it of body.items) {
         const r = await client.query(
@@ -320,12 +332,12 @@ router.get('/config/ticket-require-service-desk', async (req, res, next) => {
 
 router.put('/config/ticket-require-service-desk', async (req, res, next) => {
   try {
-    requireConfigRole(req, res);
     const tenantId = res.locals.auth.tenantId;
     const actor = res.locals.auth.username ?? null; // T0：留变更人（取不到写 NULL，不编造）
     const body = z.object({ enabled: z.boolean() }).parse(req.body);
-    const item = await withTenantClient(tenantId, (client) =>
-      client
+    const item = await withTenantClient(tenantId, async (client) => {
+      await requirePermission(res.locals.auth, client, 'basicdata.edit');
+      return client
         .query(
           `INSERT INTO system_config (tenant_id, key, value, updated_at, updated_by)
            VALUES ($1,$2,$3,now(),$4)
@@ -334,8 +346,8 @@ router.put('/config/ticket-require-service-desk', async (req, res, next) => {
            RETURNING id, key, value, updated_at`,
           [tenantId, REQUIRE_DESK_KEY, String(body.enabled), actor],
         )
-        .then((r) => r.rows[0]),
-    );
+        .then((r) => r.rows[0]);
+    });
     return res.json({ ok: true, code: 0, key: REQUIRE_DESK_KEY, enabled: body.enabled, item });
   } catch (e) {
     next(e);
