@@ -112,6 +112,18 @@ export const PERM_DEFS = {
   'material.manage': { label: '耗材维护', defaults: [] },
   'asset.manage': { label: '资产维护', defaults: [] },
   'consumable.consume': { label: '工单耗材领用', defaults: ['operator', 'worker'] },
+  // T8 第三批（2026-10-25）：设备模块独立权限点。equipment.ts 8 处写端点
+  //   （设备 / 设备类型 / 设备厂商三类主数据 CRUD + CSV 导入导出 + 保养记录增删改）
+  //   此前走 requireConfigRole（同步角色白名单，不查权限表 ⇒ 租户无法配置）。
+  //   🔴 为什么不用 `asset.manage`：设备与资产是**两套表**（equipment* vs asset*）、两个页面
+  //     （EquipmentPage vs AssetPage），且 asset.manage 经 E-9 收口为「仅 admin」，
+  //     复用它会把 operator 从放行变 403（破坏等价）。
+  //   🔴 为什么不蹭 `basicdata.edit`：见 inspect.manage 注释——蹭基础数据是被淘汰的旧做法；
+  //     且设备是独立运维模块，并入基础数据权限点就退化成「要么都给要么都不给」，
+  //     与「权限可配置」的诉求相悖（配了设备就得配字典，无法单独授权）。
+  //   🔴 operator 默认给这个是**为了等价、不是策略选择**：原白名单就是 admin+operator，
+  //     不给就会从放行变 403。是否收紧到 admin 属独立产品决策，不在本批夹带（E6）。
+  'equipment.manage': { label: '设备维护', defaults: ['operator'] },
 } as const satisfies Record<string, { label: string; defaults: readonly Role[] }>;
 
 /** 权限点清单（由 PERM_DEFS 派生，勿手改）。 */

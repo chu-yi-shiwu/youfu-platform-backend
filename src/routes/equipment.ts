@@ -1,5 +1,6 @@
 // 设备管理模块（P4）：设备 / 设备类型 / 设备厂商 三类主数据。
-// 通用 CRUD + CSV 导入导出；RLS 铁底线（withTenantClient 注入 tenant_id）；写操作 requireConfigRole。
+// 通用 CRUD + CSV 导入导出；RLS 铁底线（withTenantClient 注入 tenant_id）；
+// 写操作 requirePermission('equipment.manage')（T8 第三批：由角色白名单收敛到权限点）。
 // 契约形态对齐 basicData.ts（{ ok, code, items / item }），与前端 EquipmentPage.tsx 配套。
 // 对齐 UOne C 族（equipment / type / company）。
 import { Router } from 'express';
@@ -7,7 +8,7 @@ import { z } from 'zod';
 import { randomUUID } from 'crypto';
 import { withTenantClient } from '../db/pool.js';
 import { AppError } from '../middleware/error.js';
-import { requireConfigRole } from '../middleware/role.js';
+import { requirePermission } from '../middleware/role.js';
 import { parseCsv, csvEscape } from '../services/csvUtil.js';
 
 const router = Router();
@@ -152,10 +153,10 @@ router.get('/equipment/:eqId/maintenances', async (req, res, next) => {
 // 新建维保
 router.post('/equipment/:eqId/maintenances', async (req, res, next) => {
   try {
-    requireConfigRole(req, res);
     const tenantId = res.locals.auth.tenantId;
     const b = maintenanceSchema.parse(req.body);
     const item = await withTenantClient(tenantId, async (client) => {
+      await requirePermission(res.locals.auth, client, 'equipment.manage');
       const cur = await client.query('SELECT id FROM equipment WHERE id=$1 AND tenant_id=$2', [req.params.eqId, tenantId]);
       if (cur.rowCount === 0) throw new AppError('NOT_FOUND', 'equipment not found', 404);
       const r = await client.query(
@@ -177,10 +178,10 @@ router.post('/equipment/:eqId/maintenances', async (req, res, next) => {
 // 更新维保
 router.put('/equipment/maintenances/:id', async (req, res, next) => {
   try {
-    requireConfigRole(req, res);
     const tenantId = res.locals.auth.tenantId;
     const b = maintenanceSchema.partial().parse(req.body);
     const item = await withTenantClient(tenantId, async (client) => {
+      await requirePermission(res.locals.auth, client, 'equipment.manage');
       const cur = await client.query('SELECT * FROM equipment_maintenance WHERE id=$1 AND tenant_id=$2', [req.params.id, tenantId]);
       if (cur.rowCount === 0) throw new AppError('NOT_FOUND', 'maintenance not found', 404);
       const sets: string[] = [];
@@ -210,11 +211,11 @@ router.put('/equipment/maintenances/:id', async (req, res, next) => {
 // 删除维保
 router.delete('/equipment/maintenances/:id', async (req, res, next) => {
   try {
-    requireConfigRole(req, res);
     const tenantId = res.locals.auth.tenantId;
-    const r = await withTenantClient(tenantId, (client) =>
-      client.query('DELETE FROM equipment_maintenance WHERE id=$1 AND tenant_id=$2', [req.params.id, tenantId]),
-    );
+    const r = await withTenantClient(tenantId, async (client) => {
+      await requirePermission(res.locals.auth, client, 'equipment.manage');
+      return client.query('DELETE FROM equipment_maintenance WHERE id=$1 AND tenant_id=$2', [req.params.id, tenantId]);
+    });
     if (r.rowCount === 0) throw new AppError('NOT_FOUND', 'maintenance not found', 404);
     return res.json({ ok: true, code: 0, deleted: r.rowCount });
   } catch (e) {
@@ -251,7 +252,6 @@ router.get('/equipment/:type', async (req, res, next) => {
 // ============ 新建 ============
 router.post('/equipment/:type', async (req, res, next) => {
   try {
-    requireConfigRole(req, res);
     const def = getType(req.params.type);
     const tenantId = res.locals.auth.tenantId;
     const b = def.schema.parse(req.body);
@@ -262,11 +262,12 @@ router.post('/equipment/:type', async (req, res, next) => {
     const cols = ['id', 'tenant_id', ...provided];
     const ph = cols.map((_, i) => `$${i + 1}`).join(', ');
     const vals = [id, tenantId, ...provided.map((c) => (b as any)[c])];
-    const item = await withTenantClient(tenantId, (client) =>
-      client
+    const item = await withTenantClient(tenantId, async (client) => {
+      await requirePermission(res.locals.auth, client, 'equipment.manage');
+      return client
         .query(`INSERT INTO ${def.table} (${cols.join(', ')}) VALUES (${ph}) RETURNING *`, vals)
-        .then((r) => r.rows[0]),
-    );
+        .then((r) => r.rows[0]);
+    });
     return res.status(201).json({ ok: true, code: 0, item });
   } catch (e) {
     next(e);
@@ -276,11 +277,11 @@ router.post('/equipment/:type', async (req, res, next) => {
 // ============ 更新 ============
 router.put('/equipment/:type/:id', async (req, res, next) => {
   try {
-    requireConfigRole(req, res);
     const def = getType(req.params.type);
     const tenantId = res.locals.auth.tenantId;
     const b = (def.schema as z.ZodObject<any>).partial().parse(req.body);
     const item = await withTenantClient(tenantId, async (client) => {
+      await requirePermission(res.locals.auth, client, 'equipment.manage');
       const cur = await client.query(`SELECT * FROM ${def.table} WHERE id=$1 AND tenant_id=$2`, [req.params.id, tenantId]);
       if (cur.rowCount === 0) throw new AppError('NOT_FOUND', `${def.table} not found`, 404);
       const sets: string[] = [];
@@ -310,12 +311,12 @@ router.put('/equipment/:type/:id', async (req, res, next) => {
 // ============ 删除 ============
 router.delete('/equipment/:type/:id', async (req, res, next) => {
   try {
-    requireConfigRole(req, res);
     const def = getType(req.params.type);
     const tenantId = res.locals.auth.tenantId;
-    const r = await withTenantClient(tenantId, (client) =>
-      client.query(`DELETE FROM ${def.table} WHERE id=$1 AND tenant_id=$2`, [req.params.id, tenantId]),
-    );
+    const r = await withTenantClient(tenantId, async (client) => {
+      await requirePermission(res.locals.auth, client, 'equipment.manage');
+      return client.query(`DELETE FROM ${def.table} WHERE id=$1 AND tenant_id=$2`, [req.params.id, tenantId]);
+    });
     if (r.rowCount === 0) throw new AppError('NOT_FOUND', `${def.table} not found`, 404);
     return res.json({ ok: true, code: 0, deleted: r.rowCount });
   } catch (e) {
@@ -326,12 +327,13 @@ router.delete('/equipment/:type/:id', async (req, res, next) => {
 // ============ CSV 导出 ============
 router.get('/equipment/:type/export', async (req, res, next) => {
   try {
-    requireConfigRole(req, res); // R9-F1：导出属管理面，仅 admin/operator
     const def = getType(req.params.type);
     const tenantId = res.locals.auth.tenantId;
-    const items = await withTenantClient(tenantId, (client) =>
-      client.query(`SELECT * FROM ${def.table} WHERE tenant_id=$1 ORDER BY created_at DESC`, [tenantId]).then((r) => r.rows),
-    );
+    // R9-F1：导出属管理面，仅 admin/operator ⇒ 现由 equipment.manage 权限点表达（operator 默认有）
+    const items = await withTenantClient(tenantId, async (client) => {
+      await requirePermission(res.locals.auth, client, 'equipment.manage');
+      return client.query(`SELECT * FROM ${def.table} WHERE tenant_id=$1 ORDER BY created_at DESC`, [tenantId]).then((r) => r.rows);
+    });
     const headers = def.insertCols;
     const lines = [headers.join(',')];
     for (const row of items) lines.push(headers.map((h) => csvEscape(row[h])).join(','));
@@ -347,7 +349,6 @@ router.get('/equipment/:type/export', async (req, res, next) => {
 // ============ CSV 导入 ============
 router.post('/equipment/:type/import', async (req, res, next) => {
   try {
-    requireConfigRole(req, res);
     const def = getType(req.params.type);
     const tenantId = res.locals.auth.tenantId;
     const text = typeof req.body === 'string' ? req.body : (req.body as any)?.csv;
@@ -358,6 +359,7 @@ router.post('/equipment/:type/import', async (req, res, next) => {
     const dataRows = rows.slice(1);
     let inserted = 0;
     await withTenantClient(tenantId, async (client) => {
+      await requirePermission(res.locals.auth, client, 'equipment.manage');
       for (const r of dataRows) {
         const obj: Record<string, unknown> = {};
         headers.forEach((h, i) => {
