@@ -10,7 +10,7 @@ import { z } from 'zod';
 import { randomUUID } from 'crypto';
 import { withTenantClient } from '../db/pool.js';
 import { AppError } from '../middleware/error.js';
-import { requireConfigRole, requirePermission } from '../middleware/role.js';
+import { requirePermission } from '../middleware/role.js';
 import { createLinkedWorkOrder } from '../services/linkedWorkOrder.js';
 import { summarizeLinkedOrders } from '../services/assetHistory.js';
 import { emitDomainEvent } from '../db/eventBus.js';
@@ -332,11 +332,15 @@ router.delete('/assets/maintenance/:mid', async (req, res, next) => {
 const ASSET_CSV_COLS = ['name', 'model', 'pinyin', 'location', 'status', 'sno', 'financial_category', 'price', 'supplier', 'purchase_date'];
 router.get('/assets/export', async (req, res, next) => {
   try {
-    requireConfigRole(req, res); // R9-F1：导出属管理面，仅 admin/operator
-    const tenantId = res.locals.auth.tenantId;
-    const items = await withTenantClient(tenantId, (client) =>
-      client.query(`SELECT * FROM asset WHERE tenant_id=$1 ORDER BY created_at DESC`, [tenantId]).then((r) => r.rows),
-    );
+    const auth = res.locals.auth;
+    const tenantId = auth.tenantId;
+    const items = await withTenantClient(tenantId, async (client) => {
+      // R9-F1：导出属管理面 ⇒ 收敛到可配置权限点（原 requireConfigRole 只读角色白名单、不查权限表）
+      await requirePermission(auth, client, 'asset.export');
+      return client
+        .query(`SELECT * FROM asset WHERE tenant_id=$1 ORDER BY created_at DESC`, [tenantId])
+        .then((r) => r.rows);
+    });
     const lines = [['asset_no', ...ASSET_CSV_COLS].join(',')];
     for (const row of items) lines.push([row.asset_no ?? '', ...ASSET_CSV_COLS.map((h) => csvEscape(row[h]))].join(','));
     const csv = '﻿' + lines.join('\r\n');

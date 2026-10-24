@@ -273,20 +273,22 @@ describe('material.ts · 流水/CSV 导出导入', () => {
     expect(calls()[0]).toContain('type = $2');
   });
 
-  it('⑩GET /materials/export → BOM+表头；（worker）→ 403；import 逐行建档', async () => {
+  it('⑩GET /materials/export → BOM+表头；import 逐行建档；（worker · prod）→ 403', async () => {
     const r = await req('GET', '/api/v1/materials/export');
     expect(r.status).toBe(200);
     expect(r.headers.get('content-type')).toContain('text/csv');
     const buf = new Uint8Array(await r.arrayBuffer());
     expect([buf[0], buf[1], buf[2]]).toEqual([0xef, 0xbb, 0xbf]);
     expect(new TextDecoder('utf-8').decode(buf.slice(3)).startsWith('code,name,category')).toBe(true);
-    authRole = 'worker';
-    expect((await req('GET', '/api/v1/materials/export')).status).toBe(403);
-    authRole = 'operator';
     const r2 = await req('POST', '/api/v1/materials/import', { csv: 'code,name\nM-A,胶带\n' });
     const j2 = (await r2.json()) as any;
     expect(j2.inserted).toBe(1);
     expect(calls().some((s) => s.includes('INSERT INTO material ('))).toBe(true);
+    // T8 第十二批：导出守卫收敛到 requirePermission('material.export') ⇒ dev 恒放行会让 403 变成恒绿假绿。
+    // 放最后：authMode / authRole 由 beforeEach 归位，不影响后续用例。
+    authMode = 'prod';
+    authRole = 'worker';
+    expect((await req('GET', '/api/v1/materials/export')).status).toBe(403);
   });
 });
 
@@ -461,5 +463,25 @@ describe('feedback.ts · 反馈提交/回复/统计', () => {
     expect(((await r1.json()) as any).item.status).toBe('replied');
     const r2 = await req('GET', '/api/v1/feedback/export');
     expect(r2.status).toBe(200);
+  });
+});
+
+describe('T8 第十二批 · 耗材 CSV 导出权限收敛（requireConfigRole → material.export）', () => {
+  // B 组 = 收敛的全部价值：改前 requireConfigRole 只读角色白名单、不查 role_permission
+  //      ⇒ 租户把 material.export 授给 reviewer 也放不了行。改前这条必红（403），改后绿。
+  it('（prod · reviewer）授 material.export ⇒ GET /materials/export 200', async () => {
+    authMode = 'prod';
+    authRole = 'reviewer';
+    permGrants['reviewer'] = ['material.export'];
+    const r = await req('GET', '/api/v1/materials/export');
+    expect(r.status).toBe(200);
+    expect(r.headers.get('content-type')).toContain('text/csv');
+  });
+
+  it('（prod · reviewer）只授 material.manage（不带 export）⇒ 仍 403（两点不互通）', async () => {
+    authMode = 'prod';
+    authRole = 'reviewer';
+    permGrants['reviewer'] = ['material.manage'];
+    expect((await req('GET', '/api/v1/materials/export')).status).toBe(403);
   });
 });

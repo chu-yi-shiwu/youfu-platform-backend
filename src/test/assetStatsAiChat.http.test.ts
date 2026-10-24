@@ -25,11 +25,18 @@ let detailRow: any = {
 let detailFound = true;
 let deleteCount = 1;
 let lastTenant = '';
+// T8 第十二批：租户级权限覆盖（role_permission 行）。空 ⇒ 回退默认矩阵。
+let permGrants: Record<string, string[]> = {};
 
 // ---- fakeClient：按 SQL 文本分发（细节分支优先于列表/导出）----
 const fakeClient = {
   query: vi.fn(async (text: unknown, params?: unknown[]) => {
     const sql = String(text);
+    if (sql.includes('SELECT perm FROM role_permission')) {
+      const role = String((params as unknown[])?.[1] ?? '');
+      const set = permGrants[role] ?? [];
+      return { rows: set.map((p) => ({ perm: p })), rowCount: set.length };
+    }
     if (sql.includes('SELECT * FROM asset WHERE id=$1 AND tenant_id=$2'))
       return detailFound ? { rows: [detailRow], rowCount: 1 } : { rows: [], rowCount: 0 };
     if (sql.includes('SELECT linked_order_ids FROM asset WHERE id=$1'))
@@ -127,6 +134,7 @@ beforeEach(() => {
   detailFound = true;
   deleteCount = 1;
   lastTenant = '';
+  permGrants = {};
   fakeClient.query.mockClear();
   emitDomainEvent.mockClear();
   createLinkedWorkOrder.mockClear();
@@ -302,6 +310,7 @@ describe('asset.ts · 维保台账 + CSV 导出/导入', () => {
   });
 
   it('⑰GET /assets/export（operator）→ CSV 带 BOM + 表头；（worker）→ 403（R9-F1）', async () => {
+    authMode = 'prod'; // 🔴 T8 第十二批：导出守卫收敛到 requirePermission ⇒ dev 恒放行会让 403 恒绿假绿
     const r = await req('GET', '/assets/export');
     expect(r.status).toBe(200);
     expect(r.headers.get('content-type')).toContain('text/csv');
@@ -458,5 +467,25 @@ describe('adminAiChat.ts · 管理对话端点（建议卡，绝不写库）', (
     expect(r.status).toBe(200);
     const j = (await r.json()) as any;
     expect(j.conversation_id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
+  });
+});
+
+describe('T8 第十二批 · 资产 CSV 导出权限收敛（requireConfigRole → asset.export）', () => {
+  // B 组 = 收敛的全部价值：改前 requireConfigRole 只读角色白名单、不查 role_permission
+  //      ⇒ 租户把 asset.export 授给 reviewer 也放不了行。改前这条必红（403），改后绿。
+  it('（prod · reviewer）授 asset.export ⇒ GET /assets/export 200', async () => {
+    authMode = 'prod';
+    authRole = 'reviewer';
+    permGrants['reviewer'] = ['asset.export'];
+    const r = await req('GET', '/assets/export');
+    expect(r.status).toBe(200);
+    expect(r.headers.get('content-type')).toContain('text/csv');
+  });
+
+  it('（prod · reviewer）只授 asset.manage（不带 export）⇒ 仍 403（两点不互通）', async () => {
+    authMode = 'prod';
+    authRole = 'reviewer';
+    permGrants['reviewer'] = ['asset.manage'];
+    expect((await req('GET', '/assets/export')).status).toBe(403);
   });
 });

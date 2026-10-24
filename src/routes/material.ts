@@ -10,7 +10,7 @@ import { z } from 'zod';
 import { randomUUID } from 'crypto';
 import { withTenantClient } from '../db/pool.js';
 import { AppError } from '../middleware/error.js';
-import { requireConfigRole, requirePermission } from '../middleware/role.js';
+import { requirePermission } from '../middleware/role.js';
 import { applyStockAction } from '../services/inventory.js';
 import { emitDomainEvent } from '../db/eventBus.js';
 import { parseCsv, csvEscape } from '../services/csvUtil.js';
@@ -601,11 +601,15 @@ router.get('/inventory/logs', async (req, res, next) => {
 const MAT_CSV_COLS = ['code', 'name', 'category', 'spec', 'unit', 'price', 'doc'];
 router.get('/materials/export', async (req, res, next) => {
   try {
-    requireConfigRole(req, res); // R9-F1：导出属管理面，仅 admin/operator
-    const tenantId = res.locals.auth.tenantId;
-    const items = await withTenantClient(tenantId, (client) =>
-      client.query(`SELECT * FROM material WHERE tenant_id=$1 ORDER BY created_at DESC`, [tenantId]).then((r) => r.rows),
-    );
+    const auth = res.locals.auth;
+    const tenantId = auth.tenantId;
+    const items = await withTenantClient(tenantId, async (client) => {
+      // R9-F1：导出属管理面 ⇒ 收敛到可配置权限点（原 requireConfigRole 只读角色白名单、不查权限表）
+      await requirePermission(auth, client, 'material.export');
+      return client
+        .query(`SELECT * FROM material WHERE tenant_id=$1 ORDER BY created_at DESC`, [tenantId])
+        .then((r) => r.rows);
+    });
     const lines = [MAT_CSV_COLS.join(',')];
     for (const row of items) lines.push(MAT_CSV_COLS.map((h) => csvEscape(row[h])).join(','));
     const csv = '﻿' + lines.join('\r\n');

@@ -7,6 +7,10 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vites
 const calls: { sql: string; params: unknown[] }[] = [];
 const txLog: string[] = [];
 let scripted: { match: RegExp; rows: any[]; rowCount?: number }[] = [];
+// T8 第十二批：导出租金守卫要测「角色被拒 / 授权放行」，role 与 authMode 必须可调。
+// 归位值取既有用例原写死的 admin + dev（hasPerm 对 dev 与 admin 均恒放行 ⇒ 既有用例零影响）。
+let authRole: string = 'admin';
+let authMode: 'dev' | 'prod' = 'dev';
 
 function push(sql: string, params: unknown[] = []) {
   calls.push({ sql, params });
@@ -44,7 +48,7 @@ import { errorMiddleware } from '../middleware/error.js';
 const app = express();
 app.use(express.json());
 app.use((_req, res, next) => {
-  res.locals.auth = { tenantId: 't1', role: 'admin', authMode: 'dev', userId: 'u1', requestId: 'test' };
+  res.locals.auth = { tenantId: 't1', role: authRole, authMode, userId: 'u1', requestId: 'test' };
   next();
 });
 app.use(basicDataRouter);
@@ -69,6 +73,8 @@ beforeEach(() => {
   calls.length = 0;
   txLog.length = 0;
   scripted = [];
+  authRole = 'admin';
+  authMode = 'dev'; // 归位：T8 第十二批导出用例会切 prod + worker
 });
 
 describe('location / reporter CRUD', () => {
@@ -190,5 +196,34 @@ describe('引擎修复③：删除报修人联动置空引用', () => {
     const r = await fetch(`${base}/basic-data/reporter/nope`, { method: 'DELETE' });
     expect(r.status).toBe(404);
     expect(calls.some((c) => c.sql.includes('UPDATE location_dict'))).toBe(false);
+  });
+});
+
+describe('T8 第十二批 · 基础数据 CSV 导出权限收敛（requireConfigRole → basicdata.edit）', () => {
+  // 改前：requireConfigRole 是同步角色白名单（admin/operator），**不查 role_permission**
+  //      ⇒ 租户授不授权都一个样。改后走 requirePermission ⇒ 可配置。
+  it('A 组：worker（prod · 无授权）→ GET /basic-data/location/export 403', async () => {
+    authMode = 'prod'; // 🔴 dev 下 requirePermission 恒放行 ⇒ 不切 prod 这条 403 是恒绿的假绿
+    authRole = 'worker';
+    const r = await fetch(`${base}/basic-data/location/export`);
+    expect(r.status).toBe(403);
+  });
+
+  // B 组 = 收敛的全部价值：改前授 basicdata.edit 给 worker 也放不了行（守卫根本不查权限表）。
+  it('B 组：worker 经 role_permission 授 basicdata.edit → 200（BOM + 真查 location_dict）', async () => {
+    authMode = 'prod';
+    authRole = 'worker';
+    scripted = [
+      { match: /SELECT perm FROM role_permission/, rows: [{ perm: 'basicdata.edit' }] },
+      { match: /SELECT \* FROM location_dict/, rows: [{ id: 'loc-1', code: '3F-A01', name: '三楼会议室', category: '房间' }] },
+    ];
+    const r = await fetch(`${base}/basic-data/location/export`);
+    expect(r.status).toBe(200);
+    expect(r.headers.get('content-type')).toContain('text/csv');
+    // BOM 必须看原始字节：text() 的 UTF-8 解码会剥掉 BOM
+    const buf = new Uint8Array(await r.arrayBuffer());
+    expect([buf[0], buf[1], buf[2]]).toEqual([0xef, 0xbb, 0xbf]);
+    // 守卫移入 withTenantClient 后，同连接查询序列变了 ⇒ 按 SQL 定位，不写死下标（骨架 §2.3 坑三）
+    expect(calls.some((c) => c.sql.includes('SELECT * FROM location_dict'))).toBe(true);
   });
 });

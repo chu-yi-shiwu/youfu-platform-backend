@@ -188,6 +188,25 @@ export const PERM_DEFS = {
   //      不是权限点归属 —— 按页面判会把服务台和字典/术语捆成"要么都给要么都不给"。
   // 🔴 operator 默认给是**为了等价**（原 requireConfigRole 白名单 admin+operator），非策略选择。
   'servicedesk.manage': { label: '服务台配置', defaults: ['operator'] },
+  // T8 第十二批（2026-10-25）：**CSV 导出独立权限点**（material / asset 两处新增；
+  //   basicData 复用既有的 basicdata.edit，见下）。三个导出端点原本是同一句
+  //   `requireConfigRole(req, res) // R9-F1：导出属管理面，仅 admin/operator`。
+  // 🔴 为什么不复用 `material.manage` / `asset.manage`：这俩经 E-9 收口为 defaults: []（仅 admin），
+  //   复用会把 operator 从放行变 403（**破坏等价**）。而且「改目录」与「导出全量」本就是两件事，
+  //   分开才有得可配——这正是本次收敛要兑现的价值。
+  // 🔴 为什么不合并成一个跨模块的 `export.csv`：前十一批判据始终是「一个模块一个权限点」
+  //   （equipment / emergency / monitor / worker / feedback / patrol / serviceDesk 各自独立），
+  //   跨模块合并无先例；且资产导出含 price / supplier / financial_category 等财务字段，
+  //   与耗材目录敏感度不同，租户有真实的分别授权需求。合成一点 ⇒ 将来想单独收紧就得拆点
+  //   （破坏性变更，成本远高于一开始就分开）。
+  // 🔴 basicData 导出**复用 `basicdata.edit`**：该模块 CRUD 写操作已走此点（basicData.ts 4 处），
+  //   defaults 含 operator ⇒ 等价保住，且它是**本模块的点**、不是蹭别人的点 ⇒ 不新增 basicdata.export。
+  // 🔴 defaults 给 operator 是**为了等价**（原白名单就是 admin+operator），不是策略选择。
+  // ⚠️ 已知授权倒挂（登记，未做）：operator 默认**不能**改耗材 / 资产目录（material.manage /
+  //   asset.manage 仅 admin）却能导出全量——这是原 requireConfigRole 白名单的既有事实，本批等价保留。
+  //   是否把这两个 export 点收紧到 admin 属独立产品决策（E6 不夹带）。
+  'material.export': { label: '耗材导出', defaults: ['operator'] },
+  'asset.export': { label: '资产导出', defaults: ['operator'] },
 } as const satisfies Record<string, { label: string; defaults: readonly Role[] }>;
 
 /** 权限点清单（由 PERM_DEFS 派生，勿手改）。 */

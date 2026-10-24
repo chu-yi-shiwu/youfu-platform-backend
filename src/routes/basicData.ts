@@ -1,12 +1,12 @@
 // 基础数据模块（P1 回归修复）：区域 / 联系人 / 供应商 三类主数据。
-// 通用 CRUD + CSV 导入导出；RLS 铁底线（withTenantClient 注入 tenant_id）；写操作 requireConfigRole。
+// 通用 CRUD + CSV 导入导出；RLS 铁底线（withTenantClient 注入 tenant_id）；写操作 requirePermission('basicdata.edit')（含 CSV 导出，原 requireConfigRole 已收敛）。
 // 契约形态对齐 asset.ts（{ ok, code, items / item }），与前端 BasicData.tsx 配套。
 import { Router } from 'express';
 import { z } from 'zod';
 import { randomUUID } from 'crypto';
 import { withTenantClient } from '../db/pool.js';
 import { AppError } from '../middleware/error.js';
-import { requirePermission, requireConfigRole } from '../middleware/role.js';
+import { requirePermission } from '../middleware/role.js';
 import { parseCsv, csvEscape } from '../services/csvUtil.js';
 
 const router = Router();
@@ -437,12 +437,17 @@ router.delete('/basic-data/:type/:id', async (req, res, next) => {
 // ============ CSV 导出 ============
 router.get('/basic-data/:type/export', async (req, res, next) => {
   try {
-    requireConfigRole(req, res); // R9-F1：导出属管理面，仅 admin/operator
     const def = getType(req.params.type);
-    const tenantId = res.locals.auth.tenantId;
-    const items = await withTenantClient(tenantId, (client) =>
-      client.query(`SELECT * FROM ${def.table} WHERE tenant_id=$1 ORDER BY created_at DESC`, [tenantId]).then((r) => r.rows),
-    );
+    const auth = res.locals.auth;
+    const tenantId = auth.tenantId;
+    const items = await withTenantClient(tenantId, async (client) => {
+      // R9-F1：导出属管理面 ⇒ 收敛到可配置权限点（原 requireConfigRole 只读角色白名单、不查权限表）。
+      // 复用本模块写操作同一权限点 basicdata.edit（CRUD 4 处已走它，defaults 含 operator ⇒ 等价保住）。
+      await requirePermission(auth, client, 'basicdata.edit');
+      return client
+        .query(`SELECT * FROM ${def.table} WHERE tenant_id=$1 ORDER BY created_at DESC`, [tenantId])
+        .then((r) => r.rows);
+    });
     const headers = def.insertCols;
     const lines = [headers.join(',')];
     for (const row of items) lines.push(headers.map((h) => csvEscape(row[h])).join(','));
