@@ -362,3 +362,68 @@ describe('存量兼容（⑬）', () => {
     expect((upd.body.item as any).phone).toBeNull();
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// T3/S5 复合权限点（perm@entityType）的**入库侧白名单**——全仓此前零覆盖。
+//
+// 【为什么必须补】`permBase` 与 `assertEntityTypeScope` 两个纯函数各自有单测
+//   （roleCap.test.ts:121-142），但**端点有没有真的接上它们**没人测：
+//   accounts.ts:151（base ∈ PERMS）与 :164-173（entityType ∈ 运行时清单）两道校验
+//   只要哪天被摘掉，`ticket.manage@随便写` 就能原样落库 —— 权限配置变成不可控的垃圾，
+//   且**静默**（不报错、不拒绝，只是这条授权永远判不中）。
+//   这是"零 DDL 实例级权限"方案唯一的入口护栏，必须有 HTTP 层的行为锚。
+//
+// 【与既有用例的分工，不重复】
+//   ⑪b 测的是**纯全局**错字（ticket.mange）；本组测的是**带 @ 时**两道校验仍各自生效
+//   （base 要过 permBase、@ 后要过运行时清单），以及形状非法 / 不在清单两种 400 的区分。
+// ─────────────────────────────────────────────────────────────────────────────
+describe('T3/S5 复合权限点（perm@entityType）入库白名单', () => {
+  /** listEntityTypes 的数据源：workflow_def 里已配置的 entity_type（内置 transport_task/emergency_plan 恒在）。 */
+  const entityScript = (types: string[]) => [
+    { match: /SELECT DISTINCT entity_type FROM workflow_def/, rows: types.map((entity_type) => ({ entity_type })) },
+  ];
+
+  it('S5① 合法复合点（base ∈ PERMS 且 entityType 在实体清单内）⇒ 200 且原样落库', async () => {
+    h.scripted = [...entityScript(['transport_task', 'inspection_task'])];
+    const r = await call('PUT', '/accounts/roles/worker/permissions', { perms: ['ticket.manage@transport_task'] });
+    expect(r.status, `期望 200，实际 ${r.status} / ${JSON.stringify(r.body)}`).toBe(200);
+    const ins = h.calls.find((c) => c.sql.includes('INSERT INTO role_permission'));
+    expect(ins, '合法复合点必须落库').toBeDefined();
+    expect(ins!.params).toContain('ticket.manage@transport_task');
+  });
+
+  it('S5② entityType 形状合法但不在清单（transport_tesk 拼错）⇒ 400，且零 INSERT（禁垃圾进库）', async () => {
+    h.scripted = [...entityScript(['transport_task', 'inspection_task'])];
+    const r = await call('PUT', '/accounts/roles/worker/permissions', { perms: ['ticket.manage@transport_tesk'] });
+    expect(r.status, `期望 400，实际 ${r.status}`).toBe(400);
+    expect(r.body.code).toBe('BAD_PARAM');
+    expect(String(r.body.message), '400 文案必须说清是 entity_type 不在清单').toContain('unknown entity_type');
+    expect(h.calls.find((c) => c.sql.includes('INSERT INTO role_permission'))).toBeUndefined();
+    expect(h.calls.find((c) => c.sql.includes('DELETE FROM role_permission'))).toBeUndefined();
+  });
+
+  it('S5③ entityType 形状非法（中文）⇒ 400 invalid entity_type，且零 INSERT', async () => {
+    h.scripted = [...entityScript(['transport_task'])];
+    const r = await call('PUT', '/accounts/roles/worker/permissions', { perms: ['ticket.manage@随便写'] });
+    expect(r.status, `期望 400，实际 ${r.status}`).toBe(400);
+    expect(r.body.code).toBe('BAD_PARAM');
+    expect(String(r.body.message)).toContain('invalid entity_type');
+    expect(h.calls.find((c) => c.sql.includes('INSERT INTO role_permission'))).toBeUndefined();
+  });
+
+  it('S5④ 带 @ 时 base 仍要过 PERMS 白名单（ticket.mange@transport_task）⇒ 400 BAD_PERM', async () => {
+    h.scripted = [...entityScript(['transport_task'])];
+    const r = await call('PUT', '/accounts/roles/worker/permissions', { perms: ['ticket.mange@transport_task'] });
+    expect(r.status, `期望 400，实际 ${r.status}`).toBe(400);
+    expect(r.body.code, 'base 拼错必须报 BAD_PERM（与 ⑪b 同码，不是 BAD_PARAM）').toBe('BAD_PERM');
+    expect(String(r.body.message)).toContain('ticket.mange');
+    expect(h.calls.find((c) => c.sql.includes('INSERT INTO role_permission'))).toBeUndefined();
+  });
+
+  it('🟢 S5⑤ 防误伤：workflow_def 无配置行（清单只剩内置）⇒ 内置实体仍可授权 200', async () => {
+    h.scripted = [...entityScript([])]; // 空库：`transport_task` / `emergency_plan` 是内置兜底
+    const r = await call('PUT', '/accounts/roles/worker/permissions', { perms: ['ticket.manage@transport_task'] });
+    expect(r.status, `期望 200，实际 ${r.status} / ${JSON.stringify(r.body)}`).toBe(200);
+    expect(h.calls.find((c) => c.sql.includes('INSERT INTO role_permission'))).toBeDefined();
+  });
+});

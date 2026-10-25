@@ -180,3 +180,37 @@ describe('role/T3: hasPerm 实例级作用域判定', () => {
     ).rejects.toThrow(/permission denied: workflow\.approve@inspection_task/);
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// T3 复合权限点（perm@entityType）零 DDL 方案的**判定侧最后一环**：
+// role_permission 一旦有该租户该角色的覆盖行，**就不再回退默认矩阵**（role.ts:515-523）。
+//
+// 【为什么单独补这三条】上面 7 例用的是 workflow.approve —— 它的 defaults 是 []（仅 admin），
+//   ⇒ "被拦"分不清是「实例级没命中」还是「默认矩阵本来就没给」，断言没有牙。
+//   本组刻意改用 **ticket.manage**（defaults 含 operator）：
+//   先把"默认矩阵确实会给"作为前置断言钉住，再断言覆盖行存在时不回退 ⇒ 收紧是真收紧。
+//   将来谁把 `return false` 改成"回退默认矩阵"，租户的收紧配置会被默认矩阵静默放大成放行。
+// ─────────────────────────────────────────────────────────────────────────────
+describe('role/T3: 有覆盖行时**不回退**默认矩阵（租户收紧必须真的收紧）', () => {
+  const mkClient = (perms: string[]) =>
+    ({ query: vi.fn(async () => ({ rows: perms.map((perm) => ({ perm })), rowCount: perms.length })) }) as any;
+  const mkAuth = () => ({ authMode: 'prod', role: 'operator', tenantId: 't-demo' } as any);
+
+  it('🔴 覆盖行存在但不含该点 ⇒ 即使默认矩阵给了也 false（收紧不被默认矩阵放大）', async () => {
+    // 前置（这条断言的牙）：默认矩阵确实给 operator 这个点 ⇒ "回退"就会放行。
+    expect(hasPermDefault('operator', 'ticket.manage')).toBe(true);
+    await expect(hasPerm(mkAuth(), mkClient(['intake.create']), 'ticket.manage')).resolves.toBe(false);
+  });
+
+  it('🔴 复合点场景：只授 ticket.manage@transport_task ⇒ 别的单据 / 无单据上下文均 false（不回退）', async () => {
+    expect(hasPermDefault('operator', 'ticket.manage')).toBe(true);
+    await expect(
+      hasPerm(mkAuth(), mkClient(['ticket.manage@transport_task']), 'ticket.manage', 'inspection_task'),
+    ).resolves.toBe(false);
+    await expect(hasPerm(mkAuth(), mkClient(['ticket.manage@transport_task']), 'ticket.manage')).resolves.toBe(false);
+  });
+
+  it('🟢 对照组：无覆盖行（rowCount=0）⇒ 回退默认矩阵 ⇒ true（证明上两条不是恒 false）', async () => {
+    await expect(hasPerm(mkAuth(), mkClient([]), 'ticket.manage')).resolves.toBe(true);
+  });
+});
