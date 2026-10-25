@@ -1,12 +1,12 @@
 // UGC 模板贡献（二期）：租户把自建流程打包提交为标准模板（status=draft 待平台审核）。
 // V3 双轮另一半：租户轮（AUTO_TUNE 自优化）→ 平台轮（对比→贡献→审核→发布→分发→效果回写）。
-// 挂载 /api/v1/template-contributions，走租户 JWT + requireConfigRole（仅 admin/operator 可贡献）。
+// 挂载 /api/v1/template-contributions，走租户 JWT + requirePermission('template.contribute')（默认 admin/operator，租户可按角色授予）。
 import { Router } from 'express';
 import { z } from 'zod';
 import pool, { withTenantClient } from '../db/pool.js';
 import { getWorkflowDef } from '../engine/workflowDef.js';
 import { AppError } from '../middleware/error.js';
-import { requireConfigRole } from '../middleware/role.js';
+import { requirePermission } from '../middleware/role.js';
 import { recordPlatformAudit } from '../repo/platformAudit.js';
 
 const router = Router();
@@ -23,9 +23,18 @@ const contributeSchema = z.object({
 // 注意：requireConfigRole 是同步校验函数（匹配时无副作用、不匹配时 throw），须处理器内显式调用（同 config.ts 模式），不能当中间件传入。
 router.post('/template-contributions', async (req, res, next) => {
   try {
-    requireConfigRole(req, res);
-    const tenantId = res.locals.auth.tenantId;
-    const actor = res.locals.auth.username ?? res.locals.auth.role;
+    const auth = res.locals.auth;
+    const tenantId = auth.tenantId;
+    // T8 第十五批：原 requireConfigRole（同步角色白名单、**不查权限表**）⇒ 可配置的权限点。
+    //   🔴 守卫单独一个事务，**不合并进下面查 workflow_def 的事务**：
+    //   原顺序是「守卫 403 → zod 422 → 业务类型未配置 400」，若把守卫塞进下面那个事务，
+    //   zod 校验和业务校验就得跟着挪进去才能保序，控制流无谓地被改写（同批 14 webhook 的取舍）。
+    //   单独事务 ⇒ 403 → 422 → 400 的顺序原样保持，且改动最小。
+    //   本事务只为取得 client 做权限查询、不写库 ⇒ 额外的事务开销可接受。
+    await withTenantClient(tenantId, async (client) => {
+      await requirePermission(auth, client, 'template.contribute');
+    });
+    const actor = auth.username ?? auth.role;
     const b = contributeSchema.parse(req.body);
 
     // 审查修复：entity_type 须为租户已显式配置的业务类型（有 workflow_def 行），

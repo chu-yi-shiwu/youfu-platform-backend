@@ -235,6 +235,19 @@ export const PERM_DEFS = {
   // ⚠️ 已知待决（登记，未做）：订阅的**停用/删除**端点本批未一并收口（原实现就无守卫，
   //   属「要不要给只读角色加门禁」的独立产品决策，E6 不夹带）。
   'webhook.manage': { label: 'Webhook 订阅', defaults: ['operator'] },
+  // T8 第十五批（2026-10-25）：UGC 模板贡献（`POST /api/v1/template-contributions`，
+  //   templateContributions.ts:26）—— `requireConfigRole` 的**最后一处**调用点。
+  // 🔴 **名字不是新造的**：本端点写给平台审计的 action 字符串**代码里本来就写的是这个**
+  //   （`recordPlatformAudit({ action: 'template.contribute' })`）⇒ 沿用代码原文。
+  // 🔴 为什么不复用 `workflow.edit`：它 defaults 是 `[]`（仅 admin）⇒ 复用会把 operator
+  //   从放行变 403（**破坏等价**）。本端点与「改自己租户的流程定义」不是一回事。
+  // 🔴 为什么不复用 `basicdata.edit`：语义不符 —— 本端点不是改字典，而是**向平台模板市场
+  //   提交内容**（写平台表 `platform_template`，status=draft 待平台审核），是租户**对外**的动作；
+  //   与批 14 的 webhook 同理：不能让「能改字典」自动等价于「能对外提交」。
+  // 🔴 operator 默认给是**为了等价**（原 requireConfigRole 白名单就是 admin+operator），非策略选择。
+  // ⚠️ 已知待决（登记，未做）：模板**市场侧**（templateMarket.ts）的端点本批未涉及
+  //   （属平台运营面，不是租户侧守卫收敛范围）。
+  'template.contribute': { label: '模板贡献', defaults: ['operator'] },
 } as const satisfies Record<string, { label: string; defaults: readonly Role[] }>;
 
 /** 权限点清单（由 PERM_DEFS 派生，勿手改）。 */
