@@ -1,7 +1,7 @@
 // workflow_def 仓储（T-①）：读/确保/保存每租户每业务流的状态图定义。
 // 状态图存 DB，由可配置状态机引擎消费，实现"流程零代码配置"。
 import type { PoolClient } from 'pg';
-import { DEFAULT_WORK_ORDER_DEF, doneStates, terminalStates, type WorkflowDef } from './stateMachine.js';
+import { DEFAULT_WORK_ORDER_DEF, doneStates, terminalStates, type WorkflowDef, type WorkflowTransition } from './stateMachine.js';
 import { ensureClaimHallState } from './claimHallEdges.js';
 import { ensureTenantStateLabels } from './labelDictTenant.js';
 import { AppError } from '../middleware/error.js';
@@ -258,6 +258,141 @@ export async function countInflightByStates(
   return { total, byState };
 }
 
+/** 一个「会让在途单走不下去」的改动面：lead/summary 进错误 message，states 是要清点的状态集合。 */
+interface InflightTransitionRisk {
+  /** 场景名（运营一眼看懂是哪种改动）。 */
+  lead: string;
+  /** 改动摘要（哪条边、踢掉了谁、新增了什么）。 */
+  summary: string;
+  /** 需要清点在途单的状态 = 被改动边的 from（单正卡在这些态上）。 */
+  states: string[];
+}
+
+/** 流转边身份键：引擎两侧消费口径都落在这个三元组里（applyEvent 用 from+event、canTransition 用 from+to）。 */
+function transitionKey(t: WorkflowTransition): string {
+  return `${t.from}|${t.event ?? ''}|${t.to}`;
+}
+
+/**
+ * T1-A（2026-10-25）：在途单防呆**第二道**——V3-D4 只挡「删状态」，下面三种改动同样
+ * 会让在途单走不下去，且改前**零报错**（改完日志干净、单子卡死，属静默失败）：
+ *   ① 删流转边          ：在途单所在状态再也走不到原目标态；
+ *   ② 收紧 allowedRoles  ：原本能操作这条边的人被踢掉；
+ *   ③ 新增 requiredFields：在途单没有这个字段，提交必 422。
+ *
+ * 【判定面为什么是 diff，不是全量】只比对旧 def 与新 def，**只对受影响状态**调
+ * countInflightByStates（与删态硬闸同一支清点，不另写 SQL）；无 diff ⇒ 一条查询都不发
+ * （v3WorkflowLocks ④「新增态/改边不发清点查询」这条既有锚点因此继续绿）。
+ *
+ * 【①为什么按 from→to 判，而不是按 from|event|to 判】引擎 canTransition 认的是 from+to，
+ * applyEvent 认的是 from+event；客户把 receive 改名成 accept 属于**重组**（单照样走得通），
+ * 按三元组判会把它误报成删边 ⇒ 误伤正当编辑。按 from→to 判则精准命中「这条通路没了」。
+ *
+ * 【已知边界（诚实声明，不装作全知）】②只看 allowedRoles，不建模 allowedPerms 的补偿：
+ * 若客户踢掉角色的同时补了 allowedPerms，理论上有人仍能走，本闸按「宁可拦下让人确认」
+ * 处理（逃生口 allowInflightLoss 仍在）。要更精细需引入执行者集合，超出本批范围。
+ */
+
+/** ① 删流转边：旧 def 的 from→to 通路在新 def 里不复存在（换 event 名不算丢）。 */
+function diffLostEdges(oldDef: WorkflowDef, newDef: WorkflowDef): InflightTransitionRisk | null {
+  const newStates = new Set<string>(newDef.states ?? []);
+  const stillHasPath = new Set<string>();
+  for (const t of newDef.transitions ?? []) stillHasPath.add(`${t.from}->${t.to}`);
+  const seen = new Set<string>();
+  const lost: string[] = [];
+  const states = new Set<string>();
+  for (const t of oldDef.transitions ?? []) {
+    // from 态本身已被删 ⇒ 归删态硬闸管，此处不重复计（避免同一批单被报两遍）
+    if (!newStates.has(t.from)) continue;
+    const pair = `${t.from}->${t.to}`;
+    if (stillHasPath.has(pair) || seen.has(pair)) continue;
+    seen.add(pair);
+    lost.push(`${t.from} --${t.event ?? ''}--> ${t.to}`);
+    states.add(t.from);
+  }
+  if (lost.length === 0) return null;
+  return { lead: '删流转边', summary: `删除流转边 [${lost.join('；')}]`, states: [...states] };
+}
+
+/** ② 收紧 allowedRoles：同一条边上旧允许、新不允许的角色；含「原不限角色 → 现限定」这一最狠的收紧。 */
+function diffTightenedRoles(oldDef: WorkflowDef, newDef: WorkflowDef): InflightTransitionRisk | null {
+  const newByKey = new Map<string, WorkflowTransition>();
+  for (const t of newDef.transitions ?? []) newByKey.set(transitionKey(t), t);
+  const parts: string[] = [];
+  const states = new Set<string>();
+  for (const ot of oldDef.transitions ?? []) {
+    const nt = newByKey.get(transitionKey(ot));
+    if (!nt) continue; // 边整个没了 ⇒ 归 ① 管，不重复报
+    const oldRoles = ot.allowedRoles ?? [];
+    const newRoles = nt.allowedRoles ?? [];
+    const kicked = oldRoles.filter((r) => !newRoles.includes(r));
+    const closedGate = oldRoles.length === 0 && newRoles.length > 0;
+    if (kicked.length === 0 && !closedGate) continue;
+    const desc = `${ot.from} --${ot.event ?? ''}--> ${ot.to}`;
+    parts.push(
+      closedGate
+        ? `${desc}（原不限角色 → 现仅限 [${newRoles.join(',')}]）`
+        : `${desc} 去掉 [${kicked.join(',')}]`,
+    );
+    states.add(ot.from);
+  }
+  if (parts.length === 0) return null;
+  return { lead: '收紧角色', summary: `收紧操作角色：${parts.join('；')}`, states: [...states] };
+}
+
+/** ③ 新增 requiredFields：同一条边上新出现、旧没有的必填字段（存量单没有 ⇒ 提交必失败）。 */
+function diffAddedRequiredFields(oldDef: WorkflowDef, newDef: WorkflowDef): InflightTransitionRisk | null {
+  const newByKey = new Map<string, WorkflowTransition>();
+  for (const t of newDef.transitions ?? []) newByKey.set(transitionKey(t), t);
+  const parts: string[] = [];
+  const states = new Set<string>();
+  for (const ot of oldDef.transitions ?? []) {
+    const nt = newByKey.get(transitionKey(ot));
+    if (!nt) continue; // 新边（原本就走不通 ⇒ 不存在被卡的在途单）与删边都不在此计
+    const oldFields = ot.requiredFields ?? [];
+    const added = (nt.requiredFields ?? []).filter((f) => !oldFields.includes(f));
+    if (added.length === 0) continue;
+    parts.push(`${ot.from} --${ot.event ?? ''}--> ${ot.to} 新增 [${added.join(',')}]`);
+    states.add(ot.from);
+  }
+  if (parts.length === 0) return null;
+  return { lead: '新增必填', summary: `新增必填字段：${parts.join('；')}`, states: [...states] };
+}
+
+/**
+ * 三场景在途单硬闸：按 ①删边 → ②收紧角色 → ③新增必填 顺序判定，命中即 409。
+ * 与删态硬闸**同码同逃生口**（INFLIGHT_STATE_LOSS / opts.allowInflightLoss），不另设开关。
+ */
+async function assertNoInflightTransitionLoss(
+  client: PoolClient,
+  tenantId: string,
+  entityType: string,
+  oldDef: WorkflowDef,
+  newDef: WorkflowDef,
+): Promise<void> {
+  const risks: InflightTransitionRisk[] = [];
+  for (const r of [
+    diffLostEdges(oldDef, newDef),
+    diffTightenedRoles(oldDef, newDef),
+    diffAddedRequiredFields(oldDef, newDef),
+  ]) {
+    if (r) risks.push(r);
+  }
+  for (const risk of risks) {
+    if (risk.states.length === 0) continue;
+    const hits = await countInflightByStates(client, tenantId, entityType, risk.states);
+    if (hits.total <= 0) continue; // 受影响的态上确实没有在途单 ⇒ 放行，不误伤
+    const detail = Object.entries(hits.byState)
+      .map(([st, n]) => `${st}:${n}`)
+      .join(',');
+    throw new AppError(
+      'INFLIGHT_STATE_LOSS',
+      `【${risk.lead}】${risk.summary} 将使 ${hits.total} 张在途单走不下去（${detail}）；确认请走审批流并显式 allowInflightLoss`,
+      409,
+    );
+  }
+}
+
 export async function saveWorkflowDef(
   client: PoolClient,
   tenantId: string,
@@ -296,6 +431,11 @@ export async function saveWorkflowDef(
           409,
         );
       }
+    }
+    // T1-A：删态之外的三场景在途单防呆（删流转边 / 收紧 allowedRoles / 新增 requiredFields）。
+    // 与删态硬闸同码（INFLIGHT_STATE_LOSS）、同逃生口（opts.allowInflightLoss），不另设开关。
+    if (!opts.allowInflightLoss) {
+      await assertNoInflightTransitionLoss(client, tenantId, entityType, oldDef, def);
     }
   }
   if (cur.rows[0]) {
