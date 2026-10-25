@@ -334,33 +334,18 @@ export function trialRateLimit(max = 5, windowMs = 24 * 3600 * 1000) {
 }
 
 /**
- * C-2：角色白名单守卫（纯函数、同步、返回 boolean）。prod 下要求 auth.role ∈ roles；dev 放行。
- * 用法：if (!requireRole(auth, 'admin')) return res.status(403)...；
+ * 🔒【已删除 · T8 回归审查 E 批（2026-10-26）】`requireRole(auth, ...roles)` 已从本文件移除。
  *
- * ⚠️ 【2026-10-24 如实改写：原文在这里撒了很久的谎】
- *   此注释原文写的是"**取代散落的 requireAdmin / requireConfigRole 重复实现**"。
- *   实测（排除定义行与 `src/test/`）分布是：
- *       `requirePermission(`  **87** 处  ← 真正主力（按权限点判定，走默认矩阵 + 租户覆盖表）
- *       `requireConfigRole(`  **73** 处  ← 管理类写端点（建/改/删配置、字典、账户）
- *       `requireRole(`        **5** 处   ← 就是本函数
+ * 【为什么能删】T8 十七批收敛完成后，本函数**真实调用点归零**
+ *   （全仓 grep：除定义行外只剩注释与测试 describe 标题，零 import、零调用）。
+ *     · `requireConfigRole(` 74 处 → 0（第 1~15 批，共收敛 71 处）
+ *     · `requireRole(`      5 处 → 0（第 16~17 批；最后一处 adminQrcode.ts 收敛到 `qrcode.generate`）
+ *   ⇒ 唯一守卫 = `requirePermission(auth, client, '<权限点>')`（157 处）。
  *
- * 🟢 **2026-10-25 收口（T8 第十五/十六批，本注释第三行数字已过时，看下面）**：
- *   · `requireConfigRole` 74 处 → **0 处**（第 1~15 批，共收敛 71 处）；
- *   · `requireRole` 的 5 处调用中，账号与邀请域的 2 处已并入 `requirePermission('role.manage')`
- *     （第十六批）；**仅剩 `adminQrcode.ts` 1 处**仍走本函数（贴码域，与账号域不同，
- *     收敛需另立权限点，属独立批次）。
- *   ⇒ 三套守卫已收敛为**两套 + 1 处遗留**，不再「三套并存」。
- *   ⇒ 本函数**既没有取代谁，也没有被谁取代**：三套守卫至今**并存**，
- *     "统一"这个说法是愿望不是事实。（收敛动作已单独登记为骨架文档 **F2**，
- *     与 T3「实例级权限」是**两件不同的事**：T3 只往 `requirePermission` 一条链上加
- *     entityType 维度，按 E6 不得顺手收敛另外两套。）
+ * 【为什么**必须**删，而不是留着当公共 API】留着一个零调用的「按角色名硬判」函数，
+ *   下次有人加写端点时会顺手用它 ⇒ 权限又变回写死、租户不可配置，与「权限可言配置」
+ *   的产品方向直接冲突。删掉是成本最低的防复发手段。
  *
- * 🟡 什么时候用哪一个：
- *   · 管"**能不能做这类管理动作**"（改字典、改账户、删配置）⇒ `requirePermission`（`requireConfigRole` 已于 T8 第十五批清零，勿再新增）；
- *   · 管"**有没有这个权限点**"（可租户覆盖、可细分到单据类型）⇒ `requirePermission`；
- *   · 本函数只在**需要临时按角色名硬判**、且不涉及权限点体系的地方用，别再新增调用点。
+ * 【决策留痕（勿复原）】本注释原文曾写「取代散落的 requireAdmin / requireConfigRole」——
+ *   那是愿望不是事实（三套守卫长期并存），已在 T8 期间如实改写，随本次删除一并归档。
  */
-export function requireRole(auth: AuthLocals, ...roles: string[]): boolean {
-  if (auth.authMode === 'dev') return true;
-  return auth.role != null && roles.includes(auth.role);
-}

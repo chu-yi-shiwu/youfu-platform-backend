@@ -594,15 +594,16 @@ export async function requireAnyPermission(
 }
 
 /**
- * 旧守卫（同步、throw）：admin/operator 可管理配置类资源。保持兼容。
- * 审查修复（架构🟡12）：白名单改引 CONFIG_ROLES 单一事实源（不再内联 role !== 'admin' && ...）。
+ * 🔒【已删除 · T8 回归审查 E 批（2026-10-26）】`requireConfigRole` 已从本文件移除。
+ *
+ * 【为什么能删】真实调用点归零（全仓 grep：除定义行外只剩注释与测试 describe 标题）。
+ *   74 处调用点在 T8 第 1~15 批逐批收敛到 `requirePermission`（按权限点判定）。
+ *
+ * 【它原来的语义，供回溯】admin/operator 可管理配置类资源（`isConfigRole` = CONFIG_ROLES）。
+ *   收敛时每个端点的等价性都单独验过：defaults 含 operator ⇒ {admin, operator} 与旧语义逐位一致。
+ *
+ * 【勿再新增】管理类写端点一律用 `requirePermission`；按角色硬判的写法已全部退场。
  */
-export function requireConfigRole(_req: unknown, res: any): void {
-  const role = res.locals.auth.role;
-  if (!isConfigRole(role)) {
-    throw new AppError('FORBIDDEN', 'only admin/operator can manage', 403);
-  }
-}
 
 /**
  * #583 归属守卫（异步，需在 withTenantClient 内调用）：
