@@ -224,6 +224,17 @@ export const PERM_DEFS = {
   //    与 `workflow.edit`（流程**定义**配置）不是一回事：flow = 业务单据，workflow = 单据的流程定义。
   // 🔴 operator 默认给是**为了等价**（原 requireConfigRole 白名单就是 admin+operator），不是策略选择。
   'flow.create': { label: '业务建单', defaults: ['operator'] },
+  // T8 第十四批（2026-10-25）：Webhook 订阅注册（`POST /api/v1/webhooks/subscriptions`，
+  //   webhook/routes.ts:21）独立权限点，**不蹭 `basicdata.edit`** —— 理由不是「它是另一张表」，
+  //   而是**它能对外开口**：订阅一旦注册，平台就会主动向该 URL 发起出向请求（这正是站内
+  //   SSRF 闸 `assertSafeOutboundUrl`（F-E2）存在的原因）。复用 basicdata.edit 会让每一个能改
+  //   字典的人自动获得「开一个对外回调通道」的能力 = **权限放大**，属横向提权面。
+  // 🔴 为什么不复用 `intake.create` / `ticket.manage`：两者 defaults 都比原白名单
+  //   （admin+operator）宽 ⇒ 复用会把 worker / dispatcher / reviewer / service_desk 从 403 变放行。
+  // 🔴 operator 默认给是**为了等价**（原 requireConfigRole 白名单就是 admin+operator），非策略选择。
+  // ⚠️ 已知待决（登记，未做）：订阅的**停用/删除**端点本批未一并收口（原实现就无守卫，
+  //   属「要不要给只读角色加门禁」的独立产品决策，E6 不夹带）。
+  'webhook.manage': { label: 'Webhook 订阅', defaults: ['operator'] },
 } as const satisfies Record<string, { label: string; defaults: readonly Role[] }>;
 
 /** 权限点清单（由 PERM_DEFS 派生，勿手改）。 */

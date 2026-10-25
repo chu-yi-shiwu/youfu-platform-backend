@@ -56,6 +56,7 @@ vi.mock('../db/pool.js', () => ({
 }));
 
 import configRouter from '../routes/config.js';
+import tenantInfoRouter from '../routes/tenantInfo.js';
 import { errorMiddleware } from '../middleware/error.js';
 
 const app = express();
@@ -72,6 +73,7 @@ app.use((_req, res, next) => {
   next();
 });
 app.use('/api/v1', configRouter); // 与 server.ts:183 一致（configRouter 自带 /config 前缀）
+app.use('/api/v1', tenantInfoRouter); // T8 第十四批：与 server.ts:205 一致（自带 /tenant-info 前缀）
 app.use(errorMiddleware);
 
 let server: Server;
@@ -165,5 +167,45 @@ describe('config.ts · 可配置收益（B 组：改前必红，改后转绿）'
     // 改前：requireConfigRole 是 admin/operator 角色白名单，**根本不查权限表**
     //       ⇒ 授了也没用，这里会是 403（RED）。改后走 requirePermission ⇒ 转绿。
     expect(r.status).toBeLessThan(300);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// T8 第十四批：PUT /api/v1/tenant-info（tenantInfo.ts:50）
+//
+// 【为什么这两处的测试写在**同一个文件**里】
+//   tenant-info 写的就是 `system_config` 表（brand_name / hotline），与 config.ts 的
+//   system_config 段（`PUT /config/system`，本文件 WRITE_ENDPOINTS 第 7 项）是**同一张表**。
+//   T8 第二批已确立「系统配置段 ⇒ basicdata.edit」的映射 ⇒ tenant-info 必须**沿用同一个权限点**，
+//   否则就变成「同一张表、两个入口、两个答案」—— 正是 T8 要消灭的病。
+//   并且本文件已有 system_config 的 SQL 桩（fakeClient 第 46-47 行）⇒ 零新增 mock 即可覆盖。
+// ═══════════════════════════════════════════════════════════════════════════
+describe('tenantInfo.ts · PUT /tenant-info 权限（T8 第十四批）', () => {
+  const BODY = { name: '优服家', hotline: '400-000-1234' };
+
+  // A 组「等价性」：钉住现有放行分布 ⇒ 改前改后都必须绿，红了就是收敛破坏了既有行为。
+  it('A 组：operator → 200；worker / reviewer → 403', async () => {
+    authRole = 'operator';
+    expect((await req('PUT', '/api/v1/tenant-info', BODY)).status).toBe(200);
+    authRole = 'worker';
+    expect((await req('PUT', '/api/v1/tenant-info', BODY)).status).toBe(403);
+    authRole = 'reviewer';
+    expect((await req('PUT', '/api/v1/tenant-info', BODY)).status).toBe(403);
+  });
+
+  // B 组「可配置收益」：改前必红 —— requireConfigRole 只读 admin/operator 角色白名单、
+  // **根本不查 role_permission 表** ⇒ 授了也没用，这里会是 403。改后转绿。
+  it('B 组：授 basicdata.edit 给 reviewer ⇒ 200（改前必红）', async () => {
+    authRole = 'reviewer';
+    permRows = [{ perm: 'basicdata.edit' }];
+    const r = await req('PUT', '/api/v1/tenant-info', BODY);
+    expect(r.status).toBe(200);
+  });
+
+  // C 组「反例锚」：钉住「没授权就是不放行」，并与 config.ts 的口径对齐（同 basicdata.edit）。
+  it('C 组：授的不是 basicdata.edit ⇒ 仍 403', async () => {
+    authRole = 'reviewer';
+    permRows = [{ perm: 'ticket.manage' }];
+    expect((await req('PUT', '/api/v1/tenant-info', BODY)).status).toBe(403);
   });
 });

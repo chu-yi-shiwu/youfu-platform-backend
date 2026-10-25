@@ -5,7 +5,7 @@ import crypto from 'node:crypto';
 import { z } from 'zod';
 import { withTenantClient } from '../db/pool.js';
 import { probeWebhook, assertSafeOutboundUrl } from './dispatch.js';
-import { requireConfigRole } from '../middleware/role.js';
+import { requirePermission } from '../middleware/role.js';
 
 const router = Router();
 
@@ -18,8 +18,17 @@ const subscribeSchema = z.object({
 // POST /api/v1/webhooks/subscriptions —— 注册订阅（secret 缺省自动生成，仅创建时返回一次）
 router.post('/webhooks/subscriptions', async (req, res, next) => {
   try {
-    requireConfigRole(req, res);
-    const tenantId = res.locals.auth.tenantId;
+    const auth = res.locals.auth;
+    const tenantId = auth.tenantId;
+    // T8 第十四批：原 requireConfigRole（同步角色白名单、**不查权限表**）⇒ 可配置的权限点。
+    //   🔴 守卫单独一个事务，**不合并进下面的写入事务**：本端点在「守卫 → zod → SSRF」之间还夹着
+    //   SSRF 闸（失败时要在事务**外** `return res.status(400)`），合并会把这个控制流搅乱
+    //   （回调里发响应后外层还要再发 201 ⇒ Cannot set headers after they are sent）。
+    //   单独事务 ⇒ **403 → 422 → 400 的原有顺序原样保持**，且改动最小。
+    //   本事务只为取得 client 做权限查询、不写库 ⇒ 额外的事务开销可接受。
+    await withTenantClient(tenantId, async (client) => {
+      await requirePermission(auth, client, 'webhook.manage');
+    });
     const body = subscribeSchema.parse(req.body);
     // SSRF 前置闸（F-E2）：注册即拒绝私网/环回/链路本地（含云元数据）地址，提早反馈
     try {
