@@ -16,7 +16,7 @@ import { z } from 'zod';
 import type { PoolClient } from 'pg';
 import { withTenantClient } from '../db/pool.js';
 import { AppError } from '../middleware/error.js';
-import { requireConfigRole, ENTITY_RE } from '../middleware/role.js';
+import { requirePermission, ENTITY_RE } from '../middleware/role.js';
 import { getWorkflowDefOrDefault } from '../engine/workflowDef.js';
 import { availableTransitions, type WorkflowDef } from '../engine/stateMachine.js';
 import { transitionEntity } from '../engine/transition.js';
@@ -192,27 +192,26 @@ router.post('/:entityType', async (req, res, next) => {
     if (!ENTITY_RE.test(entityType)) throw new AppError('BAD_REQUEST', 'invalid entity_type', 400);
     assertFlowAlive(entityType); // D2：emergency_plan 等收口实体 ⇒ 410 Gone + 指路
     assertFlowEndpointAlive(entityType); // D2：废弃入口（emergency_plan）⇒ 410 + 指路
-    requireConfigRole(req, res);
-    const tenantId = res.locals.auth.tenantId;
-    const b = z
-      .object({
-        title: z.string().min(1),
-        data: z.record(z.any()).optional(),
-        assignee: z.string().optional(),
-        location: z.string().optional(),
-        scheduled_at: z.string().optional(),
-      })
-      .parse(req.body);
+    const auth = res.locals.auth;
+    const tenantId = auth.tenantId;
     const { actor } = authInfo(res);
     // S4 分派：命中代理 ⇒ 走原生表（响应外壳不变：201 + {ok, code, item}）
     const adapter = proxyFor(entityType);
-    if (adapter) {
-      const item = await withTenantClient(tenantId, (client) =>
-        adapter.create(proxyCtx(client, res, entityType), b),
-      );
-      return res.status(201).json({ ok: true, code: 0, item });
-    }
     const item = await withTenantClient(tenantId, async (client) => {
+      // 守卫保持在事务首行 ⇒ 非授权角色的 403 优先于 zod 的 400（与原 requireConfigRole 顺序一致）。
+      // 权限点与 `POST /transport/orders` 共用 `flow.create`：见 role.ts 该点的注释；
+      // 「同一笔业务的两个入口必须同答案」由 t5RouteParity.transport.test.ts D 组钉住。
+      await requirePermission(auth, client, 'flow.create');
+      const b = z
+        .object({
+          title: z.string().min(1),
+          data: z.record(z.any()).optional(),
+          assignee: z.string().optional(),
+          location: z.string().optional(),
+          scheduled_at: z.string().optional(),
+        })
+        .parse(req.body);
+      if (adapter) return adapter.create(proxyCtx(client, res, entityType), b);
       const def = await getWorkflowDefOrDefault(client, tenantId, entityType, fallbackFor(entityType));
       const r = await client.query(
         `INSERT INTO business_flow_tasks (tenant_id, entity_type, title, status, data, assignee, location, scheduled_at, created_by)

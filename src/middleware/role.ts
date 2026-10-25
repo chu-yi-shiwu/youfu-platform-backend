@@ -207,6 +207,23 @@ export const PERM_DEFS = {
   //   是否把这两个 export 点收紧到 admin 属独立产品决策（E6 不夹带）。
   'material.export': { label: '耗材导出', defaults: ['operator'] },
   'asset.export': { label: '资产导出', defaults: ['operator'] },
+  // T8 第十三批（2026-10-25）：**业务单据创建**权限点。它同时挂在两个端点上，这不是合并、是必须：
+  //   · `POST /transport/orders`（transport.ts:281）——运输任务下单
+  //   · `POST /flow/:entityType`（businessFlow.ts:195）——通用业务流建单
+  //   🔴 **为什么两处必须同一个点（改动前必读）**：`FLOW_PROXY`(flowProxy.ts:194) 把 `transport_task`
+  //     代理到 `transportAdapter`，而 `transportAdapter.create`(transportAdapter.ts:174) 调的正是
+  //     `POST /transport/orders` 那个 `createOrder`、写同一张表 `transport_order` ⇒
+  //     `POST /flow/transport_task` 与 `POST /transport/orders` 是**同一笔业务的两个入口**。
+  //     挂两个点 ⇒ 租户配完会出现「一个入口建得了单、另一个建不了」——正是 T8 要消灭的病。
+  //     该约束由 `t5RouteParity.transport.test.ts` D 组（双入口必须同码）钉住，分叉即红。
+  // 🔴 为什么不复用 `intake.create`（defaults operator+worker）或 `ticket.manage`
+  //   （defaults operator/dispatcher/reviewer/service_desk）：两者的默认集都比原白名单
+  //   （admin+operator）**宽** ⇒ 复用会把 worker / dispatcher / reviewer / service_desk 从 403 变放行
+  //   ⇒ **破坏等价**。收口的另一条路（把这些角色的 defaults 改窄）会动到存量租户，属策略调整（E6 不夹带）。
+  // 🔴 命名 `flow.create` 有代码依据：路由挂载点就是 `/api/v1/flow`（server.ts:215）、表 `business_flow_tasks`。
+  //    与 `workflow.edit`（流程**定义**配置）不是一回事：flow = 业务单据，workflow = 单据的流程定义。
+  // 🔴 operator 默认给是**为了等价**（原 requireConfigRole 白名单就是 admin+operator），不是策略选择。
+  'flow.create': { label: '业务建单', defaults: ['operator'] },
 } as const satisfies Record<string, { label: string; defaults: readonly Role[] }>;
 
 /** 权限点清单（由 PERM_DEFS 派生，勿手改）。 */

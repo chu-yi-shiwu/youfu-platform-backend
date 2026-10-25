@@ -85,7 +85,16 @@ interface ClientOpts {
   workerId: string;
   /** `/flow` 侧单条行的当前状态 */
   bftStatus: string;
+  /**
+   * T8 第十三批：`role_permission` 的覆盖行。undefined = 无覆盖行（回退默认矩阵）。
+   * 🔴 **为什么必须显式兜住这条**：本桩兜底返回 `{ rows: [], rowCount: 1 }`，
+   *   而 `hasPerm`(role.ts:457) 是**按 rowCount 判定**覆盖行（`if (r.rowCount && r.rowCount > 0)`）
+   *   ⇒ 走兜底会让所有非 admin 角色「命中空覆盖集」⇒ 恒 403，**回退不到默认矩阵**。
+   *   不修这条，下面 D 组的 operator 放行根本测不出来（得到的是假结论）。
+   */
+  permRows?: { perm: string }[];
 }
+
 
 function makeClient(o: ClientOpts) {
   const calls: CapturedQuery[] = [];
@@ -93,6 +102,11 @@ function makeClient(o: ClientOpts) {
     query: async (text: string, params?: unknown[]) => {
       calls.push({ text, params });
       const p = params ?? [];
+      // T8 第十三批：权限查询必须**显式返回 rowCount = rows.length**（见 ClientOpts.permRows 注释）
+      if (text.includes('SELECT perm FROM role_permission')) {
+        const rows = (o.permRows ?? []).map((r) => ({ ...r }));
+        return { rows, rowCount: rows.length };
+      }
       if (text.includes('INSERT INTO domain_event')) return { rows: [], rowCount: 1 };
       // workflow_def 查不到 ⇒ getWorkflowDefOrDefault 回退内置 TRANSPORT_DEF
       if (text.includes('FROM workflow_def')) return { rows: [], rowCount: 0 };
@@ -427,5 +441,73 @@ describe('T5/S6a-C 预期变化对照（R4：/flow 必须带上原生侧两道�
       `/flow 侧返回 ${b.status}，原生侧是 ${a.status}：` +
         'def 声明 allowedRoles 时，/flow 也必须照章拒绝（否则代理等于开了一条绕过角色门禁的后门）',
     ).toBe(a.status);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// T8 第十三批 D 组：双入口**权限**对照（B/C 组对照落点与状态码，本组对照权限判定）
+//
+// 🔴 **为什么这两个端点必须挂同一个权限点（改任何一处前先读）**：
+//   `transportAdapter.create`(transportAdapter.ts:174) 与 `POST /transport/orders`(transport.ts:283)
+//   **调用同一个 `createOrder`、写同一张表 `transport_order`**；而 `FLOW_PROXY`(flowProxy.ts:194)
+//   把 `transport_task` 代理到该 adapter ⇒ **`POST /flow/transport_task` 是同一笔业务的第二个入口**。
+//   ⇒ 两处若挂不同权限点，租户配完会出现「走 /transport/orders 建得了单、走 /flow/transport_task
+//   建不了」（或反之）—— 这正是 T8 要消灭的病：**同一动作从不同入口进，答案不同**。
+//   ⇒ 本组每条断言都同时打两个入口并要求**同码**：谁把它们改回两个权限点，这里立刻红。
+// ═══════════════════════════════════════════════════════════════════════════
+describe('T8 第十三批 · 双入口权限对照（同一动作两通道必须同码）', () => {
+  const NATIVE_BODY = { item_name: '标本' };
+  const FLOW_BODY = { title: '送标本到 3 楼检验科' };
+
+  /** 同一角色分别打两个入口，返回各自状态码。 */
+  async function bothEntries(role: string, permRows?: { perm: string }[]): Promise<{ native: number; flow: number }> {
+    const opts: ClientOpts = {
+      orderStatus: 'pending',
+      carrier: 'w-1',
+      workerId: 'w-1',
+      bftStatus: 'pending',
+      permRows,
+    };
+    const native = makeClient(opts);
+    h.client = native.client;
+    const appA = await listen(appWith(transportRouter, '/transport', role));
+    const a = await post(`${appA.url}/transport/orders`, NATIVE_BODY);
+    appA.server.close();
+
+    const flow = makeClient(opts);
+    h.client = flow.client;
+    const appB = await listen(appWith(businessFlowRouter, '/flow', role));
+    const b = await post(`${appB.url}/flow/transport_task`, FLOW_BODY);
+    appB.server.close();
+    return { native: a.status, flow: b.status };
+  }
+
+  // D1 是**等价性锚**：收敛不许改变现有放行分布 ⇒ 改前改后都必须绿。
+  it('D1 等价性：worker 两通道同码 403；operator 两通道同码 201', async () => {
+    const w = await bothEntries('worker');
+    expect(w.native).toBe(403);
+    expect(w.flow, 'worker 走 /flow 建单必须与原生同码：不同码说明两处守卫口径分叉了').toBe(403);
+
+    const o = await bothEntries('operator');
+    expect(o.native).toBe(201);
+    expect(o.flow, 'operator 走 /flow 建单必须与原生同码').toBe(201);
+  });
+
+  // D2 是**价值锚**：requireConfigRole 只读角色白名单、不查权限表 ⇒ 授予也放不了行 ⇒ 改前必红。
+  it('D2 可配置性：授 flow.create 给 reviewer ⇒ 两通道同时从 403 转 201（改前必红）', async () => {
+    const before = await bothEntries('reviewer');
+    expect(before.native).toBe(403);
+    expect(before.flow).toBe(403);
+
+    const after = await bothEntries('reviewer', [{ perm: 'flow.create' }]);
+    expect(after.native).toBe(201);
+    expect(after.flow, '两条通道必须一起放行：只放一条 = 同一个动作出现两个答案').toBe(201);
+  });
+
+  // D3 是**反例锚**：钉住「没授权就是不放行」，防止将来有人图省事把守卫挂到一个谁都有的权限点上。
+  it('D3 反例锚：reviewer 授的不是 flow.create ⇒ 两通道仍同码 403', async () => {
+    const r = await bothEntries('reviewer', [{ perm: 'ticket.manage' }]);
+    expect(r.native).toBe(403);
+    expect(r.flow).toBe(403);
   });
 });

@@ -20,7 +20,7 @@ import type { PoolClient } from 'pg';
 import { withTenantClient } from '../db/pool.js';
 import { AppError } from '../middleware/error.js';
 import type { AuthLocals } from '../middleware/auth.js';
-import { requireConfigRole, requireAssigneeOrConfig } from '../middleware/role.js';
+import { requireAssigneeOrConfig, requirePermission } from '../middleware/role.js';
 import { emitDomainEvent } from '../db/eventBus.js';
 import { getWorkflowDefOrDefault } from '../engine/workflowDef.js';
 import { applyEvent, availableTransitions } from '../engine/stateMachine.js';
@@ -278,10 +278,16 @@ router.get('/orders/:id', async (req, res, next) => {
 
 router.post('/orders', async (req, res, next) => {
   try {
-    requireConfigRole(req, res);
-    const tenantId = res.locals.auth.tenantId;
-    const b = orderSchema.parse(req.body);
-    const item = await withTenantClient(tenantId, (client) => createOrder(client, tenantId, b));
+    const auth = res.locals.auth;
+    const tenantId = auth.tenantId;
+    const item = await withTenantClient(tenantId, async (client) => {
+      // 守卫保持在 body 校验**之前** ⇒ 非授权角色的 403 优先于 zod 的 400（与原 requireConfigRole 顺序一致）。
+      // 权限点与 `POST /flow/:entityType` 共用 `flow.create`：同一笔业务的两个入口必须同答案，
+      // 依据见 role.ts 的 flow.create 注释，由 t5RouteParity.transport.test.ts D 组钉住。
+      await requirePermission(auth, client, 'flow.create');
+      const b = orderSchema.parse(req.body);
+      return createOrder(client, tenantId, b);
+    });
     return res.status(201).json({ ok: true, code: 0, item });
   } catch (e) {
     next(e);
