@@ -47,9 +47,18 @@ export const DEFAULT_TENANT_ID = 't-verification';
  * 本地联调若不配 AUTH_MODE，将从"无门禁"变为"全门禁 + 租户登记校验"——
  * 本地开发需显式 AUTH_MODE=dev（.env 或启动环境变量），dev 模式下会打警告日志。
  */
+/**
+ * 只有这三个值（trim + 小写后）才进 dev；**其余一律 prod**。
+ * T8 回归审查（2026-10-25）改：原写法是 `(raw ?? 'prod').toLowerCase() === 'prod' ? 'prod' : 'dev'`
+ * ——「非 prod 即 dev」，与 F7 的 fail-closed 纪律**正好相反**：`.env` 手写成
+ * `production` / `prd` / `prod `（尾空格）/ 空串，全都静默落 dev ⇒ **全系统权限门放行**，
+ * 只有一行 warn，无指标、无启动自检。dev 是**危险侧**，必须显式白名单才能进。
+ */
+const DEV_MODE_VALUES: ReadonlySet<string> = new Set(['dev', 'development', 'local']);
+
 export function refreshAuthMode(): void {
-  const raw = process.env.AUTH_MODE;
-  AUTH_MODE = (raw ?? 'prod').toLowerCase() === 'prod' ? 'prod' : 'dev';
+  const raw = (process.env.AUTH_MODE ?? '').trim().toLowerCase();
+  AUTH_MODE = DEV_MODE_VALUES.has(raw) ? 'dev' : 'prod';
   if (AUTH_MODE === 'dev' && process.env.NODE_ENV !== 'test') {
     console.warn('[auth] AUTH_MODE=dev：权限门禁全部放行（仅限本地联调，生产环境必须显式 AUTH_MODE=prod）');
   }

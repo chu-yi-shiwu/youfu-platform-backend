@@ -197,3 +197,63 @@ describe('verifyJwt / signJwt（纯函数）', () => {
     expect(verifyJwt(t, SECRET)).toBeNull();
   });
 });
+
+describe('AUTH_MODE 解析 · 白名单 dev（F7 同源：缺省必须是最安全的那一侧）', () => {
+  // 逐个值重装模块 + 刷新，避免模块级常量互相污染。
+  async function modeWith(raw: string | undefined): Promise<string> {
+    vi.unstubAllEnvs();
+    if (raw === undefined) delete process.env.AUTH_MODE;
+    else vi.stubEnv('AUTH_MODE', raw);
+    const m = await loadAuth();
+    m.refreshAuthMode();
+    return m.AUTH_MODE;
+  }
+
+  it('显式 dev → dev（本地联调唯一合法开法）', async () => {
+    expect(await modeWith('dev')).toBe('dev');
+  });
+
+  it('未设置 → prod（fail-closed，F7 2026-10-19）', async () => {
+    expect(await modeWith(undefined)).toBe('prod');
+  });
+
+  it('prod → prod', async () => {
+    expect(await modeWith('prod')).toBe('prod');
+  });
+
+  it('PROD / Prod 大小写不敏感 → prod', async () => {
+    expect(await modeWith('PROD')).toBe('prod');
+    expect(await modeWith('Prod')).toBe('prod');
+  });
+
+  it('🔴 production 拼写 → prod（改前落 dev = 全门禁放行）', async () => {
+    expect(await modeWith('production')).toBe('prod');
+  });
+
+  it('🔴 prd 拼写 → prod（改前落 dev = 全门禁放行）', async () => {
+    expect(await modeWith('prd')).toBe('prod');
+  });
+
+  it('🔴 prod 带首尾空格 → prod（.env 手写常见，改前落 dev）', async () => {
+    expect(await modeWith('prod ')).toBe('prod');
+    expect(await modeWith(' prod')).toBe('prod');
+  });
+
+  it('🔴 空串 → prod（改前落 dev）', async () => {
+    expect(await modeWith('')).toBe('prod');
+  });
+
+  it('development / local → dev（白名单内，容错保留）', async () => {
+    expect(await modeWith('development')).toBe('dev');
+    expect(await modeWith('local')).toBe('dev');
+  });
+
+  it('🔴 platformAuth 与 authMiddleware 同源：非白名单值不得落到 dev', async () => {
+    // auth.ts:52 是唯一解析点，platformAuth.ts:23 直接引 AUTH_MODE ⇒ 此处守住即守住两边。
+    vi.unstubAllEnvs();
+    vi.stubEnv('AUTH_MODE', 'production');
+    const m = await loadAuth();
+    m.refreshAuthMode();
+    expect(m.AUTH_MODE).not.toBe('dev');
+  });
+});
