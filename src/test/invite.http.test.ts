@@ -372,3 +372,61 @@ describe('redeem 公开激活（防枚举 + 建号 + 双花兜底）', () => {
     expect(r.status).toBe(201);
   });
 });
+
+describe('T8 第十六批 · 邀请端点权限可配置（B 组：改前必红，改后转绿）', () => {
+  // 🔴 为什么归 role.manage：账号域的既定权限点就是它 —— accounts.ts 已有 9 处
+  //   `requirePermission(..., 'role.manage')`，其头注释 G4 白纸黑字写「守卫统一 role.manage
+  //   （替代 requireConfigRole/assertAdmin 散落）」，H1 写「operator 默认矩阵无 role.manage，
+  //   租户可经 role_permission 显式授予」。邀请码是**建账号的前置动作**，属同一域。
+  //   而 invite.ts 至今仍走 requireRole(auth, 'admin') 硬编码 ⇒ 同一域两套口径，
+  //   正是 T8 要消灭的病。
+  // 不传 role：走默认 operator，避免牵扯 isRoleUsable 那条支线（本组只钉权限判定本身）。
+  const body = { username: 'u-b16' };
+
+  it('⑯（prod · reviewer）授 role.manage ⇒ 生成码 201（改前必红）', async () => {
+    h.reset();
+    // 租户显式授权（role_permission 覆盖行）⇒ hasPerm 走覆盖集，不再回退默认矩阵
+    h.script(/role_permission/, [{ perm: 'role.manage' }]);
+    h.script(/FROM account_user/, []); // 用户名不重名（照 ① 的写法）
+    h.script(/INSERT INTO invite_codes/, [{
+      id: 'i-b16', username: 'u-b16', display_name: null, role: 'operator',
+      expires_at: '2999-01-01', created_at: 'now',
+    }]);
+    const app = express();
+    app.use(express.json());
+    app.use('/api/v1', injectAuth('reviewer'), inviteRouter);
+    app.use(errorMiddleware);
+    const s = app.listen(0);
+    await new Promise<void>((r) => s.once('listening', () => r()));
+    const b = `http://127.0.0.1:${(s.address() as AddressInfo).port}`;
+    const r = await fetch(`${b}/api/v1/invites`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    // 改前：requireRole 只读角色白名单、**不查权限表** ⇒ 授了也 403（RED）。改后转绿。
+    expect(r.status).toBe(201);
+    await new Promise<void>((r2) => s.close(() => r2()));
+  });
+
+  it('⑰反例锚：不授 role.manage ⇒ reviewer 生成码仍 403', async () => {
+    h.reset();
+    const app = express();
+    app.use(express.json());
+    app.use('/api/v1', injectAuth('reviewer'), inviteRouter);
+    app.use(errorMiddleware);
+    await new Promise<void>((resolve) => {
+      const s = app.listen(0, () => {
+        const b = `http://127.0.0.1:${(s.address() as AddressInfo).port}`;
+        fetch(`${b}/api/v1/invites`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(body),
+        }).then(async (r) => {
+          expect(r.status).toBe(403);
+          s.close(() => resolve());
+        });
+      });
+    });
+  });
+});

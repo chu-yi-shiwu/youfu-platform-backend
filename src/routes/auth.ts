@@ -2,8 +2,8 @@
 // 登录端点必须豁免 authMiddleware（否则拿不到令牌），详见 middleware/auth.ts 的 PUBLIC 豁免。
 import { Router } from 'express';
 import z from 'zod';
-import { AUTH_MODE, DEFAULT_TENANT_ID, loginRateLimit, requireRole, type AuthLocals } from '../middleware/auth.js';
-import { listPerms, ROLE_CODE_RE } from '../middleware/role.js';
+import { AUTH_MODE, DEFAULT_TENANT_ID, loginRateLimit, type AuthLocals } from '../middleware/auth.js';
+import { listPerms, requirePermission, ROLE_CODE_RE } from '../middleware/role.js';
 import { code2Session } from '../services/wechatMp.js';
 import {
   createUser,
@@ -141,9 +141,22 @@ router.get('/auth/me', async (req, res, next) => {
   }
 });
 
-// admin 守卫：复用统一角色守卫（C-2）
-function requireAdmin(auth: AuthLocals): boolean {
-  return requireRole(auth, 'admin');
+// 账号域守卫（T8 第十六批）：原 `requireRole(auth, 'admin')` 硬编码角色 ⇒ 可配置权限点。
+// 🔴 **为什么是 `role.manage`**：账号域的既定权限点就是它 —— `accounts.ts` 已有 9 处
+//   `requirePermission(..., 'role.manage')`，其头注释 G4 写「守卫统一 role.manage（替代
+//   requireConfigRole/assertAdmin 散落）」、H1 写「operator 默认矩阵无 role.manage」。
+//   `POST /auth/users`（建账户）/`GET /auth/users`（列账户）与 accounts.ts 是**同一件事**，
+//   此前却一个可配置、一个写死 admin ⇒ 同一域两套口径，正是 T8 要消灭的病。
+// 🔴 等价性：`role.manage` defaults 为 `[]`（仅 admin），且 `hasPerm` 对 admin 恒 true
+//   ⇒ 默认放行分布与原 requireRole(auth,'admin') **完全一致**；收益是租户可显式授予。
+// 🔴 守卫单独一个事务：保持「401 → 403 → zod 422」的原有顺序不被改写（同批 14/15 的取舍）。
+// ⚠️ 已知差异（登记）：403 的响应 code 由 `FORBID_001` 变为 `FORBIDDEN`（requirePermission
+//   的统一口径）。已实测前端/小程序 **0 处**依赖 FORBID_001，且 FORBIDDEN 是全仓既有 71 处
+//   的统一码 ⇒ 这是一致性收益，不是副作用。
+async function requireAccountAdmin(auth: AuthLocals): Promise<void> {
+  await withTenantClient(auth.tenantId, async (client) => {
+    await requirePermission(auth, client, 'role.manage');
+  });
 }
 
 const changePwSchema = z.object({
@@ -188,7 +201,7 @@ router.post('/auth/users', async (req, res, next) => {
   try {
     const auth = res.locals.auth as AuthLocals;
     if (!auth) return res.status(401).json({ ok: false, code: 'AUTH_001', message: 'missing auth' });
-    if (!requireAdmin(auth)) return res.status(403).json({ ok: false, code: 'FORBID_001', message: 'admin only' });
+    await requireAccountAdmin(auth); // 403 由 requirePermission 抛出（code=FORBIDDEN）
     const input = createUserSchema.parse(req.body);
     const created = await withTenantClient(auth.tenantId, (client) => createUser(client, auth.tenantId, input));
     return res.status(201).json({ ok: true, code: 0, user: toPublic(created) });
@@ -206,7 +219,7 @@ router.get('/auth/users', async (req, res, next) => {
   try {
     const auth = res.locals.auth as AuthLocals;
     if (!auth) return res.status(401).json({ ok: false, code: 'AUTH_001', message: 'missing auth' });
-    if (!requireAdmin(auth)) return res.status(403).json({ ok: false, code: 'FORBID_001', message: 'admin only' });
+    await requireAccountAdmin(auth); // 403 由 requirePermission 抛出（code=FORBIDDEN）
     const users = await withTenantClient(auth.tenantId, (client) => listUsers(client, auth.tenantId));
     return res.json({ ok: true, code: 0, users: users.map(toPublic) });
   } catch (e) {

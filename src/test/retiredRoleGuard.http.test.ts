@@ -169,3 +169,74 @@ describe('退场角色的入口层闸门（POST /invites、POST /auth/users）',
     expect(sqlAll).not.toMatch(/INSERT INTO invite_codes/i);
   });
 });
+
+// ═══════════════════════════════════════════════════════════════════════════
+// T8 第十六批：账号与邀请端点守卫收敛（requireRole 硬编码 admin ⇒ role.manage）
+//
+// 借本文件的理由：它**同时挂了 inviteRouter 与 authRouter**，且已有脚本化 client、
+// `makeAuthMiddleware(role)` 可注入任意角色、`authMode:'prod'`（requirePermission 在 dev
+// 恒放行 ⇒ dev 下 403 断言是恒绿的假绿）。
+// ═══════════════════════════════════════════════════════════════════════════
+describe('T8 第十六批 · 账号端点权限可配置（B 组：改前必红，改后转绿）', () => {
+  /** 用指定角色 + 指定授权另起一个 app（本文件主 app 固定是 admin）。 */
+  async function withRole(role: string, permRows: any[], fn: (post: (p: string, b: unknown) => Promise<any>) => Promise<void>) {
+    const app = express();
+    app.use(express.json());
+    app.use(makeAuthMiddleware(role));
+    app.use(inviteRouter);
+    app.use(authRouter);
+    app.use(errorMiddleware);
+    const s = app.listen(0);
+    await new Promise<void>((r) => s.once('listening', () => r()));
+    const b = `http://127.0.0.1:${(s.address() as AddressInfo).port}`;
+    h.calls.length = 0;
+    // 🔴 **不要清空 h.scripted**：beforeEach 已注入「不重名 / INSERT 成功」三条基础脚本，
+    //    清掉会让建账号走到空结果 ⇒ 500（我第一版就是这么写的，得到 expected 500 to be 201）。
+    if (permRows.length) h.scripted.push({ match: /role_permission/i, rows: permRows, rowCount: permRows.length });
+    try {
+      await fn(async (path, body) => {
+        const r = await fetch(`${b}${path}`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        return { status: r.status, json: (await r.json().catch(() => ({}))) as any };
+      });
+    } finally {
+      await new Promise<void>((r) => s.close(() => r()));
+    }
+  }
+
+  it('授 role.manage 给 reviewer ⇒ POST /auth/users 201（改前必红）', async () => {
+    await withRole('reviewer', [{ perm: 'role.manage' }], async (post) => {
+      // 改前：requireRole(auth,'admin') 只读角色、**不查权限表** ⇒ 授了也 403（RED）。改后转绿。
+      const r = await post('/auth/users', userBody('worker'));
+      expect(r.status).toBe(201);
+    });
+  });
+
+  it('授 role.manage 给 reviewer ⇒ POST /invites 201（改前必红）', async () => {
+    await withRole('reviewer', [{ perm: 'role.manage' }], async (post) => {
+      const r = await post('/invites', inviteBody('worker'));
+      expect(r.status).toBe(201);
+    });
+  });
+
+  it('反例锚：不授 role.manage ⇒ reviewer 建账号/邀请仍 403（等价性不破坏）', async () => {
+    await withRole('reviewer', [], async (post) => {
+      const a = await post('/auth/users', userBody('worker'));
+      expect(a.status).toBe(403);
+      const b = await post('/invites', inviteBody('worker'));
+      expect(b.status).toBe(403);
+    });
+  });
+
+  it('等价性锚：worker 未授权 ⇒ 403；admin 未授权也放行（role.manage 仅 admin 默认）', async () => {
+    await withRole('worker', [], async (post) => {
+      expect((await post('/auth/users', userBody('worker'))).status).toBe(403);
+    });
+    await withRole('admin', [], async (post) => {
+      expect((await post('/auth/users', userBody('worker'))).status).toBe(201);
+    });
+  });
+});

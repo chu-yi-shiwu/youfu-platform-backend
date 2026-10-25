@@ -1,6 +1,6 @@
 // 邀请码域路由（八件增量 BE-1）：admin 生成/列出/作废邀请码 + 公开激活（redeem）建号。
 // 挂载于 /api/v1（server.ts，authMiddleware 之后，同 authRouter）：
-//   - POST/GET/DELETE /invites（admin requireRole）：码明文仅在生成响应返回一次；
+//   - POST/GET/DELETE /invites（requirePermission('role.manage')，默认仅 admin、租户可授予）：码明文仅在生成响应返回一次；
 //   - POST /invites/redeem（公开，PUBLIC_POST_PATHS 豁免 + loginRateLimit）：凭码建号并签发 JWT。
 // 安全口径（架构 §七）：
 //   - 码只存 HMAC-SHA256(code, INVITE_SALT)（复用 platform.ts sha256Secret 先例，盐环境化兜底）；
@@ -11,8 +11,8 @@ import { Router } from 'express';
 import z from 'zod';
 import crypto from 'node:crypto';
 import pool, { withTenantClient } from '../db/pool.js';
-import { AUTH_MODE, loginRateLimit, requireRole, type AuthLocals } from '../middleware/auth.js';
-import { listPerms, ROLE_CODE_RE } from '../middleware/role.js';
+import { AUTH_MODE, loginRateLimit, type AuthLocals } from '../middleware/auth.js';
+import { listPerms, requirePermission, ROLE_CODE_RE } from '../middleware/role.js';
 import { isRoleUsable } from '../repo/roleDef.js';
 import { recordPlatformAudit } from '../repo/platformAudit.js';
 import {
@@ -69,10 +69,19 @@ function resolveJwtSecret(): string | null {
   return null;
 }
 
-function requireAdminAuth(res: { locals: { auth?: AuthLocals } }): AuthLocals {
+// T8 第十六批：原 `requireRole(auth, 'admin')` 硬编码角色 ⇒ 可配置权限点 `role.manage`。
+//   🔴 为什么归账号域：邀请码是**建账号的前置动作**（redeem 即凭码建号），与 accounts.ts /
+//   `POST /auth/users` 同一域；accounts.ts 头注释 G4 已确立该域守卫 = `role.manage`。
+//   🔴 等价性：`role.manage` defaults `[]`（仅 admin）+ admin 恒 true ⇒ 分布与原实现一致。
+//   🔴 守卫单独一个事务：保持「401 → 403 → zod 422」的原有顺序不被改写。
+//   ⚠️ 已知差异（登记）：403 的 code 由 `FORBID_001` 变为 `FORBIDDEN`（全仓统一口径，
+//     已实测前端/小程序 0 处依赖 FORBID_001）。
+async function requireAdminAuth(res: { locals: { auth?: AuthLocals } }): Promise<AuthLocals> {
   const auth = res.locals.auth as AuthLocals | undefined;
   if (!auth) throw new AppError('AUTH_001', 'missing auth', 401);
-  if (!requireRole(auth, 'admin')) throw new AppError('FORBID_001', 'admin only', 403);
+  await withTenantClient(auth.tenantId, async (client) => {
+    await requirePermission(auth, client, 'role.manage');
+  });
   return auth;
 }
 
@@ -86,7 +95,7 @@ const inviteCreateSchema = z.object({
 // ---- POST /api/v1/invites —— admin：生成邀请码（明文仅本次响应返回一次；重发先作废旧码） ----
 router.post('/invites', async (req, res, next) => {
   try {
-    const auth = requireAdminAuth(res);
+    const auth = await requireAdminAuth(res);
     const b = inviteCreateSchema.parse(req.body);
     const tenantId = auth.tenantId;
     const code = randomInviteCode();
@@ -175,7 +184,7 @@ function inviteStatus(row: Pick<InviteRow, 'used_at' | 'revoked_at' | 'expires_a
 
 router.get('/invites', async (req, res, next) => {
   try {
-    const auth = requireAdminAuth(res);
+    const auth = await requireAdminAuth(res);
     const limitRaw = Number(req.query.limit);
     const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(Math.floor(limitRaw), 1), 200) : 50;
     const rows = await withTenantClient(auth.tenantId, (client) =>
@@ -200,7 +209,7 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 // ---- DELETE /api/v1/invites/:id —— admin：作废邀请码（置 revoked_at；已用/已作废幂等视作 404） ----
 router.delete('/invites/:id', async (req, res, next) => {
   try {
-    const auth = requireAdminAuth(res);
+    const auth = await requireAdminAuth(res);
     const id = String(req.params.id ?? '');
     // 非法 uuid 直接按不存在处理（避免 22P02 冒 500/400 误导「码还在」）
     if (!UUID_RE.test(id)) throw new AppError('INVITE_404', '邀请码不存在', 404);
