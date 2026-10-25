@@ -248,6 +248,18 @@ export const PERM_DEFS = {
   // ⚠️ 已知待决（登记，未做）：模板**市场侧**（templateMarket.ts）的端点本批未涉及
   //   （属平台运营面，不是租户侧守卫收敛范围）。
   'template.contribute': { label: '模板贡献', defaults: ['operator'] },
+  // T8 第十七批（2026-10-25）：admin 机构级贴码（`GET /api/v1/admin/mp-qrcode`，
+  //   adminQrcode.ts:17）—— **`requireRole` 的最后一处真实调用点**。
+  // 🔴 **defaults 必须是 `[]`（仅 admin）**：原 `requireRole(auth, 'admin')` 不含 operator，
+  //   若给 operator 就会把原本进不来的人放进来 ⇒ **破坏等价**。这一点已由
+  //   `tenantOnboarding.http.test.ts` 的等价性锚（operator 未授权 ⇒ 403）钉住。
+  // 🔴 为什么不复用 `role.manage`（账号域）：贴码与建账号不是一回事，归到一起会把
+  //   「能建账号」和「能出码」捆成「要么都给要么都不给」⇒ 权限放大。
+  // 🔴 为什么不能复用 `basicdata.edit`：它 defaults 含 operator ⇒ 会破坏等价（同上）。
+  // 🔴 命名依据**代码原文**：路由 `/admin/mp-qrcode`、文件 `adminQrcode.ts`、服务 `genMpCode`。
+  //   动词用 `generate`（而非 manage）是因为当前**只有生成这一个检查点** —— 照批 10 patrol
+  //   的判据：YAGNI，没有检查点的权限点是空头支票。
+  'qrcode.generate': { label: '生成贴码', defaults: [] },
 } as const satisfies Record<string, { label: string; defaults: readonly Role[] }>;
 
 /** 权限点清单（由 PERM_DEFS 派生，勿手改）。 */

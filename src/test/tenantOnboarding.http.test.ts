@@ -380,3 +380,46 @@ describe('admin 贴码端点 GET /admin/mp-qrcode', () => {
     expect(buf.subarray(0, 4).toString('hex')).toBe('89504e47'); // PNG 魔数
   });
 });
+
+// ═══════════════════════════════════════════════════════════════════════════
+// T8 第十七批：admin 贴码端点权限可配置（`requireRole` 硬编码 admin ⇒ `qrcode.generate`）
+// 这是 `requireRole` 的**最后一处**真实调用点。
+//
+// 【主 app 只有 admin / worker 两种固定挂载，故本组自建 app 注入任意角色】
+// ═══════════════════════════════════════════════════════════════════════════
+describe('T8 第十七批 · admin 贴码权限可配置（B 组：改前必红，改后转绿）', () => {
+  async function withRole(role: string, permRows: any[]): Promise<number> {
+    h.reset();
+    // 授权行：有 ⇒ hasPerm 走覆盖集；不 push ⇒ 走兜底 {rows:[],rowCount:0} 回退默认矩阵
+    if (permRows.length) h.script(/role_permission/, permRows);
+    const app = express();
+    app.use(express.json());
+    app.use('/api/v1', injectAuth(role), adminQrcodeRouter);
+    app.use(errorMiddleware);
+    const s = app.listen(0);
+    await new Promise<void>((r) => s.once('listening', () => r()));
+    const b = `http://127.0.0.1:${(s.address() as AddressInfo).port}`;
+    const r = await fetch(`${b}/api/v1/admin/mp-qrcode?loc=3F-A01`);
+    const status = r.status;
+    await new Promise<void>((r2) => s.close(() => r2()));
+    return status;
+  }
+
+  it('授 qrcode.generate 给 reviewer ⇒ 200（改前必红）', async () => {
+    expect(await withRole('reviewer', [])).toBe(403);
+    // 改前：requireRole 只读角色白名单、**不查权限表** ⇒ 授了也 403（RED）。改后转绿。
+    expect(await withRole('reviewer', [{ perm: 'qrcode.generate' }])).toBe(200);
+  });
+
+  // 🔴 等价性锚：`qrcode.generate` 的 defaults 必须是 `[]`（仅 admin）——
+  //    原 requireRole(auth,'admin') 不含 operator，收敛后 operator 也必须仍是 403，
+  //    否则就是把 operator 从放行外的人放进来（破坏等价）。
+  it('等价性锚：operator 未授权 ⇒ 403（defaults 不含 operator）', async () => {
+    expect(await withRole('operator', [])).toBe(403);
+  });
+
+  it('反例锚：授的是别家权限点 ⇒ 仍 403（贴码不跟账号/字典权限走）', async () => {
+    expect(await withRole('reviewer', [{ perm: 'role.manage' }])).toBe(403);
+    expect(await withRole('reviewer', [{ perm: 'basicdata.edit' }])).toBe(403);
+  });
+});

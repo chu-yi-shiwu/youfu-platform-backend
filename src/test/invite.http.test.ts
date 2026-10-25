@@ -378,7 +378,7 @@ describe('T8 第十六批 · 邀请端点权限可配置（B 组：改前必红�
   //   `requirePermission(..., 'role.manage')`，其头注释 G4 白纸黑字写「守卫统一 role.manage
   //   （替代 requireConfigRole/assertAdmin 散落）」，H1 写「operator 默认矩阵无 role.manage，
   //   租户可经 role_permission 显式授予」。邀请码是**建账号的前置动作**，属同一域。
-  //   而 invite.ts 至今仍走 requireRole(auth, 'admin') 硬编码 ⇒ 同一域两套口径，
+  //   而 invite.ts 此前仍走 requireRole(auth, 'admin') 硬编码 ⇒ 同一域两套口径（第十六批已收敛），
   //   正是 T8 要消灭的病。
   // 不传 role：走默认 operator，避免牵扯 isRoleUsable 那条支线（本组只钉权限判定本身）。
   const body = { username: 'u-b16' };
