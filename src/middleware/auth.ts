@@ -81,8 +81,15 @@ const PUBLIC_POST_PATHS = new Set([
   '/v1/energy/token-exchange',
   '/v1/energy/webhook/status-update',
 ]);
+// 🔒 P1 修复（2026-10-26 查询串绕过）：Express 的 req.originalUrl **包含查询串**，
+//   直接 endsWith('/auth/login') 会让 POST /任意受保护路径?x=/auth/login 命中本分支 ⇒
+//   authMiddleware:236 直接 next()，整段鉴权被跳过（实测：受保护路由 HTTP 200 直达，
+//   res.locals.auth 为 undefined）。先按 RFC 去掉 ?query 与 #fragment，只拿 pathname 参与判定。
+//   注：点段形态（/v1/x/../auth/login）仍会命中本分支，但它匹配不到任何真实路由
+//   （apiGuard 对未知首段先行 404，已知首段的点段最终落 'NO_ROUTE' 404），已实测无数据暴露面。
 function isPublicPath(req: Request): boolean {
-  return req.method === 'POST' && (PUBLIC_POST_PATHS.has(req.path) || (req.originalUrl ?? '').endsWith('/auth/login') || (req.originalUrl ?? '').endsWith('/auth/wx-login'));
+  const pathname = (req.originalUrl ?? '').split(/[?#]/)[0];
+  return req.method === 'POST' && (PUBLIC_POST_PATHS.has(req.path) || pathname.endsWith('/auth/login') || pathname.endsWith('/auth/wx-login'));
 }
 
 function parseBearer(auth: string | undefined): string | null {
