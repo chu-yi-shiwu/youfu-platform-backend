@@ -515,17 +515,24 @@ describe('DEFAULT_LOGIN_TENANT 在生产到底起不起作用（决定"删不删
 });
 
 // ==========================================================================================
-// isPublicPath 查询串绕过 · P1 修复回归（2026-10-26）
+// isPublicPath 后缀绕过 · P1 修复回归（2026-10-26，三个 commit 的最终形态）
 //
 // 缺陷：`middleware/auth.ts` 的 isPublicPath 用 `(req.originalUrl ?? '').endsWith('/auth/login')`
 //       判定公开路径，而 Express 的 originalUrl **包含查询串** ⇒
 //       `POST /api/v1/<任意受保护路径>?x=/auth/login` 命中该分支 ⇒ authMiddleware 直接 next()，
 //       整段鉴权被跳过（端到端实测：HTTP 200 直达业务路由，res.locals.auth 为 undefined）。
-// 修法：**甲** —— 判定前先按 RFC 去掉 ?query 与 #fragment，只拿 pathname 参与 endsWith。
-//       （为何不取乙「删掉两个 endsWith 分支」见报告：甲是单变量最小改动，乙还会改变
-//        `/v1/platform/auth/login` 这条不在 PUBLIC_POST_PATHS 里的路径的谓词结果。）
+//       同一个洞的其它残余形态：点段 /v1/x/../auth/login、纯文本后缀 /v1/foo/bar/auth/login，
+//       以及任意叠加组合 —— 它们靠的都是「endsWith 是纯字符串比较」这一件事。
 //
-// 纪律：两条断言都配了定向变异验证（详见报告 §变异），不是恒绿。
+// 修法演进（第三个 commit 收口到治本）：
+//   commit1 cb6453c：去 ?query/#fragment 后再 endsWith      —— 只堵查询串；
+//   commit2 cb97564：加 removeDotSegments 做路径标准化      —— 再堵点段，但仍是「怎么更好地比后缀」；
+//   commit3 本改动：**取消后缀判定**。先把 `/v1/platform/auth/login` 显式登记进 PUBLIC_POST_PATHS
+//     （后缀分支原先唯一真在兜的那条；已复核全仓 3 处登录注册点，platform 下无 /auth/wx-login），
+//     再把 isPublicPath 退化为 `PUBLIC_POST_PATHS.has(req.path)` 纯成员判定，
+//     removeDotSegments 随之无用一并移除。判定不再读取 originalUrl ⇒ 上述全部形态一次性消失。
+//
+// 纪律：每条「必须拦住」的断言都配了定向变异验证（详见报告 §变异），不是恒绿。
 // ==========================================================================================
 
 /** 打一次 authMiddleware（**不带任何凭据**），回收"是否因公开路径豁免而放行"。 */
@@ -577,10 +584,15 @@ describe('isPublicPath · 查询串不得绕过鉴权（P1 修复 2026-10-26）'
       expect(r.passed, `合法登录必须豁免：${originalUrl}`).toBe(true);
       expect(r.statusCode, `合法登录不得被拦：${originalUrl}`).toBe(0);
     }
-    // ② endsWith 分支唯一仍在承担作用的形态：/v1/platform/auth/login **不在** PUBLIC_POST_PATHS 里
-    //    （它今天挂在 authMiddleware 之前所以不过来，但谓词语义必须保持，否则一旦调整挂载顺序就炸登录）
+    // ② 平台管理员登录（routes/platform.ts:45 注册）——后缀分支原先唯一真在兜的形态，
+    //    第三个 commit 把它显式登记进 PUBLIC_POST_PATHS 后由白名单承担；
+    //    带查询串也必须放行，且这条正是「白名单条目被删」那条变异要逼红的目标。
     const plat = await probePublicPath({ method: 'POST', originalUrl: '/api/v1/platform/auth/login?tenant=t1', path: '/v1/platform/auth/login' });
-    expect(plat.passed, '平台管理员登录路径必须仍被豁免（endsWith 分支不可删）').toBe(true);
+    expect(plat.passed, '平台管理员登录路径必须仍被豁免（PUBLIC_POST_PATHS 白名单条目不可删）').toBe(true);
+    expect(plat.statusCode, '平台管理员登录不得被拦').toBe(0);
+    // 同口径再打一次不带查询串的，确保上面放行的不是因为查询串
+    const plat2 = await probePublicPath({ method: 'POST', originalUrl: '/api/v1/platform/auth/login', path: '/v1/platform/auth/login' });
+    expect(plat2.passed, '平台管理员登录（无查询串）必须豁免').toBe(true);
     // ③ 方法维不变：GET 同一路径不得豁免（isPublicPath 只对 POST 生效）
     const get = await probePublicPath({ method: 'GET', originalUrl: '/api/v1/auth/login', path: '/v1/auth/login' });
     expect(get.passed, 'GET 不受公开路径豁免').toBe(false);
@@ -607,8 +619,38 @@ describe('isPublicPath · 查询串不得绕过鉴权（P1 修复 2026-10-26）'
       expect(r.body.code).toBe('AUTH_001');
       expect(r.auth).toBeUndefined();
     }
-    // 对照：不含点段的合法登录路径仍然豁免 ⇒ 上面测的是「点段」这一个变量，不是顺手把 endsWith 关了
+    // 对照：白名单里的合法登录路径仍然豁免 ⇒ 上面测的是「非法形态必须拦」这一个变量，
+    //       不是顺手把整个豁免机制关了（白名单条目由区别于它的变异负责逼红）。
     const stillOk = await probePublicPath({ method: 'POST', originalUrl: '/api/v1/platform/auth/login', path: '/v1/platform/auth/login' });
-    expect(stillOk.passed, '不含点段的 /auth/login 结尾路径仍须豁免（避免补刀补过头）').toBe(true);
+    expect(stillOk.passed, '白名单内的 /auth/login 结尾路径仍须豁免（避免补刀补过头）').toBe(true);
+    const stillOk2 = await probePublicPath({ method: 'POST', originalUrl: '/api/v1/auth/login?a=1', path: '/v1/auth/login' });
+    expect(stillOk2.passed, '白名单内的租户登录路径仍须豁免（避免补刀补过头）').toBe(true);
+  });
+  it('🔴 纯文本后缀形态（/v1/foo/bar/auth/login）⇒ 不得豁免，必须回落正常鉴权 401', async () => {
+    // 这是 cb97564 之后剩下的最后一条残余：不含点段、不含查询串，
+    // 但 URL 以 /auth/login 结尾 ⇒ 旧实现的纯字符串 endsWith 依然会放行。
+    // 今天不可达的实测证据：/api/v1/foo/bar/auth/login → apiGuard 先 404 NOT_FOUND（未知首段）。
+    // 收口理由同上：不可达靠的是路由配置的隐式耦合，不是逻辑上不成立。
+    for (const [originalUrl, path] of [
+      ['/api/v1/foo/bar/auth/login', '/v1/foo/bar/auth/login'],
+      ['/api/v1/accounts/list/auth/login', '/v1/accounts/list/auth/login'],
+      ['/api/v1/foo/bar/auth/wx-login', '/v1/foo/bar/auth/wx-login'],
+      // 叠加形态：纯文本后缀 ⊗ 查询串 ⊗ 点段，三个变量一起上也要拦住
+      ['/api/v1/foo/bar/auth/login?x=/auth/login', '/v1/foo/bar/auth/login'],
+      ['/api/v1/foo/bar/../auth/login#f', '/v1/foo/bar/../auth/login'],
+    ] as const) {
+      const r = await probePublicPath({ method: 'POST', originalUrl, path });
+      expect(r.passed, `纯文本后缀不得豁免鉴权：${originalUrl}`).toBe(false);
+      expect(r.statusCode, `纯文本后缀不得豁免鉴权：${originalUrl}`).toBe(401);
+      expect(r.body.code).toBe('AUTH_001');
+      expect(r.auth, `不得放行：${originalUrl}`).toBeUndefined();
+    }
+    // 对照：白名单内的真登录路径仍豁免 ⇒ 上面拦的是「伪造后缀」，不是把所有登录都关了
+    const okLogin = await probePublicPath({ method: 'POST', originalUrl: '/api/v1/auth/login', path: '/v1/auth/login' });
+    expect(okLogin.passed, '真登录路径 /v1/auth/login 仍须豁免').toBe(true);
+    const okWx = await probePublicPath({ method: 'POST', originalUrl: '/api/v1/auth/wx-login', path: '/v1/auth/wx-login' });
+    expect(okWx.passed, '真登录路径 /v1/auth/wx-login 仍须豁免').toBe(true);
+    const okPlat = await probePublicPath({ method: 'POST', originalUrl: '/api/v1/platform/auth/login', path: '/v1/platform/auth/login' });
+    expect(okPlat.passed, '真登录路径 /v1/platform/auth/login 仍须豁免（白名单条目）').toBe(true);
   });
 });

@@ -76,46 +76,37 @@ refreshAuthMode();
 const PUBLIC_POST_PATHS = new Set([
   '/v1/auth/login',
   '/v1/auth/wx-login',
+  // 平台管理员登录：routes/platform.ts:45 注册。原先靠下面的「endsWith('/auth/login')」后缀
+  // 分支兜住（见 2026-10-26 第三个 commit），白名单化后改由本集合承担。
+  '/v1/platform/auth/login',
   '/v1/invites/redeem', // 八件增量 BE-1：邀请码公开激活（扫码/手输码建号，loginRateLimit 保护）
   '/v1/energy/webhook/dispatch',
   '/v1/energy/token-exchange',
   '/v1/energy/webhook/status-update',
 ]);
-// 🔒 P1 修复（2026-10-26 查询串绕过）：Express 的 req.originalUrl **包含查询串**，
-//   直接 endsWith('/auth/login') 会让 POST /任意受保护路径?x=/auth/login 命中本分支 ⇒
-//   authMiddleware:236 直接 next()，整段鉴权被跳过（实测：受保护路由 HTTP 200 直达，
-//   res.locals.auth 为 undefined）。先按 RFC 去掉 ?query 与 #fragment，只拿 pathname 参与判定。
-//   注：仅去查询串还不足以收口，点段形态（/v1/x/../auth/login）由下面的
-//   removeDotSegments 统一处理（见『P1 补刀』注释，同 2026-10-26 第二个 commit）。
-/**
- * RFC 3986 §5.2.4 remove_dot_segments 的最小实现（只用于**判定**，不改写 req.url、不影响路由）。
- * 为什么需要：Express 不会规范化 req.url 里的 `..`（实测 /v1/x/../auth/login 落 404 NO_ROUTE），
- *   而 endsWith 是纯字符串比较 ⇒ /v1/foo/../auth/login 会被当成登录路径而豁免鉴权。
- */
-function removeDotSegments(pathname: string): string {
-  const out: string[] = [];
-  for (const seg of pathname.split('/')) {
-    if (seg === '.') continue;
-    if (seg === '..') { out.pop(); continue; }
-    out.push(seg);
-  }
-  return out.join('/');
-}
-
+// 🔒 P1 修复（2026-10-26，三个 commit 的最终形态）：**只按精确成员判定公开路径，不再看 URL 后缀。**
+//   至此为止的全部绕过形态（查询串 / fragment / 点段 / 纯文本后缀 / 任意叠加组合）一次性消失，
+//   因为判定根本不再读取 originalUrl —— 这是治本，不是给同一个洞叠第三块补丁。
+//   —— 历史（保留以防有人想把后缀判定加回来）——
+//   ① 原文 isPublicPath 用 (req.originalUrl ?? '').endsWith('/auth/login')，而 Express 的
+//      req.originalUrl **包含查询串** ⇒ POST /api/v1/<任意受保护路径>?x=/auth/login 命中该分支 ⇒
+//      authMiddleware:236 直接 next()，整段鉴权被跳过。端到端实测：AUTH_MODE=prod、无凭据情况下
+//      受保护路由 HTTP 200 直达，且 res.locals.auth === undefined（'/auth/wx-login' 同样可利用）。
+//      第一个 commit（cb6453c）的修法是先按 RFC 去掉 ?query 与 #fragment，只留 pathname。
+//   ② 仅去查询串不足以收口：/v1/x/../auth/login、/v1/foo/bar/auth/login 等仍能靠纯字符串后缀
+//      命中豁免。第二个 commit（cb97564）加了 removeDotSegments 做路径标准化，只堵住含点段那一类。
+//      今天不可达的实测证据：
+//        POST /api/v1/accounts/../auth/login → 鉴权被跳过，但路由层 404 NO_ROUTE（无处理器可达）；
+//        POST /api/v1/foo/bar/auth/login    → apiGuard 先 404 NOT_FOUND（未知首段）。
+//      仍然收口的理由：不可达靠的是『今天没有匹配得上这条 URL 的路由』这一隐式耦合，
+//      将来谁加一条能把该形态吃进去的路由（或某个中间件先做了规范化），它立刻变成可达的真正绕过。
+//   ③ 本 commit 直接取消后缀判定：先把 /v1/platform/auth/login 显式补进上面的 PUBLIC_POST_PATHS
+//      （已复核全仓仅 3 处登录注册点：routes/auth.ts:50 /auth/login、routes/auth.ts:255 /auth/wx-login、
+//      routes/platform.ts:45 /auth/login；platform 下**没有** /auth/wx-login，无第四处），
+//      再把 isPublicPath 退化为纯集合查表。后缀分支失效后 removeDotSegments 随之无用，一并移除。
+//   ⚠️ 新增登录端点必须同步登记到 PUBLIC_POST_PATHS，否则登录会在第一跳就被 401 挡掉。
 function isPublicPath(req: Request): boolean {
-  const raw = (req.originalUrl ?? '').split(/[?#]/)[0];
-  // 🔒 P1 补刀（同日 · 点段形态收口）：先做路径标准化。**含点段的请求不享受 endsWith 豁免**，
-  //    一律回落到正常鉴权（fail-closed）。
-  //    今天不可达的实测证据：
-  //      POST /api/v1/accounts/../auth/login → 鉴权被跳过，但路由层 404 NO_ROUTE（无处理器可达）；
-  //      POST /api/v1/foo/bar/auth/login    → apiGuard 先 404 NOT_FOUND（未知首段）。
-  //    仍然收口的理由：『不可达』靠的是『今天没有匹配得上这条 URL 的路由』这一隐式耦合，
-  //    将来谁加一条能把点段形态吃进去的路由（或中间件先做了规范化），它立刻变成可达的真正绕过。
-  //    这与上一个 commit（查询串）是同一个洞的残余面，不是新洞。
-  const canonical = removeDotSegments(raw);
-  const suffixExempt =
-    canonical === raw && (canonical.endsWith('/auth/login') || canonical.endsWith('/auth/wx-login'));
-  return req.method === 'POST' && (PUBLIC_POST_PATHS.has(req.path) || suffixExempt);
+  return req.method === 'POST' && PUBLIC_POST_PATHS.has(req.path);
 }
 
 function parseBearer(auth: string | undefined): string | null {
