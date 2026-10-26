@@ -13,12 +13,12 @@ import type { PoolClient } from 'pg';
 import { AppError } from '../middleware/error.js';
 import { transition } from '../repo/ticket.js';
 import { recalcHeader } from '../repo/settlement.js';
-import { getWorkflowDef } from '../engine/workflowDef.js';
+import { getWorkflowDefAtVersion } from '../engine/workflowDef.js';
 import {
   ACCEPTANCE_EVENT_PREFIX, hasAcceptanceEdges,
   acceptanceFromStates, acceptanceTargetStatus, acceptanceEventFor,
 } from '../engine/acceptanceEdges.js';
-import type { WorkOrderStatus, WorkflowDef } from '../engine/stateMachine.js';
+import { DEFAULT_WORK_ORDER_DEF, type WorkOrderStatus, type WorkflowDef } from '../engine/stateMachine.js';
 
 // 审查修复（架构🔴2 / QA🟡4）：此处原硬编码 ACCEPTANCE_ROLES 白名单，与 workflow_def 边里的
 // allowedRoles 形成两份事实源——租户在流程配置里改了 allowedRoles 也不生效，违反设计支柱②。
@@ -118,15 +118,21 @@ export async function applyAcceptance(
 ): Promise<AcceptanceOutcome> {
   // ① 行锁读工单（与 transition() 同款 FOR UPDATE，杜绝并发双验收）
   // E-8 BUG-003：补 assignee_id 列——SELF_ACCEPT 守卫需比对处理工人归属。
+  // T1-B 批4：本句是窄列 SELECT（不是 SELECT *），为取行上锁定的流程版本**必须拓宽这一个列名**
+  //   —— 红线那条"不许拓宽 SELECT"针对的是 findOneForUpdate / findOne / list（它们已是
+  //   `SELECT *` / `SELECT wo.*`，天然带 def_version），与本条不冲突；此处不动其余任何列。
   const cur = await client.query(
-    'SELECT id, status, order_no, sla_minutes, assignee_id FROM work_orders WHERE id = $1 AND tenant_id = $2 FOR UPDATE',
+    'SELECT id, status, order_no, sla_minutes, assignee_id, def_version FROM work_orders WHERE id = $1 AND tenant_id = $2 FOR UPDATE',
     [workOrderId, tenantId],
   );
   if (cur.rows.length === 0) {
     throw new AppError('NOT_FOUND', 'work order not found', 404);
   }
   // ① 租户 def（只读）——验收起止态一律由它派生，服务层不保留状态名字面量（F10）。
-  const def = await getWorkflowDef(client, tenantId, 'work_order');
+  // T1-B 批4：按**这张工单行**锁定的版本读，不能用 live def。
+  //   理由：本处的 acceptanceFromStates 是"这张单能不能验收"的放行判定，:173 的 transition()
+  //   读的是行上锁版本 ⇒ 两边不同版本就变成「端点放行、点了才 422」（验收按钮看得见按不动）。
+  const def = await getWorkflowDefAtVersion(client, tenantId, 'work_order', cur.rows[0].def_version, DEFAULT_WORK_ORDER_DEF);
   // F10：等待验收的起态 = def 里 acceptance_* 边的 from（默认是 completed；租户改了就跟他走）。
   //   此前写死 status !== 'completed'：租户把验收边挂在别的完成态名上 → 那些单永远验不了。
   const acceptableFrom = acceptanceFromStates(def);

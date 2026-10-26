@@ -1,0 +1,55 @@
+-- 103_inflight_def_version_workorder.sql —— T1-B 批4：给工单表加「建单时流程版本」列
+--
+-- 【为什么必须有这份迁移】
+--   T1-B 要回答一个当前答不上来的问题：「这张在途工单当时是按哪一版流程建的」。
+--   102 已经给 inspection_task / transport_order / business_flow_tasks 三张表加好列
+--   （批 1/2/3 已上线），工单是**最后一类**在途单，本次补上：
+--     · def_version 在 work_orders 上此前 0 命中 ⇒ 新增字段，无撞名；
+--     · 版本号的另一半早就齐了：workflow_def.version 建表时就有（022:12），
+--       且「(tenant_id, entity_type, version) → 完整 def 快照」的映射表
+--       workflow_def_history 也已存在、有唯一约束、且 append-only（047:113-126）。
+--   ⇒ 本迁移同样不需要自己存快照，只需要给业务行加一个指向它的 int。
+--   本迁移只加列、不改任何既有列 ⇒ **与现状逐字节等价，可单独上线**。
+--
+-- 【🔴 E4：本迁移不改动任何一行既存数据】
+--   存量行一律靠 DEFAULT 0 落到哨兵值。0 的语义是「**未记录**」——
+--   不是「事实上是第 0 版」，更不是「创建时的当前版本」。
+--   任何「把存量填成当时的 version」的写法都是**伪造数据**（总则 E4），本迁移明令禁止：
+--   一张 9 月建的工单，我们没有任何证据说它是按哪一版 def 建的，
+--   拿今天的版本号填进去，就是拿今天猜昨天。
+--   宁可留 0，让读取侧降级按 live def 走 —— 那正是今天的行为，逐字节不变。
+--   （反之，若填了假值，"降级"这条退路也被堵死了：假值看起来像真值，不会触发降级。）
+--
+-- 【为什么是 int NOT NULL DEFAULT 0，而不是可空】
+--   ① 避免第三态：可空会让每个读取点都要写 row.def_version ?? 0，
+--      且「没写」与「写了 0」在运行中不可区分 ⇒ 平白多一个出错面。
+--      用哨兵 0，类型系统直接给你 number。
+--   ② 与既有函数语义天然对齐：getWorkflowDefVersion（src/engine/workflowDef.ts:514）
+--      在租户没有 definition 时**返回 0**（:523 `r.rows[0]?.version ?? 0`）
+--      ⇒ 建单点可以直接拿它落值，无需任何特殊分支。
+--   ③ 回退安全：有 DEFAULT 0 ⇒ 删列之后能原样加回来
+--      （与 101 里 label_dict_tenant.version 用 NOT NULL DEFAULT 1 同款论证）。
+--
+-- 【为什么工单单独成一份迁移，不并进 102】
+--   102:32-36 记载了当时的排除理由：§6 不动清单（docs/00_现行/任务骨架.md:1027）
+--   明列「工单模块本身」不动；且 repo/ticket.ts 不走 applyEvent，是自己
+--   `def.transitions.find({from,to})` 解析 ⇒ 改造形状与另三张表不同，
+--   混在一批违反总则 E6（一次只改一个变量）。
+--   ⇒ 保持同样的纪律：列与代码同批落地（103 + 批 4 代码），
+--   且**单独成文件** ⇒ 工单这一列可以独立回退，不牵连已上线的三张表。
+--   （102 已上线且三张表已在记账；把工单塞进 102 会要求重放一份已应用的迁移。）
+--
+-- 【施工踩坑先例（照着 029 的教训写）】
+--   029_inspection_updated_at.sql:1-3 记载：路由引用了 updated_at，但 011 没建列
+--   ⇒ 潜伏很久才炸。⇒ **本列加上之后，必须同步改 INSERT 语句**
+--   （见 T1-B 设计 §5 批 4 的「盖章」条目，src/repo/ticket.ts createWithIdem），
+--   否则就是新造一个 029。
+--
+-- 【与既有加列互不冲突】work_orders 的加列历史见 025 / 026 / 031 / 074 / 088 等。
+--   本列名为 def_version，与 102 同名列语义一致（各表各自一列，无共享）。
+--
+-- 【幂等】ADD COLUMN IF NOT EXISTS，可重复执行；DDL 须以属主执行：
+--   sudo -u postgres psql -d youfu -v ON_ERROR_STOP=1 -f 103_inflight_def_version_workorder.sql
+
+-- 工单（001 建表，025/026/031 等历次扩列）
+ALTER TABLE work_orders ADD COLUMN IF NOT EXISTS def_version int NOT NULL DEFAULT 0;

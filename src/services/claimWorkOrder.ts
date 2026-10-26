@@ -22,10 +22,10 @@
 
 import type { PoolClient } from 'pg';
 import { transition, findOne, findOneForUpdate } from '../repo/ticket.js';
-import { getWorkflowDef } from '../engine/workflowDef.js';
+import { getWorkflowDefAtVersion } from '../engine/workflowDef.js';
 import { insertNotification } from './notify.js';
 import { AppError } from '../middleware/error.js';
-import type { WorkOrderStatus } from '../engine/stateMachine.js';
+import { DEFAULT_WORK_ORDER_DEF, type WorkOrderStatus } from '../engine/stateMachine.js';
 import { claimableStates, CLAIM_EVENT } from '../engine/stateMachine.js';
 
 // F10：池态不再写死 ['claim_hall','pending_dispatch']——由 claimableStates(def) 派生
@@ -46,9 +46,13 @@ export async function claimWorkOrder(
   tenantId: string,
   p: ClaimParams,
 ): Promise<{ ticket: unknown }> {
-  const def = await getWorkflowDef(client, tenantId, 'work_order');
   const cur = await findOneForUpdate(client, tenantId, p.orderId);
   if (!cur) throw new AppError('NOT_FOUND', 'work order not found', 404);
+  // T1-B 批4：按**这张工单行**锁定的版本读（原为逐行无关的 live def，现移到此行取到之后）。
+  //   理由：下方 claimableStates 是"这张单能不能被抢"的放行判定，:76 的 transition()
+  //   读的是行上锁版本 ⇒ 两边不同版本就变成「抢单按钮在、抢了才 409/422」。
+  //   cur 来自 findOneForUpdate（SELECT *）⇒ def_version 天然在位，无需拓宽 SELECT。
+  const def = await getWorkflowDefAtVersion(client, tenantId, 'work_order', Number(cur.def_version) || 0, DEFAULT_WORK_ORDER_DEF);
   if (!claimableStates(def).includes(cur.status)) {
     throw new AppError('CONFLICT', `work order not in claimable pool (status=${cur.status})`, 409);
   }

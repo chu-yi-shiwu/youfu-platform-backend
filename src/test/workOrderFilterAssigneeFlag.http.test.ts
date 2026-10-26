@@ -11,6 +11,8 @@ import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import express from 'express';
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { errorMiddleware } from '../middleware/error.js';
 import type { AuthLocals } from '../middleware/auth.js';
 
@@ -355,5 +357,243 @@ describe('任务三：ticket_require_service_desk 租户开关', () => {
     // 写权限对齐 requireConfigRole（worker 403）
     const forbidden = await put('/config/ticket-require-service-desk', { enabled: true }, 'worker');
     expect(forbidden.status).toBe(403);
+  });
+});
+
+// ============================================================
+// T1-B 批4 · 工单在途单锁版本 —— HTTP 穿透验收（A3-W / A4-W / A9-W）
+//
+// 【为什么这三条必须走 HTTP 而不是 ../../engine 单测】
+//   read 侧三处改动（列表分组读 / 详情按行读 / 建单盖章）**长在 route handler 与 createWithIdem 里**，
+//   真库那份（workflowDefAtVersion.pglite.test.ts 批4 组）验的是"拿到哪一版、按它流转对不对"，
+//   这儿验的是"这个 HTTP 端点到底有没有走版本化读" —— 两边互补，缺一边都会留缝。
+//
+// 【🔴🔴 桩纪律（批 3 的血的教训）】
+//   假 client 的**兜底分支返回空行**，兜底对象里**一律不得出现 def_version** ——
+//   真实数据库里没被 SELECT 的列不会出现在行上。若桩给每行都塞上 def_version，
+//   "那处忘了把 def_version 读出来"的 bug 会被桩填平 ⇒ 假绿。
+//   本文件既有的 makeClient 兜底返回 `{ rows: [] }`，天然合规，此处只是加注释钉住不许改。
+// ============================================================
+const WO_OLD_ID = '33333333-3333-4333-8333-333333333333';
+const WO_NEW_ID = '44444444-4444-4444-8444-444444444444';
+
+/** v1：draft→assigned→processing→completed，三条边（老单锁的那一版）。 */
+const DEF_V1 = {
+  initial: 'draft',
+  states: ['draft', 'assigned', 'processing', 'completed'],
+  transitions: [
+    { from: 'draft', to: 'assigned', event: 'assign' },
+    { from: 'assigned', to: 'processing', event: 'start' },
+    { from: 'processing', to: 'completed', event: 'complete' },
+  ],
+  config: {},
+};
+/** v2 = v1 + 一条 v1 **没有**的边 assigned --fast_close--> completed —— A3-W 列表/详情的判别关键。 */
+const DEF_V2 = {
+  initial: 'draft',
+  states: ['draft', 'assigned', 'processing', 'completed'],
+  transitions: [
+    ...DEF_V1.transitions,
+    { from: 'assigned', to: 'completed', event: 'fast_close' },
+    // A3-W 抢单大厅面的判别关键：v1 里 claim_hall 只有引擎注入的三条机制出边，
+    // v2 多了一条自定义的 claim_hall --grab--> processing。
+    // （claim_hall 不需要写进 states：withMechanismStates 会把它连同机制边幂等补上。）
+    { from: 'claim_hall', to: 'processing', event: 'grab' },
+  ],
+  config: {},
+};
+
+/**
+ * 版本化读路径的三个必答查询。
+ * 【顺序敏感】`FROM workflow_def_history` 含有子串 `FROM workflow_def` ⇒ history 分支必须排在
+ * 任何宽匹配之前；本组刻意**不提供** `includes('FROM workflow_def')` 这种兜底，让未预期的查询直接暴露。
+ * 【为什么必须给 SELECT version 单独一条分支】getWorkflowDefVersion 用它；没有这条 ⇒ 返回 undefined
+ * ⇒ 版本号变 NaN/undefined，测试会假红成产品 bug（而不是把真实缺陷验出来）。
+ */
+function versionedDefHandlers(): Handler[] {
+  return [
+    { match: (t) => t.includes('SELECT version FROM workflow_def'), reply: () => ({ rows: [{ version: 2 }] }) },
+    {
+      match: (t) => t.includes('FROM workflow_def_history'),
+      // getWorkflowDefHistoryVersion：$1 tenant / $2 entity / $3 version
+      reply: (_t, p) => (Number(p?.[2]) === 1 ? { rows: [{ def: DEF_V1 }] } : { rows: [] }),
+    },
+    { match: (t) => t.includes('SELECT def FROM workflow_def'), reply: () => ({ rows: [{ def: DEF_V2 }] }) },
+  ];
+}
+
+const eventOf = (list: Array<{ event: string }>) => list.map((a) => a.event);
+
+describe('A3-W：available 老单新单各按各的版本（穿透 read 侧）', () => {
+  const detailRow = (id: string, defVersion: number) => ({
+    match: (t: string) => t.includes('FROM work_orders wo') && t.includes('LEFT JOIN worker w'),
+    reply: () => ({
+      rows: [{
+        id, tenant_id: T, order_no: 'WO_A3', status: 'assigned',
+        assignee_id: null, assignee_name: null, def_version: defVersion,
+      }],
+    }),
+  });
+
+  it('详情：老单（def_version=1，live=2）available 不含 v2 新增的 fast_close', async () => {
+    const { client } = makeClient([
+      detailRow(WO_OLD_ID, 1),
+      ...versionedDefHandlers(),
+      { match: (t) => t.includes('FROM ticket_event'), reply: () => ({ rows: [] }) },
+    ]);
+    h.client = client;
+    const r = await get(`/open/work_order/${WO_OLD_ID}`);
+    expect(r.status).toBe(200);
+    const ev = eventOf(r.body.available);
+    expect(ev, 'v1 自带的边照常在').toContain('start');
+    expect(ev, '详情 available 不得出现 v2 独有的 fast_close').not.toContain('fast_close');
+  });
+
+  it('详情对照：同状态下新单（def_version=2 = live）available 含 fast_close', async () => {
+    const { client } = makeClient([
+      detailRow(WO_NEW_ID, 2),
+      ...versionedDefHandlers(),
+      { match: (t) => t.includes('FROM ticket_event'), reply: () => ({ rows: [] }) },
+    ]);
+    h.client = client;
+    const r = await get(`/open/work_order/${WO_NEW_ID}`);
+    expect(r.status).toBe(200);
+    // 没有这条对照的话，"一律按最老版本渲染按钮"的错误实现也能让上一条全绿。
+    expect(eventOf(r.body.available), '新单必须看得到 v2 的新边').toContain('fast_close');
+  });
+
+  it('列表：一行老单(v1) + 一行新单(v2) ⇒ 老单不含 fast_close、新单含（getDefsForVersions 分组读）', async () => {
+    const rows = [
+      { id: WO_OLD_ID, tenant_id: T, order_no: 'WO_OLD', status: 'assigned', assignee_id: null, assignee_name: null, def_version: 1 },
+      { id: WO_NEW_ID, tenant_id: T, order_no: 'WO_NEW', status: 'assigned', assignee_id: null, assignee_name: null, def_version: 2 },
+    ];
+    const { client } = makeClient([
+      {
+        match: (t) => t.includes('FROM work_orders wo') && t.includes('COUNT(*)'),
+        reply: () => ({ rows: [{ c: String(rows.length) }] }),
+      },
+      {
+        match: (t) => t.includes('FROM work_orders wo') && t.includes('ORDER BY wo.created_at'),
+        reply: () => ({ rows }),
+      },
+      ...versionedDefHandlers(),
+    ]);
+    h.client = client;
+    const r = await get('/open/work_orders');
+    expect(r.status).toBe(200);
+    expect(r.body.items.length).toBe(2);
+    const byId = new Map<string, string[]>(r.body.items.map((it: any) => [it.id, eventOf(it.available)]));
+    expect(byId.get(WO_OLD_ID), '列表里老单的 available 不得出现 v2 独有的边').not.toContain('fast_close');
+    expect(byId.get(WO_NEW_ID), '列表里新单的 available 必须含 v2 的边').toContain('fast_close');
+    // 两行同状态却给出**不同**按钮集 —— 这正是「共用 live def」做不到的事 ⇒ 锁版本真的生效了。
+    expect(byId.get(WO_OLD_ID)).not.toEqual(byId.get(WO_NEW_ID));
+  });
+
+  it('抢单大厅：available 同样逐行分组读 ⇒ 老单(v1)不含 v2 独有的 grab、新单(v2)含', async () => {
+    const rows = [
+      { id: WO_OLD_ID, tenant_id: T, order_no: 'WO_OLD', status: 'claim_hall', assignee_id: null, def_version: 1 },
+      { id: WO_NEW_ID, tenant_id: T, order_no: 'WO_NEW', status: 'claim_hall', assignee_id: null, def_version: 2 },
+    ];
+    const { client } = makeClient([
+      // 抢单大厅先探「租户内现存哪些版本」（源 reachable 分支；没有它 ⇒ undefined 直接崩）
+      {
+        match: (t) => t.includes('SELECT DISTINCT def_version FROM work_orders'),
+        reply: () => ({ rows: [{ def_version: 1 }, { def_version: 2 }] }),
+      },
+      {
+        match: (t) => t.includes('FROM work_orders WHERE tenant_id=$1 AND status = ANY($2::text[])'),
+        reply: () => ({ rows }),
+      },
+      ...versionedDefHandlers(),
+    ]);
+    h.client = client;
+    const r = await get('/open/claim-hall');
+    expect(r.status).toBe(200);
+    expect(r.body.items.length, '两张单都必须在池里（池态取各版本并集）').toBe(2);
+    const byId = new Map<string, string[]>(r.body.items.map((it: any) => [it.id, eventOf(it.available)]));
+    // 机制注入的三条出边（claim/dispatch/cancel）两个版本都有 ⇒ 两边都在
+    expect(byId.get(WO_OLD_ID)).toContain('claim');
+    expect(byId.get(WO_NEW_ID)).toContain('claim');
+    expect(byId.get(WO_OLD_ID), '大厅里老单不得出现 v2 独有的 grab').not.toContain('grab');
+    expect(byId.get(WO_NEW_ID), '大厅里新单必须含 v2 的 grab').toContain('grab');
+  });
+});
+
+describe('A4-W：POST /open/work_order 建单盖章（穿透 INSERT 实参）', () => {
+  const createBody = (extra: Record<string, unknown> = {}) => ({
+    id: WO_ID,
+    business_type: 'repair',
+    title: '盖章穿透验证',
+    ...extra,
+  });
+
+  it('INSERT 末位实参 = 取到的版本号（非 0），且取版本号的查询排在 INSERT 之前', async () => {
+    // 🔴 version 分支必须排在 createHandlers() 里那条 `includes('FROM workflow_def')` 兜底之前：
+    //    `SELECT version FROM workflow_def` 同样含子串 `FROM workflow_def`，顺序反了会被兜底吃掉。
+    const { client, calls } = makeClient([
+      { match: (t) => t.includes('SELECT version FROM workflow_def'), reply: () => ({ rows: [{ version: 5 }] }) },
+      ...createHandlers(),
+    ]);
+    h.client = client;
+    const r = await post('/open/work_order', createBody());
+    expect(r.status).toBe(201);
+
+    const insIdx = calls.findIndex((c) => c.text.startsWith('INSERT INTO work_orders'));
+    const verIdx = calls.findIndex((c) => c.text.includes('SELECT version FROM workflow_def'));
+    expect(insIdx, '必须真的走了建单 INSERT').toBeGreaterThan(-1);
+    expect(verIdx, '建单前必须真的取过版本号').toBeGreaterThan(-1);
+    expect(verIdx, '取版本号必须排在 INSERT 之前（版本号是写入时的事实，不许事后补）').toBeLessThan(insIdx);
+
+    const params = calls[insIdx].params as unknown[];
+    expect(params.length, 'INSERT 实参个数：批4 起为 18 参').toBe(18);
+    expect(params[params.length - 1], 'INSERT 末位实参必须是那次取到的版本号').toBe(5);
+    expect(params[params.length - 1], '哨兵 0 = 未盖章 ⇒ 不许出现').not.toBe(0);
+  });
+});
+
+describe('A9-W：刻意不改的三处仍是 live def（静态锁定，不许漂移）', () => {
+  const readSrc = (rel: string) => readFileSync(join(__dirname, '..', rel), 'utf8');
+
+  /** 取源码里 [from, to) 这段区间（用**下一处顶层锚点**收尾，避免写死行号 ⇒ 重排不给假红）。 */
+  function region(text: string, from: string, to: string, label: string): string {
+    const a = text.indexOf(from);
+    const b = a < 0 ? -1 : text.indexOf(to, a + from.length);
+    if (a < 0 || b < 0) throw new Error(`[A9-W] 定位不到 ${label}：源码结构变了，本用例需同步更新`);
+    return text.slice(a, b);
+  }
+
+  const NO_VERSION_LOCK = (body: string) => {
+    expect(body).not.toContain('AtVersion');
+    expect(body).not.toContain('getDefsForVersions');
+  };
+
+  it('A9-W-①：GET /open/work_order/available 仍按 live def 出 available（刻意不改）', () => {
+    const src = readSrc('routes/workOrder.ts');
+    const body = region(
+      src,
+      "router.get('/open/work_order/available'",
+      "router.get('/open/work_order/:id/events'",
+      '/open/work_order/available 端点',
+    );
+    expect(body, '该端点必须仍是单次 getWorkflowDef（按状态问"我能不能干这个"，与具体单据无关）').toContain('getWorkflowDef(');
+    NO_VERSION_LOCK(body);
+  });
+
+  it('A9-W-②：autoDispatchAfterCreate 仍按 live def 派单（刻意不改）', () => {
+    const src = readSrc('routes/workOrder.ts');
+    const body = region(
+      src,
+      'async function autoDispatchAfterCreate',
+      'const createSchema = z.object(',
+      'autoDispatchAfterCreate',
+    );
+    expect(body, '派单目标态仍取自 live def（新建单的派单策略刻意不做版本化）').toContain('getWorkflowDef(');
+    NO_VERSION_LOCK(body);
+  });
+
+  it('A9-W-③：services/linkedWorkOrder.ts 仍按 live def（刻意不改，整个文件不许出现版本化读）', () => {
+    const src = readSrc('services/linkedWorkOrder.ts');
+    expect(src).toContain("getWorkflowDef(client, p.tenantId, 'work_order')");
+    NO_VERSION_LOCK(src);
   });
 });

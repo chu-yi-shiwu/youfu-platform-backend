@@ -5,8 +5,8 @@ import { randomBytes } from 'crypto';
 import { AppError } from '../middleware/error.js';
 import { listPerms } from '../middleware/role.js';
 import type { AuthLocals } from '../middleware/auth.js';
-import { isKnownState, doneStates, terminalStates, activeStates, timestampColumnFor, isTransitionAllowed, type WorkOrderStatus, type WorkflowTransition, type WorkflowDef } from '../engine/stateMachine.js';
-import { getWorkflowDef } from '../engine/workflowDef.js';
+import { DEFAULT_WORK_ORDER_DEF, isKnownState, doneStates, terminalStates, activeStates, timestampColumnFor, isTransitionAllowed, type WorkOrderStatus, type WorkflowTransition, type WorkflowDef } from '../engine/stateMachine.js';
+import { getDefsForVersions, getWorkflowDefAtVersion, getWorkflowDefVersion } from '../engine/workflowDef.js';
 import { pickAutoRule, TERMINAL_STATES } from '../engine/autoRules.js'; // 地基④：自动审核
 import { listEnabledAutoRules } from '../repo/autoRule.js';
 import { emitDomainEvent } from '../db/eventBus.js';
@@ -59,6 +59,9 @@ export interface WorkOrderRow {
   department?: string | null;
   satisfaction_score?: number | null;
   ext?: unknown;
+  // T1-B 批4：建单时锁定的流程定义版本号（103 迁移加的列）。0 = 未锁定（存量行/租户无 definition）
+  //   ⇒ 读侧 getWorkflowDefAtVersion 降级按 live def 走，与加列前逐字节等价。
+  def_version?: number | null;
   // 决策 #7：列表/详情下发承接人姓名（LEFT JOIN worker 而来；无承接人 → null）
   assignee_name?: string | null;
   created_at: string;
@@ -102,10 +105,15 @@ export async function createWithIdem(
     }
   }
   const orderNo = genOrderNo();
+  // T1-B 批4：盖章 —— 新单锁上建单当时的流程定义版本（租户无 definition 时返 0 = 未锁定）。
+  //   必须用 getWorkflowDefVersion（单一事实源 = workflow_def.version），不许临场读 live def 顶替：
+  //   版本号是**写入时的事实**，读 def 再推版本会随后续保存漂移。
+  //   status 仍为硬编码字面量 'draft'（E4/E6：不碰无关变量）。
+  const defVersion = await getWorkflowDefVersion(client, dto.tenantId, 'work_order');
   const ins = await client.query<WorkOrderRow>(
     `INSERT INTO work_orders
-       (id, tenant_id, order_no, business_type, catalog, priority, location, title, description, contact, reporter_name, assets, status, source, fault_type, service_desk, department, ext)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'draft',$13,$14,$15,$16,$17)
+       (id, tenant_id, order_no, business_type, catalog, priority, location, title, description, contact, reporter_name, assets, status, source, fault_type, service_desk, department, ext, def_version)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'draft',$13,$14,$15,$16,$17,$18)
      RETURNING *`,
     [
       dto.id, dto.tenantId, orderNo, dto.businessType, dto.catalog ?? null, dto.priority ?? 'normal',
@@ -114,6 +122,7 @@ export async function createWithIdem(
       JSON.stringify(dto.assets ?? []),
       dto.source ?? 'backend', dto.faultType ?? null, dto.serviceDesk ?? null, dto.department ?? null,
       JSON.stringify(dto.ext ?? {}),
+      defVersion,
     ],
   );
   // （幂等键已在上方抢键分支写入，无需重复插入；无 idempotencyKey 时不写键，保持原语义）
@@ -189,8 +198,13 @@ export async function transition(
   // 同时让下方"首次进入触发态"判定基于锁内权威快照，杜绝 READ COMMITTED 下双触发增量学习。
   const cur = await findOneForUpdate(client, tenantId, id);
   if (!cur) throw new AppError('NOT_FOUND', 'work order not found', 404);
-  // T-①：状态合法性由 workflow_def（可配置状态机）校验，不再写死固定字典
-  const def = await getWorkflowDef(client, tenantId, 'work_order');
+  // T-①：状态合法性由 workflow_def（可配置状态机）校验，不再写死固定字典。
+  // T1-B 批4（核心）：在途单按建单时锁定的流程版本流转 —— 租户改流程只对改完之后新建的单生效，
+  //   老单照它创建那天那一版走。cur 来自 findOneForUpdate（SELECT *）⇒ def_version 天然在位，
+  //   无需拓宽 SELECT。def_version = 0（存量行）⇒ 降级按 live def 走，与改前逐字节等价。
+  //   🔴 改这一处即覆盖下游全部判定：边匹配、必填校验、角色门禁、activeStates(load 结算)、
+  //   tryAutoAdvance 传入的 def 全都跟着同一个 def —— 不许再单独改它们（总则 E6）。
+  const def = await getWorkflowDefAtVersion(client, tenantId, 'work_order', Number(cur.def_version) || 0, DEFAULT_WORK_ORDER_DEF);
   if (!isKnownState(def, cur.status) || !isKnownState(def, to)) {
     throw new AppError('CONFLICT', `unknown state: from=${cur.status} to=${to}`, 422);
   }
@@ -544,9 +558,35 @@ export async function list(
   // timeoutOnly：超时且未闭环。排除集=doneStates(def)+terminalStates(def)（SLA 扫描同口径，
   // 复用 slaScheduler.ts:43 的 slaExclude 派生方式），def 按 tenant 动态取 → 租户自定义工作流
   // 扩展终态自动纳入排除，不写死枚举。
+  // T1-B 批5：排除集改「租户内所有版本终态集的交集」（0 = live，必在内）。
+  //   【为什么必须是交集】兜底原则：多版本并存时一律取向「宁可多显示（误报），绝不静默丢单」。
+  //     本处此刻还没有任何具体行，手上没有 def_version ⇒ 只能按"版本集合"求终态口径。
+  //     若只读 live def：状态 Z 在 v1 里未终结、在 v2 里变成终态 ⇒ 一张锁着 v1 的超期老单
+  //     会被 `wo.status <> ALL($n)` 误排除掉 —— 而那恰恰是最该显示给值班人的单（超时未闭环）。
+  //     取交集后，只有在**每一个**版本里都属于终态的状态才被排除 ⇒ 老单不会被误排掉。
+  //   【代价/取舍】误报（个别在旧版本里其实已闭环的老单仍出现在列表里，由人复核关闭）优于
+  //     丢单；多一次 `SELECT DISTINCT def_version` 查询 + 每多一个历史版本多一次 def 查询。
   if (filter.timeoutOnly) {
-    const def = await getWorkflowDef(client, tenantId, 'work_order');
-    const exclude = Array.from(new Set([...doneStates(def), ...terminalStates(def)]));
+    const vr = await client.query<{ def_version: number }>(
+      'SELECT DISTINCT def_version FROM work_orders WHERE tenant_id = $1 AND def_version > 0',
+      [tenantId],
+    );
+    const probeRows = [{ def_version: 0 }, ...vr.rows.map((v) => ({ def_version: v.def_version }))];
+    const defMap = await getDefsForVersions(client, tenantId, 'work_order', probeRows, DEFAULT_WORK_ORDER_DEF);
+    // 交集：逐个版本求交。防御：Map 为空 ⇒ 交集为空 ⇒ 不排除任何状态（= 最宽松口径，绝不丢单）。
+    //   （实践上 probe 恒含 0，Map 至少一个元素；单版本时结果与原 live 口径逐字等价。）
+    const terminalSets = Array.from(defMap.values()).map(
+      (d) => new Set<string>([...doneStates(d), ...terminalStates(d)]),
+    );
+    const intersection = terminalSets.reduce<Set<string> | null>((acc, s) => {
+      if (acc === null) return new Set<string>(s); // 首个版本：全集起步
+      const kept = new Set<string>();
+      for (const st of acc) {
+        if (s.has(st)) kept.add(st); // 只在**每个**版本里都属终态的状态才留下
+      }
+      return kept;
+    }, null);
+    const exclude = Array.from(intersection ?? new Set<string>());
     params.push(exclude);
     conds.push(
       `wo.sla_due_at IS NOT NULL AND wo.sla_due_at < now() AND wo.status <> ALL($${params.length}::text[])`,

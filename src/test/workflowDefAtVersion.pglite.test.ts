@@ -31,8 +31,11 @@ import {
 import { transitionEntity } from '../engine/transition.js';
 // A3 要用真引擎判定「available 里的 event 能不能真走通」，不是另写一份判定逻辑。
 import { applyEvent, availableTransitions } from '../engine/stateMachine.js';
+// 批 4（工单）：写侧两个函数都在 repo/ticket.ts 里且可直调 ⇒ 真库里直接调真产品代码，
+// 连「盖章」都验的是真链路（不像批 1/3 只能模拟 INSERT）。
+import { createWithIdem, transition } from '../repo/ticket.js';
 // WorkflowDef 定义在 stateMachine.ts，workflowDef.ts 只是 import 它、并未 re-export。
-import type { WorkflowDef } from '../engine/stateMachine.js';
+import { DEFAULT_WORK_ORDER_DEF, type WorkflowDef, type WorkOrderStatus } from '../engine/stateMachine.js';
 
 const ROOT = join(__dirname, '..', '..');
 
@@ -596,6 +599,243 @@ describe('批3 · business_flow_tasks 在途单锁版本（真库 A1/A2/A3/A4）
     const rows = (
       await db.query(`SELECT def_version FROM business_flow_tasks WHERE tenant_id = $1`, [T])
     ).rows as any[];
+    expect(rows.length).toBe(1);
+    expect(rows[0].def_version, '存量行必须是哨兵 0，不是被伪造的 1').toBe(0);
+  });
+});
+
+// ============================================================
+// 批4 · work_orders 在途工单锁版本（真库 A1-W / A2-W / A5-W）
+//
+// 【与前两批的形状差异】
+//   ① 迁移是 **103**（不是 102）—— 工单单独成份 file，值得独立回退（见 103 文件头注释）；
+//   ② 实体类型固定为 `'work_order'` ⇒ **机制态注入（withMechanismStates）会生效**，
+//      而 inspection_task / cycle_check 不走注入 ⇒ A5-W 是工单独有的验收点；
+//   ③ 本批**不停留在「模拟 INSERT」**：上面两批的三处 INSERT 藏在 route handler 里够不着，
+//      而工单的写侧 createWithIdem / transition 都是可直调的导出函数 ⇒ 这里直接调真产品代码，
+//      连「盖章」都验的是真链路（不再需要在注释里交代「本条不覆盖盖章」）。
+//
+// 【表为什么按迁移序号顺序拼】001 的 work_orders 建表带 `CHECK (status IN (4 态))`，
+//   022 才把它放宽；且某些 ADD COLUMN 自带 CHECK —— 022 的 DO 块用
+//   `SELECT conname ... LIMIT 1` 取约束名 ⇒ **必须在带 CHECK 的新列之前跑**，否则会误删到别的约束。
+//   ⇒ 严格按迁移序号贴：001 → 002 → 020 → 022 → 025 → 028 → 031 → 047 → 074 → 103。
+// ============================================================
+const UP_103 = readFileSync(join(ROOT, '103_inflight_def_version_workorder.sql'), 'utf8');
+const WO_ET = 'work_order';
+
+/** v1：draft→assigned→processing→completed，三条边。 */
+const WO_V1: WorkflowDef = {
+  initial: 'draft',
+  states: ['draft', 'assigned', 'processing', 'completed'],
+  transitions: [
+    { from: 'draft', to: 'assigned', event: 'assign' },
+    { from: 'assigned', to: 'processing', event: 'start' },
+    { from: 'processing', to: 'completed', event: 'complete' },
+  ] as any,
+  config: { doneStates: ['completed'] },
+} as WorkflowDef;
+
+/**
+ * v2 = v1 + 两处改动，正好对应「改流程坑在途单」的两种典型形态：
+ *   ① **新增一条 v1 没有的边** assigned --fast_close--> completed
+ *      ⇒ 锁版本失效时的症状：老单的按钮凭空多出来、点了还真能过。
+ *   ② 给**已存在**的边加必填 assigned --start--> processing requiredFields: ['safety_note']
+ *      ⇒ 锁版本失效时的症状：老单被要求一个它建单那天根本不存在的字段，提交必 422（卡死）。
+ */
+const WO_V2: WorkflowDef = {
+  initial: 'draft',
+  states: ['draft', 'assigned', 'processing', 'completed'],
+  transitions: [
+    { from: 'draft', to: 'assigned', event: 'assign' },
+    { from: 'assigned', to: 'processing', event: 'start', requiredFields: ['safety_note'] },
+    { from: 'processing', to: 'completed', event: 'complete' },
+    { from: 'assigned', to: 'completed', event: 'fast_close' },
+  ] as any,
+  config: { doneStates: ['completed'] },
+} as WorkflowDef;
+
+/** 取迁移文件里针对某表的全部 `ALTER TABLE <t> ADD COLUMN IF NOT EXISTS ...;` 原文（保持原序）。 */
+function addColumnStatements(file: string, table: string): string {
+  const text = readFileSync(join(ROOT, file), 'utf8');
+  const re = new RegExp(`^ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS .*;$`, 'gm');
+  const lines = text.match(re) ?? [];
+  if (lines.length === 0) throw new Error(`迁移 ${file} 里找不到 ${table} 的 ADD COLUMN 语句`);
+  return lines.join('\n');
+}
+
+/**
+ * 取迁移文件里的第一个 `DO $$ ... END $$;` 块原文。
+ * 用「原文」而非自己重写 SQL：022 放宽 status CHECK / 002 加 order_no 都是产品真实迁移，
+ * 测试里重复抄一份就等于给了漂移一处新真源（批 0 起就定的纪律）。
+ */
+function firstDoBlock(file: string): string {
+  const text = readFileSync(join(ROOT, file), 'utf8');
+  const start = text.indexOf('DO $$');
+  if (start < 0) throw new Error(`迁移 ${file} 里找不到 DO 块`);
+  const end = text.indexOf('END $$;', start);
+  if (end < 0) throw new Error(`迁移 ${file} 的 DO 块没有配对的 END $$;`);
+  return text.slice(start, end + 'END $$;'.length);
+}
+
+/**
+ * 真建库：work_orders / ticket_event（001）+ workflow_def（022）+ history（047）+
+ * domain_event（020），按迁移序号补齐工单后续扩列，最后**真跑 103 迁移**加 def_version。
+ * 布置：live = v1（version=1），history 此刻为空（v1 即 live，本身不在 history 里）。
+ */
+async function freshWoDb(): Promise<PGlite> {
+  const db = new PGlite();
+  await db.exec(createTableBlock('001_init.sql', 'work_orders'));
+  await db.exec(createTableBlock('001_init.sql', 'ticket_event'));
+  await db.exec(firstDoBlock('002_add_order_no.sql')); // order_no（NOT NULL + 租户内唯一）
+  await db.exec(createTableBlock('020_domain_event.sql', 'domain_event'));
+  await db.exec(createTableBlock('022_workflow_def.sql', 'workflow_def'));
+  await db.exec(firstDoBlock('022_workflow_def.sql')); // 放宽 status 枚举 CHECK（须早于下列带 CHECK 的新列）
+  await db.exec(createTableBlock('047_basic_data_consolidate.sql', 'workflow_def_history'));
+  await db.exec(addColumnStatements('025_work_order_granularity.sql', 'work_orders'));
+  await db.exec(addColumnStatements('028_phase_a.sql', 'work_orders'));
+  await db.exec(addColumnStatements('031_reporter_name.sql', 'work_orders'));
+  await db.exec(addColumnStatements('074_work_order_milestone_timestamps.sql', 'work_orders'));
+  await db.exec(UP_103); // 🔴 真跑迁移，不是自己手写 ALTER
+  await db.query(`INSERT INTO workflow_def (tenant_id, entity_type, def, version) VALUES ($1,$2,$3::jsonb,1)`, [
+    T,
+    WO_ET,
+    JSON.stringify(WO_V1),
+  ]);
+  return db;
+}
+
+let woSeq = 0;
+/** 建单：直调真产品函数 createWithIdem（含 103 后的盖章）⇒ 盖章链路也在真库里被覆盖。 */
+async function createWorkOrder(c: PoolClient, title: string) {
+  woSeq += 1;
+  const { row, created } = await createWithIdem(c, {
+    id: `wo-b4-${woSeq}`,
+    tenantId: T,
+    businessType: 'repair',
+    title,
+  });
+  expect(created, 'fixture：新建成功（非幂等命中）').toBe(true);
+  return row;
+}
+
+/** 改版到 v2（work_order）：v1 落进 history，live 升到 version=2（真实 saveWorkflowDef 的形态）。 */
+async function upgradeWoToV2(db: PGlite) {
+  await db.query(`INSERT INTO workflow_def_history (tenant_id, entity_type, version, def) VALUES ($1,$2,1,$3::jsonb)`, [
+    T,
+    WO_ET,
+    JSON.stringify(WO_V1),
+  ]);
+  await db.query(`UPDATE workflow_def SET def=$3::jsonb, version=2 WHERE tenant_id=$1 AND entity_type=$2`, [
+    T,
+    WO_ET,
+    JSON.stringify(WO_V2),
+  ]);
+}
+
+/** 直调产品侧共享写侧：repo/ticket.ts 的 transition()（批 4 的写就长在这里）。 */
+function woTransition(c: PoolClient, id: string, to: string, opts?: Parameters<typeof transition>[4]) {
+  return transition(c, T, id, to as WorkOrderStatus, opts);
+}
+
+describe('批4 · work_orders 在途工单锁版本（真库 A1-W / A2-W / A5-W）', () => {
+  it('A1-W：v1 建的老单改版到 v2 后仍按 v1 流转 —— ① v2 新边 422；② v2 新加的必填不要求它（真 transition）', async () => {
+    const db = await freshWoDb();
+    const c = asClient(db);
+    const old1 = await createWorkOrder(c, '老单');
+    expect(old1.def_version, '建单时盖的章 = 当时的 live version').toBe(1);
+    await upgradeWoToV2(db);
+
+    // 改版**不许**顺手把在途单的版本号刷成新版本（R-3：那等于没锁）。
+    const after = (await db.query(`SELECT def_version FROM work_orders WHERE id = $1`, [old1.id])).rows[0] as any;
+    expect(after.def_version, '改版后老单的章必须还是 v1').toBe(1);
+
+    // 先走到 assigned（v1/v2 都有的边 ⇒ 照走通，证明老单不是被整体冻死）
+    const toAssigned = await woTransition(c, old1.id, 'assigned');
+    expect(toAssigned.row.status).toBe('assigned');
+
+    // ① v2 新增的边 assigned --fast_close--> completed：对 v1 老单必须 422
+    await expect(woTransition(c, old1.id, 'completed')).rejects.toThrow(/illegal transition assigned -> completed/);
+    const snapshot = (await db.query(`SELECT status FROM work_orders WHERE id = $1`, [old1.id])).rows[0] as any;
+    expect(snapshot.status, '被拒的流转不许留下半截状态').toBe('assigned');
+
+    // ② v2 给**已存在**的边加的必填 safety_note：对 v1 老单**不要求**（缺该字段也必须能过）。
+    //    这是最阴的一种改动：边还在、按钮还在，只是提交时被一个老单根本没有的字段挡住。
+    const started = await woTransition(c, old1.id, 'processing', { fields: {} });
+    expect(started.row.status, '缺 v2 的必填项也必须放行（老单照 v1 走）').toBe('processing');
+  });
+
+  it('A2-W：改版后建的新单锁 v2 并按 v2 走（防「一律锁到最老版本」这种做反了也能绿 A1-W 的实现）', async () => {
+    const db = await freshWoDb();
+    const c = asClient(db);
+    await createWorkOrder(c, '老单');
+    await upgradeWoToV2(db);
+    const fresh = await createWorkOrder(c, '新单');
+    expect(fresh.def_version, '新单必须盖 v2 的章').toBe(2);
+
+    await woTransition(c, fresh.id, 'assigned');
+    const closed = await woTransition(c, fresh.id, 'completed');
+    expect(closed.row.status, '新单应当用得上 v2 的新边').toBe('completed');
+
+    // 反向对照（把 A1-W 的②补成闭环）：v2 给 start 边加的必填，对新单**必须**真的要求。
+    //   少了这一段，「一律不校验必填」这种实现同样能让 A1-W 绿。
+    const fresh2 = await createWorkOrder(c, '新单2');
+    await woTransition(c, fresh2.id, 'assigned');
+    await expect(woTransition(c, fresh2.id, 'processing', { fields: {} })).rejects.toThrow(
+      /missing required fields: safety_note/,
+    );
+  });
+
+  it('A4-W-真值：盖章取的就是当时的 live version，且真的落进了库（回库查，不信任 RETURNING）', async () => {
+    const db = await freshWoDb();
+    const c = asClient(db);
+    expect(await getWorkflowDefVersion(c, T, WO_ET), '改版前 live version').toBe(1);
+    await createWorkOrder(c, '老单');
+    await upgradeWoToV2(db);
+    expect(await getWorkflowDefVersion(c, T, WO_ET), '改版后 live version').toBe(2);
+    await createWorkOrder(c, '新单');
+
+    // 回库查，不信任 INSERT 的 RETURNING（RETURNING 拿的是写入值，不是落库值）。
+    const rows = (
+      await db.query(`SELECT title, def_version FROM work_orders WHERE tenant_id = $1 ORDER BY title`, [T])
+    ).rows as any[];
+    const byTitle = new Map<string, number>(rows.map((r) => [r.title, r.def_version]));
+    expect(byTitle.get('老单'), '老单锁 v1').toBe(1);
+    expect(byTitle.get('新单'), '新单锁 v2').toBe(2);
+  });
+
+  it('A5-W：R-5 机制态注入 —— 取 v1 **历史版本**的工单 def 仍含 claim_hall，且老单真的能出厅', async () => {
+    const db = await freshWoDb();
+    const c = asClient(db);
+    const old1 = await createWorkOrder(c, '老单');
+    await upgradeWoToV2(db);
+
+    // ① 结构性断言：WO_V1 快照本身**不含** claim_hall（fixture 诚实），
+    //    拿到手的 def 却必须含 ⇒ 增量完全来自 withMechanismStates(:18-21)。
+    expect(WO_V1.states, 'fixture 自检：v1 快照里没有 claim_hall').not.toContain('claim_hall');
+    const v1def = await getWorkflowDefAtVersion(c, T, WO_ET, Number(old1.def_version), DEFAULT_WORK_ORDER_DEF);
+    expect(v1def.states, '取 v1 历史版本也必须经 withMechanismStates ⇒ 含 claim_hall').toContain('claim_hall');
+    expect(
+      v1def.transitions.some((t) => t.from === 'claim_hall' && t.event === 'claim'),
+      '出厅边同样必须在历史版本里（否则「进得去出不来」）',
+    ).toBe(true);
+
+    // ② 功能性断言（比数数组更有说服力）：老单真的能进厅、再出厅。
+    //    少了注入，这两步会先撞 isKnownState(:208) 的 422 —— 文档 §7 R-5 点名的历史事故。
+    const inHall = await woTransition(c, old1.id, 'claim_hall');
+    expect(inHall.row.status, '老单按 v1 必须能进大厅').toBe('claim_hall');
+    // claim 边由机制注入带 allowedRoles:['worker','admin'] ⇒ 显式给 role，否则门禁正当拒绝。
+    const out = await woTransition(c, old1.id, 'assigned', { role: 'worker', eventOverride: 'claim' });
+    expect(out.row.status, '老单按 v1 必须能出大厅').toBe('assigned');
+  });
+
+  it('E4：103 迁移跑完后，先于它存在的存量工单 def_version 一律为 0（未记录，不伪造建单版本）', async () => {
+    const db = new PGlite();
+    await db.exec(createTableBlock('001_init.sql', 'work_orders'));
+    await db.exec(firstDoBlock('022_workflow_def.sql')); // 放宽 status CHECK，与线上同序（022 < 103）
+    await db.query(`INSERT INTO work_orders (id, tenant_id, business_type) VALUES ('wo-legacy',$1,'repair')`, [T]);
+    await db.exec(UP_103); // 真跑迁移
+
+    const rows = (await db.query(`SELECT def_version FROM work_orders WHERE tenant_id = $1`, [T])).rows as any[];
     expect(rows.length).toBe(1);
     expect(rows[0].def_version, '存量行必须是哨兵 0，不是被伪造的 1').toBe(0);
   });

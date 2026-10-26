@@ -25,10 +25,11 @@ import { isAutoTuneEffective } from '../repo/tenantSettings.js';
 import { emitDomainEvent } from '../db/eventBus.js';
 import { insertNotification, wechatSelfTest } from '../services/notify.js';
 import { claimWorkOrder } from '../services/claimWorkOrder.js';
-import type { WorkOrderStatus } from '../engine/stateMachine.js';
-import { getWorkflowDef } from '../engine/workflowDef.js';
+import type { WorkOrderStatus, WorkflowDef } from '../engine/stateMachine.js';
+import { getWorkflowDef, getWorkflowDefAtVersion, getDefsForVersions } from '../engine/workflowDef.js';
 import { CLAIM_HALL_STATE } from '../engine/claimHallEdges.js'; // F8：落抢单大厅走主通道（机制态单一事实源）
 import {
+  DEFAULT_WORK_ORDER_DEF,
   availableTransitions, learningTriggerStates, shouldTriggerLearning,
   resolveDispatchTarget, activeStates, doneStates, claimableStates, evaluatedStates,
 } from '../engine/stateMachine.js';
@@ -634,12 +635,15 @@ router.get('/open/work_orders', async (req, res, next) => {
       });
     });
     // A+ Phase3：随列表下发每个工单"当前状态可执行的转移"（含必填/角色门禁），供 SPA 动态渲染动作按钮。
-    const def = await withTenantClient(tenantId, (client) => getWorkflowDef(client, tenantId, 'work_order'));
+    // T1-B 批4：N 行可能锁着不同版本 ⇒ 改前「先读一次 def 再 .map() 套到 N 行」本质上不成立
+    //   （老单会凭空拿到新版本的按钮，点了才 422）。按 def_version 分组，几个版本查几次。
+    //   list() 的行是 `SELECT wo.*` ⇒ def_version 天然在位，无需拓宽 SELECT。
+    const defs = await withTenantClient(tenantId, (client) => getDefsForVersions(client, tenantId, 'work_order', data.items, DEFAULT_WORK_ORDER_DEF));
     // DEF-2 修复：列表项补充 order_no，供前端展示业务工单号
     const items = data.items.map((it: any) => ({
       ...it,
       code: it.order_no,
-      available: availableTransitions(def, it.status).map((t) => ({
+      available: availableTransitions(defs.get(Number(it.def_version) || 0)!, it.status).map((t) => ({
         to: t.to,
         event: t.event,
         requiredFields: t.requiredFields ?? [],
@@ -721,7 +725,10 @@ router.get('/open/work_order/:id', async (req, res, next) => {
       }
       // 与列表接口对齐：补充 code（业务工单号）= order_no，供 SPA 详情页展示（DEF-2 修复一致性）。
       const ticket = { ...ticketRow, code: ticketRow.order_no };
-      const def = await getWorkflowDef(client, tenantId, 'work_order');
+      // T1-B 批4：详情 available 必须与写侧用同一个版本化 def，否则按钮与实际校验不一致
+      //   （列表按锁版本渲染 → 点了 transition 才发现这条边在那版里不存在 ⇒ 422）。
+      //   ticketRow 来自 findOne（`SELECT wo.*`）⇒ def_version 天然在位，无需拓宽 SELECT。
+      const def = await getWorkflowDefAtVersion(client, tenantId, 'work_order', Number(ticketRow.def_version) || 0, DEFAULT_WORK_ORDER_DEF);
       const available = availableTransitions(def, ticket.status).map((t) => ({
         from: t.from,
         to: t.to,
@@ -1095,14 +1102,32 @@ router.get('/open/claim-hall', async (req, res, next) => {
   try {
     const tenantId = res.locals.auth.tenantId;
     const department = req.query.department as string | undefined;
-    const { items, def } = await withTenantClient(tenantId, async (client) => {
+    const { items, defs } = await withTenantClient(tenantId, async (client) => {
       // F10：池态不再写死 ('claim_hall','pending_dispatch')——与认领端点守卫共用
       //   claimableStates(def)（写在代码里的名单换成"能 claim 的态即池"的派生），
       //   杜绝「列表查得到、认领却 409」的两份字面量漂移。
       //   def 已含引擎机制注入；内置模板（RICH + 机制边）下结果逐字 = claim_hall/pending_dispatch。
-      const wdef = await getWorkflowDef(client, tenantId, 'work_order');
-      const poolSet = claimableStates(wdef);
-      if (poolSet.length === 0) return { items: [] as unknown[], def: wdef }; // 流程无认领边 = 无池，诚实返回空
+      // T1-B 批5：池态集合 = **租户内所有版本的并集**（0 = live，必在内）。
+      //   【为什么必须是并集】兜底原则：多版本并存时一律取向「宁可多显示，绝不静默丢单」。
+      //     本处此刻还没有任何具体行，手上没有 def_version ⇒ 只能按"版本集合"求池态口径。
+      //     若只读 live def：一张锁着 v1 的老单，其 v1 里的可抢态 Z 在租户把 def 改到 v2 后
+      //     被删掉 ⇒ Z 不在 v2 的 claimableStates 里 ⇒ 该行被下面的 `status = ANY($2)` 滤掉，
+      //     单还在库里却从抢单大厅里消失、再也没人看得到 = 静默丢数据。取所有版本的并集，
+      //     任何版本认过的池态都保留 ⇒ 老单不会被漏掉。
+      //   【代价】多一次 `SELECT DISTINCT def_version` 查询；且租户每多一个历史版本多一次 def
+      //     查询（getDefsForVersions 内部按版本分组去重，同一版本只查一次）。
+      //   【取舍】误报（个别在新版本已不可抢的旧态仍出现在大厅）优于丢单；误报行点进去会被
+      //     claim 端点的 transition() 门禁按该行锁定的版本挡住，不会放行。
+      const vRows = await client.query<{ def_version: number }>(
+        'SELECT DISTINCT def_version FROM work_orders WHERE tenant_id = $1 AND def_version > 0',
+        [tenantId],
+      );
+      const probeRows = [{ def_version: 0 }, ...vRows.rows.map((v) => ({ def_version: v.def_version }))];
+      const poolDefs = await getDefsForVersions(client, tenantId, 'work_order', probeRows, DEFAULT_WORK_ORDER_DEF);
+      // 并集去重。防御：Map 为空 ⇒ 并集为空 ⇒ 走下面的「无池」早退（实践上 probe 恒含 0，不会为空）。
+      const poolSet = Array.from(new Set(Array.from(poolDefs.values()).flatMap((d) => claimableStates(d))));
+      // 流程无认领边 = 无池，诚实返回空（defs 为空 Map：零行 ⇒ 无需查任何版本）
+      if (poolSet.length === 0) return { items: [] as unknown[], defs: new Map<number, WorkflowDef>() };
       const conds = ['tenant_id=$1', 'status = ANY($2::text[])'];
       const params: unknown[] = [tenantId, poolSet];
       if (department) { params.push(department); conds.push(`department = $${params.length}`); }
@@ -1110,12 +1135,16 @@ router.get('/open/claim-hall', async (req, res, next) => {
         `SELECT * FROM work_orders WHERE ${conds.join(' AND ')} ORDER BY created_at ASC LIMIT 500`,
         params,
       );
-      return { items: r.rows, def: wdef };
+      // T1-B 批4：available 是**逐行**的判定 ⇒ N 行可能锁不同版本，共用 wdef 会让老单
+      //   凭空拿到新版本的按钮（点了才进不了 transition）。按 def_version 分组，几个版本查几次。
+      //   上面 SQL 是 `SELECT *` ⇒ def_version 天然在位，无需拓宽 SELECT。
+      const defs = await getDefsForVersions(client, tenantId, 'work_order', r.rows, DEFAULT_WORK_ORDER_DEF);
+      return { items: r.rows, defs };
     });
     const out = items.map((it: any) => ({
       ...it,
       code: it.order_no,
-      available: availableTransitions(def, it.status).map((t) => ({
+      available: availableTransitions(defs.get(Number(it.def_version) || 0)!, it.status).map((t) => ({
         to: t.to, event: t.event, requiredFields: t.requiredFields ?? [], allowedRoles: t.allowedRoles ?? [], sideEffects: t.sideEffects ?? [],
       })),
     }));
