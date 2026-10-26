@@ -85,11 +85,37 @@ const PUBLIC_POST_PATHS = new Set([
 //   直接 endsWith('/auth/login') 会让 POST /任意受保护路径?x=/auth/login 命中本分支 ⇒
 //   authMiddleware:236 直接 next()，整段鉴权被跳过（实测：受保护路由 HTTP 200 直达，
 //   res.locals.auth 为 undefined）。先按 RFC 去掉 ?query 与 #fragment，只拿 pathname 参与判定。
-//   注：点段形态（/v1/x/../auth/login）仍会命中本分支，但它匹配不到任何真实路由
-//   （apiGuard 对未知首段先行 404，已知首段的点段最终落 'NO_ROUTE' 404），已实测无数据暴露面。
+//   注：仅去查询串还不足以收口，点段形态（/v1/x/../auth/login）由下面的
+//   removeDotSegments 统一处理（见『P1 补刀』注释，同 2026-10-26 第二个 commit）。
+/**
+ * RFC 3986 §5.2.4 remove_dot_segments 的最小实现（只用于**判定**，不改写 req.url、不影响路由）。
+ * 为什么需要：Express 不会规范化 req.url 里的 `..`（实测 /v1/x/../auth/login 落 404 NO_ROUTE），
+ *   而 endsWith 是纯字符串比较 ⇒ /v1/foo/../auth/login 会被当成登录路径而豁免鉴权。
+ */
+function removeDotSegments(pathname: string): string {
+  const out: string[] = [];
+  for (const seg of pathname.split('/')) {
+    if (seg === '.') continue;
+    if (seg === '..') { out.pop(); continue; }
+    out.push(seg);
+  }
+  return out.join('/');
+}
+
 function isPublicPath(req: Request): boolean {
-  const pathname = (req.originalUrl ?? '').split(/[?#]/)[0];
-  return req.method === 'POST' && (PUBLIC_POST_PATHS.has(req.path) || pathname.endsWith('/auth/login') || pathname.endsWith('/auth/wx-login'));
+  const raw = (req.originalUrl ?? '').split(/[?#]/)[0];
+  // 🔒 P1 补刀（同日 · 点段形态收口）：先做路径标准化。**含点段的请求不享受 endsWith 豁免**，
+  //    一律回落到正常鉴权（fail-closed）。
+  //    今天不可达的实测证据：
+  //      POST /api/v1/accounts/../auth/login → 鉴权被跳过，但路由层 404 NO_ROUTE（无处理器可达）；
+  //      POST /api/v1/foo/bar/auth/login    → apiGuard 先 404 NOT_FOUND（未知首段）。
+  //    仍然收口的理由：『不可达』靠的是『今天没有匹配得上这条 URL 的路由』这一隐式耦合，
+  //    将来谁加一条能把点段形态吃进去的路由（或中间件先做了规范化），它立刻变成可达的真正绕过。
+  //    这与上一个 commit（查询串）是同一个洞的残余面，不是新洞。
+  const canonical = removeDotSegments(raw);
+  const suffixExempt =
+    canonical === raw && (canonical.endsWith('/auth/login') || canonical.endsWith('/auth/wx-login'));
+  return req.method === 'POST' && (PUBLIC_POST_PATHS.has(req.path) || suffixExempt);
 }
 
 function parseBearer(auth: string | undefined): string | null {

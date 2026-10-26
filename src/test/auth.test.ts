@@ -586,4 +586,29 @@ describe('isPublicPath · 查询串不得绕过鉴权（P1 修复 2026-10-26）'
     expect(get.passed, 'GET 不受公开路径豁免').toBe(false);
     expect(get.statusCode).toBe(401);
   });
+
+  it('🔴 点段形态（/v1/x/../auth/login）⇒ 不得豁免，必须回落正常鉴权 401', async () => {
+    // 今天不可达的实测证据（保留在 middleware/auth.ts 的「P1 补刀」注释里）：
+    //   POST /api/v1/accounts/../auth/login → 404 NO_ROUTE（Express 不规范化 req.url，匹配不上任何路由）
+    //   POST /api/v1/foo/bar/auth/login    → apiGuard 先 404 NOT_FOUND（未知首段）
+    // 仍然收口的理由：不可达靠的是「今天没有匹配得上这条 URL 的路由」这一隐式耦合，
+    //   将来谁加一条能吃进点段形态的路由（或某个中间件先做了规范化），它立刻变成真绕过。
+    for (const [originalUrl, path] of [
+      ['/api/v1/accounts/../auth/login', '/v1/accounts/../auth/login'],
+      ['/api/v1/accounts/./auth/login', '/v1/accounts/./auth/login'],
+      ['/api/v1/work_orders/../work_orders/../auth/login', '/v1/work_orders/../work_orders/../auth/login'],
+      ['/api/v1/x/../auth/wx-login', '/v1/x/../auth/wx-login'],
+      // 查询串 + 点段叠加：两个变量一起上也必须拦住
+      ['/api/v1/accounts/../auth/login?x=/auth/login', '/v1/accounts/../auth/login'],
+    ] as const) {
+      const r = await probePublicPath({ method: 'POST', originalUrl, path });
+      expect(r.passed, `点段形态不得豁免鉴权：${originalUrl}`).toBe(false);
+      expect(r.statusCode, `点段形态不得豁免鉴权：${originalUrl}`).toBe(401);
+      expect(r.body.code).toBe('AUTH_001');
+      expect(r.auth).toBeUndefined();
+    }
+    // 对照：不含点段的合法登录路径仍然豁免 ⇒ 上面测的是「点段」这一个变量，不是顺手把 endsWith 关了
+    const stillOk = await probePublicPath({ method: 'POST', originalUrl: '/api/v1/platform/auth/login', path: '/v1/platform/auth/login' });
+    expect(stillOk.passed, '不含点段的 /auth/login 结尾路径仍须豁免（避免补刀补过头）').toBe(true);
+  });
 });
