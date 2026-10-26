@@ -562,6 +562,116 @@ export async function getWorkflowDefHistoryVersion(
   return (typeof raw === 'string' ? JSON.parse(raw) : raw) as WorkflowDef;
 }
 
+/**
+ * 按「行上已锁定的版本号」取 def（version > 0 的分支；<= 0 的由各入口自己短路）。
+ * @param liveVersion 已算好的当前版本号 —— 由调用方传入以避免逐行重复查（getDefsForVersions 用）。
+ */
+async function resolveLockedDef(
+  client: PoolClient,
+  tenantId: string,
+  entityType: string,
+  version: number,
+  fallback: WorkflowDef,
+  liveVersion: number,
+): Promise<WorkflowDef> {
+  const live = () => getWorkflowDefOrDefault(client, tenantId, entityType, fallback);
+  // 锁的就是当前 live 版本：live 版本本身**不在 history 里**（saveWorkflowDef 只在被覆盖
+  // 那一刻才写 history，见 :441-455）⇒ 这条分支不补，锁定到当前版本的单会被误判成"查不到"。
+  if (liveVersion === version) return live();
+  const snap = await getWorkflowDefHistoryVersion(client, tenantId, entityType, version);
+  if (snap) return withMechanismStates(entityType, normalizeDef(snap));
+  // 🔴 刻意不抛：见 getWorkflowDefAtVersion 的 JSDoc。
+  console.warn(
+    '[workflowDef] def_version 指向的历史版本不存在，降级到 live def',
+    { tenantId, entityType, version, liveVersion },
+  );
+  return live();
+}
+
+/**
+ * T1-B：取「第 N 版」的流程定义 —— 在途单锁版本的读路径。
+ *
+ * @param version 行上的 def_version。
+ *   <= 0  ⇒ 「未锁定」，走 getWorkflowDefOrDefault（= **今天的逐字节行为**，含取不到的兜底）
+ *   >  0  ⇒ 锁定到该版本：live.version === version 读 live，否则回查 history
+ *
+ * 【为什么不因为 version <= 0 报错】102 迁移跑完后**所有存量行都是 0**；
+ *   把它们变成 500 就是生产事故。0 的语义是「我们没记录」，不是「数据坏了」——
+ *   凡 0 一律按 live 走，行为与改动前逐字节一致（102 迁移因此是"零行为变化可单独上线"）。
+ *
+ * 【为什么必须补 live 那条分支】saveWorkflowDef 只在 def 被覆盖那一刻才把**被覆盖的旧版本**
+ *   写进 history（:441-455）⇒ 当前 live 版本本身不在 history 里。
+ *   只查 history 的话，「锁定到当前版本」的单会全部掉进降级 + warn（静默地把正确路径当异常）。
+ *
+ * 【找不到版本号时 —— 刻意不抛，降级到 live + console.warn】
+ *   ① T1-B 是"让行为更稳定"的改动；读不到版本就 500，等于把稳定性改动做成了可用性风险。
+ *   ② 版本缺失的唯一已知成因是「live 被绕过 saveWorkflowDef 直改」——
+ *      tenantProvision.ts:140 直 INSERT version=1 且不带 history 行。那时按 live 走
+ *      **正是今天的行为** ⇒ 降级 = 回到改动前，不是新增错误。
+ *   这条 warn 是 E3「不静默失败」的具体落实：日志必须能被打点告警抓到。
+ *
+ * 【为什么必须落在本文件、不能新开文件】withMechanismStates（:18-21）目前是**私有**函数，
+ *   版本化读取必须同样注入它，否则历史快照里没有 claim_hall ⇒ 工单出厅流转重新 422
+ *   （:11-16 注释记载的正是这个历史事故）。若新开文件就得把 withMechanismStates export
+ *   ⇒ 注入逻辑出现第二份真源。
+ *
+ * 【⚠️ 已知的版本链缺口（不装作全知）】见 §4.3：tenantProvision.ts:140 直 INSERT 时不带
+ *   history 行 ⇒ "版本号存在而快照不存在"。靠上面的降级 + warn 兜住，不让它变成 500。
+ */
+export async function getWorkflowDefAtVersion(
+  client: PoolClient,
+  tenantId: string,
+  entityType: string,
+  version: number,
+  fallback: WorkflowDef,
+): Promise<WorkflowDef> {
+  if (!version || version <= 0) {
+    return getWorkflowDefOrDefault(client, tenantId, entityType, fallback);
+  }
+  const liveVersion = await getWorkflowDefVersion(client, tenantId, entityType);
+  return resolveLockedDef(client, tenantId, entityType, version, fallback, liveVersion);
+}
+
+/**
+ * T1-B：批量版 —— 把 rows 按 def_version 分组，**每个不同版本只查一次**。
+ *
+ * 【为什么不能逐行读】列表口（businessFlow.ts:169-180 / energyCollection.ts:275-286 /
+ *   transportAdapter.ts:158-161）现状都是"先读一次 def 再 .map() 套到 N 行"。
+ *   每行可能锁不同版本 ⇒ 那个写法在版本化之后**本质上不成立**（R-2）。
+ *   分组后实测代价：租户在跑的版本数通常为 1~2 ⇒ 与原来 1 次查询基本同代价。
+ *
+ * 【返回 Map 的 key = 行上的原始 def_version】失效版本（查不到快照的）也保留自己的 key，
+ *   值 = 降级后的 live def ⇒ 调用侧 `defs.get(r.def_version ?? 0)` 永远命中，不会 undefined。
+ *
+ * 【为什么要先算一次 liveVersion】否则每个版本各查一次 live ⇒ 版本数 N 变成 2N。
+ *   若这批行全是 0（未锁定），连这一次都省掉。
+ */
+export async function getDefsForVersions(
+  client: PoolClient,
+  tenantId: string,
+  entityType: string,
+  rows: Array<{ def_version?: number | null }>,
+  fallback: WorkflowDef,
+): Promise<Map<number, WorkflowDef>> {
+  const versions = new Set<number>();
+  for (const r of rows) {
+    // null / undefined / NaN 一律按 0（未锁定）处理，不引入第三态。
+    versions.add(Number(r?.def_version) || 0);
+  }
+  const hasLocked = [...versions].some((v) => v > 0);
+  const liveVersion = hasLocked ? await getWorkflowDefVersion(client, tenantId, entityType) : 0;
+  const out = new Map<number, WorkflowDef>();
+  for (const v of versions) {
+    out.set(
+      v,
+      v <= 0
+        ? await getWorkflowDefOrDefault(client, tenantId, entityType, fallback)
+        : await resolveLockedDef(client, tenantId, entityType, v, fallback, liveVersion),
+    );
+  }
+  return out;
+}
+
 // 补全式规范化：保留 def 所有原始字段（含 passthrough 额外字段），仅对缺失的
 // initial/states/transitions/config 补默认值——避免剥离字段导致「读→存」二次保存洗掉字段。
 function normalizeDef(d: any): WorkflowDef {
