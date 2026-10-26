@@ -2,6 +2,12 @@
 # 以数据库属主(postgres)身份幂等应用尚未执行的迁移。
 # 应用连接角色 youfu_app 是受 RLS 约束的非属主角色，无权执行 DDL(ALTER/CREATE)，
 # 因此迁移必须在 ECS 上以 postgres 身份运行。本脚本保证只应用 _migrations 中未记录的项。
+#
+# 🔴 上线前必做：Windows 检出会把本文件变成 CRLF（本仓 core.autocrlf=true，
+#    git blob 里存的是 LF，只有本地工作副本是 CRLF）。若直接把工作目录打成 tar/scp 到 Linux，
+#    解压后 `set -euo pipefail\r` 会报 line N: set: pipefail\r: invalid option name 而整个迁移挂掉
+#    （2026-10-26 部署时踩过一次，当时 scripts/ 下 22 个文件全被覆盖成 CRLF）。
+#    ⇒ 打包前务必先做 CRLF→LF 归一化（或直接 `git archive` 取已提交的 LF blob，不要拷工作副本）。
 set -euo pipefail
 BACKEND_DIR="${1:-/opt/youfu/backend}"
 # postgres 用户的运行目录：sudo -u 不重置 CWD，若调用时 CWD 是 /root（0700，postgres 无 x 权限）

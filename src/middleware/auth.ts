@@ -77,7 +77,22 @@ const PUBLIC_POST_PATHS = new Set([
   '/v1/auth/login',
   '/v1/auth/wx-login',
   // 平台管理员登录：routes/platform.ts:45 注册。原先靠下面的「endsWith('/auth/login')」后缀
-  // 分支兜住（见 2026-10-26 第三个 commit），白名单化后改由本集合承担。
+  // 分支兜住，白名单化后（2026-10-26 第三个 commit）改由本集合承担。
+  //
+  // ⚠️ 本条目【今天不承重】——留它是为了把一层隐式耦合钉成明桩，不是为了现在：
+  //    真实 HTTP 栈上 platformRouter 挂在鉴权之前（src/server.ts:147，早于 :174 apiGuard
+  //    与 :175 authMiddleware），/api/v1/platform/auth/login 在 platformRouter 内部即终止，
+  //    **不会流到 authMiddleware** ⇒ 本条目存在与否都不影响该路径放行。
+  //    实测（engineer-3 · 2026-10-26）：删掉本条目后该路径仍放行并返回 422；
+  //    同时删掉 /v1/auth/login 则立刻变 401 —— 说明白名单机制本身是活的，
+  //    只有本条是冗余的。将来若有人把 platformRouter 挪到鉴权之后，
+  //    本条目立即转为承重项，届时登录才不会当场挂掉。
+  //
+  // ⚠️ 不要把下面这条变异测试读反：src/test/auth.test.ts 的 MUT-D1
+  //    「从白名单移除本条目 ⇒ 三条断言红」是**中间件契约层**变异，不是事故预告。
+  //    它的正确读法是「若将来这条路径经过 authMiddleware，它必须被豁免」，
+  //    **不能读成「删掉这行登录会挂」**——真实栈实测删掉它登录照样放行（见上）。
+  //    误读会导致下一个人为了「不弄挂登录」而不敢动这行，与保留它的初衷正好相反。
   '/v1/platform/auth/login',
   '/v1/invites/redeem', // 八件增量 BE-1：邀请码公开激活（扫码/手输码建号，loginRateLimit 保护）
   '/v1/energy/webhook/dispatch',
