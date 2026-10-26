@@ -14,7 +14,7 @@ import { AppError } from '../middleware/error.js';
 import { requireAssigneeOrConfig, requirePermission } from '../middleware/role.js';
 import { createLinkedWorkOrder } from '../services/linkedWorkOrder.js';
 import { emitDomainEvent } from '../db/eventBus.js';
-import { getWorkflowDefOrDefault } from '../engine/workflowDef.js';
+import { getWorkflowDefAtVersion, getWorkflowDefVersion } from '../engine/workflowDef.js';
 import { applyEvent, availableTransitions } from '../engine/stateMachine.js';
 import { INSPECTION_DEF } from '../engine/themes.js';
 import { csvEscape } from '../services/csvUtil.js'; // R30-F7：统一 CSV 转义（含 R5-001 公式注入防护），删除本地重复 esc
@@ -36,7 +36,8 @@ async function transitionTask(
   const cur = await client.query(`SELECT * FROM inspection_task WHERE id = $1 AND tenant_id = $2`, [taskId, tenantId]);
   if (cur.rowCount === 0) throw new AppError('NOT_FOUND', 'task not found', 404);
   const t = cur.rows[0];
-  const def = await getWorkflowDefOrDefault(client, tenantId, 'inspection_task', INSPECTION_DEF);
+  // T1-B 批1：在途单按建单时锁定的流程版本流转（def_version=0 表示未锁定 ⇒ 走 live，与改前逐字节等价）。
+  const def = await getWorkflowDefAtVersion(client, tenantId, 'inspection_task', t.def_version, INSPECTION_DEF);
   const target = applyEvent(def, t.status, event);
   if (!target) {
     throw new AppError('BAD_STATE', `illegal transition ${t.status} --${event}-->`, 422);
@@ -325,7 +326,8 @@ router.get('/tasks/:id', async (req, res, next) => {
       ]);
       if (cur.rowCount === 0) throw new AppError('NOT_FOUND', 'task not found', 404);
       const t = cur.rows[0];
-      const def = await getWorkflowDefOrDefault(client, tenantId, 'inspection_task', INSPECTION_DEF);
+      // T1-B 批1：详情返回的 available 必须与写侧用同一个版本化 def，否则前端按钮与后端校验不一致（R-1）。
+      const def = await getWorkflowDefAtVersion(client, tenantId, 'inspection_task', t.def_version, INSPECTION_DEF);
       const available = availableTransitions(def, t.status);
       const rec = await client
         .query(`SELECT * FROM inspection_record WHERE tenant_id = $1 AND task_id = $2 ORDER BY created_at ASC`, [tenantId, t.id])
@@ -355,10 +357,12 @@ router.post('/tasks', async (req, res, next) => {
     const item = await withTenantClient(tenantId, async (client) => {
       await requirePermission(res.locals.auth, client, 'inspect.manage');
       const snapshot = await seedItemsSnapshot(client, tenantId, b.item_ids ?? []);
+      // T1-B 批1：盖章 —— 新建单锁上当时的流程定义版本（无 definition 时 getWorkflowDefVersion 返 0 = 未锁定）。
+      const defVersion = await getWorkflowDefVersion(client, tenantId, 'inspection_task');
       const r = await client.query(
-        `INSERT INTO inspection_task (tenant_id, plan_id, point_id, type, title, assignee, scheduled_at, status, items_json)
-         VALUES ($1, NULL, $2, $3, $4, $5, $6, 'pending', $7) RETURNING *`,
-        [tenantId, b.point_id ?? null, b.type, b.title, b.assignee ?? null, b.scheduled_at ?? null, JSON.stringify(snapshot)],
+        `INSERT INTO inspection_task (tenant_id, plan_id, point_id, type, title, assignee, scheduled_at, status, items_json, def_version)
+         VALUES ($1, NULL, $2, $3, $4, $5, $6, 'pending', $7, $8) RETURNING *`,
+        [tenantId, b.point_id ?? null, b.type, b.title, b.assignee ?? null, b.scheduled_at ?? null, JSON.stringify(snapshot), defVersion],
       );
       const row = r.rows[0];
       await emitDomainEvent(client, { tenantId, entityType: 'inspection_task', entityId: row.id, type: 'create', actor: 'config_role' });
@@ -626,12 +630,14 @@ async function createPlanOccurrence(
   occurrenceDate: Date,
 ): Promise<unknown[]> {
   const snapshot = await seedItemsSnapshot(client, tenantId, plan.item_ids ?? []);
+  // T1-B 批1：盖章 —— 版本号在循环外取一次（本批 N 单同版本，避免 N 次查询）。
+  const defVersion = await getWorkflowDefVersion(client, tenantId, 'inspection_task');
   const out: unknown[] = [];
   for (const pid of plan.point_ids) {
     const r = await client.query(
-      `INSERT INTO inspection_task (tenant_id, plan_id, point_id, type, title, scheduled_at, status, items_json)
-       VALUES ($1,$2,$3,'plan',$4,$5,'pending',$6) RETURNING *`,
-      [tenantId, plan.id, pid, `${plan.name}·巡检`, toPgTs(occurrenceDate), JSON.stringify(snapshot)],
+      `INSERT INTO inspection_task (tenant_id, plan_id, point_id, type, title, scheduled_at, status, items_json, def_version)
+       VALUES ($1,$2,$3,'plan',$4,$5,'pending',$6,$7) RETURNING *`,
+      [tenantId, plan.id, pid, `${plan.name}·巡检`, toPgTs(occurrenceDate), JSON.stringify(snapshot), defVersion],
     );
     const ins = r.rows[0];
     await emitDomainEvent(client, { tenantId, entityType: 'inspection_task', entityId: ins.id, type: 'create', actor: 'config_role' });
@@ -698,12 +704,14 @@ router.post('/generate', async (req, res, next) => {
         b.point_ids.map((id) => ({ id })),
         b.scheduled_at ?? null,
       );
+      // T1-B 批1：盖章 —— 版本号在循环外取一次（本批 N 单同版本，避免 N 次查询）。
+      const defVersion = await getWorkflowDefVersion(client, tenantId, 'inspection_task');
       const out: unknown[] = [];
       for (const row of rows) {
         const r = await client.query(
-          `INSERT INTO inspection_task (tenant_id, plan_id, point_id, type, title, scheduled_at, status, items_json)
-           VALUES ($1, NULL, $2, 'plan', $3, $4, 'pending', $5) RETURNING *`,
-          [tenantId, row.point_id, row.title, row.scheduled_at, JSON.stringify(snapshot)],
+          `INSERT INTO inspection_task (tenant_id, plan_id, point_id, type, title, scheduled_at, status, items_json, def_version)
+           VALUES ($1, NULL, $2, 'plan', $3, $4, 'pending', $5, $6) RETURNING *`,
+          [tenantId, row.point_id, row.title, row.scheduled_at, JSON.stringify(snapshot), defVersion],
         );
         const ins = r.rows[0];
         await emitDomainEvent(client, { tenantId, entityType: 'inspection_task', entityId: ins.id, type: 'create', actor: 'config_role' });

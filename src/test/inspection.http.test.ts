@@ -8,6 +8,8 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vites
 import express from 'express';
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 
 const TENANT = 't-demo';
 let authRole = 'operator';
@@ -84,8 +86,10 @@ vi.mock('../db/eventBus.js', () => ({ emitDomainEvent: (...a: unknown[]) => (emi
 const createLinkedWorkOrder = vi.fn(async (..._a: unknown[]) => ({ id: 'wo-l1', order_no: 'WO-L1', status: 'draft' }));
 vi.mock('../services/linkedWorkOrder.js', () => ({ createLinkedWorkOrder: (...a: unknown[]) => (createLinkedWorkOrder as any)(...a) }));
 // workflow_def 查询打桩 → 回 INSPECTION_DEF 同款拓扑（stateMachine 真引擎消费）
-vi.mock('../engine/workflowDef.js', () => ({
-  getWorkflowDefOrDefault: async () => ({
+// T1-B 批1：inspection 读写两侧已改为走 getWorkflowDefAtVersion / getWorkflowDefVersion，
+//   桩必须补齐这两个导出，否则真模块被整体替换后二者为 undefined ⇒ 调用即 TypeError。
+vi.mock('../engine/workflowDef.js', () => {
+  const stubDef = {
     initial: 'pending',
     states: ['pending', 'in_progress', 'done', 'exception', 'cancelled'],
     transitions: [
@@ -96,8 +100,16 @@ vi.mock('../engine/workflowDef.js', () => ({
       { from: 'in_progress', to: 'cancelled', event: 'cancel', allowedRoles: ['admin', 'operator'] },
     ],
     config: { doneStates: ['done'], learningTriggers: ['done'] },
-  }),
-}));
+  };
+  return {
+    getWorkflowDefOrDefault: async () => stubDef,
+    getWorkflowDefAtVersion: async () => stubDef,
+    // 🔴 刻意返回非零的 3，不返回 0：桩值若取 0，实现把版本号写死成 0（= 永不上锁，
+    //   最严重的那种错）时断言照样绿 —— 桩值恰好等于"错误实现的默认值"就是假绿的温床。
+    //   取 3 之后，"漏传参数 / 写死 0 / 写死别的数"三种错都会被 A4-c/A4-d 抓住。
+    getWorkflowDefVersion: async () => 3,
+  };
+});
 const createAlert = vi.fn(async (..._a: unknown[]): Promise<null> => null);
 vi.mock('../routes/emergency.js', () => ({ createAlert: (...a: unknown[]) => (createAlert as any)(...a) }));
 
@@ -404,5 +416,124 @@ describe('inspection.ts · 统计与导出', () => {
     const text = new TextDecoder().decode(buf.slice(3));
     expect(text).toContain("'=cmd"); // R5-001：公式前缀单引号 neutral
     expect(text).toContain('计划巡检');
+  });
+});
+
+// ============================================================
+// T1-B 批 1 · inspection_task 在途单锁版本
+//
+// 【口径分工】A1/A2/A3 的**动态**部分在 src/test/workflowDefAtVersion.pglite.test.ts 里用真库验
+//   （那里 workflowDef 是**真模块**而非桩 ⇒ 才验得到版本链）。本文件只承担两件桩也能验的事：
+//   ① A4：三处 INSERT 的盖章是否真的落到 SQL 参数里（桩能验，因为它验的是"参数从哪来"）；
+//   ② A3 静态侧：读写两侧是不是同一条 read 路径（防 R-1：只改写侧不改读侧）。
+//
+// 【为什么不验"版本号具体等于几"】本文件的 workflowDef 是被 vi.mock 整体替换的桩 ⇒
+//   在这里断言"版本号 == live version"验的是桩不是实现，属纸面验证（E2 反面）。
+//   真值断言放到 PGlite 那份（真 getWorkflowDefVersion）里去。
+// ============================================================
+const INSPECTION_SRC = readFileSync(join(__dirname, '..', 'routes', 'inspection.ts'), 'utf8');
+
+/** 抽出 inspection_task 的三处 INSERT：列清单 / VALUES 段最大占位符 / 出现位置。 */
+function inspectionInserts(src: string) {
+  const re = /INSERT INTO inspection_task \(([^)]*)\)\s*VALUES \(([^)]*)\)/g;
+  const out: { cols: string[]; maxPh: number; at: number }[] = [];
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(src))) {
+    const cols = m[1]
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+    const nums = [...m[2].matchAll(/\$(\d+)/g)].map((x) => Number(x[1]));
+    out.push({ cols, maxPh: nums.length ? Math.max(...nums) : 0, at: m.index });
+  }
+  return out;
+}
+const INSERTS = inspectionInserts(INSPECTION_SRC);
+
+describe('T1-B 批1 · inspection_task 在途单锁版本', () => {
+  it('A4-a：三处 INSERT 全部带上 def_version 列（手工建单 / 周期计划 / 批量生成）', () => {
+    // 设计文档 §5 批1 明确点名「:632 / :704 是计划批量生成路径，不要漏」。
+    expect(INSERTS.length, 'inspection_task 的 INSERT 应为 3 处').toBe(3);
+    for (const s of INSERTS) {
+      expect(s.cols, 'INSERT 列清单缺 def_version ⇒ 该路径的新单不入版本锁').toContain('def_version');
+    }
+  });
+
+  it('A4-b：三处 INSERT 占位符各自止于 8/7/6，且与列清单对齐（防参数错位）', () => {
+    // 三处列数不同（手工建单多 assignee、各路径 plan_id 写法不同）⇒ 逐个钉死，不写成一个笼统的 >0。
+    expect(INSERTS.map((s) => s.maxPh).sort((a, b) => b - a)).toEqual([8, 7, 6]);
+    for (const s of INSERTS) {
+      // def_version 必须是最后一个占位符 ⇒ 列清单里它也必须是最后一列。
+      expect(s.cols[s.cols.length - 1]).toBe('def_version');
+    }
+  });
+
+  it('A4-c：POST /tasks 手工建单 ⇒ 版本号真的落到 INSERT 参数里（8 个参，末位即版本）', async () => {
+    authRole = 'operator';
+    authMode = 'dev';
+    fakeClient.query.mockClear();
+    const r = await req('POST', '/api/v1/inspection/tasks', { title: '配电房日检', point_id: U1 });
+    expect(r.status).toBe(201);
+    const insert = fakeClient.query.mock.calls.find((c: any) => String(c[0]).includes('INSERT INTO inspection_task'));
+    expect(insert, '没捕获到 INSERT INTO inspection_task').toBeTruthy();
+    const params = insert![1] as unknown[];
+    // 漏传参数 ⇒ length 是 7；把版本号写死成 0 或别的常量 ⇒ 不等于桩返回的 3。三种错都能抓住。
+    expect(params.length).toBe(8);
+    expect(params[7], 'def_version 参数必须取 getWorkflowDefVersion 的返回值').toBe(3);
+  });
+
+  it('A4-d：POST /generate 批量生成 ⇒ 每单都盖章，版本号在循环外只取一次', async () => {
+    authRole = 'operator';
+    authMode = 'dev';
+    fakeClient.query.mockClear();
+    const r = await req('POST', '/api/v1/inspection/generate', { point_ids: [U1, U2] });
+    expect(r.status).toBe(201);
+    const inserts = fakeClient.query.mock.calls.filter((c: any) => String(c[0]).includes('INSERT INTO inspection_task'));
+    expect(inserts.length, '两个点位 ⇒ 两条 INSERT，一条都不能漏盖章').toBe(2);
+    for (const c of inserts) {
+      const params = c[1] as unknown[];
+      expect(params.length).toBe(6);
+      expect(params[5]).toBe(3);
+    }
+  });
+
+  it('A3-静态：读写两侧走同一条 versioned read 路径（这条是抓 R-1 的关键）', () => {
+    // 🔴 若只把写侧 :40 改成 versioned、读侧 :330 仍读 live ⇒ 这里只会匹配到 1 次 ⇒ 立刻红。
+    const re = /getWorkflowDefAtVersion\(client, tenantId, 'inspection_task', t\.def_version, INSPECTION_DEF\)/g;
+    expect(INSPECTION_SRC.match(re)?.length, '写侧 + 读侧 = 2 处，少一处即 R-1（按钮与实际校验不一致）').toBe(2);
+    // 文件内不得再残留裸调用：那条残留路径读的就是 live，等于锁了个寂寞。
+    expect(INSPECTION_SRC).not.toMatch(/getWorkflowDefOrDefault\s*\(/);
+  });
+
+  it('A4-e：取版本号排在 for 循环之外（周期计划两处各只查一次，不是每单查一次）', () => {
+    for (const marker of ['for (const pid of plan.point_ids)', 'for (const row of rows)']) {
+      const forAt = INSPECTION_SRC.indexOf(marker);
+      expect(forAt, `源码里找不到 ${marker} —— 本测试已与设计脱节，请同步`).toBeGreaterThan(0);
+      const verAt = INSPECTION_SRC.lastIndexOf('getWorkflowDefVersion(client, tenantId', forAt);
+      expect(verAt, `取版本号必须排在 ${marker} 之前（放到循环内会变成每单一次查询）`).toBeGreaterThan(0);
+      // 两者之间不得再夹一个 for ⇒ 证明这次取值紧贴本循环、不在更外层（否则一样是每单查一次）。
+      expect(INSPECTION_SRC.slice(verAt, forAt)).not.toContain('for (const ');
+    }
+  });
+
+  it('A4-f：POST /plans 建周期计划 ⇒ 预生成的实例也盖章（这条路径不能只靠静态断言）', async () => {
+    // 设计文档 §5 批1 点名「:632 是计划批量生成路径，不要漏」；A4-a/b 是静态的，
+    // 这条把 :632 也拉进动态覆盖 ⇒ 三处 INSERT 每一处都有真请求打底。
+    authRole = 'operator';
+    authMode = 'dev';
+    fakeClient.query.mockClear();
+    const r = await req('POST', '/api/v1/inspection/plans', {
+      name: '日常巡检',
+      point_ids: [U1, U2],
+      frequency: 'weekly',
+    });
+    expect(r.status).toBe(201);
+    const inserts = fakeClient.query.mock.calls.filter((c: any) => String(c[0]).includes('INSERT INTO inspection_task'));
+    expect(inserts.length, '两个点位 ⇒ 预生成两条，一条都不能漏盖章').toBe(2);
+    for (const c of inserts) {
+      const params = c[1] as unknown[];
+      expect(params.length).toBe(7);
+      expect(params[6]).toBe(3);
+    }
   });
 });
