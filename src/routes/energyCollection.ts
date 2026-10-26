@@ -13,7 +13,12 @@ import { z } from 'zod';
 import { withTenantClient } from '../db/pool.js';
 import { AppError } from '../middleware/error.js';
 import { signJwt, verifyJwt, DEFAULT_TENANT_ID } from '../middleware/auth.js';
-import { getWorkflowDefOrDefault } from '../engine/workflowDef.js';
+import {
+  getWorkflowDefOrDefault,
+  getWorkflowDefAtVersion,
+  getDefsForVersions,
+  getWorkflowDefVersion,
+} from '../engine/workflowDef.js';
 import { availableTransitions } from '../engine/stateMachine.js';
 import { transitionEntity } from '../engine/transition.js';
 import { ENERGY_COLLECTION_DEF } from '../engine/themes.js';
@@ -104,16 +109,20 @@ router.post('/energy/webhook/dispatch', async (req: any, res: any, next: any) =>
         [tenantId, ENTITY, b.task_ref],
       );
       if (dup.rows[0]) {
-        const def = await getWorkflowDefOrDefault(client, tenantId, ENTITY, ENERGY_COLLECTION_DEF);
+        // T1-B 批3：幂等回放的是**老行**，available 按它自己锁的版本给，不是 live。
+        const def = await getWorkflowDefAtVersion(client, tenantId, ENTITY, dup.rows[0].def_version, ENERGY_COLLECTION_DEF);
         return { replay: true as const, item: { ...dup.rows[0], available: availableTransitions(def, dup.rows[0].status) } };
       }
 
       // 配置驱动：租户 workflow_def 优先（seed-energy-collection-def 落库），
       // 无配置回退 ENERGY_COLLECTION_DEF 内置镜像态（零配置即可收单）。
-      const def = await getWorkflowDefOrDefault(client, tenantId, ENTITY, ENERGY_COLLECTION_DEF);
+      // T1-B 批3：盖章 —— 与 businessFlow 建单同款顺序（先取版本号，再取该版本的 def 定初始态）。
+      // 🔴 实体名是常量 ENTITY（= 'energy_collection'），**不是表名 business_flow_tasks**。
+      const defVersion = await getWorkflowDefVersion(client, tenantId, ENTITY);
+      const def = await getWorkflowDefAtVersion(client, tenantId, ENTITY, defVersion, ENERGY_COLLECTION_DEF);
       const r = await client.query(
-        `INSERT INTO business_flow_tasks (tenant_id, entity_type, title, status, data, location, created_by)
-         VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *`,
+        `INSERT INTO business_flow_tasks (tenant_id, entity_type, title, status, data, location, created_by, def_version)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
         [
           tenantId,
           ENTITY,
@@ -122,6 +131,7 @@ router.post('/energy/webhook/dispatch', async (req: any, res: any, next: any) =>
           JSON.stringify({ task_ref: b.task_ref, site: b.site, deadline: b.deadline ?? null, form_url: b.form_url ?? null, template_code: b.template_code ?? null, redispatch_of: b.redispatch_of ?? null, source: 'energy-platform', worker_ref: null }),
           b.site,
           'energy-webhook',
+          defVersion,
         ],
       );
       let row = r.rows[0];
@@ -272,7 +282,6 @@ router.get('/energy/tasks', async (req: any, res: any, next: any) => {
     }
 
     const items = await withTenantClient(tenantId, async (client: any) => {
-      const def = await getWorkflowDefOrDefault(client, tenantId, ENTITY, ENERGY_COLLECTION_DEF);
       const clauses = ['tenant_id = $1', "entity_type = 'energy_collection'", "(data->>'worker_ref' = $2 OR assignee = $3)"];
       const params: unknown[] = [tenantId, workerRef, workerId];
       if (assignee) {
@@ -283,7 +292,12 @@ router.get('/energy/tasks', async (req: any, res: any, next: any) => {
         `SELECT * FROM business_flow_tasks WHERE ${clauses.join(' AND ')} ORDER BY created_at DESC`,
         params,
       );
-      return r.rows.map((row: any) => ({ ...row, available: availableTransitions(def, row.status) }));
+      // T1-B 批3：N 行可能锁着不同版本 ⇒ 按 def_version 分组，几个版本查几次。
+      const defs = await getDefsForVersions(client, tenantId, ENTITY, r.rows, ENERGY_COLLECTION_DEF);
+      return r.rows.map((row: any) => ({
+        ...row,
+        available: availableTransitions(defs.get(Number(row.def_version) || 0)!, row.status),
+      }));
     });
     return res.json({ ok: true, code: 0, items });
   } catch (e) {
@@ -296,7 +310,6 @@ router.get('/energy/tasks/:id', async (req: any, res: any, next: any) => {
   try {
     const { workerId, workerRef, tid: tenantId } = await resolveWorkerIdentity(req);
     const item = await withTenantClient(tenantId, async (client: any) => {
-      const def = await getWorkflowDefOrDefault(client, tenantId, ENTITY, ENERGY_COLLECTION_DEF);
       const r = await client.query(
         `SELECT * FROM business_flow_tasks WHERE id = $1 AND tenant_id = $2 AND entity_type = $3`,
         [req.params.id, tenantId, ENTITY],
@@ -306,6 +319,8 @@ router.get('/energy/tasks/:id', async (req: any, res: any, next: any) => {
       if (row.data?.worker_ref !== workerRef && row.assignee !== workerId) {
         throw new AppError('ENERGY_FORBIDDEN', '非本人名下的能耗采集任务', 403);
       }
+      // T1-B 批3：详情 available 与写侧同版本（R-1）。
+      const def = await getWorkflowDefAtVersion(client, tenantId, ENTITY, row.def_version, ENERGY_COLLECTION_DEF);
       return { ...row, available: availableTransitions(def, row.status) };
     });
     if (!item) throw new AppError('NOT_FOUND', 'energy collection task not found', 404);
@@ -319,6 +334,9 @@ router.get('/energy/tasks/:id', async (req: any, res: any, next: any) => {
 router.get('/energy/def', async (_req: any, res: any, next: any) => {
   try {
     const tenantId = process.env.ENERGY_DISPATCH_TENANT ?? DEFAULT_TENANT_ID;
+    // T1-B 批3：**刻意保持读 live、不改** —— 本端点是「当前生效状态图」的自述
+    //   （响应里就写着 source_note：workflow_def DB 行优先），没有行可锁，
+    //   锁了反而让自述失真。⇒ 这也是本文件为何仍 import getWorkflowDefOrDefault。
     const def = await withTenantClient(tenantId, (client: any) =>
       getWorkflowDefOrDefault(client, tenantId, ENTITY, ENERGY_COLLECTION_DEF),
     );
@@ -368,7 +386,8 @@ router.post('/energy/webhook/status-update', async (req: any, res: any, next: an
       // 重复回调不再回放，落入 transitionEntity 判非法跳转（422，S04 实证）；
       // 反向（回退态）同样 422，由 workflow_def 引擎统一裁决。
       if (row.status === b.status) {
-        const def = await getWorkflowDefOrDefault(client, tenantId, ENTITY, ENERGY_COLLECTION_DEF);
+        // T1-B 批3：回放的是**老行**，available 按它自己锁的版本给，不是 live。
+        const def = await getWorkflowDefAtVersion(client, tenantId, ENTITY, row.def_version, ENERGY_COLLECTION_DEF);
         return { replay: true as const, item: { ...row, available: availableTransitions(def, row.status) } };
       }
 

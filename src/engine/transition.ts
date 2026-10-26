@@ -3,7 +3,7 @@
 // 等任意 entity_type 复用，避免逐模块硬编码状态机（红线：所有业务流必须过 workflow_def）。
 // 表名经白名单校验（防注入），状态由 workflow_def 引擎 applyEvent 校验，data(jsonb) 合并 extra。
 import { AppError } from '../middleware/error.js';
-import { getWorkflowDefOrDefault } from './workflowDef.js';
+import { getWorkflowDefAtVersion } from './workflowDef.js';
 import { applyEvent, type WorkflowDef } from './stateMachine.js';
 import { emitDomainEvent } from '../db/eventBus.js';
 
@@ -78,7 +78,15 @@ export async function transitionEntity(
   if (cur.rowCount === 0) throw new AppError('NOT_FOUND', 'entity not found', 404);
   const row = cur.rows[0];
 
-  const def = await getWorkflowDefOrDefault(client, tenantId, opts.entityType, opts.fallbackDef);
+  // T1-B 批3：在途单按建单时锁定的流程版本流转（def_version=0 ⇒ 未锁定 ⇒ 走 live，逐字节等价）。
+  // 【E7 决策留痕：为什么用「内部自取」而不是设计文档推荐的「外层可选 def 参数」】
+  //   设计 §5 批3 推荐 `TransitionEntityOpts` 加可选 `def?: WorkflowDef` 由调用方传入。
+  //   没采用，是因为「不传则保持读 live」这条兼容语义本身是 E3 反面教材：
+  //   三个调用点（businessFlow.ts:306 / energyCollection.ts:130 / :378）漏传任何一个，
+  //   版本锁就**静默失效**（不报错、不告警，测不出来）。
+  //   内部自取则不可能漏：这里 :74-77 已是 `SELECT *` ⇒ `row.def_version` 必然在位；
+  //   且 ALLOWED_TABLES 两张表（business_flow_tasks / inspection_task）都有 102 的那一列。
+  const def = await getWorkflowDefAtVersion(client, tenantId, opts.entityType, row.def_version, opts.fallbackDef);
   const target = applyEvent(def, row.status, opts.event);
   if (!target) {
     throw new AppError('BAD_STATE', `illegal transition ${row.status} --${opts.event}-->`, 422);

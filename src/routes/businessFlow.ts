@@ -17,7 +17,7 @@ import type { PoolClient } from 'pg';
 import { withTenantClient } from '../db/pool.js';
 import { AppError } from '../middleware/error.js';
 import { requirePermission, ENTITY_RE } from '../middleware/role.js';
-import { getWorkflowDefOrDefault } from '../engine/workflowDef.js';
+import { getWorkflowDefAtVersion, getDefsForVersions, getWorkflowDefVersion } from '../engine/workflowDef.js';
 import { availableTransitions, type WorkflowDef } from '../engine/stateMachine.js';
 import { transitionEntity } from '../engine/transition.js';
 import { TRANSPORT_DEF, EMERGENCY_DEF, themeLabel } from '../engine/themes.js';
@@ -166,7 +166,6 @@ router.get('/:entityType', async (req, res, next) => {
       return res.json({ ok: true, code: 0, items, label: themeLabel(entityType) });
     }
     const items = await withTenantClient(tenantId, async (client) => {
-      const def = await getWorkflowDefOrDefault(client, tenantId, entityType, fallbackFor(entityType));
       const clauses = ['tenant_id = $1', 'entity_type = $2'];
       const params: unknown[] = [tenantId, entityType];
       if (status) {
@@ -177,7 +176,13 @@ router.get('/:entityType', async (req, res, next) => {
         `SELECT * FROM business_flow_tasks WHERE ${clauses.join(' AND ')} ORDER BY created_at DESC`,
         params,
       );
-      return r.rows.map((row: any) => ({ ...row, available: availableTransitions(def, row.status) }));
+      // T1-B 批3：N 行可能锁着不同版本 ⇒ 改前「先读一次 def 再 .map() 套到 N 行」本质上不成立
+      //   （老单会凭空拿到新版本的按钮）。按 def_version 分组，几个版本查几次。
+      const defs = await getDefsForVersions(client, tenantId, entityType, r.rows, fallbackFor(entityType));
+      return r.rows.map((row: any) => ({
+        ...row,
+        available: availableTransitions(defs.get(Number(row.def_version) || 0)!, row.status),
+      }));
     });
     return res.json({ ok: true, code: 0, items, label: themeLabel(entityType) });
   } catch (e) {
@@ -212,10 +217,19 @@ router.post('/:entityType', async (req, res, next) => {
         })
         .parse(req.body);
       if (adapter) return adapter.create(proxyCtx(client, res, entityType), b);
-      const def = await getWorkflowDefOrDefault(client, tenantId, entityType, fallbackFor(entityType));
+      // T1-B 批3：盖章 —— 新单锁上建单当时的流程定义版本（无 definition 时返 0 = 未锁定）。
+      // 🔴 **先取版本号、再取该版本的 def 来定初始态，两步顺序不能反**：
+      //    反过来的话，并发下另一请求可能在两步之间改版 ⇒ 「初始态来自 v6、章却盖 v5」，
+      //    而这正是 T1-B 要消灭的那类不一致（行的内容是新版、章是旧版）。
+      // 🔴 实体名是**路由参数 entityType 这个变量**，不是表名 business_flow_tasks
+      //    （D1 双名的另一半：批 2 是「表 transport_order vs 口径 transport_task」，
+      //     批 3 反过来是「表 business_flow_tasks vs 口径 <变量 entityType>」）。
+      //    传成表名会永远返回 0，而且一声不响（E3 反面：静默失败）。
+      const defVersion = await getWorkflowDefVersion(client, tenantId, entityType);
+      const def = await getWorkflowDefAtVersion(client, tenantId, entityType, defVersion, fallbackFor(entityType));
       const r = await client.query(
-        `INSERT INTO business_flow_tasks (tenant_id, entity_type, title, status, data, assignee, location, scheduled_at, created_by)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`,
+        `INSERT INTO business_flow_tasks (tenant_id, entity_type, title, status, data, assignee, location, scheduled_at, created_by, def_version)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,
         [
           tenantId,
           entityType,
@@ -226,6 +240,7 @@ router.post('/:entityType', async (req, res, next) => {
           b.location ?? null,
           b.scheduled_at ?? null,
           actor,
+          defVersion,
         ],
       );
       const row = r.rows[0];
@@ -255,13 +270,14 @@ router.get('/:entityType/:id', async (req, res, next) => {
       return res.json({ ok: true, code: 0, item });
     }
     const item = await withTenantClient(tenantId, async (client) => {
-      const def = await getWorkflowDefOrDefault(client, tenantId, entityType, fallbackFor(entityType));
       const r = await client.query(
         `SELECT * FROM business_flow_tasks WHERE id = $1 AND tenant_id = $2 AND entity_type = $3`,
         [req.params.id, tenantId, entityType],
       );
       if (r.rowCount === 0) throw new AppError('NOT_FOUND', 'not found', 404);
       const row = r.rows[0];
+      // T1-B 批3：详情 available 必须与写侧用同一个版本化 def，否则按钮与实际校验不一致（R-1）。
+      const def = await getWorkflowDefAtVersion(client, tenantId, entityType, row.def_version, fallbackFor(entityType));
       return { ...row, available: availableTransitions(def, row.status) };
     });
     return res.json({ ok: true, code: 0, item });
@@ -294,13 +310,19 @@ router.post('/:entityType/:id/transition', async (req, res, next) => {
     }
 
     const item = await withTenantClient(tenantId, async (client) => {
-      const def = await getWorkflowDefOrDefault(client, tenantId, entityType, fallbackFor(entityType));
-      // requiredFields 校验（引用 data 内字段）
+      // T1-B 批3：🔴 **本批唯一必须改的业务 SQL** —— 原来只 `SELECT status`，行上没有 `def_version`。
+      //   漏改这一步，整个写侧锁就是空的（拿到 0 ⇒ 走 live ⇒ 等于没锁）。
+      //   （批 1 的 inspection.ts:36 靠 `SELECT *` 躲过这一步，批 2 的 transport.ts:86 也是，批 3 躲不过。）
       const cur = await client.query(
-        `SELECT status FROM business_flow_tasks WHERE id = $1 AND tenant_id = $2 AND entity_type = $3`,
+        `SELECT status, def_version FROM business_flow_tasks WHERE id = $1 AND tenant_id = $2 AND entity_type = $3`,
         [req.params.id, tenantId, entityType],
       );
       if (cur.rowCount === 0) throw new AppError('NOT_FOUND', 'not found', 404);
+      // 🔴 必填校验与实际流转必须用**同一个版本**的 def（与批 2 补在 transportAdapter.ts:192 的同款）：
+      //   必填读 live、流转按行锁版本走 ⇒ 老单被要求填一个它出生时不存在的字段，
+      //   填了老版本又不认 ⇒ 死锁。
+      const def = await getWorkflowDefAtVersion(client, tenantId, entityType, cur.rows[0].def_version, fallbackFor(entityType));
+      // requiredFields 校验（引用 data 内字段）
       assertRequiredFields(def, cur.rows[0].status, b.event, b.data ?? {});
       const { actor } = authInfo(res);
       const row = await transitionEntity(client, tenantId, {

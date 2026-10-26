@@ -8,6 +8,8 @@ import crypto from 'node:crypto';
 import express from 'express';
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 
 vi.hoisted(() => {
   process.env.JWT_SECRET = 't303a-test-jwt-secret';
@@ -24,18 +26,35 @@ const state = {
   seq: 0,
 };
 
+// T1-B 批3：SQL 调用录制（供「建单把版本号盖进 def_version」这类"写入了什么"的断言取证）。
+// 只录不改语义——桩的应答逻辑一行未动。
+const queryCalls: Array<{ sql: string; params: any[] }> = [];
+
 function makeClient() {
   return {
     query: async (text: unknown, params?: unknown[]) => {
       const sql = String(text);
       const p = (params ?? []) as any[];
+      queryCalls.push({ sql, params: p });
       if (/SELECT id FROM worker WHERE tenant_id = \$1 AND account_id = \$2/i.test(sql)) {
         // T-bridge 桥接反查：worker.account_id → 业务 worker.id
         const wid = state.workerAccounts[p[1]];
         return wid ? { rows: [{ id: wid }], rowCount: 1 } : { rows: [], rowCount: 0 };
       }
       if (sql.includes('workflow_def')) {
-        if (/SELECT version/i.test(sql)) return { rows: [], rowCount: 0 };
+        // T1-B 批3：版本号桩**必须是非零常量 5**。
+        //   此前返回空 ⇒ getWorkflowDefVersion() 得 0；而「建单处硬编码 0 = 从不锁版本」
+        //   是最严重的错误实现，断言 params[7] === 0 会一样通过 ⇒ 测试假绿。
+        //   真实库里 workflow_def 有行时 version >= 1，故桩给 5（与 t5TransportProxy 同款）。
+        //
+        //   🔴 且只认真实 entity_type（'energy_collection'）：workflow_def 的 entity_type
+        //   是实体名不是表名，传 'business_flow_tasks' 在 prod 里零行 ⇒ 静默 0。
+        //   桩不认这个差异的话，"传错实体名"这枚雷就永远炸不到任何断言上。
+        if (/SELECT version/i.test(sql)) {
+          return p[1] === 'energy_collection'
+            ? { rows: [{ version: 5 }], rowCount: 1 }
+            : { rows: [], rowCount: 0 };
+        }
         if (/SELECT def FROM workflow_def/i.test(sql)) {
           return state.defRow ? { rows: [{ def: state.defRow }], rowCount: 1 } : { rows: [], rowCount: 0 };
         }
@@ -80,6 +99,9 @@ function makeClient() {
             location: p[5] ?? null,
             assignee: null,
             created_by: p[6] ?? null,
+            // T1-B 批3：def_version 是真实列（102 迁移，NOT NULL DEFAULT 0）——桩同步落行，
+            // 使后续读点（列表分组 / 详情 / 幂等回放）走的是"已锁定版本"分支，与 prod 同形。
+            def_version: Number(p[7]) || 0,
             created_at: new Date().toISOString(),
             updated_at: new Date().toISOString(),
           };
@@ -390,5 +412,60 @@ describe('POST /energy/token-exchange + worker 只读列表 —— token 三链'
     );
     const res2 = await fetch(url + '/api/v1/energy/tasks', { headers: { Authorization: `Bearer ${wt}` } });
     expect(res2.status).toBe(200);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T1-B 批3 · energy_collection 在途单锁版本
+// 依据：business_flow_tasks.def_version（102 迁移，NOT NULL DEFAULT 0）记录建单当时的
+// workflow_def.version，使后续对 live def 的编辑无法把在途单卡死或带偏。
+// 本块三条：①建单盖章（版本号真的被写进去了，且是读出来的 live 版本而非硬编码 0）；
+// ②四个读点全部版本化、列表走分组；③实体名是 energy_collection 而不是表名。
+// ---------------------------------------------------------------------------
+const ENERGY_SRC = readFileSync(join(__dirname, '..', 'routes', 'energyCollection.ts'), 'utf8');
+
+/** 子串出现次数（静态读点计数用；比正则更不容易被元字符骗过）。 */
+function countOf(src: string, needle: string): number {
+  return src.split(needle).length - 1;
+}
+
+describe('T1-B 批3 · energy_collection 在途单锁版本', () => {
+  it('A4-盖章：dispatch 建单把当时的 live 版本号盖进 def_version', async () => {
+    queryCalls.length = 0;
+    // 与 E08 同款驱动：signedFetch + shell()（HMAC 签名域 `${ts}.${raw}`，body 形状不另造）。
+    const r = await signedFetch('/api/v1/energy/webhook/dispatch', shell('t1b-b3-stamp-ref-0001'));
+    expect(r.status).toBe(201);
+    const b = (await r.json()) as any;
+    expect(b.ok).toBe(true);
+
+    // 取证：本次请求发出的 INSERT INTO business_flow_tasks
+    const insert = queryCalls.filter((c) => /INSERT INTO business_flow_tasks/i.test(c.sql)).pop();
+    expect(insert).toBeTruthy();
+    // ① 参数数组长度 8 —— 建单语句比原来多带一个 def_version（$8）
+    expect(insert!.params.length).toBe(8);
+    // ② params[7] 是版本号，且等于桩里 workflow_def 的 live version（5）。
+    //    🔴 断言 5 而不是 0：若产品代码硬编码 0（=从不锁版本），这里必然红。
+    expect(insert!.params[7]).toBe(5);
+    // ③ 列清单以 def_version 收尾（与 $8 对位，防"加了参数没加列"的错位写）
+    expect(insert!.sql).toMatch(/created_by,\s*def_version\)/);
+    // 落行结果同样带着这个版本号（RETURNING * 在 prod 里就是这行）
+    expect(b.item.def_version).toBe(5);
+  });
+
+  it('A3-静态：四个读点都走版本化 def，列表走分组', () => {
+    // 四个单点读：:113 dispatch 幂等回放 / :122 建单定初始态 / :323 详情 / :390 status-update 回放
+    expect(countOf(ENERGY_SRC, 'getWorkflowDefAtVersion(client, tenantId, ENTITY')).toBe(4);
+    // 列表一个批量读（N 行可能锁不同版本 ⇒ 按 def_version 分组，几个版本查几次）
+    expect(countOf(ENERGY_SRC, 'getDefsForVersions(client, tenantId, ENTITY')).toBe(1);
+    // 盖章只发生在建单这一处（先取版本号，再取该版本的 def）
+    expect(countOf(ENERGY_SRC, 'getWorkflowDefVersion(client, tenantId, ENTITY)')).toBe(1);
+  });
+
+  it('A4-实体名：版本号不是按表名取的（传成表名会永远返回 0 且一声不响）', () => {
+    // 表是 business_flow_tasks，workflow_def 的 entity_type 却是 'energy_collection'（常量 ENTITY）。
+    // 传表名 ⇒ SELECT version ... WHERE entity_type='business_flow_tasks' 永远零行 ⇒ 静默返回 0
+    // ⇒ 每行都"未锁定"，锁版本整套机制形同虚设且不报错。故这里钉死传参是 ENTITY。
+    expect(ENERGY_SRC).toContain('getWorkflowDefVersion(client, tenantId, ENTITY)');
+    expect(ENERGY_SRC).not.toContain("getWorkflowDefVersion(client, tenantId, 'business_flow_tasks')");
   });
 });

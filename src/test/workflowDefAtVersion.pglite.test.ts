@@ -26,6 +26,9 @@ import {
   getWorkflowDefVersion,
   getWorkflowDefOrDefault,
 } from '../engine/workflowDef.js';
+// 批 3 的写侧就长在 transitionEntity 里，且它是可直调的共享函数 ⇒ 真库里直接调真产品代码，
+// 不像批 1 那样只能模拟 INSERT（批 1 的三处 INSERT 藏在 route handler 里，够不着）。
+import { transitionEntity } from '../engine/transition.js';
 // A3 要用真引擎判定「available 里的 event 能不能真走通」，不是另写一份判定逻辑。
 import { applyEvent, availableTransitions } from '../engine/stateMachine.js';
 // WorkflowDef 定义在 stateMachine.ts，workflowDef.ts 只是 import 它、并未 re-export。
@@ -397,5 +400,203 @@ describe('批1 · inspection_task 在途单锁版本（真库 A1/A2/A3/A4）', (
     expect(rows[0].def_version, '存量行必须是哨兵 0，不是被伪造的 1').toBe(0);
     // 哨兵 0 ⇒ 走 live ⇒ 与改前行为逐字节一致。该语义已由本文件 ① 钉死（version<=0 ⇒ 走 live），
     // 此处不重复验；本节只负责锁住「迁移不改存量行」这条 E4 底线。
+  });
+});
+
+// ============================================================
+// 批3 · business_flow_tasks 在途单锁版本（真库 A1/A2/A3/A4）
+// 【与批 1 那组的分工】批 1 的三处 INSERT 藏在 route handler 里，只能用同款 INSERT 模拟盖章
+//   （「真 INSERT 是否带列」由 http 侧静态断言补上）。批 3 的**写侧 transitionEntity 可直调**，
+//   ⇒ 这里直接拿真 PGlite client 调真产品代码，验的是真路径。
+// 【实体名为什么选 cycle_check】最典型的「未代理」泛型实体（t5TransportProxy.http.test.ts:228
+//   已在用它）。刻意不用 transport_task —— 那一条已被 flowProxy 代理去 transport_order，
+//   根本落不到本表（businessFlow.ts:214 就分派走了）。
+//   🔴 这也是批 3 与批 1/2 的形状差异：**def 口径是变量 entityType，不是常量**。
+// ============================================================
+const ET3 = 'cycle_check';
+
+/** v1：pending → doing → done，两条边。 */
+const BF_V1: WorkflowDef = {
+  initial: 'pending',
+  states: ['pending', 'doing', 'done'],
+  transitions: [
+    { from: 'pending', to: 'doing', event: 'start' },
+    { from: 'doing', to: 'done', event: 'finish' },
+  ] as any,
+  config: {},
+} as WorkflowDef;
+/** v2 = v1 + 一条新边（doing --cancel--> cancelled）。**这条边是 A1/A2/A3 的判别关键**。 */
+const BF_V2: WorkflowDef = {
+  initial: 'pending',
+  states: ['pending', 'doing', 'done', 'cancelled'],
+  transitions: [
+    { from: 'pending', to: 'doing', event: 'start' },
+    { from: 'doing', to: 'done', event: 'finish' },
+    { from: 'doing', to: 'cancelled', event: 'cancel' },
+  ] as any,
+  config: {},
+} as WorkflowDef;
+
+/**
+ * 真建库：三张业务表 + workflow_def + history + domain_event，然后**真跑 102 迁移**加列。
+ * 比 freshInspDb 多建 `domain_event` —— transitionEntity 内部会 emitDomainEvent
+ * （src/db/eventBus.ts:16-29 是裸 INSERT，**不吞错**）⇒ 缺表会假红成产品 bug。
+ */
+async function freshFlowDb(): Promise<PGlite> {
+  const db = new PGlite();
+  await db.exec(createTableBlock('022_workflow_def.sql', 'workflow_def'));
+  await db.exec(createTableBlock('047_basic_data_consolidate.sql', 'workflow_def_history'));
+  await db.exec(createTableBlock('011_inspection.sql', 'inspection_task'));
+  await db.exec(createTableBlock('034_emergency_transport.sql', 'transport_order'));
+  await db.exec(createTableBlock('030_business_flow.sql', 'business_flow_tasks'));
+  await db.exec(createTableBlock('020_domain_event.sql', 'domain_event'));
+  await db.exec(UP_102);
+  await db.query(`INSERT INTO workflow_def (tenant_id, entity_type, def, version) VALUES ($1,$2,$3::jsonb,1)`, [
+    T,
+    ET3,
+    JSON.stringify(BF_V1),
+  ]);
+  return db;
+}
+
+/** 模拟 businessFlow.ts:231 的 INSERT（盖章）。真 INSERT 是否带列由 http 侧 A4 静态断言钉住。 */
+async function createFlowTask(db: PGlite, c: PoolClient, title: string, version?: number) {
+  const v = version ?? (await getWorkflowDefVersion(c, T, ET3));
+  const r = await db.query(
+    `INSERT INTO business_flow_tasks (tenant_id, entity_type, title, status, created_by, def_version)
+     VALUES ($1,$2,$3,'pending','t1-user',$4) RETURNING *`,
+    [T, ET3, title, v],
+  );
+  return r.rows[0] as { id: string; title: string; def_version: number; status: string };
+}
+
+/** 改版到 v2（cycle_check）：v1 落进 history，live 升到 version=2（真实 saveWorkflowDef 的形态）。 */
+async function upgradeFlowToV2(db: PGlite) {
+  await db.query(`INSERT INTO workflow_def_history (tenant_id, entity_type, version, def) VALUES ($1,$2,1,$3::jsonb)`, [
+    T,
+    ET3,
+    JSON.stringify(BF_V1),
+  ]);
+  await db.query(`UPDATE workflow_def SET def = $3::jsonb, version = 2 WHERE tenant_id = $1 AND entity_type = $2`, [
+    T,
+    ET3,
+    JSON.stringify(BF_V2),
+  ]);
+}
+
+/** 直调产品侧共享写侧：transitionEntity（批 3 的写就长在这里）。 */
+function flowTransition(c: PoolClient, id: string, event: string) {
+  return transitionEntity(c, T, {
+    table: 'business_flow_tasks',
+    id,
+    event,
+    entityType: ET3,
+    fallbackDef: BF_V2,
+    actor: 't1-user',
+  });
+}
+
+describe('批3 · business_flow_tasks 在途单锁版本（真库 A1/A2/A3/A4）', () => {
+  it('A1：v1 建的老单，改版到 v2 后仍按 v1 流转 —— v2 的新边对它 422（真 transitionEntity）', async () => {
+    const db = await freshFlowDb();
+    const c = asClient(db);
+    const t1 = await createFlowTask(db, c, '老单');
+    expect(t1.def_version, '建单时盖的章 = 当时的 live version').toBe(1);
+    await upgradeFlowToV2(db);
+
+    // 改版**不许**顺手把在途单的版本号刷成新版本（那等于没锁）。
+    const after = (
+      await db.query(`SELECT def_version FROM business_flow_tasks WHERE id = $1`, [t1.id])
+    ).rows[0] as any;
+    expect(after.def_version, '改版后老单的章必须还是 v1').toBe(1);
+
+    // ① v1 自己的边：照常走通（真写侧、真落库）
+    const doing = await flowTransition(c, t1.id, 'start');
+    expect(doing.status).toBe('doing');
+    // ② v2 新增的边：对 v1 老单必须 422 —— 否则就是「按钮凭空多出来、点了还能过」
+    await expect(flowTransition(c, t1.id, 'cancel')).rejects.toThrow(/illegal transition/);
+  });
+
+  it('A2：改版后建的新单锁 v2 并按 v2 走（防「一律锁老版本」这种做反了也能绿 A1 的实现）', async () => {
+    const db = await freshFlowDb();
+    const c = asClient(db);
+    await createFlowTask(db, c, '老单');
+    await upgradeFlowToV2(db);
+    const t2 = await createFlowTask(db, c, '新单');
+    expect(t2.def_version, '新单必须盖 v2 的章').toBe(2);
+
+    await flowTransition(c, t2.id, 'start');
+    const cancelled = await flowTransition(c, t2.id, 'cancel');
+    expect(cancelled.status, '新单应当用得上 v2 的新边').toBe('cancelled');
+  });
+
+  it('A3：读侧 available 按行给版本 —— 老单不含 v2 的 cancel，新单含（抓 R-1/R-2）', async () => {
+    const db = await freshFlowDb();
+    const c = asClient(db);
+    const t1 = await createFlowTask(db, c, '老单');
+    await upgradeFlowToV2(db);
+    const t2 = await createFlowTask(db, c, '新单');
+
+    // 🔴 刻意**分三次独立取**（老单读侧 / 新单读侧 / live），不复用同一个 def 对象 ——
+    //   复用会让「读侧漏改、仍读 live」变成永真断言（两边拿到同一对象，天然一致）。
+    const readDef1 = await getWorkflowDefAtVersion(c, T, ET3, t1.def_version, BF_V2);
+    const readDef2 = await getWorkflowDefAtVersion(c, T, ET3, t2.def_version, BF_V2);
+    const liveDef = await getWorkflowDefOrDefault(c, T, ET3, BF_V2);
+
+    const av1 = availableTransitions(readDef1, 'doing').map((x: any) => x.event);
+    const av2 = availableTransitions(readDef2, 'doing').map((x: any) => x.event);
+    const avLive = availableTransitions(liveDef, 'doing').map((x: any) => x.event);
+
+    // 若读侧漏改（读成 live = v2），av1 会与 avLive 完全一致 ⇒ 这条必红。
+    expect(av1, '老单 available 不能等于 live 的（否则读侧压根没走版本锁）').not.toEqual(avLive);
+    expect(av1).toEqual(['finish']);
+    expect(av2, '新单拿得到 v2 的新边').toEqual(['finish', 'cancel']);
+    // A3 本体：available 给出的每个 event，逐个用**写侧**的 def 真走一遍 ⇒ 不得 422。
+    for (const ev of av1) {
+      expect(applyEvent(readDef1, 'doing', ev), `available 给出的 ${ev} 必须真能流转`).not.toBeNull();
+    }
+  });
+
+  // 🔴🔴 诚实声明（2026-10-28 变异验证发现后改写）：
+  //   本条**不**覆盖「产品会把版本号盖进行里」这件事。这里的 INSERT 是本文件的夹具 helper
+  //   （createFlowTask）自己做的 —— 把 src/routes/businessFlow.ts:228 的盖章改成写死 0，
+  //   本条照样全绿（实测 19/19）。曾据此自称「盖章真值」，是纸面验收。
+  //   产品盖章由 src/test/t5TransportProxy.http.test.ts 的「A4-盖章」穿透路由验收
+  //   （10 参、末位 = 桩返的 5；改坏 ⇒ 那条红）。
+  //   本条真正覆盖的是 R-3（改版不许顺手把在途单的章刷成新版本）+ 回库真值（不信任 RETURNING）。
+  it('A4-R3：改版不许顺手把在途单的章刷成新版本；版本真值以回库查为准（不信任 RETURNING）', async () => {
+    const db = await freshFlowDb();
+    const c = asClient(db);
+    expect(await getWorkflowDefVersion(c, T, ET3), '改版前 live version').toBe(1);
+    await createFlowTask(db, c, '老单');
+    await upgradeFlowToV2(db);
+    expect(await getWorkflowDefVersion(c, T, ET3), '改版后 live version').toBe(2);
+    await createFlowTask(db, c, '新单');
+
+    // 回库查，不信任 INSERT 的 RETURNING（RETURNING 拿的是写入值，不是落库值）。
+    const rows = (
+      await db.query(`SELECT title, def_version FROM business_flow_tasks WHERE tenant_id = $1 ORDER BY title`, [T])
+    ).rows as any[];
+    const byTitle = new Map<string, number>(rows.map((r) => [r.title, r.def_version]));
+    expect(byTitle.get('老单'), '老单锁 v1').toBe(1);
+    expect(byTitle.get('新单'), '新单锁 v2').toBe(2);
+  });
+
+  it('E4：102 迁移跑完后，先于它存在的行 def_version 一律为 0（未记录，不伪造建单版本）', async () => {
+    const db = new PGlite();
+    await db.exec(createTableBlock('030_business_flow.sql', 'business_flow_tasks'));
+    await db.exec(createTableBlock('011_inspection.sql', 'inspection_task'));
+    await db.exec(createTableBlock('034_emergency_transport.sql', 'transport_order'));
+    await db.query(
+      `INSERT INTO business_flow_tasks (tenant_id, entity_type, title, status) VALUES ($1,$2,'存量单','doing')`,
+      [T, ET3],
+    );
+    await db.exec(UP_102); // 真跑迁移
+
+    const rows = (
+      await db.query(`SELECT def_version FROM business_flow_tasks WHERE tenant_id = $1`, [T])
+    ).rows as any[];
+    expect(rows.length).toBe(1);
+    expect(rows[0].def_version, '存量行必须是哨兵 0，不是被伪造的 1').toBe(0);
   });
 });
