@@ -88,6 +88,12 @@ async function freshDb(): Promise<PGlite> {
   for (const sql of alterBlocksFor('076_transport_sla.sql', 'transport_order')) await db.exec(sql);
   for (const sql of alterBlocksFor('052_transport_track_photo.sql', 'transport_track_point')) await db.exec(sql);
   await db.exec(createTableBlock('030_business_flow.sql', 'business_flow_tasks'));
+  // 🔴 102（T1-B）：给 transport_order / business_flow_tasks 加 def_version 列。
+  //    T1-B 批 2 起 createOrder 的 INSERT 带上了这一列；夹具不跟进这条迁移 ⇒ INSERT 直接报
+  //    "column def_version does not exist" —— 那是**夹具脱节的锅**，不是产品的锅。
+  //    （inspection_task 本夹具不建，故只补这两张表，不整篇 exec 102。）
+  for (const sql of alterBlocksFor('102_inflight_def_version.sql', 'transport_order')) await db.exec(sql);
+  for (const sql of alterBlocksFor('102_inflight_def_version.sql', 'business_flow_tasks')) await db.exec(sql);
   await db.exec(createTableBlock('022_workflow_def.sql', 'workflow_def'));
   for (const sql of alterBlocksFor('101_config_actor_and_version.sql', 'workflow_def')) await db.exec(sql);
   await db.exec(createTableBlock('047_basic_data_consolidate.sql', 'workflow_def_history'));

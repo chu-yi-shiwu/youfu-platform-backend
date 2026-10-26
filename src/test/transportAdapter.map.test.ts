@@ -32,6 +32,17 @@ interface FakeOpts {
   orderStatus?: string;
   carrier?: string | null;
   workerId?: string;
+  // —— T1-B 批 2：让假 client 能返回一个真实的版本链（默认全 0 ⇒ 既有用例行为不变）——
+  /** workflow_def 里的 live 版本号；0/缺省 = 无定义 ⇒ 落 TRANSPORT_DEF 兜底 */
+  liveVersion?: number;
+  /** workflow_def 里的 live def */
+  liveDef?: any;
+  /** history 快照（version → def） */
+  history?: Array<{ version: number; def: any }>;
+  /** 列表返回的行；带上 def_version 即可测「按行版本分组」 */
+  listRows?: any[];
+  /** 详情/流转取到的单行；带上 def_version 即可测「老单按老版本走」 */
+  orderRow?: any;
 }
 
 /** 假 client：把每条 SQL 记下来，并对原生函数需要的语句给出让流程走通的最小返回。 */
@@ -44,7 +55,20 @@ function makeClient(o: FakeOpts = {}) {
       calls.push({ text, params });
       const p = params ?? [];
       if (text.includes('INSERT INTO domain_event')) return { rows: [], rowCount: 1 };
-      if (text.includes('FROM workflow_def')) return { rows: [], rowCount: 0 };
+      // 🔴 顺序敏感：`workflow_def_history` 里含 `workflow_def` 子串 ⇒ history 分支必须排最前，
+      //    被下面那条兜底先拦掉会一律返回 0 行 ⇒ history 永远查不到，版本读一律降级到 live。
+      //    （这种"桩自己把被测路径堵死"的错，表现是全绿，属最隐蔽的假绿之一。）
+      if (text.includes('FROM workflow_def_history')) {
+        const v = Number(p[2] ?? 0); // 参数序 = [tenantId, entityType, version]
+        const hit = (o.history ?? []).find((x) => x.version === v);
+        return hit ? { rows: [{ def: JSON.stringify(hit.def) }], rowCount: 1 } : { rows: [], rowCount: 0 };
+      }
+      if (text.includes('SELECT version FROM workflow_def')) {
+        return o.liveVersion ? { rows: [{ version: o.liveVersion }], rowCount: 1 } : { rows: [], rowCount: 0 };
+      }
+      if (text.includes('FROM workflow_def')) {
+        return o.liveDef ? { rows: [{ def: JSON.stringify(o.liveDef) }], rowCount: 1 } : { rows: [], rowCount: 0 };
+      }
       if (text.includes('FROM work_orders')) return { rows: [], rowCount: 0 };
       if (text.includes('FROM worker')) return { rows: [{ id: o.workerId ?? 'w-1' }], rowCount: 1 };
       if (text.includes('INSERT INTO transport_track_point')) return { rows: [{ id: 'tp-1' }], rowCount: 1 };
@@ -58,6 +82,8 @@ function makeClient(o: FakeOpts = {}) {
               item_name: String(p[2]),
               carrier: p[5] ?? null,
               plan_depart_at: p[7] ?? null,
+              // T1-B 批2：新行盖的章 = 当时的 live 版本（模拟 createOrder 的 RETURNING *）
+              def_version: o.liveVersion ?? 0,
             },
           ],
           rowCount: 1,
@@ -70,10 +96,12 @@ function makeClient(o: FakeOpts = {}) {
         return { rows: [{ id: ORDER_ID, carrier }], rowCount: 1 };
       }
       if (text.includes('FROM transport_order') && text.includes('ORDER BY')) {
-        return { rows: [{ id: 'to-2', status }, { id: 'to-1', status }], rowCount: 2 };
+        const rows = o.listRows ?? [{ id: 'to-2', status }, { id: 'to-1', status }];
+        return { rows, rowCount: rows.length };
       }
       if (text.includes('FROM transport_order')) {
-        return { rows: [{ id: ORDER_ID, status, carrier, work_order_id: null }], rowCount: 1 };
+        const rows = o.orderRow ?? [{ id: ORDER_ID, status, carrier, work_order_id: null }];
+        return { rows, rowCount: rows.length };
       }
       return { rows: [], rowCount: 1 };
     },
@@ -322,5 +350,113 @@ describe('T5/S3 形状护栏：adapter 不许自己写 SQL', () => {
         'adapter 出现了按值 import flowProxy ⇒ 循环依赖 ⇒ 生产启动崩（改成 import type）',
       ).toMatch(/^import type\b/);
     }
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// T1-B 批 2 · transport_order 在途单锁版本
+//
+// 【为什么在 adapter 这一层验】/flow 代理侧的四个方法各自读一次 def 再套到行上，
+//   这条路径不经过 http 桩，而是"真 adapter + 真 workflowDef 模块 + 假 client"
+//   ⇒ 断言"查了几次、查的是哪个版本"验的是真引擎，不是桩。
+// 【两条 v1/v2 的唯一差别】v2 比 v1 多一条 pending --cancel--> cancelled。
+//   这条边就是全部判别关键：老单不该看见它，新单应该能看见。
+// ═══════════════════════════════════════════════════════════════════════════
+const V1_TRANSPORT: any = {
+  initial: 'pending',
+  states: ['pending', 'assigned', 'transporting', 'done', 'cancelled'],
+  transitions: [
+    { from: 'pending', to: 'assigned', event: 'dispatch', allowedRoles: ['admin', 'operator'] },
+    { from: 'assigned', to: 'transporting', event: 'receive', allowedRoles: ['admin', 'worker'] },
+    { from: 'transporting', to: 'done', event: 'complete', allowedRoles: ['admin', 'worker'] },
+  ],
+  config: {},
+};
+const V2_TRANSPORT: any = {
+  initial: 'pending',
+  states: ['pending', 'assigned', 'transporting', 'done', 'cancelled'],
+  transitions: [
+    ...V1_TRANSPORT.transitions,
+    { from: 'pending', to: 'cancelled', event: 'cancel', allowedRoles: ['admin', 'operator'] },
+  ],
+  config: {},
+};
+
+const evs = (row: any): string[] => (row?.available ?? []).map((t: any) => t.event);
+const historyCalls = (calls: CapturedQuery[]) => calls.filter((c) => c.text.includes('FROM workflow_def_history'));
+const versionCalls = (calls: CapturedQuery[]) => calls.filter((c) => c.text.includes('SELECT version FROM workflow_def'));
+
+describe('T1-B 批2 · transport 锁版本', () => {
+  it('列表：每行按自己锁的版本给 available，不是全表共用一个 live def', async () => {
+    const { client, calls } = makeClient({
+      liveVersion: 2,
+      liveDef: V2_TRANSPORT,
+      history: [{ version: 1, def: V1_TRANSPORT }],
+      listRows: [
+        { id: 'to-2', status: 'pending', def_version: 2 },
+        { id: 'to-1', status: 'pending', def_version: 1 },
+      ],
+    });
+    const rows: any[] = await transportAdapter.list(ctxOf(client), {});
+    const byId = new Map<string, any>(rows.map((r) => [r.id, r]));
+
+    expect(evs(byId.get('to-2')), '锁 v2 的行应当看得到 v2 新加的 cancel').toContain('cancel');
+    // 🔴 这条是批 2 列表口的存在理由：改前 list 是「读一次 def 套 N 行」，
+    //    两行都会拿到 live(v2) 的 available ⇒ 老单凭空多出 cancel 按钮。
+    expect(evs(byId.get('to-1')), '锁 v1 的老单不该出现 v2 才有的 cancel').not.toContain('cancel');
+
+    // 路径断言：分组后只该查 1 次 history（v2 是 live 不必查），不是 2 次、也不是每行 1 次。
+    expect(historyCalls(calls).length, '两个版本中只有 v1 需要翻 history ⇒ 恰好 1 次').toBe(1);
+  });
+
+  it('建单：新行的 available 走 versioned 读（路径断言：必产生一次 version 查询，且不翻 history）', async () => {
+    const { client, calls } = makeClient({
+      liveVersion: 2,
+      liveDef: V2_TRANSPORT,
+      history: [{ version: 1, def: V1_TRANSPORT }],
+    });
+    const row: any = await transportAdapter.create(ctxOf(client), { title: '送标本到 3 楼检验科' });
+
+    expect(row.def_version, '新行盖的章 = 建单当时的 live 版本').toBe(2);
+    expect(evs(row)).toContain('cancel');
+    // 路径断言：改前 create 直接用 defFor（= getWorkflowDefOrDefault），一次 version 都不查。
+    //   ⇒ 少了这条，"create 仍读 live"这种实现会照样绿（此刻结果与 versioned 读完全相同）。
+    expect(versionCalls(calls).length, 'create 必须走 versioned 读 ⇒ 至少查一次 version').toBeGreaterThan(0);
+    // 新行版本 == live ⇒ 不该去翻 history
+    expect(historyCalls(calls).length, '新行锁的就是 live 版本，不必翻 history').toBe(0);
+  });
+
+  it('流转：必填校验与流转用同一个版本 ⇒ 老单不被新版本的必填项卡死（防死锁）', async () => {
+    // 🔴 这条对应设计文档 §5 批 2 表格里**没写到**的那一处（transportAdapter.transition）。
+    //    v2 给 dispatch 加了必填 note；老单锁的是 v1（v1 的 dispatch 没有必填项）。
+    //    若必填校验读 live(v2)、流转却按老锁版本走 ⇒ 老单被要求填一个它出生时
+    //    根本不存在的字段，填了老版本也不认 ⇒ 死锁。这条就是钉死它的。
+    const v1 = {
+      initial: 'pending',
+      states: ['pending', 'assigned', 'transporting', 'done', 'cancelled'],
+      transitions: [
+        { from: 'pending', to: 'assigned', event: 'dispatch', allowedRoles: ['admin', 'operator'] },
+        { from: 'assigned', to: 'transporting', event: 'receive', allowedRoles: ['admin', 'worker'] },
+      ],
+      config: {},
+    };
+    const v2 = {
+      ...v1,
+      transitions: [
+        { from: 'pending', to: 'assigned', event: 'dispatch', requiredFields: ['note'], allowedRoles: ['admin', 'operator'] },
+        { from: 'assigned', to: 'transporting', event: 'receive', allowedRoles: ['admin', 'worker'] },
+      ],
+    };
+    const { client, calls } = makeClient({
+      liveVersion: 2,
+      liveDef: v2,
+      history: [{ version: 1, def: v1 }],
+      orderRow: [{ id: ORDER_ID, status: 'pending', carrier: 'w-1', work_order_id: null, def_version: 1 }],
+    });
+
+    // 不传 note —— 老单锁 v1，v1 的 dispatch 没有必填项 ⇒ 必须放行
+    await expect(transportAdapter.transition(ctxOf(client), ORDER_ID, { event: 'dispatch' })).resolves.toBeTruthy();
+    // 必填校验走的是老单自己那一版 ⇒ 必然真的翻了 history 去取 v1 快照
+    expect(historyCalls(calls).length, '老单锁 v1 ⇒ 必填校验必须真去 history 取 v1').toBeGreaterThan(0);
   });
 });

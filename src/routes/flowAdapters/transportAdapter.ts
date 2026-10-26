@@ -32,8 +32,9 @@
 //   · 角色门禁：`transitionOrder` 内部的 allowedRoles 校验（⇒ 403）
 //   ⇒ `/flow/transport_task/:id/transition` 对 worker 可能从 200 收紧为 403，这是预期的。
 import { AppError } from '../../middleware/error.js';
-import { getWorkflowDefOrDefault } from '../../engine/workflowDef.js';
+import { getWorkflowDefAtVersion, getDefsForVersions } from '../../engine/workflowDef.js';
 import { availableTransitions } from '../../engine/stateMachine.js';
+import type { WorkflowDef } from '../../engine/stateMachine.js';
 import { TRANSPORT_DEF } from '../../engine/themes.js';
 // ⚠️ 对 `engine/flowProxy.js` **只能 import type**：该文件按值引入了本文件的
 //    `transportAdapter`，若这里再按值反向 import 它 ⇒ 运行时循环依赖 ⇒
@@ -69,11 +70,6 @@ const UNDERSTOOD_TRANSITION_DATA_KEYS = new Set(['assignee', 'carrier', 'note', 
 
 /** def 口径名（workflow_def 行就存在 `transport_task` 名下，改不得——改了读不到 def）。 */
 const DEF_KEY = 'transport_task';
-
-/** 取状态图（DB 有配置优先 DB，否则内置 TRANSPORT_DEF）。 */
-async function defFor(ctx: FlowProxyCtx) {
-  return getWorkflowDefOrDefault(ctx.client, ctx.tenantId, DEF_KEY, TRANSPORT_DEF);
-}
 
 /**
  * R3 守卫：建单时的 `data` / `location`。
@@ -146,7 +142,7 @@ function mapTransitionData(data: Record<string, unknown>): {
 }
 
 /** 给行补 `available`（/flow 响应外壳要求每行都带，前端据此渲染动作按钮）。 */
-function withAvailable(def: Awaited<ReturnType<typeof defFor>>, row: FlowRow): FlowRow {
+function withAvailable(def: WorkflowDef, row: FlowRow): FlowRow {
   return { ...row, available: availableTransitions(def, String(row.status)) };
 }
 
@@ -156,9 +152,11 @@ export const transportAdapter: FlowAdapter = {
   nativeEntityType: 'transport_order',
 
   async list(ctx: FlowProxyCtx, query: { status?: string }): Promise<FlowRow[]> {
-    const def = await defFor(ctx);
     const rows = await listOrders(ctx.client, ctx.tenantId, { status: query.status });
-    return rows.map((r: FlowRow) => withAvailable(def, r));
+    // T1-B 批2：N 行可能锁着不同版本 ⇒ 改前「读一次 def 套 N 行」的写法本质上不成立
+    //   （老单会拿到新版本的按钮）。改为按 def_version 分组，几个版本查几次。
+    const defs = await getDefsForVersions(ctx.client, ctx.tenantId, DEF_KEY, rows, TRANSPORT_DEF);
+    return rows.map((r: FlowRow) => withAvailable(defs.get(Number(r.def_version) || 0)!, r));
   },
 
   async create(ctx: FlowProxyCtx, body: FlowCreateBody): Promise<FlowRow> {
@@ -170,8 +168,10 @@ export const transportAdapter: FlowAdapter = {
       carrier: body.assignee ?? undefined,
       plan_depart_at: body.scheduled_at ?? undefined,
     });
-    const def = await defFor(ctx);
     const row = await createOrder(ctx.client, ctx.tenantId, input);
+    // T1-B 批2：新行盖的章就是建单当时的版本。语义上它必然等于 live，
+    //   但仍走 versioned 读 —— 否则「建单后立刻改版」会成为一个悄悄失效的例外。
+    const def = await getWorkflowDefAtVersion(ctx.client, ctx.tenantId, DEF_KEY, row.def_version, TRANSPORT_DEF);
     return withAvailable(def, row);
   },
 
@@ -189,8 +189,15 @@ export const transportAdapter: FlowAdapter = {
 
     // ② def + requiredFields 校验：`/flow` 侧原本就有这道校验（businessFlow.ts:179-185），
     //    代理后由 adapter 接过来用**同一个函数**，避免"代理 = 悄悄取消必填校验"。
-    const def = await defFor(ctx);
+    // T1-B 批2：必填校验必须与流转用**同一个版本**的 def。
+    //   🔴 改前这里读 live、流转却按行锁的版本走 ⇒ 「按新版要求必填、按老版走流转」的死锁：
+    //     老单被要求填一个它出生时不存在的字段，填了老版本也不认。
+    //   ⇒ 先取行拿到 def_version，再用同一个 versioned def 做必填校验。
+    //   【E7 决策留痕】此处与 transitionOrder 内部会各读一次 def（共 2 次），刻意不合并：
+    //     合并需给 transitionOrder 加可选 def 参数（原生 http 路由也用它），改签名的收益
+    //     小于复杂度代价；两次都基于同一行的 def_version，结果必然相同，不会死锁。
     const cur = await getOrder(ctx.client, ctx.tenantId, id);
+    const def = await getWorkflowDefAtVersion(ctx.client, ctx.tenantId, DEF_KEY, cur.def_version, TRANSPORT_DEF);
     assertRequiredFields(def, String(cur.status), body.event, data);
 
     // carrier / assignee 的转发已在 mapTransitionData 里完成（不随事件分支变化）

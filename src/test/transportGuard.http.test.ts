@@ -10,6 +10,8 @@ import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import express from 'express';
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { errorMiddleware } from '../middleware/error.js';
 
 // ---- mock 掉 DB 连接池：脚本化 SQL 响应 + 调用日志 ----
@@ -147,5 +149,55 @@ describe('transport 建单 sla_due_at 落参（P1 B2 补 SLA）', () => {
     expect(ins?.sql).toContain('sla_due_at');
     // sla_due_at 是第 12 个参数（$12），插值位置落 null
     expect(ins?.params[11]).toBeNull();
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// T1-B 批 2 · transport_order 在途单锁版本
+//
+// 【与 adapter 那份的分工】src/test/transportAdapter.map.test.ts 验 /flow 代理侧
+//   （真 adapter + 假 client，断言"查了几次、哪个版本"）；本文件验原生路由侧：
+//   盖章值对不对、读写两侧是不是同一条路径。两侧都要有，只验一侧会留缝。
+// ═══════════════════════════════════════════════════════════════════════════
+const TRANSPORT_SRC = readFileSync(join(__dirname, '..', 'routes', 'transport.ts'), 'utf8');
+
+describe('T1-B 批2 · transport_order 在途单锁版本', () => {
+  it('A4：建单 INSERT 带上 def_version，且值 = 建单时查到的 live version', async () => {
+    h.scripted.length = 0;
+    h.calls.length = 0;
+    // 🔴 刻意让 workflow_def 返回一个**非 0** 的版本号。若让它返回 0（无定义），
+    //    实现把版本号写死 0（= 永不上锁，最严重那种错）时本断言照样绿 ——
+    //    批 1 在 http 桩上刚踩过这个坑：桩值恰好等于"错误实现的默认值"就是假绿的温床。
+    h.scripted.push({ match: /SELECT version FROM workflow_def/, rows: [{ version: 5 }] });
+    h.scripted.push({ match: /INSERT INTO transport_order/, rows: [{ id: 'to-new' }] });
+    h.scripted.push({ match: /INSERT INTO domain_event/, rows: [] });
+
+    const r = await fetch(`${base}/api/v1/admin-sim/orders`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ item_name: '标本' }),
+    });
+    expect(r.status).toBe(201);
+    const ins = h.calls.find((c) => /INSERT INTO transport_order/.test(c.sql));
+    expect(ins, '没发建单 SQL').toBeTruthy();
+    expect(ins!.sql, 'INSERT 列清单缺 def_version ⇒ 新单不入版本锁').toContain('def_version');
+    expect(ins!.params.length, '参数数应为 13（原 12 + def_version）').toBe(13);
+    // 漏传 ⇒ length 是 12；写死 0 或别的常量 ⇒ 不等于 5。三种错都能抓住。
+    expect(ins!.params[12], 'def_version 参数必须取 getWorkflowDefVersion 的返回值').toBe(5);
+  });
+
+  it('A3-静态：读写两侧走同一条 versioned read 路径（漏改任一侧都被这条抓住）', () => {
+    const re = /getWorkflowDefAtVersion\(client, tenantId, 'transport_task', [to]\.def_version, TRANSPORT_DEF\)/g;
+    expect(TRANSPORT_SRC.match(re)?.length, '写侧 + 读侧 = 2 处，少一处即 R-1').toBe(2);
+    // 文件内不得残留裸调用：那条残留路径读的就是 live，等于锁了个寂寞。
+    expect(TRANSPORT_SRC).not.toMatch(/getWorkflowDefOrDefault\s*\(/);
+  });
+
+  it('A4-实体名：取版本号必须传 transport_task，不是表名 transport_order', () => {
+    // 🔴 D1 永久双名：表名 transport_order，def 口径却是 transport_task。
+    //    传错会永远返回 0 而一声不响 ⇒ 最典型的静默失败（E3 反面）。这条把实体名钉死。
+    const m = TRANSPORT_SRC.match(/getWorkflowDefVersion\(client, tenantId, '([^']+)'\)/);
+    expect(m, '源码里没找到取版本号的调用 —— 本测试已与实现脱节').toBeTruthy();
+    expect(m![1], 'def 口径实体名必须是 transport_task').toBe('transport_task');
   });
 });

@@ -22,7 +22,7 @@ import { AppError } from '../middleware/error.js';
 import type { AuthLocals } from '../middleware/auth.js';
 import { requireAssigneeOrConfig, requirePermission } from '../middleware/role.js';
 import { emitDomainEvent } from '../db/eventBus.js';
-import { getWorkflowDefOrDefault } from '../engine/workflowDef.js';
+import { getWorkflowDefAtVersion, getWorkflowDefVersion } from '../engine/workflowDef.js';
 import { applyEvent, availableTransitions } from '../engine/stateMachine.js';
 import { TRANSPORT_DEF } from '../engine/themes.js';
 
@@ -85,7 +85,8 @@ export async function transitionOrder(
   const cur = await client.query(`SELECT * FROM transport_order WHERE id = $1 AND tenant_id = $2`, [orderId, tenantId]);
   if (cur.rowCount === 0) throw new AppError('NOT_FOUND', 'order not found', 404);
   const t = cur.rows[0];
-  const def = await getWorkflowDefOrDefault(client, tenantId, 'transport_task', TRANSPORT_DEF);
+  // T1-B 批2：在途单按建单时锁定的流程版本流转（def_version=0 表示未锁定 ⇒ 走 live，与改前逐字节等价）。
+  const def = await getWorkflowDefAtVersion(client, tenantId, 'transport_task', t.def_version, TRANSPORT_DEF);
   const target = applyEvent(def, t.status, event);
   if (!target) {
     throw new AppError('BAD_STATE', `illegal transition ${t.status} --${event}-->`, 422);
@@ -199,7 +200,8 @@ export async function getOrder(client: PoolClient, tenantId: string, id: string)
   ]);
   if (cur.rowCount === 0) throw new AppError('NOT_FOUND', 'order not found', 404);
   const o = cur.rows[0];
-  const def = await getWorkflowDefOrDefault(client, tenantId, 'transport_task', TRANSPORT_DEF);
+  // T1-B 批2：详情 available 必须与写侧用同一个版本化 def，否则按钮与实际校验不一致（R-1）。
+  const def = await getWorkflowDefAtVersion(client, tenantId, 'transport_task', o.def_version, TRANSPORT_DEF);
   const available = availableTransitions(def, o.status);
   const tracks = await client
     .query(
@@ -229,9 +231,13 @@ export async function createOrder(
   b: TransportOrderInput,
   actor = 'config_role',
 ): Promise<any> {
+  // T1-B 批2：盖章 —— 新单锁上建单当时的流程定义版本（无 definition 时返 0 = 未锁定）。
+  // 🔴 表的实体名是 transport_task，不是表名 transport_order（D1 永久双名）：
+  //    传错会永远返回 0，而且一声不响 ⇒ 属于最典型的静默失败。
+  const defVersion = await getWorkflowDefVersion(client, tenantId, 'transport_task');
   const r = await client.query(
-    `INSERT INTO transport_order (tenant_id, code, item_name, from_loc, to_loc, carrier, priority, plan_depart_at, item_category, order_type, work_order_id, sla_due_at, status)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 'pending') RETURNING *`,
+    `INSERT INTO transport_order (tenant_id, code, item_name, from_loc, to_loc, carrier, priority, plan_depart_at, item_category, order_type, work_order_id, sla_due_at, status, def_version)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 'pending', $13) RETURNING *`,
     [
       tenantId,
       `T${Date.now()}${Math.random().toString(36).slice(2, 8)}`,
@@ -245,6 +251,7 @@ export async function createOrder(
       b.order_type,
       b.work_order_id ?? null,
       b.sla_due_at ?? null,
+      defVersion,
     ],
   );
   const row = r.rows[0];
