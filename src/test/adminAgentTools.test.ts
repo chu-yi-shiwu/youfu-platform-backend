@@ -86,6 +86,49 @@ describe('query_tickets（sanitize 复洗 + 关键词兜底）', () => {
     hDef.states = [];
   });
 
+  // ===================== T1-B：关键词→状态名的白名单（包含判定）不得只读 live 一份 =====================
+  /**
+   * 【洞】`augmentArgsFromMessage` 的 `keep()` 是**包含**判定（候选状态名必须在 def.states 里才保留），
+   *   但白名单只读了 live 一份 ⇒ 客户改过流程后，老单所在版本（v1）独有的状态名 live 不认
+   *   ⇒ 这个状态名**翻译不出来** ⇒ 那批锁着 v1 的老单查不出来（不误翻，只是不命中，退化成漏翻）。
+   *   按 T1-B 兜底原则：包含判定取各版本**并集**（unionStates）。
+   *
+   * 【fixture 为什么这么排】两版必须"各只认一个候选名"，否则「live 一份」与「并集」结果相同 ⇒ 修前也绿（假绿）：
+   *   - v1（老流程，存量单锁它）只认 X='assigned'
+   *   - v2（当前 live）只认 Y='processing'
+   *   ⇒ live 一份只能翻出 Y；并集才能同时翻出 X 和 Y。
+   */
+  const X = 'assigned'; // 只有老版本 v1 认这个名字
+  const Y = 'processing'; // 只有当前 live 的 v2 认这个名字
+  const V1_OLD = { key: 'work_order', states: ['draft', X, 'completed'], config: { doneStates: ['completed'] } };
+  const V2_LIVE = { key: 'work_order', states: ['draft', Y, 'completed'], config: { doneStates: ['completed'] } };
+
+  it('🔴 关键词→状态名的白名单取各版本并集：老版本独有的状态名也要能翻出来', async () => {
+    // —— 假绿防护 1：两版的候选状态名确实不同（一个含 X 不含 Y，另一个含 Y 不含 X）
+    expect(V1_OLD.states).toContain(X);
+    expect(V1_OLD.states).not.toContain(Y);
+    expect(V2_LIVE.states).toContain(Y);
+    expect(V2_LIVE.states).not.toContain(X);
+    // —— 假绿防护 2：本题与完成态口径无关（两版 config 逐字相同 ⇒ doneStates 不可能造成差异）
+    expect(JSON.stringify(V1_OLD.config)).toBe(JSON.stringify(V2_LIVE.config));
+
+    hDef.live = V2_LIVE;
+    hDef.versions = [V1_OLD, V2_LIVE];
+    listMock.mockClear();
+    try {
+      await executor('query_tickets', {}, '查一下处理中的单');
+      const f = listMock.mock.calls[0][2] as any;
+      expect(f, 'query_tickets 必须真的去查了库（否则下面断言空转）').toBeTruthy();
+      const got = String(f.status ?? '').split(',').filter(Boolean);
+      expect(got, '并集 ⇒ 只有老版本认的 assigned 也要能翻出来').toContain(X);
+      expect(got, '并集 ⇒ live 认的 processing 也不能丢').toContain(Y);
+      expect(got, '只读 live 一份 ⇒ 只翻得出 processing（这正是要修掉的旧行为）').not.toEqual([Y]);
+    } finally {
+      hDef.live = null;
+      hDef.versions = [];
+    }
+  });
+
   it('模型给了合法条件则不覆盖：args.status=pending + 消息含「处理中」→ 不追加', async () => {
     await executor('query_tickets', { status: 'pending' }, '处理中的单');
     const f = listMock.mock.calls[0][2] as any;

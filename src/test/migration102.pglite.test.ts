@@ -63,14 +63,18 @@ const TABLES = ['inspection_task', 'transport_order', 'business_flow_tasks'] as 
 const COL = 'def_version';
 
 /* ───────────── 103_inflight_def_version_workorder（T1-B 批 4：工单） ───────────── */
-/** 103 只管 1 张表（102 管 3 张）—— 形状差异仅此一处，其余口径与 102 完全相同。 */
+/**
+ * 103 只管 1 张表（102 管 3 张）—— 形状差异仅此一处，其余口径与 102 完全相同。
+ *
+ * ⚠️ 103 的**反向闭环 + 文件形态**已迁到 `src/test/migration103.pglite.test.ts`
+ * （down 文件末尾点名要那一；且只有它把第 3 步建模成真实迁移通道，变异下真红）。
+ * 故此处**只留正向侧的 4 条孤儿断言**（② ③ ④ ⑤，新文件未覆盖），
+ * 反向所需的 DOWN103 / UP103_NAME 一并移除 —— 留着就是第二处真源。
+ * 分工对照表见文件头「103（work_orders）在本文件里的覆盖范围」。
+ */
 const TABLE103 = 'work_orders';
 const UP103_PATH = join(ROOT, '103_inflight_def_version_workorder.sql');
-const DOWN103_PATH = join(ROOT, 'rollback', '103_inflight_def_version_workorder_down.sql');
 const UP103 = readFileSync(UP103_PATH, 'utf8');
-const DOWN103 = readFileSync(DOWN103_PATH, 'utf8');
-/** 103 的记账 key = 正向迁移的文件名（与 102 同款：两条通道存的都是文件名，不带路径）。 */
-const UP103_NAME = '103_inflight_def_version_workorder.sql';
 
 /** 取迁移文件里某张表的 CREATE TABLE 段（到 `\n);` 为止）：用真实建表口径，不自己另写一份。 */
 function createTableBlock(file: string, table: string): string {
@@ -313,17 +317,16 @@ describe('102 文件位置与形态（静态断言）', () => {
 
 /* ══════════════════════════════════════════════════════════════════════════════════
  * 103_inflight_def_version_workorder —— 与上面 ①~⑮ 一一对应，只是「三表」退化成「单表」。
- * 目的是补上「103 反向迁移此前从未实跑」这个洞（E1：写了没验过的反向迁移不算回退方案）。
+ *
+ * ⚠️ 103 的**反向闭环 + 文件形态**（原 ⑥~⑮ 与 ①）已迁到 `migration103.pglite.test.ts`：
+ *    那边的第 3 步走真实迁移通道（migrate.ts:61 已记账就 skip），变异下真红；
+ *    本文件原先的无条件 `db.exec(UP103)` 版 103-⑧ 在「只删列不擦账」下是绿的（纸面断言）。
+ *    ⇒ 此处只留新文件未覆盖的 4 条孤儿断言：② 列形状 / ③ 正向幂等 / ④ E4 存量行 / ⑤ E4 硬闸。
  * ══════════════════════════════════════════════════════════════════════════════════ */
 
 describe('103_inflight_def_version_workorder 正向', () => {
-  it('103-① work_orders 加上 def_version', async () => {
-    const db = await freshDb103();
-    expect(await columnsOf(db, TABLE103), '迁移前不该有 def_version').not.toContain(COL);
-    await db.exec(UP103);
-    expect(await columnsOf(db, TABLE103), '迁移后必须有 def_version').toContain(COL);
-  });
-
+  // 103-①（迁移前不含 / 迁移后含 def_version）已迁到 migration103.pglite.test.ts ①：
+  // 那边在断言列的同时还断言了记账，是 103-① 的超集 ⇒ 此处不重复。
   it('103-② 列形状：integer / NOT NULL / DEFAULT 0', async () => {
     const db = await freshDb103();
     await db.exec(UP103);
@@ -371,94 +374,8 @@ describe('103_inflight_def_version_workorder 正向', () => {
   });
 });
 
-describe('103_inflight_def_version_workorder 反向', () => {
-  it('103-⑥ 反向删掉 def_version，且其它列一行不动', async () => {
-    const db = await freshDb103();
-    const before = await columnsOf(db, TABLE103);
-    await db.exec(UP103);
-    await db.exec(DOWN103);
-    expect(await columnsOf(db, TABLE103), '反向后').toEqual(before);
-  });
-
-  it('103-⑦ 反向幂等：连续执行 2 次不报错', async () => {
-    const db = await freshDb103();
-    await db.exec(UP103);
-    await db.exec(DOWN103);
-    await db.exec(DOWN103);
-    expect(await columnsOf(db, TABLE103)).not.toContain(COL);
-  });
-
-  it('103-⑧ 正 → 反 → 正：列去而复返（退回去还能再上来）', async () => {
-    const db = await freshDb103();
-    await db.exec(UP103);
-    expect(await columnsOf(db, TABLE103)).toContain(COL);
-    await db.exec(DOWN103);
-    expect(await columnsOf(db, TABLE103)).not.toContain(COL);
-    await db.exec(UP103);
-    expect(await columnsOf(db, TABLE103)).toContain(COL);
-  });
-
-  it('103-⑨ 记账往返：反向把 _migrations 里 103 的账也擦掉（只删列不擦账 = 假回退）', async () => {
-    const db = await freshDb103();
-    await db.exec(UP103);
-    // 必须用 query 而不是 exec：PGlite 的 exec 不绑定参数，$1 会原样发给 PG ⇒ 报错。
-    await db.query(`INSERT INTO _migrations (name) VALUES ($1) ON CONFLICT DO NOTHING`, [UP103_NAME]);
-    expect(await ledgerHas(db, UP103_NAME)).toBe(true);
-    await db.exec(DOWN103);
-    expect(await ledgerHas(db, UP103_NAME), '反向后记账仍在').toBe(false);
-  });
-
-  it('103-⑩ 反向后再正向 → 记账重新回来（模拟"回退 → 修 bug → 重新上线"）', async () => {
-    const db = await freshDb103();
-    await db.exec(UP103);
-    await db.query(`INSERT INTO _migrations (name) VALUES ($1) ON CONFLICT DO NOTHING`, [UP103_NAME]);
-    await db.exec(DOWN103);
-    await db.exec(UP103);
-    await db.query(`INSERT INTO _migrations (name) VALUES ($1) ON CONFLICT DO NOTHING`, [UP103_NAME]);
-    expect(await ledgerHas(db, UP103_NAME)).toBe(true);
-    expect(await columnsOf(db, TABLE103)).toContain(COL);
-  });
-});
-
-describe('103 文件位置与形态（静态断言）', () => {
-  it('103-⑪ 正向在仓库根目录（两条自动通道扫得到）', () => {
-    expect(existsSync(UP103_PATH)).toBe(true);
-    // 反向**绝不能**在根目录：两条通道都按「数字前缀 + .sql」扫根目录，
-    // 放那里会被当成正向迁移紧跟着 103 执行 ⇒ 刚加的列被同一次 migrate 删掉。
-    for (const f of ['103_inflight_def_version_workorder_down.sql']) {
-      expect(existsSync(join(ROOT, f)), `${f} 不该在根目录`).toBe(false);
-    }
-  });
-
-  it('103-⑫ 反向在 rollback/ 子目录（两条通道都扫不到）', () => {
-    expect(existsSync(DOWN103_PATH)).toBe(true);
-  });
-
-  it('103-⑬ 顺序硬要求：down 文件里「擦账 DELETE」排在「DROP COLUMN」之前', () => {
-    const body = stripSqlComments(DOWN103); // 在语句本体上定位，不被注释措辞带偏
-    const del = body.search(/DELETE\s+FROM\s+_migrations/i);
-    const drop = body.search(/DROP\s+COLUMN/i);
-    expect(del, 'down 文件里找不到擦账 DELETE').toBeGreaterThan(-1);
-    expect(drop, 'down 文件里找不到 DROP COLUMN').toBeGreaterThan(-1);
-    // 失败态必须落在「列还在 + 账已擦」那一侧（可自愈），不能落在「列已删 + 账还在」。
-    expect(del, '擦账必须排在删列之前').toBeLessThan(drop);
-  });
-
-  it('103-⑭ down 文件自带显式事务（禁止叠加 --single-transaction）', () => {
-    expect(DOWN103).toMatch(/^\s*BEGIN\s*;/im);
-    expect(DOWN103).toMatch(/^\s*COMMIT\s*;/im);
-  });
-
-  it('103-⑮ 记账 key 写死文件名（两条通道存的都是文件名，不带路径）', () => {
-    // 🔴 必须在**剥掉注释的语句本体**上断言，不能拿原文 toContain：
-    //    down 文件头第 2 行的注释「（与 103_inflight_def_version_workorder.sql 成对）」
-    //    本身就含这个字符串 ⇒ 原文 toContain 会被**注释**满足。
-    //    实测踩到：变异 M4（把 DELETE 的 key 改成去掉 .sql）只红了 103-⑨，
-    //    ⑮ 仍绿 —— 那就是一条纸面断言，注释一改就没了。故本条盯语句本体。
-    const body = stripSqlComments(DOWN103);
-    expect(body, 'down 的语句本体里没有记账 key').toContain(UP103_NAME);
-    // 且这个 key 必须就长在**那一条擦账 DELETE** 上，而不是散落在别处。
-    const key = UP103_NAME.replace(/\./g, '\\.');
-    expect(body).toMatch(new RegExp(`DELETE\\s+FROM\\s+_migrations\\s+WHERE\\s+name\\s*=\\s*'${key}'`, 'i'));
-  });
-});
+// 103 的反向闭环（原 ⑥~⑩）与文件形态静态断言（原 ⑪~⑮）已迁到
+// src/test/migration103.pglite.test.ts —— 那边第 3 步走真实迁移通道
+// （migrate.ts:61 已记账就 skip），「只删列不擦账」变异下真红；
+// 本文件原 103-⑧ 是无条件 db.exec(UP103)，同一变异下仍绿（纸面断言）。
+// 分工对照表见文件头注释。改 down 文件请改那边，别在这里补。

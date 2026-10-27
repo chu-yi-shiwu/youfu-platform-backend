@@ -8,7 +8,7 @@
 // ───────────────────────────────────────────────────────────────────────────
 import { withTenantClient } from '../db/pool.js';
 import { list, type WorkOrderRow } from '../repo/ticket.js';
-import { getWorkflowDef, getDefsAcrossAllVersions, intersectStates } from '../engine/workflowDef.js';
+import { getDefsAcrossAllVersions, intersectStates, unionStates } from '../engine/workflowDef.js';
 import { doneStates, DEFAULT_WORK_ORDER_DEF } from '../engine/stateMachine.js';
 import {
   sanitizeTicketQueryArgs,
@@ -86,8 +86,13 @@ async function queryTickets(tenantId: string, rawArgs: Record<string, unknown>, 
   if (!base) return null;
   return withTenantClient(tenantId, async (client) => {
     // F10：先读租户 def —— 原话关键词→状态名的翻译必须按该租户真实的状态集合来做
-    const def = await getWorkflowDef(client, tenantId, 'work_order');
-    const q = augmentArgsFromMessage(message, base, def.states);
+    // T1-B 多版本并存兜底：`keep()` 是**包含**判定（候选状态名必须在集合里才保留）⇒
+    //   必须取各版本**并集**。只读 live 一份的后果：客户改流程后，老单（锁 v1）所在版本独有的
+    //   状态名 live 不认 ⇒ 这个状态名翻译不出来 ⇒ 那批老单查不出来（不误翻，只是不命中）。
+    //   取交集则是反向错：白名单更小 ⇒ 漏翻更多。由 adminAgentTools.test.ts「白名单取各版本并集」守卫。
+    const defs = await getDefsAcrossAllVersions(client, tenantId, 'work_order', 'work_orders', DEFAULT_WORK_ORDER_DEF);
+    const states = unionStates(defs.map((d) => (Array.isArray(d?.states) ? d.states : [])));
+    const q = augmentArgsFromMessage(message, base, states);
     const { items, total } = await list(client, tenantId, {
       status: q.status as never,
       priority: q.priority,

@@ -6,7 +6,7 @@ import { AppError } from '../middleware/error.js';
 import { listPerms } from '../middleware/role.js';
 import type { AuthLocals } from '../middleware/auth.js';
 import { DEFAULT_WORK_ORDER_DEF, isKnownState, doneStates, terminalStates, activeStates, timestampColumnFor, isTransitionAllowed, type WorkOrderStatus, type WorkflowTransition, type WorkflowDef } from '../engine/stateMachine.js';
-import { getDefsForVersions, getWorkflowDefAtVersion, getWorkflowDefVersion } from '../engine/workflowDef.js';
+import { getDefsAcrossAllVersions, intersectStates, getWorkflowDefAtVersion, getWorkflowDefVersion } from '../engine/workflowDef.js';
 import { pickAutoRule, TERMINAL_STATES } from '../engine/autoRules.js'; // 地基④：自动审核
 import { listEnabledAutoRules } from '../repo/autoRule.js';
 import { emitDomainEvent } from '../db/eventBus.js';
@@ -566,27 +566,13 @@ export async function list(
   //     取交集后，只有在**每一个**版本里都属于终态的状态才被排除 ⇒ 老单不会被误排掉。
   //   【代价/取舍】误报（个别在旧版本里其实已闭环的老单仍出现在列表里，由人复核关闭）优于
   //     丢单；多一次 `SELECT DISTINCT def_version` 查询 + 每多一个历史版本多一次 def 查询。
+  //   【实现】不再在本处手抄「取各版本 → 逐个求交」，统一走 workflowDef.getDefsAcrossAllVersions
+  //     + intersectStates（与本仓其它「先拼状态集合再查行」的写法同源）。此前的手抄副本是
+  //     intersectStates 的第二真源，已由 src/test/ticketTimeoutFilter.test.ts 覆盖后删除。
   if (filter.timeoutOnly) {
-    const vr = await client.query<{ def_version: number }>(
-      'SELECT DISTINCT def_version FROM work_orders WHERE tenant_id = $1 AND def_version > 0',
-      [tenantId],
-    );
-    const probeRows = [{ def_version: 0 }, ...vr.rows.map((v) => ({ def_version: v.def_version }))];
-    const defMap = await getDefsForVersions(client, tenantId, 'work_order', probeRows, DEFAULT_WORK_ORDER_DEF);
-    // 交集：逐个版本求交。防御：Map 为空 ⇒ 交集为空 ⇒ 不排除任何状态（= 最宽松口径，绝不丢单）。
-    //   （实践上 probe 恒含 0，Map 至少一个元素；单版本时结果与原 live 口径逐字等价。）
-    const terminalSets = Array.from(defMap.values()).map(
-      (d) => new Set<string>([...doneStates(d), ...terminalStates(d)]),
-    );
-    const intersection = terminalSets.reduce<Set<string> | null>((acc, s) => {
-      if (acc === null) return new Set<string>(s); // 首个版本：全集起步
-      const kept = new Set<string>();
-      for (const st of acc) {
-        if (s.has(st)) kept.add(st); // 只在**每个**版本里都属终态的状态才留下
-      }
-      return kept;
-    }, null);
-    const exclude = Array.from(intersection ?? new Set<string>());
+    const defs = await getDefsAcrossAllVersions(client, tenantId, 'work_order', 'work_orders', DEFAULT_WORK_ORDER_DEF);
+    // 逐个版本的「完成 ∪ 终态」集合取交 —— 交集为空 ⇒ 不排除任何状态（= 最宽松口径，绝不丢单）。
+    const exclude = intersectStates(defs.map((d) => Array.from(new Set([...doneStates(d), ...terminalStates(d)]))));
     params.push(exclude);
     conds.push(
       `wo.sla_due_at IS NOT NULL AND wo.sla_due_at < now() AND wo.status <> ALL($${params.length}::text[])`,
