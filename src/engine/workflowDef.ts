@@ -762,6 +762,27 @@ export async function getDefsAcrossAllVersions(
   table: string,
   fallback: WorkflowDef,
 ): Promise<WorkflowDef[]> {
+  return (await getDefEntriesAcrossAllVersions(client, tenantId, entityType, table, fallback)).map((e) => e.def);
+}
+
+/**
+ * 同 getDefsAcrossAllVersions，但**连版本号一起给**（`version → def` 配对）。
+ *
+ * 【为什么必须另出一个而不是让调用方自己再探一次版本】
+ *   「哪些版本还在用」这条探测（含哨兵 0）是唯一的真源，写在 getDefEntriesAcrossAllVersions 里；
+ *   getDefsAcrossAllVersions 只是它的薄壳。调用方若为了拿版本号自己手抄一份
+ *   `SELECT DISTINCT def_version`，名单/哨兵约定一变就两边不同步 ⇒ 又造一个第二真源。
+ *
+ * 【给谁用】凡「**按行自己的 def_version** 取该版 def」的读路径（例如逐行判定终态的列表筛选）——
+ *   这类调用方需要的正好是 (version, def) 配对，而不是去掉键的 def 列表。
+ */
+export async function getDefEntriesAcrossAllVersions(
+  client: PoolClient,
+  tenantId: string,
+  entityType: string,
+  table: string,
+  fallback: WorkflowDef,
+): Promise<Array<{ version: number; def: WorkflowDef }>> {
   const safeTable = VERSIONED_TABLES[table];
   // 【为什么是 422 不是裸 Error】裸 Error 会被 errorMiddleware 兜底成 500（"我们系统坏了"
   //   ⇒ 触发告警、排障当线上故障查）。而"表没登记进 VERSIONED_TABLES"是**开发期登记漏了 /
@@ -769,7 +790,7 @@ export async function getDefsAcrossAllVersions(
   if (!safeTable)
     throw new AppError(
       'BAD_REQUEST',
-      `getDefsAcrossAllVersions: 表 ${table} 未登记在 VERSIONED_TABLES 里（未加 def_version 列）` +
+      `版本探测: 表 ${table} 未登记在 VERSIONED_TABLES 里（未加 def_version 列）` +
         ` —— 若该表确需做版本探测，请先在 VERSIONED_TABLES 登记；` +
         `否则请改用 getWorkflowDefAtVersion / getDefsForVersions（按行上已有的 def_version 取 def）`,
       422,
@@ -780,7 +801,7 @@ export async function getDefsAcrossAllVersions(
   );
   const probe = [{ def_version: 0 }, ...vr.rows.map((v) => ({ def_version: Number(v.def_version) || 0 }))];
   const defMap = await getDefsForVersions(client, tenantId, entityType, probe, fallback);
-  return [...defMap.values()];
+  return [...defMap.entries()].map(([version, def]) => ({ version, def }));
 }
 
 /** 并集：给「包含」型集合用（活跃态、完成态、池态…）——宁可多显示，不静默丢单。 */

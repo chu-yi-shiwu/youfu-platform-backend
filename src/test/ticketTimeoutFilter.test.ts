@@ -29,7 +29,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { PoolClient } from 'pg';
 import { list } from '../repo/ticket.js';
-import { getDefsAcrossAllVersions, unionStates, getWorkflowDefOrDefault } from '../engine/workflowDef.js';
+import { getDefsAcrossAllVersions, unionStates, intersectStates, getWorkflowDefOrDefault } from '../engine/workflowDef.js';
 import { DEFAULT_WORK_ORDER_DEF, doneStates, terminalStates, type WorkflowDef } from '../engine/stateMachine.js';
 
 const ROOT = join(__dirname, '..', '..');
@@ -117,18 +117,22 @@ async function putHistory(db: PGlite, version: number, def: WorkflowDef): Promis
 /**
  * 手工插一行工单（order_no 由 002 加成 NOT NULL + 租户内唯一 ⇒ 必须给）。
  * @param opts.dueOffsetMin 相对当前时刻的分钟偏移（负 = 已过期）；不传 ⇒ sla_due_at = NULL。
+ * @param opts.createdAtMin 建单时刻偏移量（负 = 更早）。分页用例必须显式给，
+ *   否则所有行 created_at 都落在同一瞬间，`ORDER BY created_at DESC` 在并列时间戳上
+ *   **顺序不确定** ⇒ 分页断言会随机翻绿翻红（假 flaky，不是真判别力）。
  */
 async function seedOrder(
   db: PGlite,
   id: string,
   status: string,
-  opts: { defVersion?: number; dueOffsetMin?: number; department?: string } = {},
+  opts: { defVersion?: number; dueOffsetMin?: number; department?: string; createdAtMin?: number } = {},
 ): Promise<void> {
   const due = opts.dueOffsetMin;
   const dueSql = due === undefined ? 'NULL' : `now() + (${Number(due) || 0} || ' minutes')::interval`;
+  const createdSql = `now() + (${Number(opts.createdAtMin) || 0} || ' minutes')::interval`;
   await db.query(
-    `INSERT INTO work_orders (id, tenant_id, business_type, status, order_no, def_version, sla_due_at, department)
-     VALUES ($1,$2,'repair',$3,$4,$5,${dueSql},$6)`,
+    `INSERT INTO work_orders (id, tenant_id, business_type, status, order_no, def_version, sla_due_at, department, created_at)
+     VALUES ($1,$2,'repair',$3,$4,$5,${dueSql},$6,${createdSql})`,
     [id, T, status, `NO-${id}`, opts.defVersion ?? 0, opts.department ?? null],
   );
 }
@@ -158,6 +162,20 @@ async function listTimeoutOnly(db: PGlite, extra: Record<string, unknown> = {}):
   const res = await list(asClient(db), T, { timeoutOnly: true, limit: 200, ...extra } as never);
   expect(res.total, 'total 与 items 必须同口径（同一个 WHERE 拼出来的）').toBe(res.items.length);
   return res.items.map((r) => r.id).sort();
+}
+
+/**
+ * 真调 list() 拿**单页**：items 保持 `ORDER BY created_at DESC` 的原序（分页用例要看的就是这个序），
+ * total 是全局总数。
+ */
+async function listPage(
+  db: PGlite,
+  limit: number,
+  offset: number,
+  extra: Record<string, unknown> = {},
+): Promise<{ items: string[]; total: number }> {
+  const res = await list(asClient(db), T, { timeoutOnly: true, limit, offset, ...extra } as never);
+  return { items: res.items.map((r) => r.id), total: res.total };
 }
 
 /** 某版本 def 的排除集贡献 = done ∪ terminal（派生口径，供红对照复用，手工 Scratch 用）。 */
@@ -316,60 +334,49 @@ describe('② 多版本：老单不得静默消失（排除集必须是交集，
     const liveOnlyIds = await idsUnderPredicate(db, excludeSetOf(liveDef));
     expect(liveOnlyIds, '🔴 live-only ⇒ 锁 v1 的老单被排掉（复现丢单）').not.toContain('wo-old-v1-x');
 
-    // —— 真调产品函数：老单必须还在
+    // —— 真调产品函数：老单必须在，且**只**留真正未闭环的
     const ids = await listTimeoutOnly(db);
-    expect(ids).toContain('wo-old-v1-x');
-    expect(ids).not.toContain('wo-old-v1-done'); // done 是所有版本都认的完成态 ⇒ 交集仍排除
-    expect(ids).not.toContain('wo-legacy-cancelled'); // cancelled 同上
+    expect(ids, 'X 在 v1 里是活跃态 ⇒ 这张老单是真的没闭环').toContain('wo-old-v1-x');
+    expect(ids, 'X 在 v2 里已是终态 ⇒ 这张锁 v2 的单已闭环，不该再报超时').not.toContain('wo-live-x');
+    expect(ids).not.toContain('wo-old-v1-done');
+    expect(ids).not.toContain('wo-legacy-cancelled');
     expect(ids).not.toContain('wo-future'); // 未过期
-    // 诚实标注：wo-live-x 也会被带回（X 不在交集里）。这是交集的**已知代价**——
-    // 宁可让一张在 v2 下其实已闭环的单多显示一次（人复核关闭），也不让 v1 老单静默消失。
-    expect(ids).toEqual(['wo-live-assigned', 'wo-live-x', 'wo-old-v1-x']);
+    expect(ids).toEqual(['wo-live-assigned', 'wo-old-v1-x']);
   });
 
-  it('夹具自检：两种错法确实给出**不同**结果（否则本节的 Green 没有说服力）', async () => {
+  it('🔴 不多显示：wo-live-x（X 在 v2 已终态）必须消失 —— 这正是旧交集口径的误报', async () => {
     const db = await freshMultiVersionDb();
     const c = asClient(db);
     await seedOrder(db, 'wo-old-v1-x', 'X', { defVersion: 1, dueOffsetMin: -60 });
-    await seedOrder(db, 'wo-old-v1-done', 'done', { defVersion: 1, dueOffsetMin: -60 });
+    await seedOrder(db, 'wo-live-x', 'X', { defVersion: 2, dueOffsetMin: -60 });
 
+    // —— 红对照：旧口径（各版交集 = ['done','cancelled']，不含 X）会把两张 X 单都放行
     const defs = await getDefsAcrossAllVersions(c, T, WO_ET, 'work_orders', DEFAULT_WORK_ORDER_DEF);
-    const wrongUnion = await idsUnderPredicate(db, unionStates(defs.map(excludeSetOf)));
-    const rightIds = await listTimeoutOnly(db);
-    expect(wrongUnion, '错法（并集）把老单整个漏掉').not.toContain('wo-old-v1-x');
-    expect(rightIds, '正确实现把老单留下').toContain('wo-old-v1-x');
-    // 二者差异必须是**非空且正好差这张老单**（不是整体都乱了）
-    expect(rightIds.filter((x) => !wrongUnion.includes(x)).sort()).toEqual(['wo-old-v1-x']);
+    const byIntersection = intersectStates(defs.map(excludeSetOf));
+    expect(byIntersection, '旧口径交集里确实不含 X（否则本例无判别力）').not.toContain('X');
+    const oldIds = await idsUnderPredicate(db, byIntersection);
+    expect(oldIds, '🔴 旧口径把已闭环的 wo-live-x 也报成超时').toContain('wo-live-x');
+
+    // —— 新口径：逐单按自己锁定的版本判定 ⇒ 同一个 X，两张单判词相反
+    const ids = await listTimeoutOnly(db);
+    expect(ids).toEqual(['wo-old-v1-x']);
   });
 });
 
 // ============================================================
-// ③ 交集为空时保守：`<> ALL('{}')` 恒真 ⇒ 所有过期单都返回
+// ③ 同一个状态在两个版本里判词相反（旧交集口径必然误报）
 // ============================================================
 
 /**
- * v1（旧，落 history）：**每个状态都有出边**（含 cancelled 都可重开）⇒
- *   terminalStates(v1) = [] 且无显式 doneStates ⇒ 该版本对排除集的**贡献为空集**。
- *   （现实形态：老流程把所有状态都配了可回退边，例如「已取消还能重新打开」。）
- * v2（live）：正常有终态 done / cancelled。
+ * v1（旧，落 history）：终态 = done（assigned→done，done 无出边）。
+ * v2（live）：租户改名，终态 = finished；**done 降级为中间态**（done→finished，有出边）。
  *
- * ⇒ 交集 = [] ⇒ `status <> ALL('{}'::text[])` 恒真 ⇒ **所有过期单都返回**
- *   （连 completed 也回来）。这正是「空集 = 不排除任何状态 = 保守侧」的落地。
- *   若实现错用并集或只读 live ⇒ completed / cancelled 被排除 ⇒ 结果不同 ⇒ 本节有牙。
+ * ⇒ 两版终态集的交集只剩机制态 cancelled ⇒ 旧口径下 `done` / `finished` **都不被排除**
+ *   ⇒ 两张早已闭环的单（`wo-v1-done`、`wo-v2-finished`）被误报成超时。
+ *   逐单判定下：同样是 `status='done'`，锁 v1 的排除、锁 v2 的保留 ——
+ *   **这个对偶是任何"全局一套排除集"的口径都做不出来的**，是本节的判别力核心。
  */
-const DEF_CYCLE_V1: WorkflowDef = {
-  initial: 'draft',
-  states: ['draft', 'assigned', 'X', 'cancelled'],
-  transitions: [
-    { from: 'draft', to: 'assigned', event: 'assign' },
-    { from: 'assigned', to: 'X', event: 'to_x' },
-    { from: 'X', to: 'draft', event: 'cycle_back' },
-    { from: 'cancelled', to: 'draft', event: 'reopen' }, // ← 连 cancelled 都有出边
-  ] as any,
-  config: {},
-} as WorkflowDef;
-
-const DEF_HAS_TERMINAL_V2: WorkflowDef = {
+const DEF_V1_DONE_TERMINAL: WorkflowDef = {
   initial: 'draft',
   states: ['draft', 'assigned', 'done'],
   transitions: [
@@ -379,47 +386,104 @@ const DEF_HAS_TERMINAL_V2: WorkflowDef = {
   config: {},
 } as WorkflowDef;
 
-async function freshEmptyIntersectionDb(): Promise<PGlite> {
+const DEF_V2_FINISHED_TERMINAL: WorkflowDef = {
+  initial: 'draft',
+  states: ['draft', 'assigned', 'done', 'finished'],
+  transitions: [
+    { from: 'draft', to: 'assigned', event: 'assign' },
+    { from: 'assigned', to: 'done', event: 'finish' },
+    { from: 'done', to: 'finished', event: 'archive' }, // ← done 降级为中间态
+  ] as any,
+  config: {},
+} as WorkflowDef;
+
+/** 真库：live = v2(version=2)，history 有 v1。 */
+async function freshDisjointDb(): Promise<PGlite> {
   const db = await freshDb();
-  await putHistory(db, 1, DEF_CYCLE_V1);
-  await setLive(db, DEF_HAS_TERMINAL_V2, 2);
+  await putHistory(db, 1, DEF_V1_DONE_TERMINAL);
+  await setLive(db, DEF_V2_FINISHED_TERMINAL, 2);
   return db;
 }
 
-describe('③ 交集为空 ⇒ 保守（不排除任何状态，绝不静默清空）', () => {
-  it('🔴 穿透：连 completed / cancelled 的过期单都要回来（空排除集 = 全部保留）', async () => {
-    const db = await freshEmptyIntersectionDb();
+describe('③ 逐单判定：同一个 status 在两个版本里判词必须相反', () => {
+  it('🔴 对偶：锁 v1 的 done 不出现，锁 v2 的 done 必须出现（旧交集口径两者都放行）', async () => {
+    const db = await freshDisjointDb();
     const c = asClient(db);
-    await seedOrder(db, 'wo-open-v1', 'assigned', { defVersion: 1, dueOffsetMin: -60 });
-    await seedOrder(db, 'wo-open-v2', 'assigned', { defVersion: 2, dueOffsetMin: -60 });
-    await seedOrder(db, 'wo-done-v2', 'done', { defVersion: 2, dueOffsetMin: -120 });
-    await seedOrder(db, 'wo-cancelled-v1', 'cancelled', { defVersion: 1, dueOffsetMin: -30 });
-    await seedOrder(db, 'wo-future', 'assigned', { defVersion: 2, dueOffsetMin: 60 });
+    await seedOrder(db, 'wo-v1-done', 'done', { defVersion: 1, dueOffsetMin: -60 });
+    await seedOrder(db, 'wo-v2-done', 'done', { defVersion: 2, dueOffsetMin: -60 });
+    await seedOrder(db, 'wo-v2-finished', 'finished', { defVersion: 2, dueOffsetMin: -60 });
+    await seedOrder(db, 'wo-v1-assigned', 'assigned', { defVersion: 1, dueOffsetMin: -60 });
+    await seedOrder(db, 'wo-v2-assigned', 'assigned', { defVersion: 2, dueOffsetMin: -60 });
 
-    // —— 夹具自检：v1 的排除集贡献真的是空集（不是因为我们写错了 states）
+    // —— 夹具自检：两版终态集的交集只剩机制态 cancelled（不是我们写错 states 才空的）
     const defs = await getDefsAcrossAllVersions(c, T, WO_ET, 'work_orders', DEFAULT_WORK_ORDER_DEF);
-    const perVersion = defs.map(excludeSetOf);
-    const v1Idx = perVersion.findIndex((s) => s.length === 0);
-    expect(v1Idx, '必须存在至少一个版本贡献空集').toBeGreaterThanOrEqual(0);
-    expect(perVersion.some((s) => s.length > 0), '且另一个版本贡献非空集（否则两版皆空，本例无判别力）').toBe(true);
+    const byIntersection = intersectStates(defs.map(excludeSetOf));
+    expect(byIntersection.sort(), '旧口径交集只剩机制态 cancelled').toEqual(['cancelled']);
 
-    // —— 红对照 A：并集 ⇒ completed/cancelled 被排除 ⇒ 结果变小
-    const unionIds = await idsUnderPredicate(db, unionStates(perVersion));
-    expect(unionIds).not.toContain('wo-done-v2');
-    expect(unionIds).not.toContain('wo-cancelled-v1');
+    // —— 红对照：旧口径（全局一套排除集 = ['cancelled']）把这 5 张全放行 ⇒ 两张已闭环的被误报
+    const oldIds = await idsUnderPredicate(db, byIntersection);
+    expect(oldIds, '🔴 旧口径把 wo-v1-done（在 v1 里已闭环）误报成超时').toContain('wo-v1-done');
+    expect(oldIds, '🔴 旧口径把 wo-v2-finished（在 v2 里已闭环）误报成超时').toContain('wo-v2-finished');
+    expect(oldIds.length).toBe(5);
 
-    // —— 红对照 B：只读 live ⇒ 同上
-    const liveDef = await getWorkflowDefOrDefault(c, T, WO_ET, DEFAULT_WORK_ORDER_DEF);
-    const liveOnlyIds = await idsUnderPredicate(db, excludeSetOf(liveDef));
-    expect(liveOnlyIds).not.toContain('wo-done-v2');
-
-    // —— 真调产品函数：空交集 ⇒ 一个都不排除 ⇒ 全部过期单回来
+    // —— 真调产品函数：逐单判定 ⇒ 同是 'done'，锁 v1 排除、锁 v2 保留
     const ids = await listTimeoutOnly(db);
-    expect(ids).toContain('wo-done-v2');
-    expect(ids).toContain('wo-cancelled-v1');
-    expect(ids).toContain('wo-open-v1');
-    expect(ids).toContain('wo-open-v2');
-    expect(ids).not.toContain('wo-future'); // 过期判定依然有效：这条不能被"空交集"顺手放过
-    expect(ids).toEqual(['wo-cancelled-v1', 'wo-done-v2', 'wo-open-v1', 'wo-open-v2']);
+    expect(ids).not.toContain('wo-v1-done');
+    expect(ids).toContain('wo-v2-done');
+    expect(ids).not.toContain('wo-v2-finished');
+    expect(ids).toContain('wo-v1-assigned');
+    expect(ids).toContain('wo-v2-assigned');
+    expect(ids).toEqual(['wo-v1-assigned', 'wo-v2-assigned', 'wo-v2-done']);
+  });
+});
+
+// ============================================================
+// ④ 分页：判定必须在 SQL 里完成，不能下沉到 JS（否则分页必坏）
+// ============================================================
+
+/**
+ * 【为什么必须有这一节】
+ *   list() 的分页全在 SQL 侧：`total` = `COUNT(*) WHERE <同一 where>`，
+ *   items = 同一 where + `ORDER BY created_at DESC LIMIT n OFFSET m`。
+ *   若把逐单判定做成「SQL 粗筛 → JS 逐行精筛」，两件事同时坏：
+ *     ① `total` 是粗筛口径、items 是精筛口径 ⇒ 总数虚高，前端"共 N 条"说谎；
+ *     ② LIMIT 在精筛**之前**截断 ⇒ 每页行数随机变少（本例页 1 会只剩 0 条），
+ *        而被 SQL 漏进来的行把真正该显示的行挤到后面几页 ⇒ 用户翻到的前几页是错的。
+ *   本节的断言专门钉这两条，且用**页面上真实返回的条数**判定，不是只看内容。
+ */
+describe('④ 分页：timeoutOnly 的判定必须发生在 LIMIT 之前', () => {
+  it('🔴 total 必须是逐单精确口径，且每页都必须满页、不重不漏', async () => {
+    const db = await freshDisjointDb();
+    const c = asClient(db);
+    // created_at 显式错开（见 seedOrder 注释）：并列时间戳会让 ORDER BY 不确定
+    await seedOrder(db, 'wo-v1-done', 'done', { defVersion: 1, dueOffsetMin: -60, createdAtMin: -1 });
+    await seedOrder(db, 'wo-v2-finished', 'finished', { defVersion: 2, dueOffsetMin: -60, createdAtMin: -2 });
+    await seedOrder(db, 'wo-v1-assigned', 'assigned', { defVersion: 1, dueOffsetMin: -60, createdAtMin: -3 });
+    await seedOrder(db, 'wo-v2-done', 'done', { defVersion: 2, dueOffsetMin: -60, createdAtMin: -4 });
+    await seedOrder(db, 'wo-v2-assigned', 'assigned', { defVersion: 2, dueOffsetMin: -60, createdAtMin: -5 });
+
+    // —— 红对照：粗筛口径会算成 5 条（两张其实已闭环的也被算进总数）
+    const defs = await getDefsAcrossAllVersions(c, T, WO_ET, 'work_orders', DEFAULT_WORK_ORDER_DEF);
+    const coarse = await idsUnderPredicate(db, intersectStates(defs.map(excludeSetOf)));
+    expect(coarse.length, '🔴 粗筛口径总数 = 5').toBe(5);
+
+    // ① total 必须是精筛口径 3，不是粗筛口径 5
+    const p1 = await listPage(db, 2, 0);
+    expect(p1.total, 'total 必须是逐单精确口径，不是粗筛口径').toBe(3);
+
+    // ② 页 1 必须满 2 条，且正好是最新的两条**真正未闭环**的单
+    //    （JS 精筛会在 LIMIT 之后才筛 ⇒ 页 1 只剩 0 条，这条断言立刻变红）
+    expect(p1.items.length, '页 1 必须满页：判定若下沉到 JS，这里会不满页').toBe(2);
+    expect(p1.items).toEqual(['wo-v1-assigned', 'wo-v2-done']);
+
+    // ③ 后续页不重不漏；最后一页之后必须是空的
+    const p2 = await listPage(db, 2, 2);
+    expect(p2.items).toEqual(['wo-v2-assigned']);
+    expect(p2.total).toBe(3);
+    const p3 = await listPage(db, 2, 4);
+    expect(p3.items, '翻过最后一页必须是空的（total 若虚高，这里会多出空页）').toEqual([]);
+
+    const all = [...p1.items, ...p2.items].sort();
+    expect(all, '分页拼起来必须正好等于精确全集，不重不漏').toEqual(['wo-v1-assigned', 'wo-v2-assigned', 'wo-v2-done']);
   });
 });

@@ -162,7 +162,11 @@ describe('工作台下钻：GET /open/work_orders 三参筛选（纯加法）', 
     expect(listCall).toBeTruthy();
     expect(listCall!.text).toContain('wo.sla_due_at IS NOT NULL');
     expect(listCall!.text).toContain('wo.sla_due_at < now()');
-    expect(listCall!.text).toContain('wo.status <> ALL($');
+    // 排除判定按**行自己的 def_version**选型（逐单判定，取代原先的全局一套排除集）：
+    // 文本上盯 `ALL(CASE wo.def_version ...` 而不只是 `ALL($`，后者在新写法下匹配不到。
+    // 注：本文件是 mock 捕获 SQL 文本 + params 的断言，**不执行 SQL**；
+    //     超时筛选的真实行为由 src/test/ticketTimeoutFilter.test.ts 在 pglite 真库上兜。
+    expect(listCall!.text).toContain('wo.status <> ALL(CASE wo.def_version');
     // 排除集参数 = doneStates(DEFAULT)+terminalStates(DEFAULT) 去重并集（复用 SLA 扫描口径）
     const excludeParam = (listCall!.params as unknown[]).find(
       (p) => Array.isArray(p) && (p as string[]).includes('completed'),

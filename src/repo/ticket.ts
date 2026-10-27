@@ -6,7 +6,7 @@ import { AppError } from '../middleware/error.js';
 import { listPerms } from '../middleware/role.js';
 import type { AuthLocals } from '../middleware/auth.js';
 import { DEFAULT_WORK_ORDER_DEF, isKnownState, doneStates, terminalStates, activeStates, timestampColumnFor, isTransitionAllowed, type WorkOrderStatus, type WorkflowTransition, type WorkflowDef } from '../engine/stateMachine.js';
-import { getDefsAcrossAllVersions, intersectStates, getWorkflowDefAtVersion, getWorkflowDefVersion } from '../engine/workflowDef.js';
+import { getDefEntriesAcrossAllVersions, getWorkflowDefAtVersion, getWorkflowDefVersion } from '../engine/workflowDef.js';
 import { pickAutoRule, TERMINAL_STATES } from '../engine/autoRules.js'; // 地基④：自动审核
 import { listEnabledAutoRules } from '../repo/autoRule.js';
 import { emitDomainEvent } from '../db/eventBus.js';
@@ -564,18 +564,35 @@ export async function list(
   //     若只读 live def：状态 Z 在 v1 里未终结、在 v2 里变成终态 ⇒ 一张锁着 v1 的超期老单
   //     会被 `wo.status <> ALL($n)` 误排除掉 —— 而那恰恰是最该显示给值班人的单（超时未闭环）。
   //     取交集后，只有在**每一个**版本里都属于终态的状态才被排除 ⇒ 老单不会被误排掉。
-  //   【代价/取舍】误报（个别在旧版本里其实已闭环的老单仍出现在列表里，由人复核关闭）优于
-  //     丢单；多一次 `SELECT DISTINCT def_version` 查询 + 每多一个历史版本多一次 def 查询。
-  //   【实现】不再在本处手抄「取各版本 → 逐个求交」，统一走 workflowDef.getDefsAcrossAllVersions
-  //     + intersectStates（与本仓其它「先拼状态集合再查行」的写法同源）。此前的手抄副本是
-  //     intersectStates 的第二真源，已由 src/test/ticketTimeoutFilter.test.ts 覆盖后删除。
+  //   【本次把交集改成逐单判定】交集是"先拼一套全局排除集、再去查行"，在多版本并存时会退化
+  //     （v1 终态 done / v2 终态 finished ⇒ 交集只剩机制态 ⇒ 两张早已闭环的单仍被报成超时）。
+  //     改成**每张单按它自己锁定的 def_version 取那一版的终态集** ⇒ 既不漏（逐单精确），
+  //     也不多显示（该闭环的单在自己那版里就被排除掉）。
+  //   【为什么判定必须留在 SQL 里，不能下沉到 JS 逐行过滤】本函数有分页
+  //     （`total` = 同一 where 的 COUNT，`items` = 同一 where + LIMIT/OFFSET，见下方两条查询）。
+  //     若改成"SQL 粗筛 → JS 精筛"，则：① total 是粗筛口径、items 是精筛口径 ⇒ 总数虚高；
+  //     ② LIMIT 在精筛之前截断 ⇒ 每页行数随机变少，真正该显示的行被挤到后面几页 ⇒ 等于翻页即丢单。
+  //     故此处用 `CASE wo.def_version WHEN <v> THEN <该版终态集> ...` 把逐单判定推到 WHERE 里，
+  //     让 COUNT 与 LIMIT 都作用在**精筛后**的结果上。
+  //   【版本键来自 getDefEntriesAcrossAllVersions】版本探测（含哨兵 0）只有一份真源，
+  //     本处不手抄 `SELECT DISTINCT def_version`。
   if (filter.timeoutOnly) {
-    const defs = await getDefsAcrossAllVersions(client, tenantId, 'work_order', 'work_orders', DEFAULT_WORK_ORDER_DEF);
-    // 逐个版本的「完成 ∪ 终态」集合取交 —— 交集为空 ⇒ 不排除任何状态（= 最宽松口径，绝不丢单）。
-    const exclude = intersectStates(defs.map((d) => Array.from(new Set([...doneStates(d), ...terminalStates(d)]))));
-    params.push(exclude);
+    const entries = await getDefEntriesAcrossAllVersions(
+      client, tenantId, 'work_order', 'work_orders', DEFAULT_WORK_ORDER_DEF,
+    );
+    const whens: string[] = [];
+    for (const { version, def } of entries) {
+      const terminals = Array.from(new Set<string>([...doneStates(def), ...terminalStates(def)]));
+      params.push(version);
+      const vIdx = params.length;
+      params.push(terminals);
+      whens.push(`WHEN $${vIdx} THEN $${params.length}::text[]`);
+    }
+    // ELSE 兜底：版本号落在探测之外（并发插入了更新版本的行）⇒ 给空集 ⇒ 不排除任何状态
+    // ⇒ 仍是"宁可多显示，绝不静默丢单"。CASE 无 WHEN 分支时 Postgres 走 ELSE，语法亦合法。
+    const perRowExclude = `CASE wo.def_version ${whens.join(' ')} ELSE '{}'::text[] END`;
     conds.push(
-      `wo.sla_due_at IS NOT NULL AND wo.sla_due_at < now() AND wo.status <> ALL($${params.length}::text[])`,
+      `wo.sla_due_at IS NOT NULL AND wo.sla_due_at < now() AND wo.status <> ALL(${perRowExclude})`,
     );
   }
   const where = conds.join(' AND ');
