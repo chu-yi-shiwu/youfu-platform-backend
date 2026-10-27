@@ -1,0 +1,61 @@
+-- 105_drop_service_desk_agent.sql —— 坐席下线：删除 service_desk_agent 表
+--
+-- 🔴🔴🔴 本文件当前处于【暂存】状态，**不会**被自动应用，**也不许手工执行** 🔴🔴🔴
+--
+-- 为什么放在 `pending-migrations/` 而不是仓根：
+--   两个迁移入口都**只扫仓根**：
+--     ① src/db/migrate.ts:18  migrationsDir = 仓根；:39-41 readdirSync + /^\d+_.*\.sql$/
+--     ② scripts/migrate-as-owner.sh      cd $BACKEND_DIR; ls [0-9][0-9][0-9]_*.sql
+--   ⇒ 一旦放仓根，下次 `npm run migrate` / 生产部署就会**自动把表删掉**，
+--     等于绕过「先下代码 → 观察 → 再删表」的观察期（决策要求：代码与本批同批上线，
+--     删表**下一批**单独做）。
+--   ⇒ 故存于此目录（目录名不匹配 `^\d+_.*\.sql$`，两个入口都扫不到）。
+--
+-- 【启用流程】（需初一 / team-lead 批准后再做）
+--   1. 确认代码已上线且观察期结束（坐席端点已 404，前端无入口）
+--   2. git mv pending-migrations/105_drop_service_desk_agent.sql ./105_drop_service_desk_agent.sql
+--   3. 提交并部署 ⇒ 由迁移入口自动应用（或手工 psql 以 postgres 身份执行）
+--   ⚠️ 文件名一旦上线**不可改名**：_migrations 按文件名记账（migrate.ts:44 注释已明写）。
+--
+-- =============================================================================
+-- 🔴 数据不可恢复警告（必读）
+-- =============================================================================
+--   `DROP TABLE` 之后，**原数据在库里就没了**。
+--   反向迁移 rollback/105_drop_service_desk_agent_down.sql **只恢复表结构
+--   （建表 + RLS + GRANT + 索引），一行数据都恢复不了**。
+--
+--   本表在生产当前有 **1 行**（不是 0 行）：
+--     id         = 1202a582-2b94-4b86-ad32-3cf5e455b225
+--     tenant_id  = t-verification
+--     desk_id    = 338c236b-d91b-4747-b767-4818baf52c15（志愿者服务台）
+--     user_id    = 001
+--     name       = 志愿者01
+--     created_at = 2026-09-12 00:38:18.891641+08
+--   该行**已留档**（可直接 INSERT 回灌）：
+--     骨架仓 docs/00_现行/_archive/service_desk_agent_备份_20261028.sql
+--   生产每日全量备份：/opt/youfu/backup/youfu_YYYYMMDD_030701.sql.gz
+--
+--   ⚠️ 查行数时的坑：以 youfu_app（后端 .env 的 PGUSER）查本表恒为 **0**——
+--     该角色 rolsuper=f / rolbypassrls=f，受 RLS 约束，那是**假零**。
+--     要读真实行数必须 `su - postgres` 绕过 RLS。
+--
+-- =============================================================================
+-- 前置条件（执行前确认）
+-- =============================================================================
+--   1. 那 1 行已导出留档（见上）
+--   2. 后端 3 个坐席端点已下线（commit c59eadb）、前端入口已删（前端 ae1b525）
+--   3. service_desk **保留不动**——本迁移只删坐席表
+--
+-- =============================================================================
+-- 执行（以超级用户，DDL 需属主权限）
+--   psql "$DATABASE_URL_POSTGRES" -f 105_drop_service_desk_agent.sql
+--   或：sudo -u postgres psql -d youfu -f 105_drop_service_desk_agent.sql
+-- =============================================================================
+
+-- ① 删表：RLS 策略、GRANT、索引 idx_agent_desk、唯一约束、外键
+--    全部随表一起消失，无需逐条 DROP（PG 对 DROP TABLE 自动清理其附属对象）。
+DROP TABLE IF EXISTS service_desk_agent;
+
+-- ② 显式兜底：万一上面因故只删了数据没删结构（理论上不会发生），
+--    此处幂等再删一次索引，保证 idx_agent_desk 不留残骸。
+DROP INDEX IF EXISTS idx_agent_desk;
