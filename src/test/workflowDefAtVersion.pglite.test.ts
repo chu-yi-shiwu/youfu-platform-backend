@@ -42,6 +42,8 @@ import { applyEvent, availableTransitions } from '../engine/stateMachine.js';
 import { createWithIdem, transition } from '../repo/ticket.js';
 // 批 6：要验的是「调用点有没有真的取交集」，不是复算一遍口径 ⇒ 直接调真产品函数 processMetrics。
 import { processMetrics, clearStatsCache } from '../repo/stats.js';
+// 项目统一的业务错误（errorMiddleware:107 按 `err instanceof AppError` 取 err.status ⇒ 决定 HTTP 码）。
+import { AppError } from '../middleware/error.js';
 // WorkflowDef 定义在 stateMachine.ts，workflowDef.ts 只是 import 它、并未 re-export。
 import {
   DEFAULT_WORK_ORDER_DEF,
@@ -1067,6 +1069,33 @@ describe('批5 · 多版本并存名单兜底（静默丢单洞）', () => {
     // 表还在 ⇒ 注入没生效
     const r = await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM work_orders`);
     expect(r.rows[0].n).toBe(0);
+  });
+
+  /**
+   * 【为什么单独补这一条】上一条只断言「抛了」+「表没被注入」。但**抛什么**是有语义的：
+   *   裸 `Error` 会穿过 errorMiddleware 落到 :121 的兜底 ⇒ **500 INTERNAL**。
+   *   500 语义是"我们系统坏了" ⇒ 触发告警、排障时被当成线上故障查。
+   *   而"表没登记进 VERSIONED_TABLES"是**开发期登记漏了 / 调用方传错表名** ⇒ 应当 422。
+   *   （现实风险：energy_collection 目前就不在白名单里，只走 getWorkflowDefAtVersion /
+   *    getDefsForVersions 才没撞到；哪天有人给它写跨版本扫描统计，就会直接 500。）
+   */
+  it('未登记表必须抛 422（AppError），不能是裸 Error ⇒ 500（开发期漏登记 ≠ 线上故障）', async () => {
+    const db = await freshWoDb();
+    const c = asClient(db);
+    let threw: unknown = null;
+    try {
+      await getDefsAcrossAllVersions(c, T, 'work_order', 'energy_collection', DEFAULT_WORK_ORDER_DEF);
+    } catch (e) {
+      threw = e;
+    }
+    // 🔴 判别点 1：必须是 AppError（errorMiddleware 只认它才取 err.status）
+    expect(threw, '未登记的表必须抛错').toBeInstanceOf(AppError);
+    // 🔴 判别点 2：必须是 422，不是兜底的 500
+    expect((threw as AppError).status, '登记漏了是调用方传错 ⇒ 422，不能落 500').toBe(422);
+    // 🔴 判别点 3：错误信息要说清「没登记在哪」+「开发者该做什么」
+    expect((threw as AppError).message).toMatch(/VERSIONED_TABLES/);
+    expect((threw as AppError).message).toMatch(/getWorkflowDefAtVersion/);
+    expect((threw as AppError).message).toMatch(/getDefsForVersions/);
   });
 });
 

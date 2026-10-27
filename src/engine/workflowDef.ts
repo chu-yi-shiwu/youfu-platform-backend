@@ -763,7 +763,17 @@ export async function getDefsAcrossAllVersions(
   fallback: WorkflowDef,
 ): Promise<WorkflowDef[]> {
   const safeTable = VERSIONED_TABLES[table];
-  if (!safeTable) throw new Error(`getDefsAcrossAllVersions: 表 ${table} 未登记（未加 def_version 列？）`);
+  // 【为什么是 422 不是裸 Error】裸 Error 会被 errorMiddleware 兜底成 500（"我们系统坏了"
+  //   ⇒ 触发告警、排障当线上故障查）。而"表没登记进 VERSIONED_TABLES"是**开发期登记漏了 /
+  //   调用方传错表名**，属请求侧问题 ⇒ 必须 422。消息里点明开发者该做什么。
+  if (!safeTable)
+    throw new AppError(
+      'BAD_REQUEST',
+      `getDefsAcrossAllVersions: 表 ${table} 未登记在 VERSIONED_TABLES 里（未加 def_version 列）` +
+        ` —— 若该表确需做版本探测，请先在 VERSIONED_TABLES 登记；` +
+        `否则请改用 getWorkflowDefAtVersion / getDefsForVersions（按行上已有的 def_version 取 def）`,
+      422,
+    );
   const vr = await client.query<{ def_version: number }>(
     `SELECT DISTINCT def_version FROM ${safeTable} WHERE tenant_id = $1 AND def_version > 0`,
     [tenantId],
