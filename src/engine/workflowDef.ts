@@ -362,6 +362,20 @@ function diffAddedRequiredFields(oldDef: WorkflowDef, newDef: WorkflowDef): Infl
 /**
  * 三场景在途单硬闸：按 ①删边 → ②收紧角色 → ③新增必填 顺序判定，命中即 409。
  * 与删态硬闸**同码同逃生口**（INFLIGHT_STATE_LOSS / opts.allowInflightLoss），不另设开关。
+ *
+ * 【🔴 为什么「有了版本锁」也绝不许删掉本闸】（T1-B 设计 §6 明令保留；本段即该要求的落地留痕）
+ *   ① 分析口径**仍读 live def** ⇒ 删边 / 收紧角色 / 新增必填会让历史数据被重新归类，报表当天跳变：
+ *       · src/repo/stats.ts:59（ticketStats）/ :211（processMetrics）/ :307（workerLoadDrift）
+ *         走 getDefsAcrossAllVersions，而它固定把 `def_version = 0` 也放进探测集（本文件 :744）
+ *         ⇒ 0 号版本**恒等于 live def**，live 一改这三个口径当天就变；
+ *       · src/repo/processMining.ts:343 直接 getWorkflowDef（= live def），同理。
+ *       即：这三类改动不只是「挡住未来的单」，它还会**改写已经发生的统计**。
+ *   ② def_version = 0（**未记录**）的存量行仍**跟随 live def**，版本锁覆盖不到它们：
+ *       版本锁只对「建单时写了 > 0 版本号」的新单生效；存量 0 行没有快照可回、永远跟着 live。
+ *       ⇒ **本闸是这部分单唯一的保护伞**。
+ *   ⚠️ 不要因为「有了版本锁」就删掉本闸 —— 删掉的是**未被版本锁覆盖的那部分单**的保护伞。
+ *   ⚠️ 反向约束：也不要在本批扩展本闸的能力面（加新场景 / 改阈值 / 改逃生口）—— 那是独立
+ *       变量，须单独成批、单独评审，不搭本批的车。
  */
 async function assertNoInflightTransitionLoss(
   client: PoolClient,
@@ -413,6 +427,19 @@ export async function saveWorkflowDef(
     [tenantId, entityType],
   );
   // V3-D4 删态硬闸：旧 def 存在且新 def 删掉了状态 → 清点在途单（escape hatch 见 opts.allowInflightLoss）。
+  //
+  // 【🔴 为什么「有了版本锁」也绝不许删掉本闸】（T1-B 设计 §6 明令保留；本段即该要求的落地留痕）
+  //   ① 分析口径**仍读 live def** ⇒ 删状态会让历史数据被重新归类，报表口径当天跳变：
+  //       · src/repo/stats.ts:59 / :211 / :307 走 getDefsAcrossAllVersions，而它固定把
+  //         `def_version = 0` 也放进探测集（本文件 :744）⇒ 0 号版本**恒等于 live def**；
+  //       · src/repo/processMining.ts:343 直接 getWorkflowDef（= live def）。
+  //       状态一删，「哪些状态算活跃 / 完成 / 终态」当天就变 ⇒ 老单被重新归类，报表当天跳变。
+  //   ② def_version = 0（**未记录**）的存量行仍**跟随 live def**，版本锁覆盖不到它们：
+  //       版本锁只对「建单时写了 > 0 版本号」的新单生效；存量 0 行没有快照可回、永远跟着 live。
+  //       ⇒ **本闸是这部分单唯一的保护伞**。
+  //   ⚠️ 不要因为「有了版本锁」就删掉本闸 —— 删掉的是**未被版本锁覆盖的那部分单**的保护伞。
+  //   ⚠️ 反向约束：也不要在本批扩展本闸的能力面（加新场景 / 改阈值 / 改逃生口）—— 那是独立
+  //       变量，须单独成批、单独评审，不搭本批的车。
   if (cur.rows[0]) {
     const oldRaw = cur.rows[0].def;
     const oldDef = normalizeDef(typeof oldRaw === 'string' ? JSON.parse(oldRaw) : oldRaw);
@@ -592,7 +619,7 @@ async function resolveLockedDef(
  * T1-B：取「第 N 版」的流程定义 —— 在途单锁版本的读路径。
  *
  * @param version 行上的 def_version。
- *   <= 0  ⇒ 「未锁定」，走 getWorkflowDefOrDefault（= **今天的逐字节行为**，含取不到的兜底）
+ *   <= 0  ⇒ 「未记录」，走 getWorkflowDefOrDefault（= **今天的逐字节行为**，含取不到的兜底）
  *   >  0  ⇒ 锁定到该版本：live.version === version 读 live，否则回查 history
  *
  * 【为什么不因为 version <= 0 报错】102 迁移跑完后**所有存量行都是 0**；
@@ -644,7 +671,7 @@ export async function getWorkflowDefAtVersion(
  *   值 = 降级后的 live def ⇒ 调用侧 `defs.get(r.def_version ?? 0)` 永远命中，不会 undefined。
  *
  * 【为什么要先算一次 liveVersion】否则每个版本各查一次 live ⇒ 版本数 N 变成 2N。
- *   若这批行全是 0（未锁定），连这一次都省掉。
+ *   若这批行全是 0（未记录），连这一次都省掉。
  */
 export async function getDefsForVersions(
   client: PoolClient,
@@ -655,7 +682,7 @@ export async function getDefsForVersions(
 ): Promise<Map<number, WorkflowDef>> {
   const versions = new Set<number>();
   for (const r of rows) {
-    // null / undefined / NaN 一律按 0（未锁定）处理，不引入第三态。
+    // null / undefined / NaN 一律按 0（未记录）处理，不引入第三态。
     versions.add(Number(r?.def_version) || 0);
   }
   const hasLocked = [...versions].some((v) => v > 0);

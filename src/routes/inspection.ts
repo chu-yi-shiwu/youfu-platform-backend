@@ -36,7 +36,7 @@ async function transitionTask(
   const cur = await client.query(`SELECT * FROM inspection_task WHERE id = $1 AND tenant_id = $2`, [taskId, tenantId]);
   if (cur.rowCount === 0) throw new AppError('NOT_FOUND', 'task not found', 404);
   const t = cur.rows[0];
-  // T1-B 批1：在途单按建单时锁定的流程版本流转（def_version=0 表示未锁定 ⇒ 走 live，与改前逐字节等价）。
+  // T1-B 批1：在途单按建单时锁定的流程版本流转（def_version=0 表示未记录 ⇒ 走 live，与改前逐字节等价）。
   const def = await getWorkflowDefAtVersion(client, tenantId, 'inspection_task', t.def_version, INSPECTION_DEF);
   const target = applyEvent(def, t.status, event);
   if (!target) {
@@ -357,7 +357,7 @@ router.post('/tasks', async (req, res, next) => {
     const item = await withTenantClient(tenantId, async (client) => {
       await requirePermission(res.locals.auth, client, 'inspect.manage');
       const snapshot = await seedItemsSnapshot(client, tenantId, b.item_ids ?? []);
-      // T1-B 批1：盖章 —— 新建单锁上当时的流程定义版本（无 definition 时 getWorkflowDefVersion 返 0 = 未锁定）。
+      // T1-B 批1：盖章 —— 新建单锁上当时的流程定义版本（无 definition 时 getWorkflowDefVersion 返 0 = 未记录）。
       const defVersion = await getWorkflowDefVersion(client, tenantId, 'inspection_task');
       const r = await client.query(
         `INSERT INTO inspection_task (tenant_id, plan_id, point_id, type, title, assignee, scheduled_at, status, items_json, def_version)

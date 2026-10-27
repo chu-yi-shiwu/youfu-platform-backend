@@ -78,7 +78,7 @@ export async function transitionEntity(
   if (cur.rowCount === 0) throw new AppError('NOT_FOUND', 'entity not found', 404);
   const row = cur.rows[0];
 
-  // T1-B 批3：在途单按建单时锁定的流程版本流转（def_version=0 ⇒ 未锁定 ⇒ 走 live，逐字节等价）。
+  // T1-B 批3：在途单按建单时锁定的流程版本流转（def_version=0 ⇒ 未记录 ⇒ 走 live，逐字节等价）。
   // 【E7 决策留痕：为什么用「内部自取」而不是设计文档推荐的「外层可选 def 参数」】
   //   设计 §5 批3 推荐 `TransitionEntityOpts` 加可选 `def?: WorkflowDef` 由调用方传入。
   //   没采用，是因为「不传则保持读 live」这条兼容语义本身是 E3 反面教材：

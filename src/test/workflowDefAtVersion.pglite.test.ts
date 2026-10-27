@@ -7,7 +7,7 @@
  *   不能等到接进业务流之后再验（那时出错会表现为"用户点了按钮 422"，归因成本极高）。
  *
  * 【验证口径】
- *   ① version <= 0（未锁定）⇒ 走 live def（= 今天的逐字节行为）
+ *   ① version <= 0（未记录）⇒ 走 live def（= 今天的逐字节行为）
  *   ② version == live.version ⇒ 读 live —— **补「当前 live 不在 history 里」这个缺口**
  *      （saveWorkflowDef 只在被覆盖那一刻才写 history，live 版本本身不在 history 内）
  *   ③ version 在 history ⇒ 读该版本快照，且**不是** live

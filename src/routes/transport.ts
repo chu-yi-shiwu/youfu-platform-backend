@@ -85,7 +85,7 @@ export async function transitionOrder(
   const cur = await client.query(`SELECT * FROM transport_order WHERE id = $1 AND tenant_id = $2`, [orderId, tenantId]);
   if (cur.rowCount === 0) throw new AppError('NOT_FOUND', 'order not found', 404);
   const t = cur.rows[0];
-  // T1-B 批2：在途单按建单时锁定的流程版本流转（def_version=0 表示未锁定 ⇒ 走 live，与改前逐字节等价）。
+  // T1-B 批2：在途单按建单时锁定的流程版本流转（def_version=0 表示未记录 ⇒ 走 live，与改前逐字节等价）。
   const def = await getWorkflowDefAtVersion(client, tenantId, 'transport_task', t.def_version, TRANSPORT_DEF);
   const target = applyEvent(def, t.status, event);
   if (!target) {
@@ -231,7 +231,7 @@ export async function createOrder(
   b: TransportOrderInput,
   actor = 'config_role',
 ): Promise<any> {
-  // T1-B 批2：盖章 —— 新单锁上建单当时的流程定义版本（无 definition 时返 0 = 未锁定）。
+  // T1-B 批2：盖章 —— 新单锁上建单当时的流程定义版本（无 definition 时返 0 = 未记录）。
   // 🔴 表的实体名是 transport_task，不是表名 transport_order（D1 永久双名）：
   //    传错会永远返回 0，而且一声不响 ⇒ 属于最典型的静默失败。
   const defVersion = await getWorkflowDefVersion(client, tenantId, 'transport_task');

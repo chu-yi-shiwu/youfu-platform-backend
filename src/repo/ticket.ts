@@ -59,7 +59,7 @@ export interface WorkOrderRow {
   department?: string | null;
   satisfaction_score?: number | null;
   ext?: unknown;
-  // T1-B 批4：建单时锁定的流程定义版本号（103 迁移加的列）。0 = 未锁定（存量行/租户无 definition）
+  // T1-B 批4：建单时锁定的流程定义版本号（103 迁移加的列）。0 = 未记录（存量行/租户无 definition）
   //   ⇒ 读侧 getWorkflowDefAtVersion 降级按 live def 走，与加列前逐字节等价。
   def_version?: number | null;
   // 决策 #7：列表/详情下发承接人姓名（LEFT JOIN worker 而来；无承接人 → null）
@@ -105,7 +105,7 @@ export async function createWithIdem(
     }
   }
   const orderNo = genOrderNo();
-  // T1-B 批4：盖章 —— 新单锁上建单当时的流程定义版本（租户无 definition 时返 0 = 未锁定）。
+  // T1-B 批4：盖章 —— 新单锁上建单当时的流程定义版本（租户无 definition 时返 0 = 未记录）。
   //   必须用 getWorkflowDefVersion（单一事实源 = workflow_def.version），不许临场读 live def 顶替：
   //   版本号是**写入时的事实**，读 def 再推版本会随后续保存漂移。
   //   status 仍为硬编码字面量 'draft'（E4/E6：不碰无关变量）。

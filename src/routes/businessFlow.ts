@@ -217,7 +217,7 @@ router.post('/:entityType', async (req, res, next) => {
         })
         .parse(req.body);
       if (adapter) return adapter.create(proxyCtx(client, res, entityType), b);
-      // T1-B 批3：盖章 —— 新单锁上建单当时的流程定义版本（无 definition 时返 0 = 未锁定）。
+      // T1-B 批3：盖章 —— 新单锁上建单当时的流程定义版本（无 definition 时返 0 = 未记录）。
       // 🔴 **先取版本号、再取该版本的 def 来定初始态，两步顺序不能反**：
       //    反过来的话，并发下另一请求可能在两步之间改版 ⇒ 「初始态来自 v6、章却盖 v5」，
       //    而这正是 T1-B 要消灭的那类不一致（行的内容是新版、章是旧版）。

@@ -464,7 +464,7 @@ describe('T1-B 批3 · energy_collection 在途单锁版本', () => {
   it('A4-实体名：版本号不是按表名取的（传成表名会永远返回 0 且一声不响）', () => {
     // 表是 business_flow_tasks，workflow_def 的 entity_type 却是 'energy_collection'（常量 ENTITY）。
     // 传表名 ⇒ SELECT version ... WHERE entity_type='business_flow_tasks' 永远零行 ⇒ 静默返回 0
-    // ⇒ 每行都"未锁定"，锁版本整套机制形同虚设且不报错。故这里钉死传参是 ENTITY。
+    // ⇒ 每行都"未记录"，锁版本整套机制形同虚设且不报错。故这里钉死传参是 ENTITY。
     expect(ENERGY_SRC).toContain('getWorkflowDefVersion(client, tenantId, ENTITY)');
     expect(ENERGY_SRC).not.toContain("getWorkflowDefVersion(client, tenantId, 'business_flow_tasks')");
   });
