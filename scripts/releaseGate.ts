@@ -110,7 +110,15 @@ for (const f of readdirSync(root).filter((x) => /^\d+_.*\.sql$/.test(x))) {
     // 不一致才删旧建新；终态收敛、可重跑）。QA 实测 070 连跑两次第二次 NOTICE 跳过。
     // 091 修正：去掉原 `\s*$` 末尾锚定——DO 块位于文件中间（其后还有自证段）同样是幂等写法，
     // 锚定到末尾属过严误判（会把 091 这种"条件性 UPDATE + IF 跳过"错杀成非幂等）。
-    /DO\s+\$\$[\s\S]*?IF[\s\S]*?THEN[\s\S]*?\$\$;/i.test(sql);
+    /DO\s+\$\$[\s\S]*?IF[\s\S]*?THEN[\s\S]*?\$\$;/i.test(sql) ||
+    // 纯清理型迁移（只有 SELECT 盘点 + DELETE 清理，无 INSERT / CREATE TABLE / ALTER TABLE）：
+    //   **DELETE 天然幂等**——第二次执行删不到行，终态一致（如 087 清理僵尸权限行，
+    //   其注释明示"重复执行第二次删除 0 行"）。此前不认这条 ⇒ 087 被误判为非幂等。
+    //   刻意同时排除含 INSERT/CREATE/ALTER 的文件：那些语句另有幂等要求，不能被 DELETE 带过。
+    (/^\s*DELETE\s+FROM\b/im.test(sql) &&
+      !/\bINSERT\s+INTO\b/i.test(sql) &&
+      !/\bCREATE\s+TABLE\b/i.test(sql) &&
+      !/\bALTER\s+TABLE\b/i.test(sql));
   if (!guarded) {
     console.error(`  非幂等迁移 ${f}（缺 IF NOT EXISTS / ON CONFLICT 等幂等保护）`);
     nonIdem++;
@@ -157,6 +165,13 @@ const rlsPolicyTables = new Set<string>(); // CREATE POLICY ... ON x（且含 te
 const rlsWhitelist = new Set<string>([
   'tenant_registry',         // 050：平台层租户注册表，tenant_id 即主键，非业务 RLS 隔离对象（"不经 RLS"）
   'platform_template_apply', // 053：平台层模板应用记录，平台 admin 上下文访问，非空会话租户隔离
+  // 077：平台级跨租户表。redeem 凭 code_hash 定位租户——**查库那一刻租户还未知**，
+  //   加 RLS 会让 redeem 恒查不到行；表内不存明文码，访问由 invite 路由 authMiddleware 独占。
+  //   （077 迁移注释「诚实边界」已明示本表不启用 RLS，此处登记是让门与该设计对齐，不是放宽要求）
+  'invite_codes',
+  // 078：租户申请/审批台账。tenant_id 在**批准后才回填**（申请期为 NULL）⇒ 申请阶段本就
+  //   无会话租户可隔离，与 tenant_registry 同域。
+  'trial_applications',
 ]);
 for (const f of readdirSync(root).filter((x) => /^\d+_.*\.sql$/.test(x))) {
   const sql = readFileSync(join(root, f), 'utf8');
