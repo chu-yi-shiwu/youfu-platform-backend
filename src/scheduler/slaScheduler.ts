@@ -8,8 +8,8 @@
 //      in_app 渠道落库即可达；sms/push/wechat 仍按网关配置诚实 stub（delivered=false）。
 import pool from '../db/pool.js';
 import { withTenantClient } from '../db/pool.js';
-import { getWorkflowDef, getWorkflowDefOrDefault } from '../engine/workflowDef.js';
-import { doneStates, terminalStates, holdStates, activeStates as engineActiveStates, CLAIM_HALL_STATE, type WorkOrderStatus } from '../engine/stateMachine.js';
+import { getDefsAcrossAllVersions, intersectStates, unionStates } from '../engine/workflowDef.js';
+import { doneStates, terminalStates, holdStates, activeStates as engineActiveStates, CLAIM_HALL_STATE, DEFAULT_WORK_ORDER_DEF, type WorkOrderStatus } from '../engine/stateMachine.js';
 import { slaScan, type SlaScanRow } from '../engine/sla.js';
 import { TRANSPORT_DEF } from '../engine/themes.js';
 import { emitDomainEvent } from '../db/eventBus.js';
@@ -123,13 +123,18 @@ export interface TransportSlaHit {
  */
 export async function runTransportSlaScanForTenant(tenantId: string): Promise<TransportSlaHit[]> {
   return withTenantClient(tenantId, async (client) => {
-    const def = await getWorkflowDefOrDefault(client, tenantId, 'transport_task', TRANSPORT_DEF);
     // P3-②：与工单线 runSlaScanForTenant 口径对齐——除 doneStates ∪ terminalStates 外，
     // 追加排除挂起态（防御租户自定义 def 含挂起态被误判 SLA 超时）；
     // 工单线经 activeStates 二次过滤实现同款排除，运送线无二道过滤，直接落在 SQL 排除集。
     // F8：挂起态由 holdStates 派生（不再硬编码 paused/suspended），与工单线同源。
-    const exclude = Array.from(
-      new Set([...doneStates(def), ...terminalStates(def), ...holdStates(def)]),
+    // T1-B 多版本并存兜底：排除集取各版本**交集**——只排除"所有版本都认是终态"的状态。
+    //   若照旧只读 live：老单锁着 v1，其状态在 v1 非终态、在 v2 却被算进排除集
+    //   ⇒ 这批老单**静默不告警**（单还在库里，超时了也没人知道）。宁可多扫，不可静默丢单。
+    const transportDefs = await getDefsAcrossAllVersions(
+      client, tenantId, 'transport_task', 'transport_order', TRANSPORT_DEF,
+    );
+    const exclude = intersectStates(
+      transportDefs.map((d) => Array.from(new Set([...doneStates(d), ...terminalStates(d), ...holdStates(d)]))),
     );
     const rows = await client.query(
       `SELECT id, code, status, carrier, sla_due_at FROM transport_order
@@ -185,10 +190,17 @@ export async function runSlaScanForTenant(tenantId: string): Promise<SlaHit[]> {
   return withTenantClient(tenantId, async (client) => {
     // A+ Phase1.5：SLA 活跃集由 workflow_def 派生（排除完成态 ∪ 终态 ∪ 挂起态），
     // 与富模板对齐且不写死 4 态（R13-005 修复口径，保持不变）。
-    const def = await getWorkflowDef(client, tenantId, 'work_order');
     // F8：挂起态与 load 结算共用 holdStates 派生（客户自定义挂起态名不再被漏排）。
-    const slaExclude = Array.from(new Set([...doneStates(def), ...terminalStates(def)]));
-    const activeStates = engineActiveStates(def);
+    // T1-B 多版本并存兜底：SQL 排除集取**交集**、activeStates 取**并集**——
+    //   老单锁着旧版本，其状态在新流程里可能既不算终态也不算活跃 ⇒ 两头都不沾，
+    //   结果是这批老单**超时了也不告警**。宁可多扫一单，不可静默丢单。
+    const workOrderDefs = await getDefsAcrossAllVersions(
+      client, tenantId, 'work_order', 'work_orders', DEFAULT_WORK_ORDER_DEF,
+    );
+    const slaExclude = intersectStates(
+      workOrderDefs.map((d) => Array.from(new Set([...doneStates(d), ...terminalStates(d)]))),
+    );
+    const activeStates = unionStates(workOrderDefs.map((d) => engineActiveStates(d)));
     const active = await client.query<SlaScanRow & { assignee_id: string | null; order_no: string }>(
       `SELECT id, status, sla_due_at, escalated_at, assignee_id, order_no FROM work_orders
        WHERE tenant_id = $1 AND status <> ALL($2::text[])`,

@@ -88,9 +88,23 @@ vi.mock('../repo/stats.js', () => ({ processMetrics: (...a: unknown[]) => (proce
 const qualityReport = vi.fn(async (_c: unknown, _t: string): Promise<any> => ({ score: 1.0, note: '无数据' }));
 vi.mock('../services/dataQuality.js', () => ({ qualityReport: (...a: unknown[]) => (qualityReport as any)(...a) }));
 const getWorkflowDef = vi.fn(async (..._a: unknown[]): Promise<any> => ({ key: 'work_order', states: [] }));
-vi.mock('../engine/workflowDef.js', () => ({ getWorkflowDef: (...a: unknown[]) => (getWorkflowDef as any)(...a) }));
+// 批 5：/stats/overdue 的逾期排除集改走「各版本名单」⇒ 桩必须补上新导出，否则取不到即 500。
+//   这里只有一份 def（单版本桩）⇒ 并集/交集结果都等于它自己，与改造前逐字节等价。
+vi.mock('../engine/workflowDef.js', async (importOriginal) => {
+  const actual = (await importOriginal()) as Record<string, unknown>;
+  return {
+    ...actual,
+    getWorkflowDef: (...a: unknown[]) => (getWorkflowDef as any)(...a),
+    getDefsAcrossAllVersions: async () => [await (getWorkflowDef as any)()],
+  };
+});
 const doneStates = vi.fn((): string[] => ['done', 'cancelled']);
-vi.mock('../engine/stateMachine.js', () => ({ doneStates: () => (doneStates as any)() }));
+// 批 5：逾期排除集要传 fallback def ⇒ 桩得放行 DEFAULT_WORK_ORDER_DEF（否则取不到即 500）。
+//   只覆盖 doneStates 本身，其余导出走真实实现。
+vi.mock('../engine/stateMachine.js', async (importOriginal) => {
+  const actual = (await importOriginal()) as Record<string, unknown>;
+  return { ...actual, doneStates: () => (doneStates as any)() };
+});
 
 // ---- adminAiChat.ts 依赖打桩 ----
 const conversationAvailable = vi.fn(async (_t: string): Promise<{ ok: boolean; reason?: string }> => ({ ok: true }));

@@ -3,8 +3,8 @@
 // 审查修复：#2 效果回写联动模板评分；#3 7/30 两次观测（refreshed_at）。
 import pool from '../db/pool.js';
 import { withTenantClient } from '../db/pool.js';
-import { getWorkflowDef } from '../engine/workflowDef.js';
-import { activeStates, doneStates } from '../engine/stateMachine.js';
+import { getDefsAcrossAllVersions, unionStates } from '../engine/workflowDef.js';
+import { activeStates, doneStates, DEFAULT_WORK_ORDER_DEF } from '../engine/stateMachine.js';
 
 /** effect_rating（闭环率 delta，范围约 -1~1）→ 模板评分 0~5（映射并夹取 1~5）。 */
 function deltaToScore(delta: number): number {
@@ -21,9 +21,12 @@ export async function refreshApplyEffect(applyId: string): Promise<{ refreshed: 
     //   写死 'completed'/'closed'/'evaluated'/'cancelled' 会让自定义流程的 Δ 全线失真，
     //   且与 before 快照（templateMarket.ts）必须同源于同一 def，否则差值不可比。
     //   口径与 ticket.ts 的 load 净结算、slaScheduler 的活跃集共用 activeStates/doneStates。
-    const tplDef = await getWorkflowDef(client, row.tenant_id, 'work_order');
-    const tplDone = doneStates(tplDef);
-    const tplActive = activeStates(tplDef);
+    // T1-B 多版本并存兜底：模板效果是按状态「包含」计数，取各版本**并集**——
+    //   只读 live 会让锁旧版本的老单既不计入完成率、也不计入逾期率 ⇒ 效果 Δ 失真
+    //   （且这份 Δ 要与 before 快照可比，两处口径必须同步放宽）。
+    const defs = await getDefsAcrossAllVersions(client, row.tenant_id, 'work_order', 'work_orders', DEFAULT_WORK_ORDER_DEF);
+    const tplDone = unionStates(defs.map(doneStates));
+    const tplActive = unionStates(defs.map(activeStates));
     return client.query(
       `SELECT
          count(*) FILTER (WHERE status = ANY($2::text[]))::numeric / nullif(count(*),0) AS close_rate,

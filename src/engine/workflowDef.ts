@@ -688,3 +688,65 @@ function normalizeDef(d: any): WorkflowDef {
 function cloneDef(d: WorkflowDef): WorkflowDef {
   return JSON.parse(JSON.stringify(d));
 }
+
+// 已加 def_version 列的业务表白名单 —— 下面那条 SQL 的表名只能从这里取，
+// 不接受调用侧直接拼字符串（表名不可参数化，白名单是唯一能挡住注入的写法）。
+const VERSIONED_TABLES: Record<string, string> = {
+  work_orders: 'work_orders',
+  transport_order: 'transport_order',
+  business_flow_tasks: 'business_flow_tasks',
+  inspection_task: 'inspection_task',
+};
+
+/**
+ * 【多版本并存的名单兜底】取该租户该实体「当前还有行在用」的**全部版本**的 def。
+ *
+ * 【为什么需要它】凡「先按状态集合拼 SQL / 过滤条件、再去查行」的写法（超时扫描、
+ *   结算入账、各类统计、抢单大厅……），此刻手上还没有具体行，只能读 live def ⇒
+ *   租户改流程后，老单（锁着 v1）可能既不在 v2 的「包含集」里、也不在 v2 的「排除集」里
+ *   ⇒ **这批老单从名单里凭空消失**（单还在库里，但没人看得到、没人告警）。
+ *   这是版本化改造**自己引入**的洞 —— 改造前只有一份 def，谁也不会掉队。
+ *
+ * 【兜底原则】宁可多显示，绝不静默丢单：
+ *   - 用于「包含」的集合（活跃态 / 完成态 / 池态…）⇒ 取各版本**并集**（unionStates）
+ *   - 用于「排除」的集合（终态 / 完成态…）⇒ 取各版本**交集**（intersectStates）
+ *   两者都让"老单掉队"变成"老单多显示一次"，而不是消失。
+ *
+ * 【为什么连 0 一起探测】def_version = 0 是哨兵（建单时未记录版本）⇒ 走 live def。
+ *   存量单全是 0，不探 0 就会把改造前的所有老单整批漏掉。
+ */
+export async function getDefsAcrossAllVersions(
+  client: PoolClient,
+  tenantId: string,
+  entityType: string,
+  table: string,
+  fallback: WorkflowDef,
+): Promise<WorkflowDef[]> {
+  const safeTable = VERSIONED_TABLES[table];
+  if (!safeTable) throw new Error(`getDefsAcrossAllVersions: 表 ${table} 未登记（未加 def_version 列？）`);
+  const vr = await client.query<{ def_version: number }>(
+    `SELECT DISTINCT def_version FROM ${safeTable} WHERE tenant_id = $1 AND def_version > 0`,
+    [tenantId],
+  );
+  const probe = [{ def_version: 0 }, ...vr.rows.map((v) => ({ def_version: Number(v.def_version) || 0 }))];
+  const defMap = await getDefsForVersions(client, tenantId, entityType, probe, fallback);
+  return [...defMap.values()];
+}
+
+/** 并集：给「包含」型集合用（活跃态、完成态、池态…）——宁可多显示，不静默丢单。 */
+export function unionStates(sets: string[][]): string[] {
+  return [...new Set(sets.flat())];
+}
+
+/**
+ * 交集：给「排除」型集合用（终态、完成态…）——只排除"所有版本都认为是终态"的状态。
+ * 交集为空 = 不排除任何状态 = 全部保留（保守侧，符合"宁可多显示"）。
+ */
+export function intersectStates(sets: string[][]): string[] {
+  if (sets.length === 0) return [];
+  return [...sets.reduce<Set<string>>((acc, s) => {
+    const next = new Set<string>();
+    for (const x of s) if (acc.has(x)) next.add(x);
+    return next;
+  }, new Set(sets[0]))];
+}

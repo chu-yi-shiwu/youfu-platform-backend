@@ -5,7 +5,7 @@
 import type { PoolClient } from 'pg';
 import { AppError } from '../middleware/error.js';
 import { csvEscape } from '../services/csvUtil.js';
-import { getWorkflowDefOrDefault } from '../engine/workflowDef.js';
+import { getDefsAcrossAllVersions, unionStates } from '../engine/workflowDef.js';
 import { RICH_WORK_ORDER_DEF, doneStates } from '../engine/stateMachine.js';
 
 /**
@@ -25,8 +25,12 @@ export const SETTLEMENT_ELIGIBLE_STATUSES = ['completed', 'closed', 'evaluated']
  */
 export async function settlementEligibleStatuses(client: PoolClient, tenantId: string): Promise<string[]> {
   try {
-    const def = await getWorkflowDefOrDefault(client, tenantId, 'work_order', RICH_WORK_ORDER_DEF);
-    const ds = doneStates(def);
+    // T1-B 多版本并存兜底：可入账是「包含」判定（`eligible.includes(row.status)`），
+    //   取各版本**并集**——老单锁着旧版本，其状态在旧流程里是完成态、在新流程里可能不再是，
+    //   只读 live 会让这批老单**结不了账**（报 bad_status）。钱的路径，宁可多放一单。
+    //   （defs 已含 live 那份，不必再单独读一次。）
+    const defs = await getDefsAcrossAllVersions(client, tenantId, 'work_order', 'work_orders', RICH_WORK_ORDER_DEF);
+    const ds = unionStates(defs.map(doneStates));
     if (ds.length > 0) return ds;
   } catch (e) {
     // 降级纪律（E3 不静默失败）：结算是钱的路径，不能因为读流程配置抖动就整体 500。

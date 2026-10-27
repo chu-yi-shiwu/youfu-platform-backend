@@ -26,7 +26,14 @@ import { emitDomainEvent } from '../db/eventBus.js';
 import { insertNotification, wechatSelfTest } from '../services/notify.js';
 import { claimWorkOrder } from '../services/claimWorkOrder.js';
 import type { WorkOrderStatus, WorkflowDef } from '../engine/stateMachine.js';
-import { getWorkflowDef, getWorkflowDefAtVersion, getDefsForVersions } from '../engine/workflowDef.js';
+import {
+  getWorkflowDef,
+  getWorkflowDefAtVersion,
+  getDefsForVersions,
+  getDefsAcrossAllVersions,
+  unionStates,
+  intersectStates,
+} from '../engine/workflowDef.js';
 import { CLAIM_HALL_STATE } from '../engine/claimHallEdges.js'; // F8：落抢单大厅走主通道（机制态单一事实源）
 import {
   DEFAULT_WORK_ORDER_DEF,
@@ -286,9 +293,14 @@ export async function runIncrementalLearnStep(
   to: string,
   fromStatus: string | null | undefined,
 ): Promise<{ triggered: boolean; learnError: string | null }> {
-  const def = await getWorkflowDef(client, tenantId, 'work_order');
   // ⑤ 模数共振：学习触发态优先读 def.config.learningTriggers（per-def 控制），缺省回退 doneStates（向后兼容）
-  const learnOn = learningTriggerStates(def);
+  // T1-B 多版本并存兜底：触发态是「包含」判定 ⇒ 取各版本**并集**——
+  //   老单按旧流程走到学习触发态，若新流程里该态不再触发 ⇒ **老单不再产生学习样本**。
+  const learnOn = unionStates(
+    (await getDefsAcrossAllVersions(client, tenantId, 'work_order', 'work_orders', DEFAULT_WORK_ORDER_DEF)).map(
+      learningTriggerStates,
+    ),
+  );
   if (!shouldTriggerLearning(to, String(fromStatus ?? ''), learnOn)) {
     return { triggered: false, learnError: null };
   }
@@ -549,7 +561,13 @@ router.post('/open/work_order/:id/transition', async (req, res, next) => {
       const learnStep = await runIncrementalLearnStep(client, tenantId, req.params.id, to, r.from);
       learnError = learnStep.learnError;
       // F10：评价完成态由 def 派生（存在 satisfy 入边的目标态），不再写死 evaluated 这个名
-      const evaluatedSet = evaluatedStates(await getWorkflowDef(client, tenantId, 'work_order'));
+      // T1-B 多版本并存兜底：`evaluatedSet.includes(to)` 是「包含」判定 ⇒ 取各版本**并集**。
+      //   老单按旧流程走到"已评价"，若新流程里该态不再算评价完成 ⇒ **满意度评分不回写**。
+      const evaluatedSet = unionStates(
+        (await getDefsAcrossAllVersions(client, tenantId, 'work_order', 'work_orders', DEFAULT_WORK_ORDER_DEF)).map(
+          evaluatedStates,
+        ),
+      );
       // 评价完成回写满意度评分（UOne 满意度颗粒度）
       if (evaluatedSet.includes(to) && typeof score === 'number') {
         await client.query(
@@ -1248,10 +1266,13 @@ router.get('/open/me/summary', async (req, res, next) => {
       // F10：机制态/池态不再写死 'claim_hall'/'pending_dispatch' 两个名字——它们语义上
       //   不属于任何人名下，剔除口径统一取 claimableStates(def)（= 存在认领边的池态），
       //   与 GET /open/claim-hall 列表、认领端点守卫三处同源。
-      const workerDef = await getWorkflowDef(client, tenantId, 'work_order');
-      const poolSet = claimableStates(workerDef);
-      const activeSet = activeStates(workerDef).filter((s) => !poolSet.includes(s));
-      const doneSet = doneStates(workerDef);
+      // T1-B 多版本并存兜底：这里的三组都是「包含」计数（COUNT FILTER status = ANY(...)）⇒
+      //   activeSet / doneSet 取各版本**并集**（老单漏计 ⇒ 工人看起来更闲 ⇒ 派单派多）；
+      //   poolSet 是**被剔除**的一方 ⇒ 取各版本交集（少剔除 = 多算在办，落在保守侧）。
+      const workerDefs = await getDefsAcrossAllVersions(client, tenantId, 'work_order', 'work_orders', DEFAULT_WORK_ORDER_DEF);
+      const poolSet = intersectStates(workerDefs.map(claimableStates));
+      const activeSet = unionStates(workerDefs.map(activeStates)).filter((s) => !poolSet.includes(s));
+      const doneSet = unionStates(workerDefs.map(doneStates));
       const stats = await client.query(
         `SELECT
            COUNT(*) FILTER (WHERE status = ANY($3::text[])) AS active_count,

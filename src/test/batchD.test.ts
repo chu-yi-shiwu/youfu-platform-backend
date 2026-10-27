@@ -507,6 +507,10 @@ describe('mock 收口（SQL 全覆盖 · 防新增/改写 SQL 无感知）', () 
         { match: (t: string) => t.includes('FROM inventory_log il') && t.includes('JOIN material m'), reply: () => ({ rows: [], rowCount: 0 }) },
         { match: (t: string) => t.includes('UPDATE settlement SET total'), reply: () => ({ rows: [], rowCount: 1 }) },
         { match: (t: string) => t.includes('SELECT * FROM settlement WHERE id'), reply: () => ({ rows: [{ id: 'st-1', settlement_no: 'ST202609050001', status: 'draft', total: '120.00', item_count: 1 }] }) },
+        // T1-B 批 5：可入账状态改走各版本名单 ⇒ 多一次「在用的 def_version」查询。
+        // rows=[] = 本租户没有锁版本的在途单 ⇒ 只剩 live 一版 ⇒ 并集 = live 的集合，
+        // 与改造前逐字等价。留这条 handler，正是「新增 SQL 必须被感知」的护栏在工作。
+        { match: (t: string) => t.includes('SELECT DISTINCT def_version FROM work_orders'), reply: () => ({ rows: [], rowCount: 0 }) },
       ],
       { strict: true },
     );

@@ -52,9 +52,17 @@ vi.mock('../db/pool.js', () => ({
   assertSafeTenantId: (t: string) => t,
 }));
 // DELETE /workers/:id 会取流程定义算「在途态」，给个空 states 让它不炸（本文件不钉这层业务）
-vi.mock('../engine/workflowDef.js', () => ({
-  getWorkflowDef: vi.fn(async () => ({ id: 'd1', entityType: 'work_order', states: [], transitions: [] })),
-}));
+// 批 5：删人守卫改走「各版本名单」⇒ 桩必须补上新导出，否则模块里取不到会 500。
+//   这里只有一份 def（单版本桩）⇒ 并集/交集结果都等于它自己，与改造前逐字节等价。
+vi.mock('../engine/workflowDef.js', async (importOriginal) => {
+  const actual = (await importOriginal()) as Record<string, unknown>;
+  const stubDef = { id: 'd1', entityType: 'work_order', states: [], transitions: [] };
+  return {
+    ...actual,
+    getWorkflowDef: vi.fn(async () => stubDef),
+    getDefsAcrossAllVersions: vi.fn(async () => [stubDef]),
+  };
+});
 vi.mock('../db/eventBus.js', () => ({ emitDomainEvent: vi.fn(async () => undefined) }));
 
 import workerRouter from '../routes/worker.js';

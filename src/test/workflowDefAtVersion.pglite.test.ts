@@ -25,6 +25,9 @@ import {
   getDefsForVersions,
   getWorkflowDefVersion,
   getWorkflowDefOrDefault,
+  getDefsAcrossAllVersions,
+  unionStates,
+  intersectStates,
 } from '../engine/workflowDef.js';
 // 批 3 的写侧就长在 transitionEntity 里，且它是可直调的共享函数 ⇒ 真库里直接调真产品代码，
 // 不像批 1 那样只能模拟 INSERT（批 1 的三处 INSERT 藏在 route handler 里，够不着）。
@@ -35,7 +38,14 @@ import { applyEvent, availableTransitions } from '../engine/stateMachine.js';
 // 连「盖章」都验的是真链路（不像批 1/3 只能模拟 INSERT）。
 import { createWithIdem, transition } from '../repo/ticket.js';
 // WorkflowDef 定义在 stateMachine.ts，workflowDef.ts 只是 import 它、并未 re-export。
-import { DEFAULT_WORK_ORDER_DEF, type WorkflowDef, type WorkOrderStatus } from '../engine/stateMachine.js';
+import {
+  DEFAULT_WORK_ORDER_DEF,
+  doneStates,
+  terminalStates,
+  activeStates,
+  type WorkflowDef,
+  type WorkOrderStatus,
+} from '../engine/stateMachine.js';
 
 const ROOT = join(__dirname, '..', '..');
 
@@ -838,5 +848,168 @@ describe('批4 · work_orders 在途工单锁版本（真库 A1-W / A2-W / A5-W�
     const rows = (await db.query(`SELECT def_version FROM work_orders WHERE tenant_id = $1`, [T])).rows as any[];
     expect(rows.length).toBe(1);
     expect(rows[0].def_version, '存量行必须是哨兵 0，不是被伪造的 1').toBe(0);
+  });
+});
+
+// ===================== 批 5 · 多版本并存的「名单兜底」 =====================
+/**
+ * 【为什么必须有这份】
+ *   T1-B 把「针对某一张具体行」的流转锁住了，但有一类写法是**先按状态集合拼 SQL / 过滤条件、
+ *   再去查行**——此刻手上还没有具体行，只能读 live def。租户改流程后，老单（锁着 v1）
+ *   可能既不在 v2 的「包含集」里、也不在 v2 的「排除集」里 ⇒ **这批老单从名单里凭空消失**
+ *   （单还在库里，但超时不告警、结算报状态不对、工人负载少算 ⇒ 派单派多）。
+ *   这是版本化改造**自己引入**的洞：改造前只有一份 def，谁也不会掉队。
+ *
+ * 【兜底原则】宁可多显示，绝不静默丢单：包含集取各版本**并集**，排除集取各版本**交集**。
+ *
+ * 【样本设计】v1（旧）：X 是活跃态（有出边 X→done）；v2（新/live）：X 变成终态（无出边）。
+ *   ⇒ 老单 status='X' def_version=1：
+ *      · live-only 排除集 = done(v2) ∪ terminal(v2) = ['X','done'] ⇒ 老单被排除（**丢单**）
+ *      · 交集排除集      = ['X','done'] ∩ ['done']              = ['done']      ⇒ 老单保留
+ */
+const DEF_V1_X_ACTIVE: WorkflowDef = {
+  initial: 'draft',
+  states: ['draft', 'assigned', 'X', 'done'],
+  transitions: [
+    { from: 'draft', to: 'assigned', event: 'assign' },
+    { from: 'assigned', to: 'X', event: 'to_x' },
+    { from: 'X', to: 'done', event: 'finish' },
+  ] as any,
+  config: {},
+} as WorkflowDef;
+/** v2 = 当前 live：X 不再有出边 ⇒ X 变终态、且不再算活跃态。 */
+const DEF_V2_X_TERMINAL: WorkflowDef = {
+  initial: 'draft',
+  states: ['draft', 'assigned', 'X', 'done'],
+  transitions: [
+    { from: 'draft', to: 'assigned', event: 'assign' },
+    { from: 'assigned', to: 'done', event: 'finish' },
+  ] as any,
+  config: {},
+} as WorkflowDef;
+
+/** 真库：live = v2（version=2），history 里有 v1；两行工单分别锁 v1 / v2。 */
+async function freshMultiVersionDb(): Promise<PGlite> {
+  const db = await freshWoDb(); // 已含 103 迁移（def_version 列）+ live v1
+  await db.query(
+    `INSERT INTO workflow_def_history (tenant_id, entity_type, version, def) VALUES ($1,$2,1,$3::jsonb)`,
+    [T, WO_ET, JSON.stringify(DEF_V1_X_ACTIVE)],
+  );
+  await db.query(
+    `UPDATE workflow_def SET def=$3::jsonb, version=2 WHERE tenant_id=$1 AND entity_type=$2`,
+    [T, WO_ET, JSON.stringify(DEF_V2_X_TERMINAL)],
+  );
+  // order_no 由 002 迁移加为 NOT NULL + 租户内唯一 ⇒ 手工插行必须给，不能靠默认值。
+  await db.query(
+    `INSERT INTO work_orders (id, tenant_id, business_type, status, def_version, order_no)
+     VALUES ('wo-old-v1',$1,'repair','X',1,'NO-OLD-V1')`,
+    [T],
+  );
+  await db.query(
+    `INSERT INTO work_orders (id, tenant_id, business_type, status, def_version, order_no)
+     VALUES ('wo-new-v2',$1,'repair','assigned',2,'NO-NEW-V2')`,
+    [T],
+  );
+  return db;
+}
+
+/** 用排除集去真查行——SLA 扫描 / 逾期统计就是这么筛的。 */
+async function idsNotIn(db: PGlite, exclude: string[]): Promise<string[]> {
+  const r = await db.query<{ id: string }>(
+    `SELECT id FROM work_orders WHERE tenant_id=$1 AND status <> ALL($2::text[]) ORDER BY id`,
+    [T, exclude],
+  );
+  return r.rows.map((x) => x.id);
+}
+
+describe('批5 · 多版本并存名单兜底（静默丢单洞）', () => {
+  it('🔴 穿透：老单在 live-only 排除集下消失，在交集排除集下保留', async () => {
+    const db = await freshMultiVersionDb();
+    const c = asClient(db);
+
+    // —— 旧算法（改造前的写法）：只读 live
+    const liveOnly = Array.from(
+      new Set([
+        ...doneStates(DEF_V2_X_TERMINAL),
+        ...terminalStates(DEF_V2_X_TERMINAL),
+      ]),
+    );
+    // 这里用的是手写常量（未经机制态注入），终态 = [X, done]；
+    // 真代码走 getWorkflowDef 会多注入 cancelled，但**结论不变**：X 在排除集里 ⇒ 老单被漏掉。
+    expect(liveOnly).toEqual(['X', 'done']); // X 在新流程里已是终态
+    const oldHit = await idsNotIn(db, liveOnly);
+    expect(oldHit, '🔴 旧算法把锁 v1 的老单整个漏掉了（复现丢单）').not.toContain('wo-old-v1');
+
+    // —— 新算法（本次修复）：各版本取交集
+    const defs = await getDefsAcrossAllVersions(c, T, 'work_order', 'work_orders', DEFAULT_WORK_ORDER_DEF);
+    const fixed = intersectStates(defs.map((d) => Array.from(new Set([...doneStates(d), ...terminalStates(d)]))));
+    expect(fixed, '交集只保留所有版本都认的终态 ⇒ X 被排除出排除集').toEqual(['done', 'cancelled']);
+    const newHit = await idsNotIn(db, fixed);
+    expect(newHit, '修复后老单必须还在名单里').toContain('wo-old-v1');
+    expect(newHit, '新单照常命中').toContain('wo-new-v2');
+  });
+
+  it('🔴 穿透：老单在 live-only 活跃集下被过滤，在并集活跃集下保留', async () => {
+    const db = await freshMultiVersionDb();
+    const c = asClient(db);
+
+    const liveActive = activeStates(DEF_V2_X_TERMINAL); // v2 里 X 已不算活跃
+    expect(liveActive).not.toContain('X');
+    expect(liveActive.includes('X'), '🔴 旧算法：老单的状态不在 live 活跃集 ⇒ 被 slaScan 过滤掉').toBe(false);
+
+    const defs = await getDefsAcrossAllVersions(c, T, 'work_order', 'work_orders', DEFAULT_WORK_ORDER_DEF);
+    const unionActive = unionStates(defs.map(activeStates));
+    expect(unionActive, '并集必须把 v1 的活跃态 X 收回来').toContain('X');
+    const rows = await db.query<{ id: string }>(
+      `SELECT id FROM work_orders WHERE tenant_id=$1 AND status = ANY($2::text[]) ORDER BY id`,
+      [T, unionActive],
+    );
+    expect(rows.rows.map((r) => r.id), '修复后老单重新进入活跃名单').toContain('wo-old-v1');
+  });
+
+  it('getDefsAcrossAllVersions：v1 / v2 / 哨兵 0 三个版本都在（0 不能漏，否则存量老单整批消失）', async () => {
+    const db = await freshMultiVersionDb();
+    const c = asClient(db);
+    const defs = await getDefsAcrossAllVersions(c, T, 'work_order', 'work_orders', DEFAULT_WORK_ORDER_DEF);
+    // ⚠️ 读路径会注入机制态（claim_hall + cancelled，见 workflowDef.ts:19 withMechanismStates）
+    //   ⇒ 终态集比我手写的 def 多出 cancelled，断言必须按**注入后**的真实结果写。
+    const termSets = defs.map((d) => terminalStates(d));
+    expect(termSets.some((s) => !s.includes('X')), 'v1（旧）的终态不含 X —— X 在旧流程里还是活跃态').toBe(true);
+    expect(termSets.some((s) => s.includes('X')), 'v2（live）的终态含 X —— X 已变成终态').toBe(true);
+    // 哨兵 0 → live(v2)，v1，v2 ⇒ 三个 key 各一份（0 与 2 是同一份 def，但都必须在）
+    expect(defs.length, '哨兵 0 / v1 / v2 三个 key 各一份，缺 0 会整批漏掉存量老单').toBe(3);
+  });
+
+  it('单版本不回归：只有 live 一版时，交集 = 该版集合（与改造前逐字节等价）', async () => {
+    const db = await freshWoDb(); // 只有 live = WO_V1，无任何 def_version>0 的行
+    const c = asClient(db);
+    const defs = await getDefsAcrossAllVersions(c, T, 'work_order', 'work_orders', DEFAULT_WORK_ORDER_DEF);
+    const liveDef = await getWorkflowDefOrDefault(c, T, 'work_order', DEFAULT_WORK_ORDER_DEF);
+    expect(defs.length, '单版本 ⇒ 只有一份 def').toBe(1);
+    expect(intersectStates(defs.map(terminalStates))).toEqual(terminalStates(liveDef));
+    expect(unionStates(defs.map(activeStates))).toEqual(activeStates(liveDef));
+  });
+
+  it('纯函数边界：unionStates 去重 / intersectStates 无交集则为空（空集=不排除=保守侧）', () => {
+    expect(unionStates([['a', 'b'], ['b', 'c']])).toEqual(['a', 'b', 'c']);
+    expect(intersectStates([['a', 'b'], ['b', 'c']])).toEqual(['b']);
+    expect(intersectStates([['a'], ['b']]), '无共同终态 ⇒ 一个都不排除（宁可多显示）').toEqual([]);
+    expect(intersectStates([])).toEqual([]);
+  });
+
+  it('未登记的表必须报错（表名不可参数化，白名单是唯一能挡注入的写法）', async () => {
+    const db = await freshWoDb();
+    const c = asClient(db);
+    let threw: unknown = null;
+    try {
+      await getDefsAcrossAllVersions(c, T, 'work_order', 'work_orders; DROP TABLE work_orders--', DEFAULT_WORK_ORDER_DEF);
+    } catch (e) {
+      threw = e;
+    }
+    expect(threw, '未登记的表必须抛错，不能静默拼进 SQL').not.toBeNull();
+    expect(String((threw as Error)?.message)).toMatch(/未登记/);
+    // 表还在 ⇒ 注入没生效
+    const r = await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM work_orders`);
+    expect(r.rows[0].n).toBe(0);
   });
 });

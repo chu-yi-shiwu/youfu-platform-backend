@@ -84,7 +84,10 @@ CREATE TABLE work_orders (
   sla_due_at    timestamptz,
   sla_paused_at timestamptz,
   assigned_at   timestamptz,
-  ext           jsonb NOT NULL DEFAULT '{}'::jsonb
+  ext           jsonb NOT NULL DEFAULT '{}'::jsonb,
+  -- T1-B 103 迁移（work_orders.def_version）所加列：本文件是手写 DDL，等价补齐，
+  -- 否则 workerLoadDrift 走「各版本名单」时 SELECT DISTINCT def_version 会报列不存在。
+  def_version   int NOT NULL DEFAULT 0
 );
 CREATE TABLE ticket_event (
   id           bigserial PRIMARY KEY,

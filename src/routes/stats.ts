@@ -5,8 +5,8 @@ import { Router } from 'express';
 import { withTenantClient } from '../db/pool.js';
 import { processMetrics, workerLoadDrift } from '../repo/stats.js';
 import { qualityReport } from '../services/dataQuality.js';
-import { getWorkflowDef } from '../engine/workflowDef.js';
-import { doneStates } from '../engine/stateMachine.js';
+import { getDefsAcrossAllVersions, intersectStates } from '../engine/workflowDef.js';
+import { doneStates, DEFAULT_WORK_ORDER_DEF } from '../engine/stateMachine.js';
 import { requirePermission } from '../middleware/role.js';
 
 const router = Router();
@@ -72,8 +72,10 @@ router.get('/stats/overdue', async (req, res, next) => {
     const tenantId = res.locals.auth.tenantId;
     const out = await withTenantClient(tenantId, async (client) => {
       await requirePermission(res.locals.auth, client, 'dashboard.view');
-      const def = await getWorkflowDef(client, tenantId, 'work_order');
-      const done = doneStates(def);
+      // T1-B 多版本并存兜底：这里是「排除」判定（NOT status = ANY(done)），取各版本**交集**——
+      //   只把"所有版本都认是完成态"的状态排除掉，否则老单会被当成已完成 ⇒ **逾期数少报**。
+      const defs = await getDefsAcrossAllVersions(client, tenantId, 'work_order', 'work_orders', DEFAULT_WORK_ORDER_DEF);
+      const done = intersectStates(defs.map(doneStates));
       const r = await client.query(
         `SELECT
            COUNT(*)::int AS overdue_total,

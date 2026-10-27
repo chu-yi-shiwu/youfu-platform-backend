@@ -9,8 +9,8 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { withTenantClient } from '../db/pool.js';
 import { AppError } from '../middleware/error.js';
-import { getWorkflowDef } from '../engine/workflowDef.js';
-import { activeStates } from '../engine/stateMachine.js';
+import { getDefsAcrossAllVersions, unionStates } from '../engine/workflowDef.js';
+import { activeStates, DEFAULT_WORK_ORDER_DEF } from '../engine/stateMachine.js';
 import { requirePermission, canAssignRole, type Role } from '../middleware/role.js';
 import { hashPassword } from '../account.js';
 import { generateAdminPassword } from '../repo/tenantProvision.js';
@@ -135,8 +135,11 @@ router.delete('/workers/:id', async (req, res, next) => {
       // `status <> 'completed'`：① 客户改完成态名 → 凡是"真完成"的单都算在途 → 永远删不掉人；
       // ② 已 cancelled / closed / evaluated 的单同样被误判成在途 → 误拒绝删人。
       // 守卫方向是保守的（不会放行本该拦住的单），所以历史表现是"该删删不掉"而非孤儿引用。
-      const delDef = await getWorkflowDef(client, tenantId, 'work_order');
-      const inFlightSet = activeStates(delDef);
+      // T1-B 多版本并存兜底：删人守卫是「包含」判定，取各版本**并集**——
+      //   更多状态被算作在途 ⇒ 守卫方向**更保守**（更难删人），与原注释的取向一致；
+      //   反过来（取 live）会让挂着老单的人看起来空闲 ⇒ 被删掉 ⇒ 工单成孤儿引用。
+      const defs = await getDefsAcrossAllVersions(client, tenantId, 'work_order', 'work_orders', DEFAULT_WORK_ORDER_DEF);
+      const inFlightSet = unionStates(defs.map(activeStates));
       const inFlight = await client.query(
         `SELECT 1 FROM work_orders WHERE tenant_id=$1 AND assignee_id=$2 AND status = ANY($3::text[]) LIMIT 1`,
         [tenantId, req.params.id, inFlightSet],

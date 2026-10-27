@@ -7,8 +7,8 @@
 //   是否有人工 transition 干预）。真实无人值守闭环率待工程接 ticket_event 审计聚合细化，
 //   此处不编造"演示自动完成"数据（已消除演示自动置 completed 的旧问题）。
 import type { PoolClient } from 'pg';
-import { getWorkflowDef } from '../engine/workflowDef.js';
-import { doneStates, terminalStates, activeStates, cancelledStates } from '../engine/stateMachine.js';
+import { getDefsAcrossAllVersions, unionStates } from '../engine/workflowDef.js';
+import { doneStates, terminalStates, activeStates, cancelledStates, DEFAULT_WORK_ORDER_DEF } from '../engine/stateMachine.js';
 
 // P-5：统计聚合短 TTL 缓存（单进程部署足够；对齐 DataScreen 30s 刷新，降低重复聚合压力）。
 // 按租户键隔离；仅缓存最终计算结果，不影响 RLS（结果已按租户算出）。
@@ -54,10 +54,12 @@ export async function ticketStats(client: PoolClient, tenantId: string): Promise
   if (hit) return hit;
   // A+ Phase1.5：完成态口径由 workflow_def 派生（DEFAULT=['completed']；RICH=['completed','closed','evaluated']），
   // 富模板下不漏计 closed/evaluated，且不把 cancelled 算完成。
-  const def = await getWorkflowDef(client, tenantId, 'work_order');
-  const done = doneStates(def);
+  // T1-B 多版本并存兜底：统计是「包含」计数，取各版本**并集**——
+  //   老单锁旧版本，其状态在新流程里可能不算完成/取消 ⇒ 只读 live 会让这批老单**漏计**。
+  const defs = await getDefsAcrossAllVersions(client, tenantId, 'work_order', 'work_orders', DEFAULT_WORK_ORDER_DEF);
+  const done = unionStates(defs.map(doneStates));
   // 取消态口径同源派生（不入这一格则客户改流程后 cancelled 恒为 0）。
-  const cancelledStatesList = cancelledStates(def);
+  const cancelledStatesList = unionStates(defs.map(cancelledStates));
   const r = await client.query<{
     total: string;
     completed: string;
@@ -200,9 +202,10 @@ export async function processMetrics(client: PoolClient, tenantId: string): Prom
   const hit = cachedResult<ProcessMetrics>(cacheKey);
   if (hit) return hit;
   // A+ Phase1.5：由 workflow_def 派生"活跃集/完成态"，富模板下不写死 4 态。
-  const def = await getWorkflowDef(client, tenantId, 'work_order');
-  const terminals = terminalStates(def); // 终态（含 cancelled/closed/evaluated）→ 不计入活跃堆
-  const done = doneStates(def); // 成功完成态（含 completed 里程碑态）
+  // T1-B 多版本并存兜底：同上，包含计数取并集。
+  const defs = await getDefsAcrossAllVersions(client, tenantId, 'work_order', 'work_orders', DEFAULT_WORK_ORDER_DEF);
+  const terminals = unionStates(defs.map(terminalStates)); // 终态（含 cancelled/closed/evaluated）→ 不计入活跃堆
+  const done = unionStates(defs.map(doneStates)); // 成功完成态（含 completed 里程碑态）
   // 1) 派单命中率 + 转派率
   const base = await client.query<{ total: string; auto_dispatched: string }>(
     `SELECT COUNT(*)::text AS total, COUNT(*) FILTER (WHERE auto_flow = true)::text AS auto_dispatched
@@ -294,8 +297,10 @@ export interface WorkerLoadDrift {
  * 活跃态口径与 load 净结算同源（activeStates(def)），杜绝两处口径漂移。
  */
 export async function workerLoadDrift(client: PoolClient, tenantId: string): Promise<WorkerLoadDrift[]> {
-  const def = await getWorkflowDef(client, tenantId, 'work_order');
-  const active = activeStates(def);
+  // T1-B 多版本并存兜底：工人负载是「包含」计数，取各版本**并集**——
+  //   老单不计入某工人名下 ⇒ 该工人看起来更闲 ⇒ **派单会给他派更多，实际过载**。
+  const defs = await getDefsAcrossAllVersions(client, tenantId, 'work_order', 'work_orders', DEFAULT_WORK_ORDER_DEF);
+  const active = unionStates(defs.map(activeStates));
   const r = await client.query<{ id: string; name: string; load: number; c: string }>(
     `SELECT w.id, w.name, w.load, COALESCE(a.cnt, 0)::text AS c
        FROM worker w
