@@ -13,7 +13,9 @@ DELETE FROM notification     WHERE tenant_id = 't-phasea';
 DELETE FROM workflow_def     WHERE tenant_id = 't-phasea';
 DELETE FROM worker           WHERE tenant_id = 't-phasea';
 DELETE FROM service_desk     WHERE tenant_id = 't-phasea';
-DELETE FROM service_desk_agent WHERE tenant_id = 't-phasea';
+-- 原 DELETE FROM service_desk_agent WHERE tenant_id = 't-phasea';
+--   已于 2026-10-28 随「坐席下线」移除（决策：初一「取消坐席」，只删坐席、服务台保留）。
+--   表将由迁移 105 删除；留着这行会让本种子脚本在表不存在后直接报错。
 DELETE FROM account_user     WHERE tenant_id = 't-phasea';
 DELETE FROM system_config    WHERE tenant_id = 't-phasea';
 
