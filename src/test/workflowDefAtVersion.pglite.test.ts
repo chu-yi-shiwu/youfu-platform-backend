@@ -17,8 +17,11 @@
  */
 import { describe, it, expect, vi } from 'vitest';
 import { PGlite } from '@electric-sql/pglite';
+import express from 'express';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import type { Server } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import type { PoolClient } from 'pg';
 import {
   getWorkflowDefAtVersion,
@@ -138,7 +141,7 @@ function wrap(db: PGlite) {
 const asClient = (db: PGlite) => db as unknown as PoolClient;
 
 describe('getWorkflowDefAtVersion 支取判定', () => {
-  it('① version <= 0（未锁定）⇒ 走 live def（与今天逐字节一致）', async () => {
+  it('① version <= 0（未记录）⇒ 走 live def（与今天逐字节一致）', async () => {
     const db = await freshDb();
     const d = await getWorkflowDefAtVersion(asClient(db), T, ET, 0, FALLBACK);
     expect(d.transitions[0]?.event).toBe('assign_v3'); // = V3，不是 FALLBACK
@@ -219,7 +222,7 @@ describe('getDefsForVersions 分组（R-2）', () => {
     expect(stats.history, 'history 查询次数必须等于不同版本数').toBe(2);
   });
 
-  it('⑧ 全为 0（未锁定）⇒ 一个版本都不查 history，直接走 live', async () => {
+  it('⑧ 全为 0（未记录）⇒ 一个版本都不查 history，直接走 live', async () => {
     const db = await freshDb();
     const { client, stats } = wrap(db);
     const m = await getDefsForVersions(client, T, ET, [{ def_version: 0 }, { def_version: 0 }], FALLBACK);
@@ -228,7 +231,7 @@ describe('getDefsForVersions 分组（R-2）', () => {
     expect(stats.history).toBe(0);
   });
 
-  it('⑨ 含未锁定 + 锁定 + 失效版本 ⇒ 各归各位（0 与 999 都落到 live）', async () => {
+  it('⑨ 含未记录 + 已记录 + 失效版本 ⇒ 各归各位（0 与 999 都落到 live）', async () => {
     const db = await freshDb();
     const spy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     try {
@@ -851,6 +854,57 @@ describe('批4 · work_orders 在途工单锁版本（真库 A1-W / A2-W / A5-W�
     expect(rows.length).toBe(1);
     expect(rows[0].def_version, '存量行必须是哨兵 0，不是被伪造的 1').toBe(0);
   });
+
+  /**
+   * A7（行级端到端）：手工把**某一行**的 def_version 改成 99999 ⇒ 真实流转仍成功且按 live 走 + warn。
+   *
+   * 【与用例 ④ 的分工 —— 为什么 ④ 不够、必须再补这一条】
+   *   ④（:175）是**函数级**：直接把 999 当参数传给 getWorkflowDefAtVersion，验的是
+   *   「函数收到一个不存在的版本号会怎样」。但产品里没人会凭空传版本号——版本号是**从行上读出来的**。
+   *   ⇒ ④ 验不到「行上的脏版本号真的会流到读路径」这一段（读行 → Number(cur.def_version) → 取 def），
+   *     也验不到「降级之后**整条流转**还能走完」。设计 §8 A7 要的是后者，故补这一条行级端到端。
+   *
+   * 【判别关键】升级到 v2 后，`assigned --fast_close--> completed` 是**只有 v2(live) 才有**的边，
+   *   v1 里根本没有（A1-W 已验证：锁 v1 的老单走这条边会 422）。
+   *   ⇒ 脏版本号(99999)若按 live(v2) 降级 ⇒ 该边走得通；
+   *     若降级错了（退回 v1）或干脆抛 500 ⇒ 这里立刻红。
+   */
+  it('A7-行级：某行 def_version 被手工改成 99999 ⇒ 真实流转成功且按 live(v2) 走 + warn（不抛 500）', async () => {
+    const db = await freshWoDb();
+    const c = asClient(db);
+    const wo = await createWorkOrder(c, '脏版本单');
+    expect(wo.def_version, '建单时盖的章 = 当时的 live version（正常锁定值）').toBe(1);
+    await upgradeWoToV2(db); // live 升到 v2、v1 落进 history ⇒ 99999 既不是 live 也不在 history 里
+
+    // —— 手工把**这一行**的版本号改成一个不存在的版本（模拟 live 被绕过 saveWorkflowDef 直改 / 脏数据）
+    await db.query(`UPDATE work_orders SET def_version = 99999 WHERE id = $1`, [wo.id]);
+    const dirty = (await db.query(`SELECT def_version FROM work_orders WHERE id = $1`, [wo.id])).rows[0] as any;
+    expect(dirty.def_version, 'fixture 自检：脏版本号确实落库了（回库查，不信任 UPDATE 返回值）').toBe(99999);
+
+    const spy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      // ① 真实流转路径：走 repo/ticket.ts 的 transition（:207 按行上的 def_version 取 def），
+      //    不是直接调读取函数 ⇒ 这才证明「行上的脏版本号」真的流到了读路径、且没把流转搞成 500。
+      const toAssigned = await woTransition(c, wo.id, 'assigned');
+      expect(toAssigned.row.status, '脏版本号不得让流转失败').toBe('assigned');
+
+      // ② 结果按 live(v2) 走：用只有 v2 才有的边 assigned --fast_close--> completed 判别。
+      const closed = await woTransition(c, wo.id, 'completed');
+      expect(closed.row.status, '降级到 live(v2) ⇒ v2 的新边可用（未降级/退回 v1 则 422）').toBe('completed');
+      const back = (await db.query(`SELECT status FROM work_orders WHERE id = $1`, [wo.id])).rows[0] as any;
+      expect(back.status, '落库状态同样是 completed（不信任 RETURNING）').toBe('completed');
+
+      // ③ 不静默失败（E3）：warn 必须出现，且日志里能带得出来是哪个租户 / 实体 / 版本号。
+      expect(spy.mock.calls.length, '失效版本号必须打 warn，不能静默降级').toBeGreaterThanOrEqual(1);
+      const hit = spy.mock.calls.some((args: unknown[]) => {
+        const blob = args.map((a) => (typeof a === 'string' ? a : JSON.stringify(a))).join(' ');
+        return blob.includes(T) && blob.includes(WO_ET) && blob.includes('99999');
+      });
+      expect(hit, `warn 必须能定位到租户/实体/版本号，实际调用：${JSON.stringify(spy.mock.calls)}`).toBe(true);
+    } finally {
+      spy.mockRestore();
+    }
+  });
 });
 
 // ===================== 批 5 · 多版本并存的「名单兜底」 =====================
@@ -1044,7 +1098,7 @@ async function freshMetricsDb(): Promise<PGlite> {
 }
 
 describe('批6 · processMetrics 活跃堆积（排除判定必须取交集）', () => {
-  it('🔴 穿透：老单不能在活跃堆积里消失（当前用并集 ⇒ 期望 2 实得 1）', async () => {
+  it('🔴 穿透：老单不能在活跃堆积里消失（排除集当前取交集；若退回并集则期望 2 实得 1）', async () => {
     clearStatsCache(); // 缓存按 tenantId 键，跨用例会串味
     const db = await freshMetricsDb();
 
@@ -1217,5 +1271,143 @@ describe('批5b · 模板效果回写（templateEffects.ts，0% 覆盖区）', (
       [T, doneStates(liveDef)],
     );
     expect(Number(after.close_rate), '单版本 ⇒ 并集 = 该版集合，与旧口径逐字节相同').toBe(Number(r.rows[0]?.v ?? 0));
+  });
+});
+
+// ===================== 批 1b · inspection_task 真实写路径（穿透 routes/inspection.ts） =====================
+/**
+ * 【为什么补这一节】
+ *   上面「批1」的 A1/A2 是**引擎级**的：直接 `applyEvent(getWorkflowDefAtVersion(...))`，
+ *   绕开了 `src/routes/inspection.ts:40` 这个真正的写侧调用点 ⇒ 把 :40 改回读 live，
+ *   上面那几条**实测仍然全绿**（只有 inspection.http.test.ts:505 的静态计数会红）。
+ *   ⇒ 本节把 express app 挂在**真 PGlite** 上，用**真 HTTP** 打
+ *     `POST /api/v1/inspection/tasks` 与 `POST /api/v1/inspection/tasks/:id/transition`
+ *     ⇒ 走的是真 routes/inspection.ts：真盖章 + 真 transitionTask + 真 applyEvent + 真落库。
+ *
+ * 【为什么放本文件、不放 inspection.http.test.ts】
+ *   那份把 `../engine/workflowDef.js` **整体 vi.mock 成桩**（:91-112）：
+ *   `getWorkflowDefAtVersion` 与 `getWorkflowDefOrDefault` 都返回同一个 `stubDef`
+ *   ⇒ 在那里「读锁定版本」与「读 live」结果**逐字节相同**，:40 的变异构造上不可能被抓住。
+ *   本文件 workflowDef 是真模块、版本链是真的（live/history 真表）⇒ 才验得到。
+ *
+ * 【为什么用 dev authMode】requirePermission（role.ts:458）/ requireAssigneeOrConfig
+ *   （role.ts:622）在 dev 下恒放行 ⇒ 守卫不参与判定，只让「流转校验」本身说话。
+ *   守卫本身由 inspection.http.test.ts 的 prod 分支覆盖，此处不重复。
+ */
+async function freshRouteDb(): Promise<PGlite> {
+  const db = await freshInspDb(); // live = v1 + 102 迁移 + inspection_task 真表
+  // 011 只有骨架列，路由要写的 items_json / updated_at / scan_meta 是后续迁移加的
+  // ⇒ 按迁移序号补齐（原文照搬，不自抄一份 SQL）。
+  for (const f of ['029_inspection_updated_at.sql', '040_inspection_items.sql', '048_inspection_rfid.sql']) {
+    await db.exec(addColumnStatements(f, 'inspection_task'));
+  }
+  // transitionTask 末尾 emitDomainEvent 是**裸 INSERT、不吞错**（eventBus.ts:16-29）
+  // ⇒ 缺这张表会假红成产品 bug。
+  await db.exec(createTableBlock('020_domain_event.sql', 'domain_event'));
+  return db;
+}
+
+/**
+ * 把 db/pool.js 指向真 PGlite 后**动态 import 真路由**，挂成 express app 并起真端口。
+ * （沿用本文件批 5b 的 `vi.resetModules + vi.doMock + 动态 import` 既有套路。）
+ */
+async function mountInspectionApp(db: PGlite): Promise<{ base: string; close: () => Promise<void> }> {
+  vi.resetModules();
+  vi.doMock('../db/pool.js', () => ({
+    default: {
+      query: async (text: unknown, params?: unknown[]) => db.query(String(text), (params ?? []) as any[]),
+    },
+    // 真库没有 RLS / GUC ⇒ 不开事务，直接把真 pglite client 交给 handler。
+    withTenantClient: async (_tenantId: string, fn: (c: unknown) => unknown) =>
+      fn({ query: (text: unknown, params?: unknown[]) => db.query(String(text), (params ?? []) as any[]) }),
+    assertSafeTenantId: (t: string) => t,
+  }));
+  const [inspMod, errMod] = await Promise.all([
+    import('../routes/inspection.js'),
+    import('../middleware/error.js'),
+  ]);
+  const app = express();
+  app.use(express.json({ limit: '1mb' }));
+  app.use((_req, res, next) => {
+    res.locals.auth = { tenantId: T, role: 'operator', userId: 'u-1', requestId: 'r-1', authMode: 'dev' };
+    next();
+  });
+  app.use('/api/v1/inspection', inspMod.default);
+  app.use(errMod.errorMiddleware);
+  const server = await new Promise<Server>((resolve) => {
+    const s = app.listen(0, () => resolve(s));
+  });
+  const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  return { base, close: () => new Promise<void>((resolve) => server.close(() => resolve())) };
+}
+
+/** 真 HTTP 请求（与 inspection.http.test.ts 同款，不引新依赖）。 */
+function httpJson(method: 'POST', url: string, body: unknown) {
+  return fetch(url, {
+    method,
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+}
+
+/** 走真 `POST /tasks` 建单，并返回**回库查**到的行（不信任响应体 / RETURNING）。 */
+async function createTaskViaRoute(base: string, db: PGlite, title: string) {
+  const r = await httpJson('POST', `${base}/api/v1/inspection/tasks`, { title });
+  expect(r.status, `POST /tasks(${title}) 应 201`).toBe(201);
+  const rows = (await db.query(`SELECT id, def_version, status FROM inspection_task WHERE tenant_id = $1 AND title = $2`, [T, title])).rows as any[];
+  expect(rows.length, `${title} 必须真的落库`).toBe(1);
+  return rows[0] as { id: string; def_version: number; status: string };
+}
+
+/** 走真 `POST /tasks/:id/transition` 流转（inspection.ts:570 → transitionTask:28 → :40）。 */
+function transitionViaRoute(base: string, id: string, event: string) {
+  return httpJson('POST', `${base}/api/v1/inspection/tasks/${id}/transition`, { event });
+}
+
+describe('批1b · inspection_task 真实写路径（穿透 routes/inspection.ts 的 /transition）', () => {
+  it('🔴 穿透 A1：v1 老单 —— v2 新增的 cancel 边被 422 拒掉，v1 自己的 checkin 照走（真 HTTP + 真库）', async () => {
+    const db = await freshRouteDb();
+    const { base, close } = await mountInspectionApp(db);
+    try {
+      const old1 = await createTaskViaRoute(base, db, '老单'); // 走 inspection.ts:363 盖章
+      expect(old1.def_version, '建单盖的章 = 当时的 live version').toBe(1);
+      await upgradeToV2(db); // live 升到 v2：新增 pending --cancel--> cancelled
+
+      // 🔴 变异点：若 :40 被改回「读 live」（如第 4 实参写成 0 ⇒ 走 live），
+      //   这里会拿到 v2 的 def ⇒ cancel 合法 ⇒ 200 而不是 422 ⇒ 本条立刻红。
+      const bad = await transitionViaRoute(base, old1.id, 'cancel');
+      expect(bad.status, 'v2 新增的边不许对 v1 老单生效').toBe(422);
+      expect(((await bad.json()) as any).code).toBe('BAD_STATE');
+      // 被拒的流转不许留下半截状态
+      const afterBad = (await db.query(`SELECT status FROM inspection_task WHERE id = $1`, [old1.id])).rows[0] as any;
+      expect(afterBad.status).toBe('pending');
+
+      // 老单不是被整体冻死：v1 自己的边照走、且真落库。
+      const ok = await transitionViaRoute(base, old1.id, 'checkin');
+      expect(ok.status, 'v1 自己的边必须照常走通').toBe(200);
+      const afterOk = (await db.query(`SELECT status FROM inspection_task WHERE id = $1`, [old1.id])).rows[0] as any;
+      expect(afterOk.status, '真落库，不是只回了个 200').toBe('in_progress');
+    } finally {
+      await close();
+    }
+  });
+
+  it('🔴 穿透 A2（反向防做反）：改版后新建的单盖 v2 并按 v2 走 —— cancel 边放行', async () => {
+    const db = await freshRouteDb();
+    const { base, close } = await mountInspectionApp(db);
+    try {
+      await createTaskViaRoute(base, db, '老单');
+      await upgradeToV2(db);
+      const fresh = await createTaskViaRoute(base, db, '新单');
+      expect(fresh.def_version, '改版后建的新单必须盖 v2 的章').toBe(2);
+
+      // 少了这条，「一律锁到最老版本 / 版本号写死 1」这种做反了的实现也能让 A1 全绿。
+      const r = await transitionViaRoute(base, fresh.id, 'cancel');
+      expect(r.status, '新单应当用得上 v2 的新边').toBe(200);
+      const row = (await db.query(`SELECT status FROM inspection_task WHERE id = $1`, [fresh.id])).rows[0] as any;
+      expect(row.status).toBe('cancelled');
+    } finally {
+      await close();
+    }
   });
 });

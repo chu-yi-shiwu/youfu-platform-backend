@@ -519,6 +519,75 @@ describe('A3-W：available 老单新单各按各的版本（穿透 read 侧）',
   });
 });
 
+// ============================================================
+// A3（设计 §8 验收条款原文）· available 与写侧一致 —— 防 R-1
+//
+// 【这条在验什么】详情接口返回的 `available` 里**每个 event 逐个真实调用 ⇒ 无 422**。
+//   这是唯一能抓住「只改写侧（流转按锁版本校验）不改读侧（按钮按 live 渲染）」的断言 ——
+//   那种 bug 的表现正是：用户看得见按钮，点下去 422。
+//
+// 【三条不可退让的写法纪律】
+//   ① available **必须**取自 GET 详情的响应体，绝不在本文件调 availableTransitions() 自己算。
+//     自己算的那份与读侧实现无关 ⇒ 读侧改回「一律读 live」时它照样成立 ⇒ 假绿，等于没补。
+//   ② 场景必须是「老单锁 v1、live 是 v2」的多版本并存 —— 单版本下读侧怎么错都对得上。
+//   ③ 每个 event 都要真发起 HTTP 调用（走真实路由 → transition()），不是直接调引擎函数。
+// ============================================================
+describe('A3：详情 available 逐个真实调用 ⇒ 无 422（available 与写侧一致，防 R-1）', () => {
+  const rowOf = (id: string, defVersion: number) => ({
+    id, tenant_id: T, order_no: 'WO_A3_R1', status: 'assigned',
+    assignee_id: null, assignee_name: null, def_version: defVersion,
+  });
+
+  /** 详情读路径：findOne 形状命中行（行上带 def_version）+ 版本化 def 读。 */
+  const detailHandlers = (id: string, defVersion: number): Handler[] => [
+    {
+      match: (t) => t.includes('FROM work_orders wo') && t.includes('LEFT JOIN worker w'),
+      reply: () => ({ rows: [rowOf(id, defVersion)] }),
+    },
+    ...versionedDefHandlers(),
+    { match: (t) => t.includes('FROM ticket_event'), reply: () => ({ rows: [] }) },
+  ];
+
+  /** 写路径：行锁读（FOR UPDATE）返回同一行 ⇒ transition() 按**行上锁的那一版**校验。 */
+  const transitionHandlers = (id: string, defVersion: number): Handler[] => [
+    { match: (t) => t.includes('FOR UPDATE'), reply: () => ({ rows: [rowOf(id, defVersion)], rowCount: 1 }) },
+    ...versionedDefHandlers(),
+    {
+      match: (t) => t.includes('UPDATE work_orders SET status'),
+      reply: (_t, p) => ({ rows: [{ ...rowOf(id, defVersion), status: p[0] as string }], rowCount: 1 }),
+    },
+    { match: (t) => t.includes('SELECT DISTINCT def_version FROM work_orders'), reply: () => ({ rows: [{ def_version: defVersion }] }) },
+  ];
+
+  it('老单(def_version=1, live=2)与新单(v2)：详情给的 available 逐个真调 /transition ⇒ 没有一个 422', async () => {
+    for (const [id, ver, label] of [
+      [WO_OLD_ID, 1, '老单(v1)'],
+      [WO_NEW_ID, 2, '新单(v2)'],
+    ] as const) {
+      // ① available 只认接口返回值（不许自己算）
+      const { client } = makeClient(detailHandlers(id, ver));
+      h.client = client;
+      const detail = await get(`/open/work_order/${id}`);
+      expect(detail.status).toBe(200);
+      const available = (detail.body.available ?? []) as Array<{ to: string; event: string }>;
+      expect(available.length, `${label}：详情必须给出至少 1 个可点动作，否则本条等于没跑`).toBeGreaterThan(0);
+
+      // ② 逐个真调（真实路由 → transition()，每个 event 一次真实 HTTP 往返）
+      const rejected: string[] = [];
+      for (const a of available) {
+        const { client: c2 } = makeClient(transitionHandlers(id, ver));
+        h.client = c2;
+        const r = await post(`/open/work_order/${id}/transition`, { to: a.to });
+        if (r.status === 422) {
+          rejected.push(`${label} ${a.event}(assigned→${a.to}) ⇒ 422 ${r.body.code ?? ''} ${r.body.message ?? ''}`);
+        }
+      }
+      // ③ 断言：详情给了按钮、点下去却被写侧拒 ⇒ available 与写侧不一致（R-1 被造出来了）
+      expect(rejected).toEqual([]);
+    }
+  });
+});
+
 describe('A4-W：POST /open/work_order 建单盖章（穿透 INSERT 实参）', () => {
   const createBody = (extra: Record<string, unknown> = {}) => ({
     id: WO_ID,

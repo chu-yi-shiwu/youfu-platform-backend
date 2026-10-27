@@ -101,6 +101,21 @@ function stripSqlComments(sql: string): string {
 }
 
 /**
+ * 把一个单元格压成可逐字节比较的字符串（供用例 ⑯ 的行级比对用）。
+ * 【为什么不能直接 toEqual(raw)】
+ *   ① Date / jsonb 对象用 toEqual 比较依赖引用语义与键序，换个驱动就飘；
+ *   ② '1'（string）与 1（number）在 JS 的 == 下相等，会把「迁移把列换了类型」洗绿。
+ * ⇒ 带上 typeof 前缀 + 确定性序列化：Date → ISO 串，对象 → JSON 串，null/undefined → 固定记号。
+ */
+function normalizeCell(v: unknown): string {
+  if (v === null || v === undefined) return 'NULL';
+  if (v instanceof Date) return `date:${v.toISOString()}`;
+  if (Array.isArray(v)) return `array:${JSON.stringify(v)}`;
+  if (typeof v === 'object') return `json:${JSON.stringify(v)}`;
+  return `${typeof v}:${String(v)}`;
+}
+
+/**
  * _migrations 记账表建表原文（与 src/db/migrate.ts:31-34 同款）。
  * 【为什么抽成常量】103 的库也要同一张记账表；抽出来才不会有两份真源、
  * 也不会为了复用而改动 freshDb() 的既有行为。
@@ -166,6 +181,48 @@ async function colShape(
   return { isNullable: row.is_nullable === 'YES', dataType: row.data_type, def: row.column_default };
 }
 
+/**
+ * 🔴 **按真实迁移通道的口径**应用 102：已记账 ⇒ skip（src/db/migrate.ts:61 `continue`）。
+ *
+ * 【为什么不能直接 db.exec(UP)】那是"无条件执行"，而真实通道不是这样 ——
+ * 本文件旧版 ⑧ 正因为无条件 exec 上游 SQL，在「只删列不擦账」变异下**仍然绿**
+ * （SQL 被硬跑一遍，列当然回来了），是纸面断言。本函数是那条 paper assertion 的替身。
+ *
+ * @returns 是否真的执行了（false = 被记账 skip 掉）
+ */
+async function apply102ViaMigrate(db: PGlite): Promise<boolean> {
+  if (await ledgerHas(db, UP_NAME)) return false; // migrate.ts:61 —— 已记账就 skip
+  await db.exec(UP);
+  // migrate.ts:87 —— 跑完才记账，口径一致（ON CONFLICT DO NOTHING，只增不删）
+  await db.query(`INSERT INTO _migrations (name) VALUES ($1) ON CONFLICT DO NOTHING`, [UP_NAME]);
+  return true;
+}
+
+/**
+ * 反向迁移的真实执行方式：人手工 `psql -v ON_ERROR_STOP=1 -f rollback/xxx_down.sql`
+ * （自带 BEGIN/COMMIT，禁止叠加 --single-transaction —— 见 down 文件头）。
+ * @param sql 默认用仓库里的 down 原文；传变体时只改内存里的字符串，**不动仓库文件**。
+ */
+async function applyDownViaPsql(db: PGlite, sql: string = DOWN): Promise<void> {
+  await db.exec(sql);
+}
+
+/**
+ * 造「只删列不擦账」的变体：把 down 里擦账那一条 DELETE 去掉（其余一字不改，剥注释后过滤）。
+ * 【为什么自己造而不用上面那种 —— 因为留痕迹的仓库文件不能动】本函数只在内存里改。
+ */
+function withoutLedgerWipe(sql: string): string {
+  const stripped = stripSqlComments(sql);
+  const out = stripped
+    .split('\n')
+    .filter((l) => !/DELETE\s+FROM\s+_migrations/i.test(l))
+    .join('\n');
+  if (out === stripped) {
+    throw new Error('变体构造失败：down 文件里没找到擦账 DELETE（本测试已失效，请检查 down 文件）');
+  }
+  return out;
+}
+
 describe('102_inflight_def_version 正向', () => {
   it('① 三张表都加上 def_version', async () => {
     const db = await freshDb();
@@ -227,6 +284,71 @@ describe('102_inflight_def_version 正向', () => {
     // 兜底：整个文件里一条 UPDATE 都不该有（本迁移只是加列）
     expect(UP.trim()).not.toMatch(/^\s*UPDATE\s/im);
   });
+
+  it('⑯ 🔴 A5 行级字节比对：迁移前后抽 3 行，除 def_version 外每字段逐项不变', async () => {
+    // 【这条补的是什么】设计 §8 A5 原文要求「迁移前后**抽 N 行**，def_version 全为 0，
+    // 且**除该列外其它字段字节不变**」。既有的 ④ 只验了「def_version 全为 0」且样本只有 1 行，
+    // 完全没法发现「迁移顺手改写了业务数据」（如夹一句 UPDATE ... SET status='x'）。
+    // 本条用 3 行有区分度的数据 + 整行 SELECT * 快照，按**字段名逐个**比对。
+    //
+    // 【为什么是 3 行】1 行只能证明"这一行没被改"，证明不了"没有按条件改写某一类行"；
+    // 3 行覆盖 pending / in_progress / done 三种 status，夹带 UPDATE 时至少命中一类。
+    const db = await freshDb();
+    // id 是 uuid DEFAULT gen_random_uuid()，不手工塞（PGlite 会判类型错误 —— 见 ④ 注释）；
+    // 用 tenant_id + title 做稳定主键，避免依赖 ORDER BY（中文排序随 locale 变）。
+    // 字段刻意覆盖 uuid/nullable/text/double/jsonb/timestamptz 各种形态，
+    // 其中 status / note / photos 是最容易被"顺手改写"的目标。
+    const ROWS: Array<[string, string, string, string]> = [
+      ['tenant-甲', '存量-待处理', 'pending', '甲备注 / 含斜杠与空格'],
+      ['tenant-乙', '存量-进行中', 'in_progress', '乙备注\n含换行\n第二行'],
+      ['tenant-丙', '存量-已完成', 'done', '丙备注 <含尖括号&符号>'],
+    ];
+    for (const [tenant, title, status, note] of ROWS) {
+      await db.exec(
+        `INSERT INTO inspection_task
+           (tenant_id, type, title, assignee, status, geo_lat, geo_lng, note, photos,
+            scheduled_at, done_at, created_by, created_at)
+         VALUES ('${tenant}', 'plan', '${title}', '巡检员-${title}', '${status}',
+                 31.2304, 121.4737, '${note}', '[{"u":"${title}.png"}]'::jsonb,
+                 '2025-01-02T03:04:05Z', NULL, 'u-1', '2024-12-01T00:00:00Z')`,
+      );
+    }
+
+    // 迁移前整行快照（SELECT * ⇒ 不预设任何字段清单，迁移改了 schema 也算变化被测到）
+    type Row = Record<string, unknown>;
+    const snapBefore = await db.query<Row>(`SELECT * FROM inspection_task`);
+    expect(snapBefore.rows.length, '迁移前应有 3 行样本').toBe(ROWS.length);
+
+    await db.exec(UP);
+
+    const snapAfter = await db.query<Row>(`SELECT * FROM inspection_task`);
+    expect(snapAfter.rows.length, '迁移后行数必须不变（不许增删行）').toBe(snapBefore.rows.length);
+
+    const beforeByTitle = new Map(snapBefore.rows.map((r) => [String(r.title), r]));
+    const seen = new Set<string>();
+    for (const after of snapAfter.rows) {
+      const key = String(after.title);
+      const before = beforeByTitle.get(key);
+      expect(before, `迁移后出现了迁移前没有的行：${key}`).toBeDefined();
+      seen.add(key);
+
+      // ① 除 def_version 外的每个字段逐个比字节（uniq 前缀带上 typeof，防 '1' 与 1 蒙混过关）
+      const fields = Object.keys(before as Row);
+      expect(fields.length, '快照字段太少 ⇒ 比对形同虚设').toBeGreaterThanOrEqual(10);
+      for (const f of fields) {
+        expect(normalizeCell((after as Row)[f]), `${key}.${f} 迁移前后必须字节不变`).toBe(
+          normalizeCell((before as Row)[f]),
+        );
+      }
+      // ② def_version 必须是 E4 哨兵 0
+      expect(after[COL], `${key}.${COL} 必须全为 0（E4：不伪造建单版本）`).toBe(0);
+      // ③ 迁移后不许凭空多出 def_version 之外的字段
+      const extra = Object.keys(after).filter((k) => !(k in (before as Row)));
+      expect(extra.filter((k) => k !== COL), `${key} 多出了 ${COL} 之外的字段`).toEqual([]);
+    }
+    // ④ 迁移前的每一行都被比过（漏比 = 假绿）
+    expect([...seen].sort(), '必须逐行比对到全部 3 行').toEqual([...beforeByTitle.keys()].sort());
+  });
 });
 
 describe('102_inflight_def_version 反向', () => {
@@ -267,6 +389,67 @@ describe('102_inflight_def_version 反向', () => {
     expect(await ledgerHas(db, UP_NAME)).toBe(true);
     await db.exec(DOWN);
     expect(await ledgerHas(db, UP_NAME), '反向后记账仍在').toBe(false);
+  });
+
+  it('⑰ 🔴 正 → 反 → 正（**走真实迁移通道**）：列去而复返，且第三步不许被 skip', async () => {
+    // 【为什么还要再写一条】既有的 ⑧ 是无条件 `db.exec(UP)`，直接绕过
+    // src/db/migrate.ts:61 的 skip 逻辑。实测（见下）：把 down 里「擦账 DELETE」注释掉，
+    // ⑧ **仍然全绿** —— 它证明不了任何事。本条第 3 步走 apply102ViaMigrate（真实 skip 语义），
+    // 同一变异下**必红**。这是本条相对 ⑧ 唯一的、也是关键的增量。
+    //
+    // 【为什么这条红很重要】「只删列不擦账」这个假回退，症状发生在**已经成功回退之后**：
+    // 回退 → 修 bug → 重新上线，此时 102 被记账 skip ⇒ 列永远回不来 ⇒ 42703 ⇒ 500。
+    const db = await freshDb();
+
+    // ① 正向（真实通道）：真的跑了 + 列在 + 记账在
+    const ran1 = await apply102ViaMigrate(db);
+    expect(ran1, '首次上线 102 应真的被执行（不该被 skip）').toBe(true);
+    for (const t of TABLES) expect(await columnsOf(db, t), `${t} 迁移后`).toContain(COL);
+    expect(await ledgerHas(db, UP_NAME), '迁移后必须有记账').toBe(true);
+
+    // ② 反向（人工 psql -f）：列没了 **且账也没了**
+    await applyDownViaPsql(db);
+    for (const t of TABLES) expect(await columnsOf(db, t), `${t} 反向后`).not.toContain(COL);
+    expect(await ledgerHas(db, UP_NAME), '反向必须同时擦账（只删列不擦账 = 假回退）').toBe(false);
+
+    // ③ 再次正向（真实通道）：不该被 skip，列必须加得回来
+    const ran2 = await apply102ViaMigrate(db);
+    expect(ran2, '重新上线时 102 不该被记账 skip 掉').toBe(true);
+    for (const t of TABLES) expect(await columnsOf(db, t), `${t} 再上线后列必须加回来`).toContain(COL);
+    expect(await ledgerHas(db, UP_NAME), '重新记账').toBe(true);
+  });
+
+  it('⑱ 🔴 假回退钉死：只删列不擦账 ⇒ 再上线被 skip ⇒ 读 def_version 报 42703', async () => {
+    // 与 ⑰ 互补：⑰ 变异的是**仓库里的 down 文件**，本条把变体造在**内存**里
+    // （withoutLedgerWipe），不碰仓库任何文件 ⇒ 日常回归也能钉住这个洞。
+    const db = await freshDb();
+    await apply102ViaMigrate(db);
+    // 先插一行真实业务数据，好让 42703 真的炸在查询上（空表 SELECT 未必触发）。
+    await db.exec(
+      `INSERT INTO inspection_task (tenant_id, title, status)
+       VALUES ('tenant-1', '在途单', 'pending')`,
+    );
+
+    // 变体：把擦账那一条 DELETE 去掉（只改内存里的 SQL，**不动仓库里的 down 文件**）
+    await applyDownViaPsql(db, withoutLedgerWipe(DOWN));
+
+    // 假回退的表象：列确实没了……
+    expect(await columnsOf(db, 'inspection_task'), '变体下列应被删掉').not.toContain(COL);
+    // ……但账还在 ⇒ 真实通道会 skip ⇒ 列永远回不来
+    expect(await ledgerHas(db, UP_NAME), '变体下记账应残留（这正是假回退的特征）').toBe(true);
+    const ran = await apply102ViaMigrate(db);
+    expect(ran, '假回退后重新上线，102 被 skip（列回不来）').toBe(false);
+    expect(await columnsOf(db, 'inspection_task'), '列没被加回来').not.toContain(COL);
+
+    // 落到生产症状：读 def_version ⇒ 42703 ⇒ 500
+    let err: unknown = null;
+    try {
+      await db.query(`SELECT ${COL} FROM inspection_task WHERE tenant_id = 'tenant-1'`);
+    } catch (e) {
+      err = e;
+    }
+    expect(err, '列不在却没报错 ⇒ 洞没被钉住').not.toBeNull();
+    expect(String((err as { message?: string } | null)?.message ?? '')).toMatch(/def_version/i);
   });
 
   it('⑩ 反向后再正向 → 记账重新回来（模拟"回退 → 修 bug → 重新上线"）', async () => {
