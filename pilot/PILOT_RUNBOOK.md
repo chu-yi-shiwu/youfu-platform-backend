@@ -39,10 +39,23 @@ ssh root@8.136.107.153 "mkdir -p /opt/youfu/backend.bak.\$(date +%s) && \
   tar cf - --exclude=node_modules -C /opt/youfu backend | \
   tar xf - -C /opt/youfu/backend.bak.\$(date +%s)"
 
-# 2) 同步源码（保留 .env / node_modules / 根目录 0NN_*.sql 迁移）
+# 2) 同步源码（保留 .env / node_modules）
 cd /path/to/youfu_platform_backend
 tar czf - src public tsconfig.json tsconfig.build.json package.json package-lock.json scripts | \
   ssh root@8.136.107.153 "cd /opt/youfu/backend && tar xzf -"
+
+# 2.5) 🔴 跑数据库迁移 —— **这一步原 runbook 缺失，是 102/103 迁移长期没上生产的直接原因**
+#   迁移**不会**随服务启动自动跑（src/server.ts 里没有 migrate 调用），必须手工执行。
+#   实测教训（2026-10-28）：scripts/*.sh 在 git blob 里**就是 CRLF**（不是"只有工作副本是"），
+#   `git archive` 取出来照样是 CRLF ⇒ `set -euo pipefail\r` 直接让整个迁移挂掉，
+#   且不报任何 DB 错误、只是静默少加列 —— 最难查的一类失败。
+#   ⇒ 传送后**必须先归一化**，再执行：
+ssh root@8.136.107.153 "cd /opt/youfu/backend && \
+  for f in scripts/*.sh; do sed -i 's/\r$//' \"\$f\"; done && \
+  bash scripts/migrate-as-owner.sh /opt/youfu/backend"
+#   预期输出：已应用的全部 `skip (already applied): ...`，本次新增的显示 `apply: NNN_xxx.sql` + DDL 回显。
+#   执行后务必核对记账（否则等于没跑）：
+#     psql -d youfu -t -A -c "SELECT name FROM _migrations WHERE name LIKE '10%'"
 
 # 3) 构建（Node 16 直编，勿用 tsc 全局）
 ssh root@8.136.107.153 "cd /opt/youfu/backend && \
@@ -55,6 +68,11 @@ ssh root@8.136.107.153 "systemctl restart youfu-backend.service"
 curl -s -o /dev/null -w "master-data:%{http_code}\n" http://127.0.0.1:4001/master-data
 curl -s -o /dev/null -w "process-mining:%{http_code}\n" http://127.0.0.1:4001/process-mining
 curl -s -H "Authorization: Bearer dev" -H "X-Tenant-Id: t-verification" http://127.0.0.1:4001/api/v1/assets
+#   ⚠️ 本环境 AUTH_MODE=prod ⇒ 上面三条返回 **401 是正常**（要登录），不是故障。
+#   真正的健康判据是日志，不是 HTTP 码：
+ssh root@8.136.107.153 "journalctl -u youfu-backend.service --since '10 min ago' --no-pager | \
+  grep -iE '42703|does not exist|ERROR'"
+#   ⇒ 空 = 健康。另确认 `listening on 0.0.0.0:4001` 与各 scheduler started 都在。
 ```
 
 ---
