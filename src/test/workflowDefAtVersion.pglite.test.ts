@@ -37,6 +37,8 @@ import { applyEvent, availableTransitions } from '../engine/stateMachine.js';
 // 批 4（工单）：写侧两个函数都在 repo/ticket.ts 里且可直调 ⇒ 真库里直接调真产品代码，
 // 连「盖章」都验的是真链路（不像批 1/3 只能模拟 INSERT）。
 import { createWithIdem, transition } from '../repo/ticket.js';
+// 批 6：要验的是「调用点有没有真的取交集」，不是复算一遍口径 ⇒ 直接调真产品函数 processMetrics。
+import { processMetrics, clearStatsCache } from '../repo/stats.js';
 // WorkflowDef 定义在 stateMachine.ts，workflowDef.ts 只是 import 它、并未 re-export。
 import {
   DEFAULT_WORK_ORDER_DEF,
@@ -1011,6 +1013,56 @@ describe('批5 · 多版本并存名单兜底（静默丢单洞）', () => {
     // 表还在 ⇒ 注入没生效
     const r = await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM work_orders`);
     expect(r.rows[0].n).toBe(0);
+  });
+});
+
+// ===================== 批 6 · 口径方向（独立评审 C1：排除判定用成了并集） =====================
+/**
+ * 【为什么必须有这份】
+ *   批 5 的验收是「我在测试里手写正确写法，再断言它对」——那只验了 `intersectStates` 这个
+ *   纯函数，**没验调用点真的用了它**。结果 `repo/stats.ts:207` 我实际写成了 `unionStates`，
+ *   批 5 的 6 条测试全绿、tsc 全绿，方向错了一整轮没人发现（独立评审才抓出来）。
+ *   ⇒ 本节改成**直接调真产品函数 `processMetrics`**，让「调用点写错」立刻变红。
+ *
+ * 【判定方向怎么定】`terminals` 落到 `stats.ts:252` 是 `status <> ALL($2::text[])`
+ *   ⇒ 这是**排除**判定 ⇒ 按本批自定原则必须取**交集**（只排除所有版本都认是终态的状态）。
+ *   取并集会让排除集变大 ⇒ 老单被排掉 ⇒ 大屏「瓶颈定位/活跃堆积」少报。
+ *
+ * 【样本】沿用批 5 的 v1/v2：v1 里 X 是活跃态（有出边），v2 里 X 变终态（无出边）。
+ *   老单 status='X' def_version=1 ⇒ 并集排除集含 X ⇒ 被漏；交集排除集不含 X ⇒ 保留。
+ */
+async function freshMetricsDb(): Promise<PGlite> {
+  const db = await freshMultiVersionDb(); // 已含 live=v2、history v1、两单（wo-old-v1='X'/v1，wo-new-v2='assigned'/v2）
+  await db.exec(addColumnStatements('004_sla.sql', 'work_orders')); // sla_due_at（SLA 达成率口径要用）
+  // processMetrics 的瓶颈定位是 5 张表的 UNION ALL ⇒ 表都得在，否则真库直接报错。
+  await db.exec(createTableBlock('001_init.sql', 'worker'));
+  await db.exec(createTableBlock('011_inspection.sql', 'inspection_task'));
+  await db.exec(createTableBlock('012_volunteer.sql', 'volunteer_record'));
+  await db.exec(createTableBlock('013_feedback.sql', 'feedback'));
+  await db.exec(createTableBlock('014_monitor.sql', 'monitor_alert'));
+  return db;
+}
+
+describe('批6 · processMetrics 活跃堆积（排除判定必须取交集）', () => {
+  it('🔴 穿透：老单不能在活跃堆积里消失（当前用并集 ⇒ 期望 2 实得 1）', async () => {
+    clearStatsCache(); // 缓存按 tenantId 键，跨用例会串味
+    const db = await freshMetricsDb();
+
+    // —— 先证明旧算法（并集）确实会漏，作为红对照
+    const c = asClient(db);
+    const defs = await getDefsAcrossAllVersions(c, T, 'work_order', 'work_orders', DEFAULT_WORK_ORDER_DEF);
+    const byUnion = unionStates(defs.map(terminalStates));
+    expect(byUnion, '并集排除集含 X（v2 里 X 已是终态）').toContain('X');
+    const lost = await db.query<{ id: string }>(
+      `SELECT id FROM work_orders WHERE tenant_id=$1 AND status <> ALL($2::text[]) ORDER BY id`,
+      [T, byUnion],
+    );
+    expect(lost.rows.map((r) => r.id), '🔴 并集 ⇒ 锁 v1 的老单被排掉（复现少报）').not.toContain('wo-old-v1');
+
+    // —— 真调产品函数：它必须把老单算进活跃堆积
+    const m = await processMetrics(c, T);
+    const wo = m.bottleneck.find((b) => b.entity_type === 'work_order');
+    expect(wo?.active, '两单都在活跃堆里 ⇒ 排除集必须是交集，不能是并集').toBe(2);
   });
 });
 

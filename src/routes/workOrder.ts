@@ -292,15 +292,16 @@ export async function runIncrementalLearnStep(
   workOrderId: string,
   to: string,
   fromStatus: string | null | undefined,
+  // 批 8：调用方可把同一份 defs 传进来复用。本函数在一个流转事务里与「评价态回写」相邻调用，
+  //   各自取一次 = 两次 `SELECT DISTINCT def_version` 全租户扫描，且发生在持行锁期间。
+  //   不传时行为与改动前完全一致（自己取一次）⇒ 其它调用点零影响。
+  defs?: WorkflowDef[],
 ): Promise<{ triggered: boolean; learnError: string | null }> {
   // ⑤ 模数共振：学习触发态优先读 def.config.learningTriggers（per-def 控制），缺省回退 doneStates（向后兼容）
   // T1-B 多版本并存兜底：触发态是「包含」判定 ⇒ 取各版本**并集**——
   //   老单按旧流程走到学习触发态，若新流程里该态不再触发 ⇒ **老单不再产生学习样本**。
-  const learnOn = unionStates(
-    (await getDefsAcrossAllVersions(client, tenantId, 'work_order', 'work_orders', DEFAULT_WORK_ORDER_DEF)).map(
-      learningTriggerStates,
-    ),
-  );
+  const woDefs = defs ?? (await getDefsAcrossAllVersions(client, tenantId, 'work_order', 'work_orders', DEFAULT_WORK_ORDER_DEF));
+  const learnOn = unionStates(woDefs.map(learningTriggerStates));
   if (!shouldTriggerLearning(to, String(fromStatus ?? ''), learnOn)) {
     return { triggered: false, learnError: null };
   }
@@ -558,16 +559,16 @@ router.post('/open/work_order/:id/transition', async (req, res, next) => {
       }
       // 完成态触发增量学习——抽取为 runIncrementalLearnStep（2026-08-31 审查 F2：原内联逻辑
       // 无法单测，SAVEPOINT 修复零回归护栏）。行为与抽取前逐行等价，learn_error 语义不变。
-      const learnStep = await runIncrementalLearnStep(client, tenantId, req.params.id, to, r.from);
+      // 批 8：学习段与评价段**共用同一份 defs** —— 各取一次会让一次流转跑两条
+      //   `SELECT DISTINCT def_version FROM work_orders`（全租户扫描，且发生在 FOR UPDATE 持锁期间）。
+      //   由 evaluatedStatesHttp.test.ts「一次流转只扫一次 def_version」守卫。
+      const woDefs = await getDefsAcrossAllVersions(client, tenantId, 'work_order', 'work_orders', DEFAULT_WORK_ORDER_DEF);
+      const learnStep = await runIncrementalLearnStep(client, tenantId, req.params.id, to, r.from, woDefs);
       learnError = learnStep.learnError;
       // F10：评价完成态由 def 派生（存在 satisfy 入边的目标态），不再写死 evaluated 这个名
       // T1-B 多版本并存兜底：`evaluatedSet.includes(to)` 是「包含」判定 ⇒ 取各版本**并集**。
       //   老单按旧流程走到"已评价"，若新流程里该态不再算评价完成 ⇒ **满意度评分不回写**。
-      const evaluatedSet = unionStates(
-        (await getDefsAcrossAllVersions(client, tenantId, 'work_order', 'work_orders', DEFAULT_WORK_ORDER_DEF)).map(
-          evaluatedStates,
-        ),
-      );
+      const evaluatedSet = unionStates(woDefs.map(evaluatedStates));
       // 评价完成回写满意度评分（UOne 满意度颗粒度）
       if (evaluatedSet.includes(to) && typeof score === 'number') {
         await client.query(
@@ -1271,8 +1272,15 @@ router.get('/open/me/summary', async (req, res, next) => {
       //   poolSet 是**被剔除**的一方 ⇒ 取各版本交集（少剔除 = 多算在办，落在保守侧）。
       const workerDefs = await getDefsAcrossAllVersions(client, tenantId, 'work_order', 'work_orders', DEFAULT_WORK_ORDER_DEF);
       const poolSet = intersectStates(workerDefs.map(claimableStates));
-      const activeSet = unionStates(workerDefs.map(activeStates)).filter((s) => !poolSet.includes(s));
       const doneSet = unionStates(workerDefs.map(doneStates));
+      // ⚠️ 修错记录：初版 activeSet 只剔除了 poolSet，没剔除 doneSet。
+      //   单版本下 activeStates 与 doneStates 由构造保证互斥（stateMachine.ts:308-313），
+      //   但**并集取自不同版本** ⇒ 存在 X 在 v1 是活跃态、在 v2 被声明为完成态的情况，
+      //   于是 X 同时进 activeSet 和 doneSet ⇒ 同一张单既算在办又算已完成 ⇒ 在办+已完成 > 总数。
+      //   ⇒ doneSet 优先：算过完成就不再算在办。由 statusVocabDerived.test.ts ⑥ 守卫。
+      const activeSet = unionStates(workerDefs.map(activeStates)).filter(
+        (s) => !poolSet.includes(s) && !doneSet.includes(s),
+      );
       const stats = await client.query(
         `SELECT
            COUNT(*) FILTER (WHERE status = ANY($3::text[])) AS active_count,

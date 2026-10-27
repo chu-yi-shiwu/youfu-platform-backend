@@ -23,6 +23,9 @@ import {
 
 const h = vi.hoisted(() => ({
   def: null as unknown,
+  // 批 6：多版本样本（v1 = 老单锁的旧版本，versions = 库里真实存在的 def_version 列表）
+  defV1: null as unknown,
+  versions: null as unknown,
   captured: [] as Array<{ text: string; params: unknown[] }>,
 }));
 
@@ -35,6 +38,16 @@ vi.mock('../db/pool.js', () => ({
     fn({
       query: async (text: string, params: unknown[] = []) => {
         h.captured.push({ text, params });
+        // 批 6：让 getDefsAcrossAllVersions 真的拿到**两个不同版本**（否则只有哨兵 0 一版）
+        if (text.includes('SELECT DISTINCT def_version')) {
+          const rows = (h.versions as Array<{ def_version: number }> | null) ?? [];
+          return { rows, rowCount: rows.length };
+        }
+        if (text.includes('SELECT version FROM workflow_def')) return { rows: [{ version: 2 }], rowCount: 1 };
+        if (text.includes('FROM workflow_def_history')) {
+          const d = Number(params[2]) === 1 ? h.defV1 : h.def;
+          return { rows: d ? [{ def: JSON.stringify(d) }] : [], rowCount: d ? 1 : 0 };
+        }
         if (text.includes('FROM workflow_def')) {
           return { rows: h.def ? [{ def: JSON.stringify(h.def) }] : [], rowCount: h.def ? 1 : 0 };
         }
@@ -189,5 +202,45 @@ describe('工人端统计口径：流程派生的状态集真的进了 SQL（GET
       activeStates(custom).filter((s) => s !== 'claim_hall' && s !== 'pending_dispatch'),
     );
     expect(doneSet).toEqual(doneStates(custom));
+  });
+
+  it('⑥ 多版本并存：在办集与已完成集不得相交（否则同一张单既算在办又算已完成）', async () => {
+    // v1（老单锁着的旧版本）：X 还是活跃态；v2（live）：X 已被客户声明为完成态。
+    // 两版的 states/transitions 完全相同，只有 config.doneStates 不同 ⇒ 差异纯粹来自口径。
+    const shape = {
+      initial: 'draft',
+      states: ['draft', 'X', 'done'],
+      transitions: [
+        { from: 'draft', to: 'X', event: 'to_x' },
+        { from: 'X', to: 'done', event: 'finish' },
+      ],
+    };
+    const v1 = { ...shape, config: { doneStates: ['done'] } } as WorkflowDef;
+    const v2 = { ...shape, config: { doneStates: ['done', 'X'] } } as WorkflowDef;
+
+    h.def = v2;
+    h.defV1 = v1;
+    h.versions = [{ def_version: 1 }, { def_version: 2 }];
+    try {
+      const sql = await call();
+      const activeSet = (sql!.params as unknown[])[2] as string[];
+      const doneSet = (sql!.params as unknown[])[3] as string[];
+
+      // —— 前提成立（否则本例是假绿）：两版的口径源里确实各自含 X，
+      //     所以**并集**必然把 X 同时带进两个集合 —— 这正是要防的情况。
+      expect(doneStates(v2), 'v2 把 X 声明为完成态').toContain('X');
+      expect(activeStates(v1), 'v1 里 X 仍是活跃态').toContain('X');
+      expect(doneSet, '并集后 X 进入已完成集').toContain('X');
+
+      // 🔴 修前：X 同时命中 `COUNT FILTER status = ANY($3)` 与 `ANY($4)`
+      //   ⇒ 同一张单既算在办又算已完成 ⇒ 在办 + 已完成 > 总数。
+      expect(
+        activeSet.filter((s) => doneSet.includes(s)),
+        '在办集与已完成集不得相交（同一张单不能既在办又已完成）',
+      ).toEqual([]);
+    } finally {
+      h.defV1 = null;
+      h.versions = null;
+    }
   });
 });

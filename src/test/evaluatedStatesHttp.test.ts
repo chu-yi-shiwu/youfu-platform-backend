@@ -180,4 +180,27 @@ describe('评价完成态（evaluatedStates 派生）：满意度回写 + 自动
     expect(findCall(calls, 'satisfaction_score')).toBeUndefined();
     expect(findCall(calls, 'SAVEPOINT auto_settle')).toBeTruthy();
   });
+
+  // ===================== 批 8 · 热路径去重（独立评审 C2） =====================
+  /**
+   * 【洞】一次 `POST /open/work_order/:id/transition` 里，学习段（runIncrementalLearnStep，
+   *   workOrder.ts:299）和评价段（:566）**各跑一次** `getDefsAcrossAllVersions`
+   *   ⇒ 每次一条 `SELECT DISTINCT def_version FROM work_orders WHERE tenant_id=$1`（全租户扫描，
+   *   work_orders 上没有 (tenant_id, def_version) 索引）。
+   *   改造前这里只有 1 次 `workflow_def` 主键级查询；改造后变成 2 次全租户扫描 + 多轮 def 加载，
+   *   而且发生在**持有行锁（FOR UPDATE）期间** ⇒ 直接放大流转并发争抢。
+   * 【修法】一次流转只取一份 defs，两个调用点共用。
+   */
+  it('🔴 一次流转只扫一次 def_version（学习段与评价段共用同一份 defs）', async () => {
+    const { client, calls } = makeClient(baseHandlers(defWithEvalState('evaluated')));
+    h.client = client;
+    const r = await postTransition({ to: 'evaluated', score: 5 });
+    expect(r.status, `期望 200，实际 ${r.status} ${JSON.stringify(r.body)}`).toBe(200);
+
+    // 前提成立：这条链路真的走了学习段和评价段（否则「0 次」是假绿）
+    expect(findCall(calls, 'satisfaction_score'), '评价段必须真的执行了').toBeTruthy();
+
+    const scans = calls.filter((c) => c.text.includes('SELECT DISTINCT def_version'));
+    expect(scans.length, '一次流转只该扫一次 def_version，不能每处各扫一次').toBe(1);
+  });
 });

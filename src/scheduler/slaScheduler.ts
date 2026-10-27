@@ -136,14 +136,28 @@ export async function runTransportSlaScanForTenant(tenantId: string): Promise<Tr
     const exclude = intersectStates(
       transportDefs.map((d) => Array.from(new Set([...doneStates(d), ...terminalStates(d), ...holdStates(d)]))),
     );
+    // 批 7 · 二道过滤（补上与原注释「运送线无二道过滤」的不对称，与工单线的 slaScan+activeStates 对齐）
+    // 【为什么必须补】排除集是各版本**交集**；客户把完成态改名（v1='done' → v2='finished'）时，
+    //   两版终态可能**零交集** ⇒ `status <> ALL('{}')` 在 PG 里**恒真** ⇒ 所有
+    //   `sla_due_at < now() AND escalated_at IS NULL` 的历史单（含已完成、已取消）全部被捞出来
+    //   升级 + 通知 carrier 和**全部 admin** + 写 escalated_at（**不可逆，无自动回滚**）。
+    //   补一道「状态必须属于各版本活跃态并集」⇒ 空集时只命中活跃单，不会误炸。
+    // 【为什么不改成"交集为空就不扫"】那会退回静默丢告警；二道过滤既保住"宁可多扫"，
+    //   又把误升级面收回到活跃单。由 slaScheduler.test.ts 两条用例双向守卫
+    //   （已完成单零命中 + 真活跃单照常命中）。
+    // 【为什么过滤放在 JS 层而不是塞进 SQL】与工单线**同构**（工单线是 SQL 排除 + slaScan 在 JS
+    //   里按 activeStates 二次过滤）。放在 JS 层还能让 mock 型测试真的验到这道闸——
+    //   塞进 SQL 的 `AND status = ANY($3)` 在 mock 下不执行，等于有一道闸没人看着。
+    const transportActive = unionStates(transportDefs.map(engineActiveStates));
     const rows = await client.query(
       `SELECT id, code, status, carrier, sla_due_at FROM transport_order
        WHERE tenant_id = $1 AND status <> ALL($2::text[])
          AND sla_due_at IS NOT NULL AND escalated_at IS NULL AND sla_due_at < now()`,
       [tenantId, exclude],
     );
+    const candidates = rows.rows.filter((r) => transportActive.includes(r.status));
     const hits: TransportSlaHit[] = [];
-    for (const r of rows.rows) {
+    for (const r of candidates) {
       await client.query('UPDATE transport_order SET escalated_at = now() WHERE id = $1', [r.id]);
       await emitDomainEvent(client, {
         tenantId,

@@ -7,7 +7,7 @@
 //   是否有人工 transition 干预）。真实无人值守闭环率待工程接 ticket_event 审计聚合细化，
 //   此处不编造"演示自动完成"数据（已消除演示自动置 completed 的旧问题）。
 import type { PoolClient } from 'pg';
-import { getDefsAcrossAllVersions, unionStates } from '../engine/workflowDef.js';
+import { getDefsAcrossAllVersions, unionStates, intersectStates } from '../engine/workflowDef.js';
 import { doneStates, terminalStates, activeStates, cancelledStates, DEFAULT_WORK_ORDER_DEF } from '../engine/stateMachine.js';
 
 // P-5：统计聚合短 TTL 缓存（单进程部署足够；对齐 DataScreen 30s 刷新，降低重复聚合压力）。
@@ -202,9 +202,14 @@ export async function processMetrics(client: PoolClient, tenantId: string): Prom
   const hit = cachedResult<ProcessMetrics>(cacheKey);
   if (hit) return hit;
   // A+ Phase1.5：由 workflow_def 派生"活跃集/完成态"，富模板下不写死 4 态。
-  // T1-B 多版本并存兜底：同上，包含计数取并集。
+  // T1-B 多版本并存兜底：**区分包含/排除两种判定**——本函数里 `done` 是包含（取并集），
+  //   `terminals` 是排除（落在下面 `status <> ALL($2)`，**必须取交集**）。
+  // ⚠️ 修错记录：初版这里把 `terminals` 也写成了并集（方向反了），批 5 的验收因为
+  //   「在测试里手写正确写法再断言」而没抓到 ⇒ 独立评审才发现。现由
+  //   workflowDefAtVersion.pglite.test.ts「批 6」真调本函数守卫，写错立刻红。
+  //   并集会让排除集变大 ⇒ 锁旧版本的老单被排掉 ⇒ 大屏「活跃堆积」少报（静默丢单）。
   const defs = await getDefsAcrossAllVersions(client, tenantId, 'work_order', 'work_orders', DEFAULT_WORK_ORDER_DEF);
-  const terminals = unionStates(defs.map(terminalStates)); // 终态（含 cancelled/closed/evaluated）→ 不计入活跃堆
+  const terminals = intersectStates(defs.map(terminalStates)); // 终态（含 cancelled/closed/evaluated）→ 不计入活跃堆
   const done = unionStates(defs.map(doneStates)); // 成功完成态（含 completed 里程碑态）
   // 1) 派单命中率 + 转派率
   const base = await client.query<{ total: string; auto_dispatched: string }>(
