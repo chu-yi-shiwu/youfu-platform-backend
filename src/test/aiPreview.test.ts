@@ -1,8 +1,16 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { Request } from 'express';
+import { doneStates } from '../engine/stateMachine.js';
 
 // AI 端点测试：mock LLM + DB，覆盖 /preview /similar /feedback /agent-stats /gen-config 关键逻辑
 const dbCalls: string[] = [];
+// 与 dbCalls 下标一一对应的实参快照（多版本口径用例要断言喂给 status = ANY($n) 的数组）
+const dbParams: unknown[][] = [];
+// T1-B 多版本口径用例的两份 def：v1（老版本，完成态多一个 'X'）/ live（当前版本）。
+const DEF_V1 = { initial: 'draft', states: ['draft', 'done', 'X'], transitions: [], config: { doneStates: ['done', 'X'] } };
+const DEF_LIVE = { initial: 'draft', states: ['draft', 'done'], transitions: [], config: { doneStates: ['done'] } };
+// 版本探针开关：默认关（其余用例走 live 单版本，行为不变），仅多版本口径用例打开
+const defVersionState = { enabled: false };
 // K2 embedding 行为的可塑状态：默认关（走关键词路径），K2 测试里打开
 const embeddingState = { enabled: false, vec: null as number[] | null };
 
@@ -14,7 +22,21 @@ vi.mock('../db/pool.js', () => ({
     const client = {
       query: async (sql: string, params: any[] = []) => {
         dbCalls.push(sql);
+        dbParams.push(params ?? []);
         let rows: any[] = [];
+        // T1-B 版本探测分支（仅多版本口径用例打开）。
+        // ⚠️ 必须**提前 return**：这几条 SQL 都含 business_flow_tasks / workflow_def 子串，
+        //    若并进下面的 else-if 链，会被后面的同名分支覆盖（探针静默失效、用例假绿）。
+        if (defVersionState.enabled) {
+          // ① 探「当前在用版本」：业务流任务行上锁着 v1（外加哨兵 0 = 走 live）
+          if (sql.includes('DISTINCT def_version')) return { rows: [{ def_version: 1 }], rowCount: 1 };
+          // ② live 版本号 = 2 ⇒ v1 必须回查 history 快照（不是 live）
+          if (sql.includes('SELECT version FROM workflow_def')) return { rows: [{ version: 2 }], rowCount: 1 };
+          // ③ v1 历史快照
+          if (sql.includes('workflow_def_history')) return { rows: [{ def: DEF_V1 }], rowCount: 1 };
+          // ④ live def（def_version = 0 的哨兵行走这份）
+          if (sql.includes('FROM workflow_def')) return { rows: [{ def: DEF_LIVE }], rowCount: 1 };
+        }
         if (sql.includes('FROM ai_feedback')) {
           rows = [{ action: 'adopt', c: 2 }, { action: 'ignore', c: 1 }];
         } else if (sql.includes('ai_inference_log')) {
@@ -278,5 +300,40 @@ describe('aiPreview · I4 灰度总开关门禁（#704）', () => {
     expect(res.body.ok).toBe(true);
     expect(res.body.draft).not.toBe(null);
     expect(res.body.draft.fields[0].key).toBe('patient_name');
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// T1-B：doneSampleClause 的「已完成样本」是**包含判定**（status = ANY(完成态)），
+// 此刻手上没有具体行 ⇒ 必须按「租户当前所有在用版本」的完成态**并集**求口径。
+// 只读 live 一份 ⇒ 锁着旧版本、状态是旧版完成态的行**漏采**（AI 相似建议少一整路证据源）。
+// ─────────────────────────────────────────────────────────────────────────────
+describe('aiPreview · 采样口径 T1-B 多版本完成态并集', () => {
+  beforeEach(() => {
+    dbCalls.length = 0;
+    dbParams.length = 0;
+    defVersionState.enabled = true;
+    aiFeaturesState.enabled = true;
+    embeddingState.enabled = false;
+    embeddingState.vec = null;
+  });
+  afterEach(() => { defVersionState.enabled = false; });
+
+  it('完成态取各在用版本并集：锁 v1 的老行（状态 X）也进采样集', async () => {
+    // 假绿防护：两版完成态必须真的不同，否则"含 X"这条断言恒真、用例本身没意义
+    expect(doneStates(DEF_V1 as any)).toContain('X');
+    expect(doneStates(DEF_LIVE as any)).not.toContain('X');
+
+    const router = await loadRouter();
+    const handler = findHandler(router, 'post', '/similar');
+    const res = makeRes();
+    await handler(makeReq({ description: '走廊灯不亮', category: '照明' }), res, () => {});
+    expect(res.body.ok).toBe(true);
+
+    const idx = dbCalls.findIndex((s) => s.includes('status = ANY('));
+    expect(idx).toBeGreaterThanOrEqual(0); // 采样 SQL 必须真的带着状态集发出
+    // WHERE tenant_id=$1 AND (entity_type = $2 AND status = ANY($3::text[])) ⇒ params[2] = 完成态集合
+    const done = dbParams[idx][2] as string[];
+    expect(done).toEqual(expect.arrayContaining(['done', 'X']));
   });
 });

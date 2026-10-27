@@ -17,8 +17,8 @@ import { getLlmEnabled } from '../repo/tenantSettings.js';
 import { mpConfigured, decryptPhoneCode, genMpCode } from '../services/wechatMp.js';
 import { reportSchema, CTYPE_EXT, isAudioCType } from './publicReportSchema.js';
 import { createPublicRepairReport } from '../services/publicReportCreate.js';
-import { getWorkflowDef } from '../engine/workflowDef.js';
-import { doneStates } from '../engine/stateMachine.js';
+import { getDefsAcrossAllVersions, unionStates } from '../engine/workflowDef.js';
+import { DEFAULT_WORK_ORDER_DEF, doneStates } from '../engine/stateMachine.js';
 import { emitDomainEvent } from '../db/eventBus.js';
 
 const router = Router();
@@ -669,8 +669,13 @@ router.get('/public/service-status', loginRateLimit(30), async (req, res, next) 
     if (tr.rowCount === 0) return res.status(404).json({ ok: false, code: 'ORG_404', message: '机构不存在或未启用' });
     const tenantId = org;
     const data = await withTenantClient(tenantId, async (client) => {
-      const def = await getWorkflowDef(client, tenantId, 'work_order');
-      const done = doneStates(def);
+      // T1-B：这是「先按状态集合拼 SQL 过滤条件、再去查行」的**包含判定** —— 此刻手上还没有
+      // 具体行，只能按「租户当前所有在用版本」求口径。只读 live 一份 ⇒ 锁着旧版本、状态是旧版
+      // 完成态的老单被 WHERE 排除在外 ⇒ **今日完成数少报**；而本端点是免登录对外公示入口，
+      // 数字少报 = 对外事实失真（不是内部报表偏差，不能按"内部口径"糊过去）。
+      // 包含判定取各版本**并集**（unionStates）：宁可多报一次，绝不静默漏单。
+      const defs = await getDefsAcrossAllVersions(client, tenantId, 'work_order', 'work_orders', DEFAULT_WORK_ORDER_DEF);
+      const done = unionStates(defs.map(doneStates));
       const t = await client.query<{ c: string }>(
         `SELECT COUNT(*)::text AS c FROM work_orders
          WHERE tenant_id = $1 AND status = ANY($2::text[]) AND updated_at::date = CURRENT_DATE`,

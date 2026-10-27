@@ -11,7 +11,7 @@ import { llmConfigured, llmInferCategory, llmGenConfig, embeddingConfigured, emb
 import { withTenantClient } from '../db/pool.js';
 import { getAiFeaturesEnabled, setAiFeaturesEnabled } from '../repo/tenantSettings.js';
 import { requirePermission } from '../middleware/role.js';
-import { getWorkflowDefOrDefault } from '../engine/workflowDef.js';
+import { getDefsAcrossAllVersions, getWorkflowDefOrDefault, unionStates, isVersionedTable } from '../engine/workflowDef.js';
 import { doneStates } from '../engine/stateMachine.js';
 import { builtinDefFor } from '../engine/themes.js';
 
@@ -180,6 +180,26 @@ interface SimilarItem { title: string; desc: string; category: string; priority:
  * 【口径】按 business_flow_tasks 里实际出现的 entity_type 逐类取 def 的 doneStates，
  *   组合成 OR 条件。上限 MAX_ENTITY_TYPES 防止 SQL 参数爆炸；命中上限时告警（不静默丢弃）。
  */
+/**
+ * T1-B：采样源表与「版本探测」口径。
+ *
+ * 【采样源恒为 business_flow_tasks】doneSampleClause 产出的 clause 只作用于该表
+ * （两个调用点 :250 / :367 的 SQL 都是 FROM business_flow_tasks）⇒ 「租户当前在用的
+ * def 版本」也只能从**同一张表**探；探别的表 = 探出一组与采样对象无关的版本集合。
+ *
+ * 【为什么不把 et 当 table 传】et 是运行时 entity_type（repair / transport /
+ * emergency_plan…，租户自定义业务流可随意起名），**不是表名**。把它塞进
+ * getDefsAcrossAllVersions 的 table 参数会撞 VERSIONED_TABLES 白名单 → 直接 throw。
+ * 本批**不扩白名单**（那属于新增改动面，且一扩就等于允许任意表参与版本探测）。
+ *
+ * 【因此按"表是否登记过 def_version"分流】
+ *   · 已登记 ⇒ 走多版本**并集**（包含判定：宁可多采，不静默漏采老版本完成态的行）；
+ *   · 未登记 ⇒ **保持原样**只读 live 一份（既有行为，不引入新的 throw 面）。
+ *   判定走 workflowDef.ts 导出的 isVersionedTable 谓词 —— 不在这里抄一份白名单副本
+ *   （抄副本 = 第二真源，白名单增减时两边不同步，会静默退化成"少采"）。
+ */
+const SAMPLE_TABLE = 'business_flow_tasks';
+
 const MAX_ENTITY_TYPES = 10;
 async function doneSampleClause(
   client: { query: (t: string, p?: unknown[]) => Promise<{ rows: any[] }> },
@@ -198,8 +218,16 @@ async function doneSampleClause(
   for (const row of types.rows) {
     const et = String(row.entity_type);
     if (parts.length >= MAX_ENTITY_TYPES) { truncated += 1; continue; }
-    const def = await getWorkflowDefOrDefault(client as never, tenantId, et, builtinDefFor(et));
-    const ds = doneStates(def);
+    // 包含判定（status = ANY(完成态)）：此刻手上没有具体行 ⇒ 按「该表当前所有在用版本」求并集。
+    // 只读 live 一份会让「锁着旧版本、状态是旧版完成态」的行漏采（AI 少一整路证据源）。
+    let ds: string[];
+    if (isVersionedTable(SAMPLE_TABLE)) {
+      const defs = await getDefsAcrossAllVersions(client as never, tenantId, et, SAMPLE_TABLE, builtinDefFor(et));
+      ds = unionStates(defs.map((d) => doneStates(d)));
+    } else {
+      // 采样表未加 def_version 列 ⇒ 探不了版本，保持原样（只读 live 一份）
+      ds = doneStates(await getWorkflowDefOrDefault(client as never, tenantId, et, builtinDefFor(et)));
+    }
     if (ds.length === 0) continue; // 该流程没声明完成态 → 诚实不采样，不猜名字
     parts.push(`(${prefix}entity_type = $${i} AND ${prefix}status = ANY($${i + 1}::text[]))`);
     params.push(et, ds);

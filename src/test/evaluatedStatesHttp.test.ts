@@ -197,8 +197,13 @@ describe('评价完成态（evaluatedStates 派生）：满意度回写 + 自动
     const r = await postTransition({ to: 'evaluated', score: 5 });
     expect(r.status, `期望 200，实际 ${r.status} ${JSON.stringify(r.body)}`).toBe(200);
 
-    // 前提成立：这条链路真的走了学习段和评价段（否则「0 次」是假绿）
+    // 前提成立：这条链路真的走了学习段和评价段（否则「1 次」是假绿——
+    // 若学习段压根没跑，只剩评价段自己扫 1 次，本例同样会通过，等于这道闸没人看着）。
     expect(findCall(calls, 'satisfaction_score'), '评价段必须真的执行了').toBeTruthy();
+    expect(
+      findCall(calls, 'INSERT INTO ticket_learn_log'),
+      '学习段必须真的进入了（幂等守卫 INSERT 在 runIncrementalLearnStep:311，是学习段的入口标记）',
+    ).toBeTruthy();
 
     const scans = calls.filter((c) => c.text.includes('SELECT DISTINCT def_version'));
     expect(scans.length, '一次流转只该扫一次 def_version，不能每处各扫一次').toBe(1);

@@ -9,11 +9,29 @@ import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 
 // ---- 依赖打桩：pool（外层查 registry/配额）+ withTenantClient（注入 fakeClient）----
+// T1-B 多版本口径用例用的两份 def：v1（老版本，完成态多一个 'X'）/ live（当前版本）。
+// 只有两版完成态**真的不同**，"并集含 X"这条断言才有意义（假绿防护见用例内断言）。
+const DEF_V1 = { initial: 'draft', states: ['draft', 'done', 'X'], transitions: [], config: { doneStates: ['done', 'X'] } };
+const DEF_LIVE = { initial: 'draft', states: ['draft', 'done'], transitions: [], config: { doneStates: ['done'] } };
+// 版本探针开关：默认关（其余用例走 live 单版本，行为不变），仅多版本口径用例打开。
+const versionProbeState = { enabled: false };
 const fakeClient = {
   query: vi.fn(async (text: unknown) => {
     const sql = String(text);
     if (sql.includes('fault_category') && sql.includes('enabled = true')) {
       return { rows: [{ id: 'cat-1', name: '空调' }, { id: 'cat-2', name: '水电' }], rowCount: 2 };
+    }
+    if (versionProbeState.enabled) {
+      // ① 探「当前在用版本」：工单行上锁着 v1（外加哨兵 0 = 走 live）
+      if (sql.includes('DISTINCT def_version')) return { rows: [{ def_version: 1 }], rowCount: 1 };
+      // ② live 版本号 = 2 ⇒ v1 必须回查 history 快照（不是 live）
+      if (sql.includes('SELECT version FROM workflow_def')) return { rows: [{ version: 2 }], rowCount: 1 };
+      // ③ v1 历史快照
+      if (sql.includes('workflow_def_history')) return { rows: [{ def: DEF_V1 }], rowCount: 1 };
+      // ④ live def（def_version = 0 的哨兵行走这份）
+      if (sql.includes('FROM workflow_def')) return { rows: [{ def: DEF_LIVE }], rowCount: 1 };
+      // ⑤ 今日完成数（避免 rows[0] undefined 抛错，值本身不是本用例断言对象）
+      if (sql.includes('COUNT(*)::text AS c')) return { rows: [{ c: '3' }], rowCount: 1 };
     }
     return { rows: [], rowCount: 0 } as any;
   }) as any,
@@ -60,6 +78,7 @@ vi.mock('../services/wechatMp.js', () => ({
 
 import publicReportRouter from '../routes/publicReport.js';
 import { createWithIdem } from '../repo/ticket.js';
+import { doneStates } from '../engine/stateMachine.js';
 import { errorMiddleware } from '../middleware/error.js';
 import { mpConfigured, genMpCode } from '../services/wechatMp.js';
 
@@ -276,5 +295,33 @@ describe('GET /public/mp-qrcode（贴码生成 · env_version 通道）', () => 
     const regCall = poolQuery.mock.calls.find(([sql]) => /^SELECT 1 FROM tenant_registry/.test(String(sql)));
     expect(regCall).toBeTruthy();
     expect((regCall![1] as unknown[])[0]).toBe('t-demo');
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// T1-B：/public/service-status「今日完成数」是**包含判定**（status = ANY(完成态)），
+// 此刻手上没有具体行 ⇒ 必须按「租户当前所有在用版本」的完成态**并集**求口径。
+// 只读 live 一份 ⇒ 锁着旧版本、状态是旧版完成态的老单被 SQL 排除 ⇒ **对外公示数字少报**。
+// ─────────────────────────────────────────────────────────────────────────────
+describe('GET /public/service-status（今日完成数 · 多版本完成态并集）', () => {
+  it('完成态取各在用版本并集：锁 v1 的老单（状态 X）也计入今日完成数', async () => {
+    // 假绿防护：两版完成态必须真的不同，否则"含 X"这条断言恒真、用例本身没意义
+    expect(doneStates(DEF_V1 as any)).toContain('X');
+    expect(doneStates(DEF_LIVE as any)).not.toContain('X');
+
+    versionProbeState.enabled = true;
+    fakeClient.query.mockClear();
+    try {
+      const r = await get('/public/service-status?org=t-demo');
+      expect(r.status).toBe(200);
+      const call = (fakeClient.query.mock.calls as unknown[][])
+        .find((c) => String(c[0]).includes('status = ANY($2::text[])'));
+      expect(call).toBeTruthy(); // 包含判定的那条 SQL 必须真的发出来
+      const done = (call![1] as unknown[])[1] as string[];
+      // 关键断言：喂给 status = ANY($2) 的是**并集**，不是只有 live 的 ['done']
+      expect(done).toEqual(expect.arrayContaining(['done', 'X']));
+    } finally {
+      versionProbeState.enabled = false;
+    }
   });
 });

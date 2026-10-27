@@ -9,9 +9,35 @@ let clientForTest: any = {};
 const listMock = vi.fn(async (_c: unknown, _t: string, _f: unknown): Promise<{ items: any[]; total: number }> => ({ items: [], total: 0 }));
 vi.mock('../repo/ticket.js', () => ({ list: (...a: unknown[]) => (listMock as any)(...a) }));
 // F10：租户流程的状态集合做成可变量——"原话关键词→状态名"的翻译必须按它过滤
-const hDef = vi.hoisted(() => ({ states: [] as string[] }));
-vi.mock('../engine/workflowDef.js', () => ({ getWorkflowDef: async () => ({ key: 'work_order', states: hDef.states }) }));
-vi.mock('../engine/stateMachine.js', () => ({ doneStates: () => ['completed', 'closed', 'evaluated'] }));
+// T1-B M2：另加 live / versions 两个可变项，用来钉住「排除集取各版本交集」而不是只读 live 一份。
+const hDef = vi.hoisted(() => ({
+  states: [] as string[],
+  live: null as unknown, // getWorkflowDef 的返回值；null ⇒ 沿用 legacy 形状（既有用例零改动）
+  versions: [] as unknown[], // getDefsAcrossAllVersions 的返回值（各在用版本）；空 ⇒ 只有 live 一份
+}));
+// 【为什么 intersectStates / unionStates 用真实现】本批要钉的就是"调用点选了并集还是交集"——
+//   若在 mock 里再抄一份口径，测试就变成用自己抄的答案验自己，修错也恒绿。
+//   只替换两个**读库**的函数，纯函数仍走真模块（importOriginal 展开）。
+vi.mock('../engine/workflowDef.js', async (importOriginal) => {
+  const actual = (await importOriginal()) as Record<string, unknown>;
+  return {
+    ...actual,
+    getWorkflowDef: async () => hDef.live ?? { key: 'work_order', states: hDef.states },
+    getDefsAcrossAllVersions: async () =>
+      hDef.versions.length > 0 ? hDef.versions : [hDef.live ?? { key: 'work_order', states: hDef.states }],
+  };
+});
+vi.mock('../engine/stateMachine.js', async (importOriginal) => {
+  const actual = (await importOriginal()) as Record<string, unknown>;
+  return {
+    ...actual,
+    // 既有用例的 def 不带 config ⇒ 保持旧的常量三态（零回归）；多版本用例走 def.config.doneStates。
+    doneStates: (def: any) =>
+      Array.isArray(def?.config?.doneStates) && def.config.doneStates.length > 0
+        ? def.config.doneStates
+        : ['completed', 'closed', 'evaluated'],
+  };
+});
 
 import { makeAdminToolExecutor } from '../services/adminAgentTools.js';
 
@@ -103,5 +129,61 @@ describe('get_stats（今日概览）', () => {
     expect(card.open_total).toBe(7);
     expect(out!.reply).toContain('今日新增 3 单');
     expect(out!.reply).toContain('未完成 7 单');
+  });
+
+  // ===================== T1-B · M2（独立评审）：排除判定不得只读 live 一份 =====================
+  /**
+   * 【洞】`status <> ALL($2::text[])` 是**排除**判定，但 done 只从 live def 派生 ⇒
+   *   客户改过流程后，老单（锁 v1）的状态在 v1 里算未完成、在 v2(live) 里被算成完成
+   *   ⇒ 这批老单被 `status <> ALL` 静默排掉 ⇒ 「当前未完成 N 单」**少报**。
+   * 【修法】排除集取各版本**交集**（只排除每个版本都认是完成态的状态）。
+   *
+   * 【fixture 为什么这么排】三口径必须两两不同，否则用例没有判别力：
+   *   交集=['done'] ／ live 一份=['done','Y'] ／ 并集=['done','X','Y']。
+   *   ⇒ 必须让"多出来的那个态"落在 **live** 那版（X 在 v1、Y 在 v2）；
+   *     若照"老版多一个态"排（v1=['done','X']、v2=['done']），交集恰好等于 live ⇒ 修前也绿（假绿）。
+   */
+  const SHAPE = {
+    initial: 'draft',
+    states: ['draft', 'doing', 'done', 'X', 'Y'],
+    transitions: [
+      { from: 'draft', to: 'doing', event: 'start' },
+      { from: 'doing', to: 'done', event: 'finish' },
+      { from: 'doing', to: 'X', event: 'finish_x' },
+      { from: 'doing', to: 'Y', event: 'finish_y' },
+    ],
+  };
+  const V1_OLD = { ...SHAPE, config: { doneStates: ['done', 'X'] } }; // 老版本（存量单锁它）
+  const V2_LIVE = { ...SHAPE, config: { doneStates: ['done', 'Y'] } }; // 当前 live
+
+  it('🔴 未完成排除集取各版本交集：既不是 live 一份，也不是并集', async () => {
+    // —— 假绿防护：两版完成态确实不同（否则"交集 vs 并集"无从判别）
+    expect(V1_OLD.config.doneStates).toEqual(['done', 'X']);
+    expect(V2_LIVE.config.doneStates).toEqual(['done', 'Y']);
+
+    const calls: Array<{ sql: string; params: unknown[] }> = [];
+    hDef.live = V2_LIVE;
+    hDef.versions = [V1_OLD, V2_LIVE];
+    clientForTest = {
+      query: async (sql: string, params: unknown[] = []) => {
+        calls.push({ sql, params });
+        if (sql.includes('GROUP BY status')) return { rows: [{ status: 'pending', c: 2 }] };
+        return { rows: [{ c: 7 }] };
+      },
+    };
+    try {
+      const out = await executor('get_stats', {});
+      // 前提成立：排除查询真的发了（否则下面的 params 断言是空转）
+      expect(out, 'get_stats 必须返回结果卡').not.toBeNull();
+      const openCall = calls.find((c) => c.sql.includes('status <> ALL'));
+      expect(openCall, '未完成计数必须真的走排除查询').toBeTruthy();
+      const exclude = openCall!.params[1] as string[];
+      expect(exclude, '交集 = 只排除每版都认是完成态的状态 ⇒ 只有 done').toEqual(['done']);
+      expect(exclude, 'Y 只被 live 认作完成 ⇒ 不得排除（否则老单被丢）').not.toContain('Y');
+      expect(exclude, 'X 只被 v1 认作完成 ⇒ 不得排除（并集才会带它）').not.toContain('X');
+    } finally {
+      hDef.live = null;
+      hDef.versions = [];
+    }
   });
 });

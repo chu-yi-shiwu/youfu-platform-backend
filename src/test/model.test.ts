@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { StatsModelBackend } from '../engine/model/ModelBackend.js';
-import { computeRewards, isSyntheticWorker, stripSyntheticArms } from '../services/modelTrainer.js';
+import { computeRewards, isSyntheticWorker, stripSyntheticArms, trainFromDb } from '../services/modelTrainer.js';
 
 describe('StatsModelBackend（派单自适应评分）', () => {
   it('新候选给基线分，被 UCB 探索优先选中', () => {
@@ -191,5 +191,76 @@ describe('StatsModelBackend arms 上限（R17-003 防内存膨胀）', () => {
     const size = Object.keys(m.toParams().arms).length;
     expect(size).toBeLessThanOrEqual(5000);
     expect(size).toBeGreaterThan(0);
+  });
+});
+
+// ===================== T1-B · m3（独立评审）：训练样本口径必须取各版本并集 =====================
+/**
+ * 【洞】`status = ANY($2::text[])` 是**包含**判定，但 done 只从 live def 派生 ⇒
+ *   客户改过流程后，锁着 v1 的老单走到 v1 的完成态（X），而 v2(live) 不认 X 是完成态
+ *   ⇒ 这批老单**进不了训练样本**（模型学不到它们，且无任何报错，属静默丢样本）。
+ * 【修法】包含判定取各版本**并集**（宁可多训一单，不可静默漏样本）。
+ *
+ * 【fixture】v1(老)=['done','X'] ／ v2(live)=['done','Y'] ⇒
+ *   并集=['done','X','Y'] ／ live 一份=['done','Y'] ／ 交集=['done'] —— 三口径两两不同，用例有判别力。
+ */
+describe('trainFromDb（训练样本口径）', () => {
+  const SHAPE = {
+    initial: 'draft',
+    states: ['draft', 'doing', 'done', 'X', 'Y'],
+    transitions: [
+      { from: 'draft', to: 'doing', event: 'start' },
+      { from: 'doing', to: 'done', event: 'finish' },
+      { from: 'doing', to: 'X', event: 'finish_x' },
+      { from: 'doing', to: 'Y', event: 'finish_y' },
+    ],
+  };
+  const V1_OLD = { ...SHAPE, config: { doneStates: ['done', 'X'] } }; // 老版本（存量单锁它）
+  const V2_LIVE = { ...SHAPE, config: { doneStates: ['done', 'Y'] } }; // 当前 live
+
+  /** 假 PoolClient：只响应 trainFromDb + getDefsAcrossAllVersions 真正会发的那几条 SQL。 */
+  function trainerClient(calls: Array<{ sql: string; params: unknown[] }>): any {
+    return {
+      query: async (sql: string, params: unknown[] = []) => {
+        calls.push({ sql, params });
+        if (sql.includes('SELECT params FROM model_state')) return { rows: [], rowCount: 0 };
+        if (sql.includes('SELECT DISTINCT def_version')) return { rows: [{ def_version: 1 }, { def_version: 2 }], rowCount: 2 };
+        if (sql.includes('SELECT version FROM workflow_def')) return { rows: [{ version: 2 }], rowCount: 1 };
+        // ⚠️ history 必须先判：`SELECT def FROM workflow_def_history ...` 也含 "SELECT def FROM workflow_def"
+        if (sql.includes('FROM workflow_def_history')) return { rows: [{ def: JSON.stringify(V1_OLD) }], rowCount: 1 };
+        if (sql.includes('SELECT def FROM workflow_def')) return { rows: [{ def: JSON.stringify(V2_LIVE) }], rowCount: 1 };
+        if (sql.includes('FROM work_orders')) return { rows: [{ id: 'wo-1', business_type: 'electric', satisfaction_score: 5 }], rowCount: 1 };
+        if (sql.includes('FROM ticket_event')) {
+          return {
+            rows: [
+              { type: 'assign', to_status: 'assigned', actor: 'auto_dispatch', payload: { worker_id: 'w-1' }, created_at: 't1' },
+              { type: 'transition', to_status: 'done', actor: 'system', payload: {}, created_at: 't2' },
+            ],
+            rowCount: 2,
+          };
+        }
+        if (sql.includes('INSERT INTO model_state')) return { rows: [], rowCount: 1 };
+        return { rows: [], rowCount: 0 };
+      },
+    };
+  }
+
+  it('🔴 训练样本取各版本完成态并集：锁旧版本的完成态工单不漏训', async () => {
+    // —— 假绿防护：两版完成态确实不同（否则"并集 vs live 一份"无从判别）
+    expect(V1_OLD.config.doneStates).toEqual(['done', 'X']);
+    expect(V2_LIVE.config.doneStates).toEqual(['done', 'Y']);
+
+    const calls: Array<{ sql: string; params: unknown[] }> = [];
+    const model = await trainFromDb(trainerClient(calls), 't-train');
+
+    // 前提成立：真的扫到样本并学到了臂（否则下面的 params 断言在空转）
+    expect(Object.keys(model.toParams().arms).length, '必须真的学到一条臂').toBeGreaterThan(0);
+
+    const sampleCall = calls.find((c) => c.sql.includes('status = ANY'));
+    expect(sampleCall, '训练样本查询必须真的执行').toBeTruthy();
+    const done = new Set(sampleCall!.params[1] as string[]);
+    expect(done, '并集必须含 v1 独有的完成态 X（否则老单漏训）').toEqual(new Set(['done', 'X', 'Y']));
+    expect(done.has('X'), 'X 只被 v1 认作完成 ⇒ 并集必须带上它').toBe(true);
+    expect(done.has('Y'), 'Y 只被 live 认作完成 ⇒ 并集必须带上它').toBe(true);
   });
 });

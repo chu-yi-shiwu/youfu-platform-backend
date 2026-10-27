@@ -5,8 +5,8 @@
 import type { PoolClient } from 'pg';
 import { StatsModelBackend, type ModelBackend, type ModelParams } from '../engine/model/ModelBackend.js';
 import { generateOptimizations, applyDispatchOptimizations } from './optimizer.js';
-import { getWorkflowDef } from '../engine/workflowDef.js';
-import { doneStates } from '../engine/stateMachine.js';
+import { getDefsAcrossAllVersions, unionStates } from '../engine/workflowDef.js';
+import { doneStates, DEFAULT_WORK_ORDER_DEF } from '../engine/stateMachine.js';
 
 /** pg 驱动对 jsonb 可能返回字符串或已解析对象；统一归一化（T-A 缺陷2修复）。 */
 function safeParsePayload(p: any): any {
@@ -158,8 +158,12 @@ export async function trainFromDb(
   const model = new StatsModelBackend({ version: loaded?.version ?? 1 });
   // A+ Phase1.5：训练样本取"完成态"工单（def 派生：DEFAULT=completed；RICH=completed/closed/evaluated），
   // 富模板下不漏训 closed/evaluated，且不把 cancelled 当完成样本喂模型。
-  const def = await getWorkflowDef(client, tenantId, 'work_order');
-  const done = doneStates(def);
+  // T1-B 多版本并存兜底：`status = ANY($2::text[])` 是**包含**判定 ⇒ 取各版本**并集**。
+  //   只读 live 一份的后果：客户改流程后，锁着旧版本的老单走到旧版完成态（新版本不认它是完成态）
+  //   ⇒ 这批老单**进不了训练样本**，且无任何报错（模型悄悄少学一批真实样本，静默降级）。
+  //   宁可多训一单，不可静默漏样本。由 model.test.ts「训练样本取各版本完成态并集」守卫。
+  const defs = await getDefsAcrossAllVersions(client, tenantId, 'work_order', 'work_orders', DEFAULT_WORK_ORDER_DEF);
+  const done = unionStates(defs.map(doneStates));
   const orders = await client.query<{ id: string; business_type: string; satisfaction_score: number | null }>(
     `SELECT id, business_type, satisfaction_score FROM work_orders
      WHERE tenant_id = $1 AND status = ANY($2::text[])

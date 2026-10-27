@@ -8,8 +8,8 @@
 //      in_app 渠道落库即可达；sms/push/wechat 仍按网关配置诚实 stub（delivered=false）。
 import pool from '../db/pool.js';
 import { withTenantClient } from '../db/pool.js';
-import { getDefsAcrossAllVersions, intersectStates, unionStates } from '../engine/workflowDef.js';
-import { doneStates, terminalStates, holdStates, activeStates as engineActiveStates, CLAIM_HALL_STATE, DEFAULT_WORK_ORDER_DEF, type WorkOrderStatus } from '../engine/stateMachine.js';
+import { getDefsAcrossAllVersions, getDefsForVersions, intersectStates, unionStates } from '../engine/workflowDef.js';
+import { doneStates, terminalStates, holdStates, activeStates as engineActiveStates, CLAIM_HALL_STATE, DEFAULT_WORK_ORDER_DEF, type WorkflowDef, type WorkOrderStatus } from '../engine/stateMachine.js';
 import { slaScan, type SlaScanRow } from '../engine/sla.js';
 import { TRANSPORT_DEF } from '../engine/themes.js';
 import { emitDomainEvent } from '../db/eventBus.js';
@@ -102,6 +102,16 @@ export async function runClaimHallTimeoutScanForTenant(tenantId: string): Promis
   });
 }
 
+/**
+ * 运送线的 dead 集（不受 SLA 约束）：doneStates ∪ terminalStates ∪ holdStates。
+ * 【为什么必须抽成一个函数】SQL 预过滤与 JS 按行判定**共用同一表达式**——
+ *   两处各写一份就会口径漂移（一处加了 holdStates 另一处没加 ⇒ 同一张单在两层结论相反）。
+ *   与工单线 activeStates/doneStates 派生同源的纪律一致。
+ */
+function deadStatesOf(d: WorkflowDef): string[] {
+  return Array.from(new Set([...doneStates(d), ...terminalStates(d), ...holdStates(d)]));
+}
+
 /** P1（B2 补 SLA）：运送线 SLA 命中记录（与工单线 SlaHit 分离，字段语义不同）。 */
 export interface TransportSlaHit {
   transportOrderId: string;
@@ -114,8 +124,8 @@ export interface TransportSlaHit {
  * P1（B2 补 SLA）：运送单线 SLA 扫描——此前 cron 只扫 work_orders，运送单超时零告警
  * （实测 2 单卡 transporting 15 天，审查报告 20260908 🟡实证）。
  * 口径：
- *   - 活跃集 = transport_task workflow_def 派生（排除 doneStates ∪ terminalStates ∪ paused/suspended，
- *     与工单线口径一致，租户可定制不写死）；
+ *   - 受 SLA 约束 = **按每张单自己锁的那版** transport_task 流程判定：不在该版的
+ *     doneStates ∪ terminalStates ∪ holdStates（挂起态）里才算在途，租户可定制不写死；
  *   - 命中 = sla_due_at 已过（sla_due_at < now()）且未升级（escalated_at IS NULL）且已设期
  *     （sla_due_at IS NOT NULL——建单未传 sla_due_at 的单诚实不扫，不替租户估时）；
  *   - 命中后置 escalated_at（防重复告警）+ domain_event + 通知（在身承运人 carrier + 租户在岗管理员）。
@@ -123,39 +133,56 @@ export interface TransportSlaHit {
  */
 export async function runTransportSlaScanForTenant(tenantId: string): Promise<TransportSlaHit[]> {
   return withTenantClient(tenantId, async (client) => {
-    // P3-②：与工单线 runSlaScanForTenant 口径对齐——除 doneStates ∪ terminalStates 外，
-    // 追加排除挂起态（防御租户自定义 def 含挂起态被误判 SLA 超时）；
-    // 工单线经 activeStates 二次过滤实现同款排除，运送线无二道过滤，直接落在 SQL 排除集。
-    // F8：挂起态由 holdStates 派生（不再硬编码 paused/suspended），与工单线同源。
-    // T1-B 多版本并存兜底：排除集取各版本**交集**——只排除"所有版本都认是终态"的状态。
-    //   若照旧只读 live：老单锁着 v1，其状态在 v1 非终态、在 v2 却被算进排除集
-    //   ⇒ 这批老单**静默不告警**（单还在库里，超时了也没人知道）。宁可多扫，不可静默丢单。
-    const transportDefs = await getDefsAcrossAllVersions(
+    // ============================ T1-B 批 8 · 根治（独立评审 M1） ============================
+    // 【批 5 的老写法为什么挡不住洞】那时候手上没有具体行，只能"读各版本的 def 求集合"：
+    //   SQL 用 `status <> ALL(各版本终态的**交集**)` 排除。客户把完成态改名（v1='done'
+    //   → v2='finished'）⇒ 两版终态**零交集** ⇒ 交集为空 ⇒ PG 里 `x <> ALL('{}')` **恒真**
+    //   ⇒ 所有 `sla_due_at < now() AND escalated_at IS NULL` 的历史单（含已完成、已取消）
+    //   全被捞出来升级 + 通知 carrier 和**全部 admin** + 写 escalated_at（**不可逆，无自动回滚**）。
+    // 【批 7 的二道过滤为什么也不够】它补的是「status ∈ 各版本 activeStates 的**并集**」。
+    //   但 activeStates = 全态 − done − terminal − hold，**跨版本后不再互斥**：
+    //   'done' 在 v1 是终态，在 v2 因为客户加了 `done --close--> finished` 变成中间态 ⇒ 活跃
+    //   ⇒ 并集里含 'done' ⇒ 锁着 v1、status='done' 的单（按它自己那版**早已终结**）
+    //   仍被判成在途 ⇒ 照样误升级。并集的方向是"宁可多算"，用在**放行闸**上就把误报面放大了。
+    //   两条防线方向都是"猜"，而猜的前提（各版本口径一致）恰恰是版本化之后不再成立的。
+    //
+    // 【根治：不猜，按行判定】transport_order 表上**本来就有 def_version 列**
+    //   （102_inflight_def_version.sql:55，T1-B 加的在途单锁版本列）。
+    //   ⇒ 这里根本不属于"手上没行、只能读 live"的场景——SQL 把 def_version 一起查出来，
+    //   再用 getDefsForVersions 按行取**该单自己锁的那一版** def 来判定。
+    //   代价：getDefsForVersions 按版本分组，**每个在跑的版本只查一次**（不是逐行查）；
+    //   输入行集已由下面的 SQL（三个时间/状态条件 + 交集预过滤）收窄，不是全表扫描。
+    // =======================================================================================
+    // P3-② / F8 的口径不变：受 SLA 约束 = 不在该版的 doneStates ∪ terminalStates ∪ holdStates
+    //   （挂起态由 holdStates 派生，不再硬编码 paused/suspended，与工单线同源）。
+    // 【两道闸的分工】
+    //  ① SQL 交集预过滤（本段）：**保守侧**——状态 S 只有在「每一个版本里都 dead」时才被排除，
+    //     那么无论该行锁哪一版，S 在它自己那版里也必然是 dead ⇒ 排除它**一定不会漏告警**。
+    //     作用是把终态行挡在库里：否则终态行永不被升级 ⇒ escalated_at 恒为 NULL ⇒
+    //     它们会永久留在结果集里，每 60s 逐租户重捞一遍且只增不减。
+    //     单版本（最常见）时交集 = 该版 dead 集 ⇒ 终态行在 SQL 里就被挡掉。
+    //     ⚠️ 这里必须是**交集**：写成并集会把"只在某些版本里 dead"的状态也挡掉 ⇒ 静默漏告警
+    //     （违反 E3，比误升级更隐蔽）。由 slaScheduler.test.ts 的变异守卫用例钉住。
+    //  ② JS 按行精确判定（下一段）：兜住 ① 兜不住的两种情形——两版 dead 集零交集（①不挡），
+    //     以及同名状态跨版本从 dead 变活跃（① 也不挡，但按该行锁的版本它不是 dead ⇒ 必须放行）。
+    const acrossDefs = await getDefsAcrossAllVersions(
       client, tenantId, 'transport_task', 'transport_order', TRANSPORT_DEF,
     );
-    const exclude = intersectStates(
-      transportDefs.map((d) => Array.from(new Set([...doneStates(d), ...terminalStates(d), ...holdStates(d)]))),
-    );
-    // 批 7 · 二道过滤（补上与原注释「运送线无二道过滤」的不对称，与工单线的 slaScan+activeStates 对齐）
-    // 【为什么必须补】排除集是各版本**交集**；客户把完成态改名（v1='done' → v2='finished'）时，
-    //   两版终态可能**零交集** ⇒ `status <> ALL('{}')` 在 PG 里**恒真** ⇒ 所有
-    //   `sla_due_at < now() AND escalated_at IS NULL` 的历史单（含已完成、已取消）全部被捞出来
-    //   升级 + 通知 carrier 和**全部 admin** + 写 escalated_at（**不可逆，无自动回滚**）。
-    //   补一道「状态必须属于各版本活跃态并集」⇒ 空集时只命中活跃单，不会误炸。
-    // 【为什么不改成"交集为空就不扫"】那会退回静默丢告警；二道过滤既保住"宁可多扫"，
-    //   又把误升级面收回到活跃单。由 slaScheduler.test.ts 两条用例双向守卫
-    //   （已完成单零命中 + 真活跃单照常命中）。
-    // 【为什么过滤放在 JS 层而不是塞进 SQL】与工单线**同构**（工单线是 SQL 排除 + slaScan 在 JS
-    //   里按 activeStates 二次过滤）。放在 JS 层还能让 mock 型测试真的验到这道闸——
-    //   塞进 SQL 的 `AND status = ANY($3)` 在 mock 下不执行，等于有一道闸没人看着。
-    const transportActive = unionStates(transportDefs.map(engineActiveStates));
+    const exclude = intersectStates(acrossDefs.map(deadStatesOf));
     const rows = await client.query(
-      `SELECT id, code, status, carrier, sla_due_at FROM transport_order
+      `SELECT id, code, status, carrier, sla_due_at, def_version FROM transport_order
        WHERE tenant_id = $1 AND status <> ALL($2::text[])
          AND sla_due_at IS NOT NULL AND escalated_at IS NULL AND sla_due_at < now()`,
       [tenantId, exclude],
     );
-    const candidates = rows.rows.filter((r) => transportActive.includes(r.status));
+    const defs = await getDefsForVersions(client, tenantId, 'transport_task', rows.rows, TRANSPORT_DEF);
+    const candidates = rows.rows.filter((r) => {
+      // getDefsForVersions 的 key 就是 `Number(row.def_version) || 0`，永远命中（查不到的版本
+      // 已在函数内降级到 live 并保留自己的 key）⇒ 取不到只可能是 Map 本身为空（rows 为空），保守跳过。
+      const d = defs.get(Number(r.def_version) || 0);
+      if (!d) return false;
+      return !deadStatesOf(d).includes(String(r.status));
+    });
     const hits: TransportSlaHit[] = [];
     for (const r of candidates) {
       await client.query('UPDATE transport_order SET escalated_at = now() WHERE id = $1', [r.id]);

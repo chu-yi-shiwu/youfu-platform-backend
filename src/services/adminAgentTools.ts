@@ -8,8 +8,8 @@
 // ───────────────────────────────────────────────────────────────────────────
 import { withTenantClient } from '../db/pool.js';
 import { list, type WorkOrderRow } from '../repo/ticket.js';
-import { getWorkflowDef } from '../engine/workflowDef.js';
-import { doneStates } from '../engine/stateMachine.js';
+import { getWorkflowDef, getDefsAcrossAllVersions, intersectStates } from '../engine/workflowDef.js';
+import { doneStates, DEFAULT_WORK_ORDER_DEF } from '../engine/stateMachine.js';
 import {
   sanitizeTicketQueryArgs,
   type AdminToolExecutor,
@@ -113,8 +113,13 @@ async function queryTickets(tenantId: string, rawArgs: Record<string, unknown>, 
 
 async function getStats(tenantId: string): Promise<{ reply: string; card: StatsCard }> {
   return withTenantClient(tenantId, async (client) => {
-    const def = await getWorkflowDef(client, tenantId, 'work_order');
-    const done = doneStates(def);
+    // T1-B 多版本并存兜底：`done` 落在下面的 `status <> ALL($2::text[])` ⇒ 是**排除**判定，
+    //   必须取各版本**交集**（只排除"每个版本都认是完成态"的状态）。
+    //   只读 live 一份的后果：客户改流程后，老单（锁 v1）的状态在 v1 里算未完成、在 v2 里算了完成
+    //   ⇒ 这批老单被静默排掉 ⇒ 话术里的「当前未完成 N 单」**少报**（值班人据此判断积压，方向错）。
+    //   取并集则是反向错：排除集变大 ⇒ 少报得更狠。由 adminAgentTools.test.ts「未完成排除集取各版本交集」守卫。
+    const defs = await getDefsAcrossAllVersions(client, tenantId, 'work_order', 'work_orders', DEFAULT_WORK_ORDER_DEF);
+    const done = intersectStates(defs.map(doneStates));
     const todayR = await client.query(
       `SELECT status, COUNT(*)::int AS c FROM work_orders WHERE tenant_id=$1 AND created_at >= date_trunc('day', now()) GROUP BY status ORDER BY c DESC`,
       [tenantId],

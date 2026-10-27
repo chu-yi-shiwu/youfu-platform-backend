@@ -699,6 +699,19 @@ const VERSIONED_TABLES: Record<string, string> = {
 };
 
 /**
+ * 该表是否已加 `def_version` 列（即能否做版本探测）。
+ *
+ * 【为什么必须导出而不是让调用方自己抄一份名单】白名单是 `getDefsAcrossAllVersions`
+ *   **会 throw** 的硬约束；调用方若手抄一份副本，名单增减时两边不同步 ⇒ 要么退化成
+ *   "少采"（静默），要么撞 throw。此前 src/routes/aiPreview.ts 就抄过一份本地副本，
+ *   那是第二真源，本次导出谓词后已删除。
+ *   用谓词而非导出常量本体：调用方只能问"能不能探"，拿不到可拼接的表名 ⇒ 注入面不扩大。
+ */
+export function isVersionedTable(table: string): boolean {
+  return Object.prototype.hasOwnProperty.call(VERSIONED_TABLES, table);
+}
+
+/**
  * 【多版本并存的名单兜底】取该租户该实体「当前还有行在用」的**全部版本**的 def。
  *
  * 【为什么需要它】凡「先按状态集合拼 SQL / 过滤条件、再去查行」的写法（超时扫描、
