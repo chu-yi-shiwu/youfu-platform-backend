@@ -1,11 +1,12 @@
-// serviceDesk.http.test.ts —— 服务台 + 来电弹屏代申告 真·HTTP 层测试（补 #229 查证发现的测试盲区）。
+// serviceDesk.http.test.ts —— 服务台 + 服务台人员代报修 真·HTTP 层测试（补 #229 查证发现的测试盲区）。
 //
 // 覆盖五类行为：
 //   ① 服务台 CRUD：admin/operator 可写（requireConfigRole）、worker 403、404 语义
-//   ② 客服人员管理：desk 存在性校验、ON CONFLICT DO UPDATE（重复添加即改名）、删除 404
-//   ③ 代申告建单（POST /tickets）：dto 映射断言（title/contact/businessType/priority）+
+//   ② **坐席端点已下线**（2026-10-28 决策：取消坐席）：GET/POST/DELETE /service-desks/:id/agents
+//      均 404 —— 原「客服人员管理」2 个用例随端点删除，改为 3 条下线断言（用例数净 +1）
+//   ③ 代报修建单（POST /tickets）：dto 映射断言（title/contact/businessType/priority）+
 //      幂等键 svcdesk:{deskId}:{sessionId} 抢键先行（INSERT idempotency_key 先于 INSERT work_orders）
-//   ④ 代申告双击防重：第二次抢键冲突 → 回查复用既有单（created=false 仍 201、id 一致）
+//   ④ 代报修双击防重：第二次抢键冲突 → 回查复用既有单（created=false 仍 201、id 一致）
 //   ⑤ 权限点：intake.create 覆盖存在但不含该点 → 403（R35 接线：登录态建单纳入 intake.create）
 //
 // 断言纪律：一律断言真实 HTTP 状态码，禁止 try/catch 空过写法（对齐 acceptance.http.test.ts）。
@@ -48,7 +49,6 @@ function makeClient(handlers: Handler[]) {
 
 const T = 't-svcdesk-http';
 const DESK = '11111111-1111-4111-8111-111111111111';
-const AGENT_ROW = { id: 'ag-1', tenant_id: T, desk_id: DESK, user_id: 'u-9', name: '坐席九' };
 const DESK_ROW = { id: DESK, tenant_id: T, name: '一楼服务台', template: null, created_at: '2026-09-01T00:00:00Z' };
 
 function deskHandlers(
@@ -63,12 +63,8 @@ function deskHandlers(
     // PUT：先查当前行
     { match: (t) => t.includes('SELECT * FROM service_desk WHERE id=$1 AND tenant_id=$2'), reply: () => (deskExists ? { rows: [DESK_ROW], rowCount: 1 } : { rows: [], rowCount: 0 }) },
     { match: (t) => t.includes('UPDATE service_desk SET name=COALESCE'), reply: () => ({ rows: [{ ...DESK_ROW, name: '二楼服务台' }], rowCount: 1 }) },
-    // 代申告 / agents POST 的 desk 存在性校验（SELECT id FROM ...）
+    // 代报修 POST /tickets 的 desk 存在性校验（SELECT id FROM ...）
     { match: (t) => t.includes('SELECT id FROM service_desk WHERE id=$1 AND tenant_id=$2'), reply: () => (deskExists ? { rows: [{ id: DESK }], rowCount: 1 } : { rows: [], rowCount: 0 }) },
-    // 客服人员
-    { match: (t) => t.includes('FROM service_desk_agent WHERE tenant_id=$1 AND desk_id=$2 ORDER BY created_at'), reply: () => ({ rows: [AGENT_ROW] }) },
-    { match: (t) => t.includes('INSERT INTO service_desk_agent'), reply: () => ({ rows: [AGENT_ROW], rowCount: 1 }) },
-    { match: (t) => t.startsWith('DELETE FROM service_desk_agent'), reply: () => ({ rows: [], rowCount: 1 }) },
     // 幂等抢键（R1-001 零 DDL 串行化）
     { match: (t) => t.includes('INSERT INTO idempotency_key'), reply: () => ({ rows: [], rowCount: idemGrabbed ? 1 : 0 }) },
     { match: (t) => t.includes('SELECT work_order_id FROM idempotency_key WHERE key = $1'), reply: () => (opts.existingWo ? { rows: [{ work_order_id: opts.existingWo.id as string }] } : { rows: [] }) },
@@ -182,32 +178,34 @@ describe('服务台管理（requireConfigRole 门禁）', () => {
   });
 });
 
-describe('客服人员管理', () => {
-  it('添加坐席 201；desk 不存在 404', async () => {
+describe('坐席端点已下线（2026-10-28 决策：取消坐席，只删坐席、服务台保留）', () => {
+  // 🔴 这三个断言是「坐席真的没了」的钉子，不是新功能断言。
+  //   E2 可验证：只删用例不补断言 ⇒ 删没删干净测不出来（会漏成"端点还在但没人管"）。
+  //   只断言 status：本测试 app 未挂 apiGuard 与 /api 兜底 ⇒ 走 Express 默认 HTML 404；
+  //   生产挂了 server.ts:255-257 的 JSON 兜底 ⇒ 返回 JSON 404。两侧状态码一致，
+  //   因此**只断言 404**，不耦合响应体形态。
+  //   ⚠️ 必须带合法 token（currentRole='admin' 由 beforeAll 注入 auth），
+  //     否则会先被鉴权拦成 401，断言 404 会假红。
+  it('GET /service-desks/:id/agents → 404', async () => {
     h.client = makeClient(deskHandlers()).client;
-    const ok = await post(`/service-desks/${DESK}/agents`, { user_id: 'u-9', name: '坐席九' });
-    expect(ok.status).toBe(201);
-
-    h.client = makeClient(deskHandlers({ deskExists: false })).client;
-    const nf = await post(`/service-desks/${DESK}/agents`, { user_id: 'u-9', name: '坐席九' });
-    expect(nf.status).toBe(404);
+    const res = await get(`/service-desks/${DESK}/agents`);
+    expect(res.status).toBe(404);
   });
 
-  it('删除坐席 200；不存在 404', async () => {
+  it('POST /service-desks/:id/agents → 404', async () => {
     h.client = makeClient(deskHandlers()).client;
-    const ok = await del(`/service-desks/${DESK}/agents/ag-1`);
-    expect(ok.status).toBe(200);
+    const res = await post(`/service-desks/${DESK}/agents`, { user_id: 'u-9', name: '坐席九' });
+    expect(res.status).toBe(404);
+  });
 
-    const m2 = makeClient([
-      { match: (t) => t.startsWith('DELETE FROM service_desk_agent'), reply: () => ({ rows: [], rowCount: 0 }) },
-    ]);
-    h.client = m2.client;
-    const nf = await del(`/service-desks/${DESK}/agents/ag-x`);
-    expect(nf.status).toBe(404);
+  it('DELETE /service-desks/:id/agents/:agentId → 404', async () => {
+    h.client = makeClient(deskHandlers()).client;
+    const res = await del(`/service-desks/${DESK}/agents/ag-1`);
+    expect(res.status).toBe(404);
   });
 });
 
-describe('来电弹屏代申告（POST /tickets）', () => {
+describe('服务台人员代报修（POST /tickets）', () => {
   const payload = {
     deskId: DESK,
     callerName: '张三',
@@ -290,25 +288,25 @@ describe('来电弹屏代申告（POST /tickets）', () => {
 describe('T8 第十一批 · 服务台配置权限收敛', () => {
   // A 组：等价性。原 requireConfigRole 白名单 admin+operator ⇒ worker 必须继续 403。
   // 改前改后都应绿（这是"行为不变"的钉子，不是新功能断言）。
-  it('A 组：worker 对 PUT /service-desks/:id、POST/DELETE agents 均 403', async () => {
+  // 🔴 2026-10-28 坐席下线：原 POST/DELETE agents 两条断言随端点删除移除，
+  //    本组只剩 PUT /service-desks/:id（worker 仍须 403）。等价性判据不变。
+  it('A 组：worker 对 PUT /service-desks/:id 仍 403', async () => {
     currentRole = 'worker';
     h.client = makeClient(deskHandlers()).client;
     expect((await put(`/service-desks/${DESK}`, { name: '越权台' })).status).toBe(403);
-    expect((await post(`/service-desks/${DESK}/agents`, { user_id: 'u-9', name: '越权坐席' })).status).toBe(403);
-    expect((await del(`/service-desks/${DESK}/agents/ag-1`)).status).toBe(403);
     currentRole = 'admin';
   });
 
   // B 组：这就是收敛的全部价值 —— requireConfigRole 只读角色白名单、根本不查权限表，
   // ⇒ 租户把 servicedesk.manage 授给 reviewer 也放不了行。改前这条必红（403），改后绿。
-  it('B 组（prod · reviewer）授 servicedesk.manage ⇒ 4 处配置端点全放行', async () => {
+  // 🔴 2026-10-28 坐席下线：守卫面由 4 处缩为 2 处（POST/PUT /service-desks），
+  //    故标题与断言同步收敛；若端点被误删，这两条会立刻变红。
+  it('B 组（prod · reviewer）授 servicedesk.manage ⇒ 2 处配置端点全放行', async () => {
     currentRole = 'reviewer';
     const grant = ['servicedesk.manage'];
     h.client = makeClient(deskHandlers({ permGrant: grant })).client;
     expect((await post('/service-desks', { name: '三号台' })).status).toBe(201);
     expect((await put(`/service-desks/${DESK}`, { name: '四号台' })).status).toBe(200);
-    expect((await post(`/service-desks/${DESK}/agents`, { user_id: 'u-9', name: '坐席九' })).status).toBe(201);
-    expect((await del(`/service-desks/${DESK}/agents/ag-1`)).status).toBe(200);
     currentRole = 'admin';
   });
 });

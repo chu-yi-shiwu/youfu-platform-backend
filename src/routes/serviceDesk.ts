@@ -1,6 +1,6 @@
-// 服务台模块（批次 C）：服务台管理 + 客服人员 + 来电弹屏代申告。
+// 服务台模块（批次 C）：服务台管理 + 服务台人员代报修（POST /tickets）。
 // 风格对齐既有路由：withTenantClient 注入租户/RLS；写操作 requirePermission('servicedesk.manage')。
-// 代申告复用 repo.createWithIdem（不强制全局幂等，仅 sessionId 防双击，见 services/serviceDeskTicket.ts）。
+// 代报修复用 repo.createWithIdem（不强制全局幂等，仅 sessionId 防双击，见 services/serviceDeskTicket.ts）。
 import { Router } from 'express';
 import { z } from 'zod';
 import { withTenantClient } from '../db/pool.js';
@@ -70,60 +70,16 @@ router.put('/service-desks/:id', async (req, res, next) => {
   }
 });
 
-router.get('/service-desks/:id/agents', async (req, res, next) => {
-  try {
-    const tenantId = res.locals.auth.tenantId;
-    const items = await withTenantClient(tenantId, (client) =>
-      client
-        .query(`SELECT * FROM service_desk_agent WHERE tenant_id=$1 AND desk_id=$2 ORDER BY created_at ASC LIMIT 200`, [tenantId, req.params.id])
-        .then((r) => r.rows),
-    );
-    return res.json({ ok: true, code: 0, items });
-  } catch (e) {
-    next(e);
-  }
-});
+// 坐席（service_desk_agent）已于 2026-10-28 下线（决策：初一「取消坐席」，只删坐席、服务台保留）。
+// 原 3 个端点 GET/POST /service-desks/:id/agents 与 DELETE /service-desks/:id/agents/:agentId
+// 已删除；表 service_desk_agent 由后续迁移 105 删除（本批只下代码，先观察，再删表）。
+// 🔴 回退：revert 本 commit 即恢复端点；表若已 DROP，需另跑 rollback/105_drop_service_desk_agent_down.sql
+//    重建空表——**结构可恢复，数据不可恢复**（唯一那 1 行已留档，见骨架仓
+//    docs/00_现行/_archive/service_desk_agent_备份_20261028.sql）。
 
-router.post('/service-desks/:id/agents', async (req, res, next) => {
-  try {
-    const tenantId = res.locals.auth.tenantId;
-    const item = await withTenantClient(tenantId, async (client) => {
-      await requirePermission(res.locals.auth, client, 'servicedesk.manage');
-      const b = z.object({ user_id: z.string().min(1), name: z.string().min(1) }).parse(req.body);
-      const desk = await client.query(`SELECT id FROM service_desk WHERE id=$1 AND tenant_id=$2`, [req.params.id, tenantId]);
-      if (desk.rowCount === 0) throw new AppError('NOT_FOUND', 'service desk not found', 404);
-      const r = await client.query(
-        `INSERT INTO service_desk_agent (tenant_id, desk_id, user_id, name) VALUES ($1,$2,$3,$4)
-         ON CONFLICT (tenant_id, desk_id, user_id) DO UPDATE SET name=EXCLUDED.name RETURNING *`,
-        [tenantId, req.params.id, b.user_id, b.name],
-      );
-      return r.rows[0];
-    });
-    return res.status(201).json({ ok: true, code: 0, item });
-  } catch (e) {
-    next(e);
-  }
-});
-
-router.delete('/service-desks/:id/agents/:agentId', async (req, res, next) => {
-  try {
-    const tenantId = res.locals.auth.tenantId;
-    const n = await withTenantClient(tenantId, async (client) => {
-      await requirePermission(res.locals.auth, client, 'servicedesk.manage');
-      return client
-        .query(`DELETE FROM service_desk_agent WHERE tenant_id=$1 AND desk_id=$2 AND id=$3`, [tenantId, req.params.id, req.params.agentId])
-        .then((r) => r.rowCount ?? 0);
-    });
-    if (n === 0) throw new AppError('NOT_FOUND', 'agent not found', 404);
-    return res.json({ ok: true, code: 0 });
-  } catch (e) {
-    next(e);
-  }
-});
-
-// 来电弹屏代申告：生成标准工单进入派单流（坐席角色即可，不强制 admin；需登录由 authMiddleware 保证）
+// 服务台人员代报修：生成标准工单进入派单流（服务台人员即可，不强制 admin；需登录由 authMiddleware 保证）
 // 决策 #5 豁免说明：本路径天然绑定 deskId（deskId 为必填且已做存在性校验），
-// 租户开启 ticket_require_service_desk 严格开关时无需也不应重复校验——代申告本身即"有服务台"的建单通道。
+// 租户开启 ticket_require_service_desk 严格开关时无需也不应重复校验——代报修本身即"有服务台"的建单通道。
 router.post('/tickets', async (req, res, next) => {
   try {
     const tenantId = res.locals.auth.tenantId;

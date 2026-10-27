@@ -178,12 +178,17 @@ export const PERM_DEFS = {
   //   （PatrolPage vs InspectionPage + InspectionPlansPage）⇒ 复用会「只管巡检的人顺带能改巡更任务」。
   // 🔴 operator 默认给是**为了等价**（原 requireConfigRole 白名单 admin+operator），非策略选择。
   'patrol.manage': { label: '巡更配置', defaults: ['operator'] },
-  // T8 第十一批（2026-10-25）：服务台模块独立权限点。**只用一个点、不拆**：
-  //   4 处全是**配置面** —— 服务台主数据（POST/PUT /service-desks）+ 客服人员编排
-  //   （POST/DELETE /service-desks/:id/agents）；**代申告 POST /tickets 不在内**
-  //   （它是坐席执行动作，早已走 intake.create，本批不动）。
-  // 🔴 为什么不复用 `basicdata.edit`：**两套表**（service_desk + service_desk_agent）、
-  //   独立业务域（批次 C，自带代申告通道与幂等键），且蹭基础数据是已淘汰做法。
+  // T8 第十一批（2026-10-25）：服务台模块独立权限点。**只用一个点、不拆**。
+  // 🔴 2026-10-28 坐席下线后，本点守卫面从 4 处缩到 **2 处**：
+  //   只剩服务台主数据（POST /service-desks、PUT /service-desks/:id）。
+  //   原「客服人员编排」POST/DELETE /service-desks/:id/agents 已随坐席下线一并删除
+  //   （决策：初一「取消坐席」——只删坐席，服务台保留）；
+  //   **代报修 POST /tickets 从不在内**（它是服务台人员的执行动作，早已走 intake.create）。
+  // 🔴 为什么不复用 `basicdata.edit`（**前提已变，结论不变，2026-10-28 重写**）：
+  //   旧论证写的是「**两套表**（service_desk + service_desk_agent）」——坐席表删掉后
+  //   **只剩 service_desk 一张表**，这条理由**不再成立**，故此处重写而非保留原话。
+  //   但**换一条理由结论依旧成立**：服务台是**独立业务域**（批次 C，自带代报修通道
+  //   与幂等键），且蹭基础数据是已淘汰做法。
   //   ⚠️ 服务台配置入口确在 `BasicData.tsx` / `AdminPage.tsx`，但那只是**页面归属**，
   //      不是权限点归属 —— 按页面判会把服务台和字典/术语捆成"要么都给要么都不给"。
   // 🔴 operator 默认给是**为了等价**（原 requireConfigRole 白名单 admin+operator），非策略选择。
