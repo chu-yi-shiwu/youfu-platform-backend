@@ -1013,3 +1013,157 @@ describe('批5 · 多版本并存名单兜底（静默丢单洞）', () => {
     expect(r.rows[0].n).toBe(0);
   });
 });
+
+// ===================== 批 5b · 模板效果回写的多版本口径（全仓唯一 0% 覆盖的改动点） =====================
+/**
+ * 【为什么必须补这一节】
+ *   覆盖率实测（180 文件 / 2180 用例全绿的那轮）：`src/services/templateEffects.ts`
+ *   **语句覆盖 0%（1-92 行全红）**，它仅有的两个调用方 `routes/templateMarket.ts`、
+ *   `scheduler/templateEffectScheduler.ts` 同样 0%。三个文件都不是死代码——
+ *   `server.ts:148` 挂了路由、`server.ts:61` 起了 cron。
+ *   ⇒ 批 5 在 `templateEffects.ts:27-29` 做的「多版本并集」改动**此前没有任何测试验证过**，
+ *     tsc 通过只证明类型对，不证明口径对。本节用真库把它钉死。
+ *
+ * 【为什么写在这里、不新建文件】本轮硬约束：验收一律扩在既有测试文件里。
+ *   本文件已有 pglite 真库基建（freshWoDb / asClient / createTableBlock / addColumnStatements）。
+ *
+ * 【样本设计】v1（旧）显式声明 `config.doneStates = ['done','X']` ⇒ X 算完成态；
+ *   v2（live）只认 `['done']` ⇒ X 不再是完成态。
+ *   老单 `status='X' def_version=1` 在「只读 live」口径下**不算完成** ⇒ 闭环率被低估
+ *   ⇒ 模板效果 Δ 失真、模板评分被压低。这正是批 5 要修的。
+ *
+ * 【为什么必须真调 refreshApplyEffect 而不是复算一遍口径】
+ *   要验的是「调用点有没有真的把并集传进 SQL」，不是「并集函数对不对」（已在上一节验过）。
+ *   复算一遍等价于自己给自己盖章 ⇒ 用 `vi.doMock` 把 pool 指向真 pglite，再动态 import 真产品代码。
+ */
+const TPL_ID = '11111111-1111-1111-1111-111111111111';
+const APPLY_ID = '22222222-2222-2222-2222-222222222222';
+
+/** v1（旧）：X 也算完成态。 */
+const TPL_DEF_V1: WorkflowDef = {
+  initial: 'draft',
+  states: ['draft', 'assigned', 'X', 'done'],
+  transitions: [
+    { from: 'draft', to: 'assigned', event: 'assign' },
+    { from: 'assigned', to: 'done', event: 'finish' },
+  ] as any,
+  config: { doneStates: ['done', 'X'] } as any,
+} as WorkflowDef;
+/** v2（live）：只认 done，X 被降级为非完成态。 */
+const TPL_DEF_V2: WorkflowDef = {
+  initial: 'draft',
+  states: ['draft', 'assigned', 'X', 'done'],
+  transitions: [
+    { from: 'draft', to: 'assigned', event: 'assign' },
+    { from: 'assigned', to: 'done', event: 'finish' },
+  ] as any,
+  config: { doneStates: ['done'] } as any,
+} as WorkflowDef;
+
+/** 真库：live=v2、history 有 v1，两单分别锁 v1(X) / v2(done)，外加模板与应用记录。 */
+async function freshTplDb(multiVersion: boolean): Promise<PGlite> {
+  const db = await freshWoDb(); // 已含 103 迁移 + live v1
+  await db.exec(addColumnStatements('004_sla.sql', 'work_orders')); // sla_due_at（效果回写的逾期率口径要用）
+  await db.exec(createTableBlock('053_platform_template.sql', 'platform_template'));
+  await db.exec(createTableBlock('053_platform_template.sql', 'platform_template_apply'));
+  await db.exec(addColumnStatements('053b_review_fixes.sql', 'platform_template_apply')); // refreshed_at
+  if (multiVersion) {
+    await db.query(
+      `INSERT INTO workflow_def_history (tenant_id, entity_type, version, def) VALUES ($1,$2,1,$3::jsonb)`,
+      [T, WO_ET, JSON.stringify(TPL_DEF_V1)],
+    );
+    await db.query(
+      `UPDATE workflow_def SET def=$3::jsonb, version=2 WHERE tenant_id=$1 AND entity_type=$2`,
+      [T, WO_ET, JSON.stringify(TPL_DEF_V2)],
+    );
+  }
+  // order_no 由 002 迁移加为 NOT NULL + 租户内唯一 ⇒ 手工插行必须给。
+  await db.query(
+    `INSERT INTO work_orders (id, tenant_id, business_type, status, def_version, order_no)
+     VALUES ('wo-old-v1',$1,'repair',$2,$3,'NO-OLD-V1')`,
+    [T, 'X', multiVersion ? 1 : 0],
+  );
+  await db.query(
+    `INSERT INTO work_orders (id, tenant_id, business_type, status, def_version, order_no)
+     VALUES ('wo-new-v2',$1,'repair','done',0,'NO-NEW-V2')`,
+    [T],
+  );
+  await db.query(`INSERT INTO platform_template (id, name, entity_type) VALUES ($1,'模板A','work_order')`, [TPL_ID]);
+  await db.query(
+    `INSERT INTO platform_template_apply (id, template_id, tenant_id, entity_type, before_metrics, status)
+     VALUES ($1,$2,$3,'work_order',$4::jsonb,'applied')`,
+    [APPLY_ID, TPL_ID, T, JSON.stringify({ close_rate: 0 })],
+  );
+  return db;
+}
+
+/** 把 db/pool 指向真 pglite 后动态 import 真产品代码，调一次效果回写。 */
+async function runRefreshApplyEffect(db: PGlite): Promise<{ refreshed: boolean; effect_rating: number | null }> {
+  vi.resetModules();
+  vi.doMock('../db/pool.js', () => ({
+    default: {
+      query: async (text: unknown, params?: unknown[]) => {
+        const r: any = await db.query(String(text), (params ?? []) as any[]);
+        return { ...r, rowCount: r.rows?.length ?? 0 };
+      },
+    },
+    withTenantClient: async (_tenantId: string, fn: (c: unknown) => unknown) =>
+      fn({ query: (text: unknown, params?: unknown[]) => db.query(String(text), (params ?? []) as any[]) }),
+    assertSafeTenantId: (t: string) => t,
+  }));
+  const mod = await import('../services/templateEffects.js');
+  return mod.refreshApplyEffect(APPLY_ID);
+}
+
+async function readAfterMetrics(db: PGlite): Promise<any> {
+  const r = await db.query<{ after_metrics: any }>(
+    `SELECT after_metrics FROM platform_template_apply WHERE id = $1`,
+    [APPLY_ID],
+  );
+  const raw = r.rows[0]?.after_metrics;
+  return typeof raw === 'string' ? JSON.parse(raw) : raw;
+}
+
+/** 老口径（只读 live）下的闭环率：同一份真库数据，不调产品代码。 */
+async function closeRateLiveOnly(db: PGlite): Promise<number> {
+  const r = await db.query<{ v: string | null }>(
+    `SELECT count(*) FILTER (WHERE status = ANY($2::text[]))::numeric / nullif(count(*),0) AS v
+     FROM work_orders WHERE tenant_id = $1`,
+    [T, doneStates(TPL_DEF_V2)],
+  );
+  return Number(r.rows[0]?.v ?? 0);
+}
+
+describe('批5b · 模板效果回写（templateEffects.ts，0% 覆盖区）', () => {
+  it('🔴 穿透：旧口径把锁 v1 的老单漏出完成率，并集口径必须计回来', async () => {
+    const db = await freshTplDb(true);
+
+    // —— 旧算法：只认 live(v2) 的 done 集 ⇒ X 不算完成
+    expect(doneStates(TPL_DEF_V2)).toEqual(['done']);
+    const oldRate = await closeRateLiveOnly(db);
+    expect(oldRate, '🔴 旧算法：2 单里只认 1 单完成（复现效果 Δ 被低估）').toBe(0.5);
+
+    // —— 新代码：真调 refreshApplyEffect，看它写回库的 after_metrics
+    await runRefreshApplyEffect(db);
+    const after = await readAfterMetrics(db);
+    expect(after.total, '两单都要进样本').toBe(2);
+    expect(Number(after.close_rate), '并集口径把 v1 的完成态 X 收回来 ⇒ 2/2 = 1').toBe(1);
+  });
+
+  it('单版本不回归：库里只有一个版本时，回写结果与旧口径一致（与改造前逐字节等价）', async () => {
+    const db = await freshTplDb(false); // 无 history、无 def_version>0 ⇒ 只有 live 一版
+    await runRefreshApplyEffect(db);
+    const after = await readAfterMetrics(db);
+    expect(after.total).toBe(2);
+    // live = WO_V1（freshWoDb 默认，未覆盖成 v2）⇒ 完成态由该 def 派生；
+    // 老单 status='X' 不在其中 ⇒ 完成率 0.5，与「只读 live」必然相同（无第二版本可并）。
+    const c = asClient(db);
+    const liveDef = await getWorkflowDefOrDefault(c, T, 'work_order', DEFAULT_WORK_ORDER_DEF);
+    const r = await db.query<{ v: string | null }>(
+      `SELECT count(*) FILTER (WHERE status = ANY($2::text[]))::numeric / nullif(count(*),0) AS v
+       FROM work_orders WHERE tenant_id = $1`,
+      [T, doneStates(liveDef)],
+    );
+    expect(Number(after.close_rate), '单版本 ⇒ 并集 = 该版集合，与旧口径逐字节相同').toBe(Number(r.rows[0]?.v ?? 0));
+  });
+});
