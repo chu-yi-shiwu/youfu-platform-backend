@@ -194,7 +194,14 @@ export async function autoDispatchAfterCreate(
   const loadedParams = safeParseJsonb(modelParams.rows[0]?.params) ?? undefined;
   const model: ModelBackend = new StatsModelBackend(loadedParams);
   const resolved = resolveDispatch(workerRows, rules, needPayload, model);
-  const picked = resolved ? resolved.worker : pickWorker(workerRows, { skillTags: need.skill_tags ?? undefined });
+  // 洞③-2a（修「假中」）：兜底必须与 :196 **同一份口径**，用派生后的 needPayload.skill_tags，
+  //   而不是调用方的原始 need.skill_tags。
+  //   改前的问题链：resolveNeed 把目录/故障分类上配的技能派生进 needPayload.skill_tags，
+  //   但兜底这一行仍读 need.skill_tags ⇒ 公开报修 / AI 建单不传 skill_tags 时它恒为 undefined
+  //   ⇒ 传给 pickWorker 的 required=[] ⇒ dispatch.ts:43-45 的 [].every() 恒真
+  //   ⇒ **只要有 1 名在岗工人就必中**，命中率的 71%~85% 是这么来的（数字好看，单派错人）。
+  //   初一裁决 D-3：修假中，要真数字不要好看数字 ⇒ 派不中就老实落抢单大厅。
+  const picked = resolved ? resolved.worker : pickWorker(workerRows, { skillTags: needPayload.skill_tags ?? undefined });
   let autoFlow = false;
   let assignee: string | null = null;
   let reason = 'manual claim required';

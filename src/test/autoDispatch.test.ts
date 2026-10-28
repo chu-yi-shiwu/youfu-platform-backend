@@ -22,10 +22,17 @@ function makeClient(handler: QueryFn) {
 
 const WORKER_ID = '11111111-1111-4111-8111-111111111111';
 
-function dispatchHandler(opts: { workerRows?: any[]; ruleRows?: any[]; adminRows?: any[] } = {}): QueryFn {
+function dispatchHandler(opts: {
+  workerRows?: any[];
+  ruleRows?: any[];
+  adminRows?: any[];
+  /** 洞③-2a：fault_category 上配的 skill_tags（派生技能的数据源）。默认空 = 派生不出技能。 */
+  catalogRows?: any[];
+} = {}): QueryFn {
   return async (text: string, params?: any[]) => {
     if (text.includes('UPDATE work_orders SET sla_minutes')) return { rows: [] };
     if (text.includes('FROM worker WHERE tenant_id')) return { rows: opts.workerRows ?? [] };
+    if (text.includes('FROM fault_category')) return { rows: opts.catalogRows ?? [] };
     if (text.includes('FROM dispatch_rule WHERE')) return { rows: opts.ruleRows ?? [] }; // 无规则 → least_load 兜底
     if (text.includes('SELECT def FROM workflow_def')) return { rows: [] }; // 无自定义 def → DEFAULT
     if (text.includes('SELECT params FROM model_state')) return { rows: [] };
@@ -178,5 +185,59 @@ describe('autoDispatchAfterCreate（R31-F2 回归护栏）', () => {
     expect(r.autoFlow).toBe(true);
     expect(r.assignee).toBe(WORKER_ID);
     expect(r.reason).toBe('auto dispatched by least_load fallback');
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 洞③-2a：修「假中」——兜底 pickWorker 必须用**派生后**的 skill_tags
+//
+// 症状：自动派单命中率看着 71%~85%，数字是假的。
+//   routes/workOrder.ts 的 `resolveNeed` 把派生技能写进了 needPayload.skill_tags
+//   （engine/dispatch/needResolver.ts:114-117），但兜底那一行仍用调用方**原始**的
+//   need.skill_tags。而 engine/dispatch.ts:43-45 里 required=[] 时 [].every() 恒真
+//   ⇒ 公开报修（publicReportCreate.ts:304）/ AI 建单（conversationAgent.ts:183）
+//   不传 skill_tags 时，**只要有 1 名在岗工人就必中**。
+// 初一裁决 D-3：修假中，要真数字不要好看数字。
+// ═══════════════════════════════════════════════════════════════════════════
+describe('洞③-2a · 兜底派单必须用派生后的技能（假中修复）', () => {
+  /** 调用方**不传** skill_tags（= 公开报修 / AI 建单的真实形态），技能全靠 catalog 派生。 */
+  const needNoSkill = { business_type: 'repair', skill_tags: null, priority: 'normal', catalog: 'electrical' };
+
+  it('① 3 名在岗工人只有 1 名具备派生技能 ⇒ 派中的必须是那名有技能的工人', async () => {
+    const { client } = makeClient(
+      dispatchHandler({
+        // 故障分类 electrical 上配了技能 electrician（运营可配，用户零感知）⇒ 派生出 ["electrician"]
+        catalogRows: [{ skill_tags: '["electrician"]' }],
+        // 两名"手上没活但不会电"的工人 load=0：若兜底不看派生技能，least_load 会选中它们 = 派错人
+        workerRows: [
+          { id: 'w-clean-1', skill_tags: '["cleaning"]', load: 0, active: true },
+          { id: 'w-clean-2', skill_tags: '["cleaning"]', load: 0, active: true },
+          { id: 'w-electrician', skill_tags: '["electrician"]', load: 7, active: true },
+        ],
+      }),
+    );
+    const r = await autoDispatchAfterCreate(client, 't-verification', row, needNoSkill);
+    expect(r.autoFlow).toBe(true);
+    expect(r.assignee, '必须派给唯一具备派生技能的工人，而不是"手上活最少的无关工人"').toBe('w-electrician');
+  });
+
+  it('② 没有任何匹配工人 ⇒ 不再"必中"（假中的直接反证：落抢单大厅，不随便派一个人）', async () => {
+    const { client, calls } = makeClient(
+      dispatchHandler({
+        catalogRows: [{ skill_tags: '["electrician"]' }],
+        // 两名在岗工人都不会电 ⇒ 改前 required=[] ⇒ [].every() 恒真 ⇒ 必中（假中）
+        workerRows: [
+          { id: 'w-clean-1', skill_tags: '["cleaning"]', load: 0, active: true },
+          { id: 'w-clean-2', skill_tags: '["cleaning"]', load: 0, active: true },
+        ],
+      }),
+    );
+    const r = await autoDispatchAfterCreate(client, 't-verification', row, needNoSkill);
+    expect(r.autoFlow, '没有匹配工人就不该算派中').toBe(false);
+    expect(r.assignee).toBeNull();
+    // 有 active 工人却没派出去 ⇒ 落大厅且原因是技能失配（no_rule_matched），不是容量问题
+    const evt = calls.find((c) => c.text.includes('INSERT INTO ticket_event'));
+    expect(evt?.text).toContain("'enter_hall'");
+    expect(JSON.parse(String(evt?.params?.[5]))).toMatchObject({ reason: 'no_rule_matched' });
   });
 });
