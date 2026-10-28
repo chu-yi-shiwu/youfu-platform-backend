@@ -29,9 +29,16 @@ function makeClient(handler: QueryFn) {
 const WO_ID = 'wo-linked-1';
 const ORDER_NO = 'WO_20260914_0000000001';
 
-function linkedHandler(opts: { workerRows?: any[]; ruleRows?: any[]; adminRows?: any[] } = {}): QueryFn {
+function linkedHandler(opts: {
+  workerRows?: any[];
+  ruleRows?: any[];
+  adminRows?: any[];
+  /** 洞③-2b：fault_category 上配的 skill_tags（派生技能的数据源）。默认空 = 派生不出技能。 */
+  catalogRows?: any[];
+} = {}): QueryFn {
   return async (text: string) => {
     if (text.includes('FROM worker WHERE tenant_id')) return { rows: opts.workerRows ?? [] };
+    if (text.includes('FROM fault_category')) return { rows: opts.catalogRows ?? [] };
     if (text.includes('FROM dispatch_rule WHERE')) return { rows: opts.ruleRows ?? [] };
     if (text.includes('SELECT def FROM workflow_def')) return { rows: [] }; // 无自定义 def → DEFAULT（initial=draft）
     if (text.includes("SELECT id FROM account_user WHERE tenant_id=$1 AND role='admin'")) {
@@ -158,5 +165,58 @@ describe('linkedWorkOrder 派单未命中兜底（纵切② P0-3/P0-4）', () =>
     // picked 分支无 enter_hall / 无 admin 通知
     expect(calls.find((c) => c.text.includes("'enter_hall'"))).toBeUndefined();
     expect(calls.find((c) => c.text.includes('INSERT INTO notification'))).toBeUndefined();
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 洞③-2b：联动单是 4 条建单路径里最弱的一条——它连 resolveNeed 都没 import，
+//   :131 自己 resolveDispatch、:132 自己 pickWorker，且兜底用的是调用方**原始**
+//   p.skillTags（与 workOrder.ts 洞③-2a 同一个"假中"病灶，且更重：连派生都没有）。
+// 本组断言：修完后这条路径的派中结果与批 2 修完的 workOrder.ts **同场景同结果**。
+// ═══════════════════════════════════════════════════════════════════════════
+describe('洞③-2b · 联动单派单口径对齐主路径（补齐 resolveNeed）', () => {
+  beforeEach(() => {
+    (transition as any).mockReset();
+    (transition as any).mockResolvedValue({ row: {}, transition: null, from: 'draft' });
+    (createWithIdem as any).mockReset();
+    (createWithIdem as any).mockResolvedValue({
+      row: { id: WO_ID, order_no: ORDER_NO, auto_flow: false, assignee_id: null },
+      created: true,
+    });
+  });
+
+  it('① 3 名在岗工人只有 1 名具备派生技能 ⇒ 派中的必须是那名有技能的（与 workOrder.ts 同场景同结果）', async () => {
+    const { client } = makeClient(
+      linkedHandler({
+        catalogRows: [{ skill_tags: '["electrician"]' }],
+        workerRows: [
+          { id: 'w-clean-1', skill_tags: '["cleaning"]', load: 0, active: true },
+          { id: 'w-clean-2', skill_tags: '["cleaning"]', load: 0, active: true },
+          { id: 'w-electrician', skill_tags: '["electrician"]', load: 7, active: true },
+        ],
+      }),
+    );
+    // 调用方**不传** skillTags（联动单的真实形态：巡检异常转维修单），技能全靠 catalog 派生
+    const r = await createLinkedWorkOrder(client, basePayload({ catalog: 'electrical', skillTags: undefined }));
+    expect(r.autoFlow).toBe(true);
+    expect(r.assignee, '必须与 workOrder.ts 同场景派给同一个人（唯一具备派生技能的工人）').toBe('w-electrician');
+  });
+
+  it('② 没有任何匹配工人 ⇒ 不再"必中"，落 claim_hall 且 reason=no_rule_matched', async () => {
+    const { client } = makeClient(
+      linkedHandler({
+        catalogRows: [{ skill_tags: '["electrician"]' }],
+        workerRows: [
+          { id: 'w-clean-1', skill_tags: '["cleaning"]', load: 0, active: true },
+          { id: 'w-clean-2', skill_tags: '["cleaning"]', load: 0, active: true },
+        ],
+      }),
+    );
+    const r = await createLinkedWorkOrder(client, basePayload({ catalog: 'electrical', skillTags: undefined }));
+    expect(r.autoFlow, '没有匹配工人就不该算派中').toBe(false);
+    expect(r.assignee).toBeNull();
+    const tArgs = (transition as any).mock.calls[0];
+    expect(tArgs[3]).toBe('claim_hall');
+    expect(tArgs[4].payloadExtra).toEqual({ reason: 'no_rule_matched' });
   });
 });

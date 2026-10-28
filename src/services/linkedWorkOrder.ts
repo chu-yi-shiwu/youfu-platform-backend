@@ -8,6 +8,9 @@
 import type { PoolClient } from 'pg';
 import { createWithIdem, transition } from '../repo/ticket.js';
 import { pickWorker, resolveDispatch, getActiveRules } from '../engine/dispatch.js';
+// 洞③-2b：需求走解析器链（与 routes/workOrder.ts **同一入口**），派生出目录/故障分类上配的技能。
+import { resolveNeed } from '../engine/dispatch/needResolver.js';
+import { safeParseJsonb } from '../util/jsonb.js';
 import { resolveDispatchTarget, type WorkOrderStatus } from '../engine/stateMachine.js';
 import { getWorkflowDef } from '../engine/workflowDef.js';
 import { CLAIM_HALL_STATE } from '../engine/claimHallEdges.js'; // F8：落抢单大厅走主通道（机制态单一事实源）
@@ -95,11 +98,25 @@ export async function createLinkedWorkOrder(
     'SELECT id, skill_tags, load, active FROM worker WHERE tenant_id = $1',
     [p.tenantId],
   );
-  const need = {
-    business_type: p.businessType,
-    skill_tags: p.skillTags,
-    priority: p.priority,
-  };
+  // 洞③-2b：与 routes/workOrder.ts:145-146 同口径——worker.skill_tags 先过 safeParseJsonb。
+  //   改前把 `workers.rows` 原样喂给派单引擎：pg 驱动对 jsonb 列在部分版本下返回**字符串**，
+  //   于是 `w.skill_tags.includes(tag)` 退化成子串匹配（tag 'clean' 能命中 '["cleaning"]'）。
+  const workerRows = workers.rows.map((w: any) => ({ ...w, skill_tags: safeParseJsonb(w.skill_tags) ?? [] }));
+  // 洞③-2b：需求走解析器链（engine/dispatch/needResolver.ts），与 routes/workOrder.ts:150-160
+  //   **同一个 resolveNeed**——调用方显式传了以显式为准，没传则由目录/故障分类上配的技能派生。
+  //   🔴 这是本函数此前最大的缺口：它连 resolveNeed 都没 import ⇒ 4 条建单路径里唯一
+  //      一条完全不做技能派生的，运营在分类上配的技能对联动单**从来没生效过**。
+  const needPayload = await resolveNeed(
+    {
+      tenantId: p.tenantId,
+      entityType: 'work_order',
+      business_type: p.businessType,
+      priority: p.priority ?? undefined,
+      skill_tags: p.skillTags ?? undefined,
+      catalog: p.catalog ?? undefined,
+    },
+    client,
+  );
   const rules = await getActiveRules(client, p.tenantId);
   // ④⑤ 模数共振：读 workflow_def.autoRoutes，决定本租户自动派发的目标态与策略（缺省保持旧行为：落 assigned、规则优先）
   const def = await getWorkflowDef(client, p.tenantId, 'work_order');
@@ -128,8 +145,13 @@ export async function createLinkedWorkOrder(
   // 2026-09-14 纵切② P0-1：strategy:'least_load' 不再短路规则匹配（t-phasea 实证规则被静默废掉；
   // 规则未命中时 resolveDispatch 返回 null，自然落 pickWorker 兜底，无规则租户行为不变）。
   // dispatchTarget（route?.to）逻辑不动：目标态仍由 autoRoutes 决定。
-  const resolved = resolveDispatch(workers.rows, rules, need);
-  const picked = resolved ? resolved.worker : pickWorker(workers.rows, { skillTags: p.skillTags });
+  const resolved = resolveDispatch(workerRows, rules, needPayload);
+  // 洞③-2b：兜底与主路径同口径——用**派生后**的 needPayload.skill_tags，而不是调用方原始的
+  //   p.skillTags（routes/workOrder.ts 洞③-2a 修的是同一个病灶）。不修则 p.skillTags 常为
+  //   undefined ⇒ required=[] ⇒ [].every() 恒真 ⇒ 只要有 1 名在岗工人就"必中"（假中）。
+  const picked = resolved
+    ? resolved.worker
+    : pickWorker(workerRows, { skillTags: needPayload.skill_tags ?? undefined });
   let autoFlow = false;
   let assignee: string | null = null;
   let reason = 'manual claim required';
