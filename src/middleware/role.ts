@@ -23,7 +23,8 @@ import type { AuthLocals } from './auth.js';
 //     存量账号由管理员自行改派，系统不自动改数据（改数据是破坏性动作，需人决策）。
 //
 // ⚠️ 名字撞车警告：'service_desk' 既是角色 code，**也是业务表名**（018_service_desk.sql）
-//   与业务模块（src/routes/serviceDesk.ts，服务台管理 + 来电弹屏代申告，挂 server.ts:190）。
+//   与业务模块（src/routes/serviceDesk.ts，服务台管理，挂 server.ts:195）。
+//   ⚠️ 原「+ 来电弹屏代申告」随该端点 2026-10-28 下线删除（代申告与坐席同批下线）。
 //   本退场**只针对角色**，绝不触碰表与模块——删角色 ≠ 删服务台业务。
 export const ROLES = ['admin', 'operator', 'dispatcher', 'worker', 'reviewer', 'service_desk'] as const;
 export type Role = (typeof ROLES)[number];

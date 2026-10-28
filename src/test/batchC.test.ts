@@ -2,7 +2,6 @@
 // 不依赖真实 PG：纯函数直接测；ticketStats 用 mock client 走真实调用路径。
 import { describe, it, expect } from 'vitest';
 import { applyStockAction } from '../services/inventory.js';
-import { buildServiceDeskTicket } from '../services/serviceDeskTicket.js';
 import { summarizeLinkedOrders } from '../services/assetHistory.js';
 import { ticketStats, clearStatsCache } from '../repo/stats.js';
 import type { PoolClient } from 'pg';
@@ -22,32 +21,8 @@ describe('applyStockAction（库存动作）', () => {
   });
 });
 
-describe('buildServiceDeskTicket（来电弹屏映射）', () => {
-  it('catalog 映射为 business_type，无误则无幂等键', () => {
-    const dto = buildServiceDeskTicket({
-      tenantId: 't1',
-      deskId: 'd1',
-      callerName: '张三',
-      catalog: 'repair',
-      description: '灯不亮',
-    });
-    expect(dto.businessType).toBe('repair');
-    expect(dto.catalog).toBe('repair');
-    expect(dto.idempotencyKey).toBeUndefined();
-    expect(dto.title).toContain('张三');
-  });
-  it('sessionId 存在才生成幂等键防双击', () => {
-    const dto = buildServiceDeskTicket({
-      tenantId: 't1',
-      deskId: 'd1',
-      callerName: '李四',
-      catalog: 'transport',
-      description: '送检',
-      sessionId: 's-abc',
-    });
-    expect(dto.idempotencyKey).toBe('svcdesk:d1:s-abc');
-  });
-});
+// 原 describe('buildServiceDeskTicket（来电弹屏映射）') 随**代申告下线**一并删除
+// （2026-10-28）：被测函数 services/serviceDeskTicket.ts 是本端点的唯一消费方，已随删。
 
 describe('summarizeLinkedOrders（资产历史只读聚合）', () => {
   it('空数组返回空', () => {

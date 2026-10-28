@@ -205,83 +205,21 @@ describe('坐席端点已下线（2026-10-28 决策：取消坐席，只删坐�
   });
 });
 
-describe('服务台人员代报修（POST /tickets）', () => {
-  const payload = {
-    deskId: DESK,
-    callerName: '张三',
-    catalog: '维修',
-    description: '空调不制冷',
-    location: '门诊三楼',
-    sessionId: 'sess-001',
-  };
+// 原 describe('服务台人员代报修（POST /tickets）') 的 5 个用例随**代申告下线**一并删除
+// （2026-10-28，初一改判）。端点已删，这些用例会 404 无意义。
 
-  it('建单 201 + dto 映射断言（title/contact/businessType/幂等键抢键先行）', async () => {
-    const m = makeClient(deskHandlers());
-    h.client = m.client;
-    const res = await post('/tickets', payload);
-    expect(res.status).toBe(201);
-    const body = (await res.json()) as { item: { title: string; business_type: string } };
-    expect(body.item.title).toBe('服务台代申告·张三');
-    expect(body.item.business_type).toBe('维修');
-
-    // SQL 序列：抢幂等键必须先于 INSERT work_orders（R1-001 零 DDL 串行化）
-    const grabIdx = m.calls.findIndex((c) => c.text.includes('INSERT INTO idempotency_key'));
-    const insIdx = m.calls.findIndex((c) => c.text.startsWith('INSERT INTO work_orders'));
-    expect(grabIdx).toBeGreaterThanOrEqual(0);
-    expect(insIdx).toBeGreaterThan(grabIdx);
-
-    // 幂等键形态：svcdesk:{deskId}:{sessionId}
-    const grab = m.calls[grabIdx];
-    expect(grab.params![0]).toBe(`svcdesk:${DESK}:sess-001`);
-    expect(grab.params![1]).toBe(T);
-
-    // INSERT work_orders 映射：businessType=catalog、contact=callerName、priority=normal、title 前缀
-    const ins = m.calls[insIdx];
-    expect(ins.params![3]).toBe('维修'); // business_type
-    expect(ins.params![4]).toBe('维修'); // catalog
-    expect(ins.params![5]).toBe('normal'); // priority
-    expect(ins.params![6]).toBe('门诊三楼'); // location
-    expect(ins.params![7]).toBe('服务台代申告·张三'); // title
-    expect(ins.params![9]).toBe('张三'); // contact
-    expect(ins.params![12]).toBe('backend'); // source
-  });
-
-  it('无 sessionId 时不写幂等键直接建单', async () => {
-    const m = makeClient(deskHandlers());
-    h.client = m.client;
-    const res = await post('/tickets', { ...payload, sessionId: undefined });
-    expect(res.status).toBe(201);
-    expect(m.calls.some((c) => c.text.includes('INSERT INTO idempotency_key'))).toBe(false);
-  });
-
-  it('双击防重：第二次抢键冲突 → 回查复用既有单，仍 201 且 id 一致', async () => {
-    const existing = { id: 'wo-existing-1', tenant_id: T, order_no: 'WO_1', status: 'draft' };
-    h.client = makeClient(deskHandlers({ idemGrabbed: false, existingWo: existing })).client;
-    const res = await post('/tickets', payload);
-    expect(res.status).toBe(201);
-    const body = (await res.json()) as { item: { id: string; order_no: string } };
-    expect(body.item.id).toBe('wo-existing-1'); // 复用既有单而非新建
-    expect(body.item.order_no).toBe('WO_1');
-  });
-
-  it('deskId 非 uuid → 422；desk 不存在 → 404', async () => {
+describe('代报修端点已下线（2026-10-28 初一改判：代申告与坐席同批下线）', () => {
+  // 🔴 这是「代申告真的没了」的钉子。只断言 status（本测试 app 未挂 /api 兜底，
+  //    走 Express 默认 HTML 404；生产有 server.ts:255-257 的 JSON 兜底 ⇒ 两侧状态码一致）。
+  it('POST /tickets → 404', async () => {
     h.client = makeClient(deskHandlers()).client;
-    const bad = await post('/tickets', { ...payload, deskId: 'not-a-uuid' });
-    expect(bad.status).toBe(422);
-
-    h.client = makeClient(deskHandlers({ deskExists: false })).client;
-    const nf = await post('/tickets', payload);
-    expect(nf.status).toBe(404);
-  });
-
-  it('角色权限覆盖存在但不含 intake.create → 403（R35 接线）', async () => {
-    currentRole = 'service_desk'; // 非 admin → 走 role_permission 查库路径
-    h.client = makeClient(deskHandlers()).client; // mock 返回覆盖集 {settlement.edit}，不含 intake.create
-    const res = await post('/tickets', payload);
-    expect(res.status).toBe(403);
-    const body = (await res.json()) as { message: string };
-    expect(body.message).toContain('intake.create');
-    currentRole = 'admin';
+    const res = await post('/tickets', {
+      deskId: DESK,
+      callerName: '张三',
+      catalog: '维修',
+      description: '空调不制冷',
+    });
+    expect(res.status).toBe(404);
   });
 });
 

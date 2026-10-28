@@ -310,8 +310,9 @@ router.put('/config/system', async (req, res, next) => {
 
 // ============ 租户开关：ticket_require_service_desk（决策 #5） ============
 // 存储：复用 system_config（tenant_id + key-value，零 DDL）；缺行 = 关（默认宽松）。
-// 行为：开 → 直接建单（POST /open/work_order）缺 service_desk → 422 SERVICE_DESK_REQUIRED；
-//       来电弹屏代申告（serviceDesk.ts POST /tickets）天然带服务台，豁免。
+// 行为：开 → 直接建单（POST /open/work_order）缺 service_desk → 422 SERVICE_DESK_REQUIRED。
+// ⚠️ 原「来电弹屏代申告（serviceDesk.ts POST /tickets）天然带服务台，豁免」随该端点
+//    2026-10-28 下线**删除**（代申告与坐席同批下线），现已无任何建单豁免分支。
 const REQUIRE_DESK_KEY = 'ticket_require_service_desk';
 
 router.get('/config/ticket-require-service-desk', async (req, res, next) => {

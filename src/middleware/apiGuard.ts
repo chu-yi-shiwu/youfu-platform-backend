@@ -40,7 +40,10 @@ export const KNOWN_V1_SEGMENTS: ReadonlySet<string> = new Set([
   'preview', 'process-mining', 'product-catalog', 'public', 'records', 'scan',
   'service-desks', 'settlements', 'similar', 'sla', 'stats', 'summary', 'tasks',
   'template-contributions', 'templates', 'tenant-info', 'tenants', 'themes',
-  'tickets', 'upload', 'usage', 'webhooks', 'workers', 'workflow',
+  // 🔴 'tickets' 已于 2026-10-28 移除：原 POST /api/v1/tickets（代申告）随代申告下线删除，
+  //    全仓再无 router 以 tickets 作首段。留着会被 routerRegistry 的
+  //    「白名单不得冗余」反向检查判红（该检查就是防白名单腐烂的）。
+  'upload', 'usage', 'webhooks', 'workers', 'workflow',
   'energy', // T303a 能耗采集收单/worker token/只读列表（src/routes/energyCollection.ts）
 ]);
 

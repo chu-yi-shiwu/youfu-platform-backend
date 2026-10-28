@@ -52,8 +52,10 @@ const router = Router();
 /**
  * 决策 #5（服务台租户开关）：读取租户级「必须指定服务台」开关。
  * 键名 ticket_require_service_desk（system_config，key-value，零 DDL）；缺行/非 'true' = 关（默认宽松）。
- * 开启后：直接建单路径（POST /open/work_order）不带 service_desk → 422 SERVICE_DESK_REQUIRED；
- * 来电弹屏代申告（routes/serviceDesk.ts POST /tickets）天然带 deskId，豁免该校验。
+ * 开启后：直接建单路径（POST /open/work_order）不带 service_desk → 422 SERVICE_DESK_REQUIRED。
+ * ⚠️ 原「来电弹屏代申告（routes/serviceDesk.ts POST /tickets）天然带 deskId，豁免该校验」
+ *   一句随该端点 2026-10-28 下线**删除**：代申告已不存在，服务台建单入口只剩
+ *   /open/work_order 显式带 service_desk 这一条，无需也不该再有豁免分支。
  */
 export const TICKET_REQUIRE_SERVICE_DESK_KEY = 'ticket_require_service_desk';
 
@@ -177,7 +179,7 @@ export async function autoDispatchAfterCreate(
   if (unmetFields.length > 0) {
     throw new AppError(
       'BAD_REQUEST',
-      `自动派单目标转移要求必填字段 ${unmetFields.join(',')}，系统派单无法提供；请调整流程配置或改用人工派单`,
+      `自动派单目标转移要求必填字段 ${unmetFields.join(',')}，系统派单无法提供；请调整流程配置后重试`,
       422,
     );
   }

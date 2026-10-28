@@ -9326,46 +9326,6 @@
         }
       }
     },
-    "/api/v1/tickets": {
-      "post": {
-        "tags": [
-          "serviceDesk"
-        ],
-        "summary": "服务台人员代报修：生成标准工单进入派单流（服务台人员即可，不强制 admin；需登录由 authMiddleware 保证）",
-        "description": "决策 #5 豁免说明：本路径天然绑定 deskId（deskId 为必填且已做存在性校验），\n租户开启 ticket_require_service_desk 严格开关时无需也不应重复校验——代报修本身即\"有服务台\"的建单通道。\n\n来源：src/routes/serviceDesk.ts:127\n\n服务端响应状态码（代码扫描）：201\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
-        "security": [
-          {
-            "bearerAuth": []
-          }
-        ],
-        "responses": {
-          "201": {
-            "description": "HTTP 201",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "description": "骨架占位：字段以服务端实现为准"
-                }
-              }
-            }
-          }
-        },
-        "requestBody": {
-          "required": false,
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object",
-                "additionalProperties": true,
-                "description": "骨架占位：请求字段以服务端实现为准"
-              }
-            }
-          }
-        }
-      }
-    },
     "/api/v1/stats/by-catalog": {
       "get": {
         "tags": [

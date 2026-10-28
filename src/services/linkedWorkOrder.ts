@@ -121,7 +121,7 @@ export async function createLinkedWorkOrder(
   if (unmetFields.length > 0) {
     throw new AppError(
       'BAD_REQUEST',
-      `自动派单目标转移要求必填字段 ${unmetFields.join(',')}，系统派单无法提供；请调整流程配置或改用人工派单`,
+      `自动派单目标转移要求必填字段 ${unmetFields.join(',')}，系统派单无法提供；请调整流程配置后重试`,
       422,
     );
   }

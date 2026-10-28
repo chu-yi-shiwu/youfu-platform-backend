@@ -4,7 +4,8 @@
 //     —— 单独过滤生效 + 与 status 组合生效 + 不传时行为与旧版完全一致（回归）。
 //   任务二（决策 #7）：列表/详情下发 assignee_name（LEFT JOIN worker，无承接人 → null）。
 //   任务三（决策 #5）：租户开关 ticket_require_service_desk —— 默认关（建单不带服务台完全合法）；
-//     开启后直接建单缺服务台 → 422 SERVICE_DESK_REQUIRED；来电弹屏代申告路径豁免；翻转接口。
+//     开启后直接建单缺服务台 → 422 SERVICE_DESK_REQUIRED；翻转接口。
+//     ⚠️ 原「来电弹屏代申告路径豁免」随该端点 2026-10-28 下线删除（现已无豁免分支）。
 //
 // 断言纪律：一律断言真实 HTTP 状态码（对齐 acceptance.http.test.ts），禁止 try/catch 空过。
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
@@ -302,23 +303,9 @@ describe('任务三：ticket_require_service_desk 租户开关', () => {
     expect(r.body.ok).toBe(true);
   });
 
-  it('豁免：开关开启后来电弹屏代申告（POST /service-desk/tickets 语义）仍成功', async () => {
-    const { client } = makeClient([
-      ...createHandlers({ systemConfigValue: 'true' }),
-      // serviceDesk 代申告路径：desk 存在性校验 + 幂等回查旧形状兼容
-      { match: (t) => t.includes('SELECT id FROM service_desk WHERE id=$1 AND tenant_id=$2'), reply: () => ({ rows: [{ id: DESK_UUID }], rowCount: 1 }) },
-    ]);
-    h.client = client;
-    const r = await post('/tickets', {
-      deskId: DESK_UUID,
-      callerName: '王护士',
-      catalog: 'repair',
-      description: '输液泵无法开机',
-    });
-    expect(r.status).toBe(201);
-    expect(r.body.ok).toBe(true);
-  });
-
+  // 原「豁免：开关开启后来电弹屏代申告（POST /service-desk/tickets 语义）仍成功」
+  // 随**代申告下线**一并删除（2026-10-28，初一改判）：端点已删，该豁免语义不复存在。
+  // ⚠️ 本文件测的是 /open/work_order 的开关校验 —— **开关 ticket_require_service_desk 保留**，不受影响。
   it('翻转接口：GET 默认 false → PUT true → GET true；worker 写入 403', async () => {
     // 可变 flag：PUT upsert 后读取同步翻转，验证「读-写-读」闭环
     let flag: string | null = null;
