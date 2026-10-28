@@ -443,3 +443,191 @@ describe('洞② · 运送单建单后自动派单', () => {
     expect(calls.find((c) => c.text.includes('UPDATE transport_order'))).toBeUndefined();
   });
 });
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 运送线 worker.load 净结算（least_load 的"分母"）
+//
+// 【症状】运送线派完单从不 `UPDATE worker SET load`（全仓只有工单线 repo/ticket.ts:312/315
+//   有）⇒ 对运送单而言「手上活最少」永远算出来是同一个人 ⇒ 连续两张运送单派给同一人，
+//   产品「运送单先不加资质、按 least_load 派」的裁决落空。
+//
+// 【口径】**照抄** repo/ticket.ts:305-315 的净结算（activeStates 派生 + before/after 净变化 +
+//   GREATEST 兜底），不自创第二套——两套口径迟早漂移（与 T1-B def_version 同论证）。
+//
+// 【断言一律钉 SQL 实参】桩行是我们自己写的常量，钉它等于自己给自己发奖状；只有实参
+//   （`$1 = worker_id`、`$2 = tenant_id`）能证明确实落到了库里。
+// ═══════════════════════════════════════════════════════════════════════════
+
+/** 活跃态（activeStates(TRANSPORT_DEF) 的派生结果：全态 − done − 终态 − 挂起）。 */
+const TRANSPORT_ACTIVE_STATES = ['pending', 'assigned', 'transporting'];
+
+/**
+ * load 会随 `UPDATE worker SET load` **真的变化**的运送线夹具。
+ * 只有让 load 动起来，「第二张单派给谁」才由被测代码自己决定，而不是被桩写死。
+ */
+function transportLoadHandler(
+  workers: Array<{ id: string; load: number; active?: boolean }>,
+): QueryFn {
+  const loads = new Map<string, number>(workers.map((w) => [w.id, w.load]));
+  const actives = new Map<string, boolean>(workers.map((w) => [w.id, w.active !== false]));
+  return async (text: string, p?: any[]) => {
+    if (text.includes('FROM workflow_def')) return { rows: [{ version: 0 }], rowCount: 1 };
+    if (text.includes('INSERT INTO transport_order')) {
+      return {
+        rows: [{ id: TRANSPORT_ORDER_ID, code: 'T-1', status: 'pending', carrier: null, def_version: 0 }],
+        rowCount: 1,
+      };
+    }
+    if (text.includes('SELECT * FROM transport_order WHERE id')) {
+      // transitionOrder 的流转前行：恒为「刚建出来、还没派人」的 pending 单
+      return {
+        rows: [{ id: TRANSPORT_ORDER_ID, status: 'pending', carrier: null, def_version: 0 }],
+        rowCount: 1,
+      };
+    }
+    if (text.includes('SELECT id, skill_tags, load, active FROM worker')) {
+      return {
+        rows: [...loads.keys()].map((id) => ({
+          id,
+          skill_tags: '[]',
+          load: loads.get(id) ?? 0,
+          active: actives.get(id) !== false,
+        })),
+        rowCount: loads.size,
+      };
+    }
+    // 两条 UPDATE 在夹具里**真的改内存 load**（模拟 PG 语义：+1 / GREATEST(-1, 0)）
+    if (text.includes('UPDATE worker SET load = load + 1')) {
+      const id = String((p ?? [])[0]);
+      loads.set(id, (loads.get(id) ?? 0) + 1);
+      return { rows: [], rowCount: 1 };
+    }
+    if (text.includes('UPDATE worker SET load = GREATEST(load - 1, 0)')) {
+      const id = String((p ?? [])[0]);
+      loads.set(id, Math.max((loads.get(id) ?? 0) - 1, 0));
+      return { rows: [], rowCount: 1 };
+    }
+    if (text.includes('UPDATE transport_order')) {
+      return {
+        rows: [{ id: TRANSPORT_ORDER_ID, status: 'assigned', carrier: String((p ?? [])[3] ?? null) }],
+        rowCount: 1,
+      };
+    }
+    return { rows: [], rowCount: 0 };
+  };
+}
+
+/** 所有 `UPDATE worker SET load` 调用（钉 SQL 文本 + 实参，non stub 行）。 */
+function loadUpdates(calls: Array<{ text: string; params?: any[] }>): Array<{
+  sql: string;
+  params: any[];
+  kind: 'inc' | 'dec';
+}> {
+  return calls
+    .filter((c) => c.text.includes('UPDATE worker SET load'))
+    .map((c) => ({
+      sql: c.text.replace(/\s+/g, ' ').trim(),
+      params: (c.params ?? []) as any[],
+      kind: (c.text.includes('GREATEST') ? 'dec' : 'inc') as 'inc' | 'dec',
+    }));
+}
+
+describe('运送线 worker.load 净结算（least_load 的分母）', () => {
+  it('① 连续建两张运送单 ⇒ 派给两个不同的工人（核心：证明 least_load 真的成立）', async () => {
+    const { client } = makeClient(
+      transportLoadHandler([
+        { id: 'wt-a', load: 0, active: true },
+        { id: 'wt-b', load: 0, active: true },
+      ]),
+    );
+    const first = await settle(createOrder(client, T_TRANSPORT, transportInput()));
+    const second = await settle(createOrder(client, T_TRANSPORT, transportInput()));
+    expect(first.ok, `第一张运送单建单失败（${first.code}）`).toBe(true);
+    expect(second.ok, `第二张运送单建单失败（${second.code}）`).toBe(true);
+    const c1 = String(first.row?.carrier ?? 'null');
+    const c2 = String(second.row?.carrier ?? 'null');
+    expect(c1, '第一张必须派出去').not.toBe('null');
+    expect(c2, '第二张必须派出去').not.toBe('null');
+    // 改前：两张都派给 wt-a（load 从不 +1 ⇒ 永远"最闲"的是第一个）⇒ 本条红
+    expect(c2, `两张运送单都派给了 ${c1}：运送线没结算 load，least_load 名存实亡`).not.toBe(c1);
+    expect([c1, c2].sort()).toEqual(['wt-a', 'wt-b']);
+  });
+
+  it('② 派中 ⇒ 该工人 load + 1（钉 UPDATE 实参，且只 +1 一次）', async () => {
+    const { client, calls } = makeClient(
+      transportHandler({ workerRows: [{ id: 'wt-2', skill_tags: '[]', load: 1, active: true }] }),
+    );
+    const outcome = await settle(createOrder(client, T_TRANSPORT, transportInput()));
+    expect(outcome.ok, `建单派单失败（${outcome.code}）`).toBe(true);
+    expect(outcome.row.carrier).toBe('wt-2');
+    const ups = loadUpdates(calls);
+    expect(ups.length, `期望恰好 1 条 load UPDATE，实际 ${JSON.stringify(ups)}`).toBe(1);
+    expect(ups[0]!.kind).toBe('inc');
+    // 实参：$1 = 被派中的工人、$2 = 租户（与工单线 repo/ticket.ts:315 同款）
+    expect(ups[0]!.params).toEqual(['wt-2', T_TRANSPORT]);
+    expect(ups[0]!.sql).toBe('UPDATE worker SET load = load + 1 WHERE id = $1 AND tenant_id = $2');
+  });
+
+  it('③ 走到终态/取消 ⇒ 该工人 load - 1，且 GREATEST(...,0) 兜底不会减成负数', async () => {
+    // 两条真实边：transporting --complete--> done（成功终态）、assigned --cancel--> cancelled（取消终态）
+    const cases: Array<[string, string, string]> = [
+      ['transporting', 'complete', 'worker'],
+      ['assigned', 'cancel', 'admin'],
+    ];
+    for (const [from, event, role] of cases) {
+      const { client, calls } = makeClient(
+        transportHandler({
+          current: { id: TRANSPORT_ORDER_ID, status: from, carrier: 'wt-2', def_version: 0 },
+        }),
+      );
+      const outcome = await settle(
+        transitionOrder(client, T_TRANSPORT, TRANSPORT_ORDER_ID, event, {}, {}, 'u-1', role),
+      );
+      expect(outcome.ok, `${from} --${event}--> 必须成功（${outcome.code}）`).toBe(true);
+      // 活跃态派生自检：这两个 from 都必须在活跃集里，否则 before 侧算不出贡献者
+      expect(TRANSPORT_ACTIVE_STATES).toContain(from);
+      const ups = loadUpdates(calls);
+      expect(ups.length, `${from} --${event}--> 期望恰好 1 条 load UPDATE，实际 ${JSON.stringify(ups)}`).toBe(1);
+      expect(ups[0]!.kind).toBe('dec');
+      expect(ups[0]!.params).toEqual(['wt-2', T_TRANSPORT]);
+      // 减载必须 GREATEST 兜底：load=0 的工人再完成一单就成 -1，派单均衡直接崩
+      expect(ups[0]!.sql).toContain('GREATEST(load - 1, 0)');
+      expect(ups[0]!.sql).toBe('UPDATE worker SET load = GREATEST(load - 1, 0) WHERE id = $1 AND tenant_id = $2');
+    }
+  });
+
+  it('④ 改派（旧 carrier → 新 carrier）⇒ 旧 -1、新 +1，两条 UPDATE 都要出现', async () => {
+    // 【为什么用 receive 边】TRANSPORT_DEF 里没有 assigned→assigned 的改派边，不为此发明
+    //   新边（= 新增变量，且没有消费方）。用真实 def 里唯一一条「活跃态→活跃态」的边
+    //   receive（assigned→transporting）携带新 carrier，钉住净结算的两条 UPDATE。
+    const { client, calls } = makeClient(
+      transportHandler({
+        current: { id: TRANSPORT_ORDER_ID, status: 'assigned', carrier: 'wt-old', def_version: 0 },
+      }),
+    );
+    const outcome = await settle(
+      transitionOrder(
+        client, T_TRANSPORT, TRANSPORT_ORDER_ID, 'receive', { carrier: 'wt-new' }, {}, 'u-admin', 'admin',
+      ),
+    );
+    expect(outcome.ok, `改派必须成功（${outcome.code}）`).toBe(true);
+    const ups = loadUpdates(calls);
+    expect(ups.length, `期望 2 条 load UPDATE（-1 与 +1），实际 ${JSON.stringify(ups)}`).toBe(2);
+    expect(ups.find((u) => u.kind === 'dec')?.params).toEqual(['wt-old', T_TRANSPORT]);
+    expect(ups.find((u) => u.kind === 'inc')?.params).toEqual(['wt-new', T_TRANSPORT]);
+  });
+
+  it('⑤ 派不中（无在岗工人）⇒ 不得发出任何 UPDATE worker SET load', async () => {
+    const { client, calls } = makeClient(
+      transportHandler({
+        workerRows: [{ id: 'wt-off', skill_tags: '[]', load: 0, active: false }],
+        adminRows: [{ id: 'u-admin-1' }],
+      }),
+    );
+    const outcome = await settle(createOrder(client, T_TRANSPORT, transportInput()));
+    expect(outcome.ok, `派不到人不得报错（${outcome.code}）`).toBe(true);
+    expect(outcome.row.carrier ?? null).toBeNull();
+    // 一个人都没派出去，就不许动任何人的 load（动了就是凭空造负载）
+    expect(loadUpdates(calls)).toEqual([]);
+  });
+});

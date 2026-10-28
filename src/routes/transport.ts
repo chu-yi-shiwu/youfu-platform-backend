@@ -23,7 +23,7 @@ import type { AuthLocals } from '../middleware/auth.js';
 import { requireAssigneeOrConfig, requirePermission } from '../middleware/role.js';
 import { emitDomainEvent } from '../db/eventBus.js';
 import { getWorkflowDefAtVersion, getWorkflowDefVersion } from '../engine/workflowDef.js';
-import { applyEvent, availableTransitions } from '../engine/stateMachine.js';
+import { activeStates, applyEvent, availableTransitions } from '../engine/stateMachine.js';
 import { TRANSPORT_DEF } from '../engine/themes.js';
 // 洞②（运送单接自动派单）：选人**复用** engine/dispatch.ts 的 pickWorker，不新写一套算法。
 import { pickWorker } from '../engine/dispatch.js';
@@ -126,6 +126,30 @@ export async function transitionOrder(
     values,
   );
   const row = r.rows[0];
+  // ── worker.load 净结算（与 `repo/ticket.ts:305-315` **同口径**，不自创第二套）──────────
+  // 为什么必须有这一段：派单选人是 least_load（`engine/dispatch.ts:47` 按 load 升序取第一个），
+  //   而 load 只在工单线 `repo/ticket.ts:312/315` 结算 ⇒ 运送线派完从不 +1 ⇒ 对运送单而言
+  //   「手上活最少」永远算出来是同一个人（连续两张运送单都派给他），least_load 名存实亡。
+  //   负载与工单**共用 worker.load 这一个计数字段**（不新增列/表）：跨工单+运送单的
+  //   「手上总活数」才是派单该看的数，各记一列反而要再合成一次。
+  // 口径（逐条对应工单线）：
+  //   ① 活跃态由 `activeStates(def)` 派生（全态 − done − 终态 − 挂起），不硬编码状态名；
+  //   ② 「在身人」列是运送单的 carrier（对应工单的 assignee_id）；
+  //   ③ 净变化：before = 流转前活跃且有 carrier；after = 流转后活跃且有 carrier；
+  //      before≠after 才动 SQL ⇒ 同一个人改别的不重复加减，改派一次完成「旧 −1、新 +1」；
+  //   ④ 减载用 `GREATEST(load - 1, 0)` 兜底，脏数据也不会把 load 减成负数。
+  // 🔴 刻意**不**移植工单线的 `resolveDispatchShadow`（K2 影子回填）：运送单没有 dispatch
+  //    影子这个概念，扩过去就是往本批里塞第二个变量。
+  const se = activeStates(def);
+  const nextCarrier = (extra.carrier as string) ?? t.carrier ?? null;
+  const beforeContrib = se.includes(t.status) && t.carrier ? t.carrier : null;
+  const afterContrib = se.includes(target) && nextCarrier ? nextCarrier : null;
+  if (beforeContrib && beforeContrib !== afterContrib) {
+    await client.query('UPDATE worker SET load = GREATEST(load - 1, 0) WHERE id = $1 AND tenant_id = $2', [beforeContrib, tenantId]);
+  }
+  if (afterContrib && afterContrib !== beforeContrib) {
+    await client.query('UPDATE worker SET load = load + 1 WHERE id = $1 AND tenant_id = $2', [afterContrib, tenantId]);
+  }
   // 轨迹点：每次流转留痕（含取件/签收照片凭证）
   await client.query(
     `INSERT INTO transport_track_point (tenant_id, order_id, event, loc, note, lat, lng, photo)
