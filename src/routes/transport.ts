@@ -25,6 +25,10 @@ import { emitDomainEvent } from '../db/eventBus.js';
 import { getWorkflowDefAtVersion, getWorkflowDefVersion } from '../engine/workflowDef.js';
 import { applyEvent, availableTransitions } from '../engine/stateMachine.js';
 import { TRANSPORT_DEF } from '../engine/themes.js';
+// 洞②（运送单接自动派单）：选人**复用** engine/dispatch.ts 的 pickWorker，不新写一套算法。
+import { pickWorker } from '../engine/dispatch.js';
+import { safeParseJsonb } from '../util/jsonb.js';
+import { insertNotification } from '../services/notify.js';
 
 /**
  * F-A2 纵深防御（三轮 QA 第一轮修复）：仅允许已知列名进入 UPDATE 的列名插值位，
@@ -81,6 +85,9 @@ export async function transitionOrder(
   track: { loc?: string; note?: string; lat?: number; lng?: number; photo?: string } = {},
   actor = 'config_role',
   role?: string,
+  // 洞②：系统身份通道——与 `repo/ticket.ts` 的 `transition()` 的 `systemAuto` **同款、同命名、同语义**，
+  //   不自创第二套说法（两套说法 = 两套口径，迟早漂移）。
+  opts?: { systemAuto?: boolean },
 ): Promise<any> {
   const cur = await client.query(`SELECT * FROM transport_order WHERE id = $1 AND tenant_id = $2`, [orderId, tenantId]);
   if (cur.rowCount === 0) throw new AppError('NOT_FOUND', 'order not found', 404);
@@ -95,9 +102,17 @@ export async function transitionOrder(
   // （repo/ticket.ts transition()），运送线 applyEvent 仅校验 from+event——被指派工人
   // 可对自己单子执行声明上仅 admin/operator 可用的 cancel。口径对齐工单线：
   // 为空/未定义=放行（向后兼容，避免门死自己）；显式配置且调用角色不在其中 → 403。
+  //
+  // 洞②：系统身份通道（与工单线 F4 深修同一论证）——allowedRoles 是**人类**门禁
+  // （约束"谁能点按钮"），系统 actor 根本没有角色可谈。若系统也守这道门，则任何配了
+  // allowedRoles 的 dispatch 边 = 自动派单永远 403（dispatch 边恰恰就配了
+  // allowedRoles=['admin','operator']）。系统只跳过人类门禁，**拓扑（applyEvent）、
+  // 必填、副作用一个不跳**——下面三行代码一行没动。
   const tdef = (def.transitions ?? []).find((x: any) => x.from === t.status && x.event === event);
-  if (tdef?.allowedRoles && tdef.allowedRoles.length > 0 && !(role && tdef.allowedRoles.includes(role))) {
-    throw new AppError('FORBIDDEN', `role ${role ?? 'unknown'} not allowed to ${event} transport order`, 403);
+  if (!opts?.systemAuto) {
+    if (tdef?.allowedRoles && tdef.allowedRoles.length > 0 && !(role && tdef.allowedRoles.includes(role))) {
+      throw new AppError('FORBIDDEN', `role ${role ?? 'unknown'} not allowed to ${event} transport order`, 403);
+    }
   }
   const { parameterized: filteredKeys, nowCols } = filterTransportExtraCols(extra);
   const assigns = [
@@ -220,10 +235,118 @@ export async function getOrder(client: PoolClient, tenantId: string, id: string)
 }
 
 /**
+ * 洞②：运送单「建单后自动派单」——把人从派单环节里摘出去。
+ *
+ * 【为什么单独抽一个函数】createOrder 是原生路由与 `/flow` 代理 adapter **共用**的
+ * 唯一 INSERT 点（`transportAdapter.ts:171` 也调它）。派单逻辑写在 createOrder 体内
+ * 还是体外，两个入口的行为都必须一致 ⇒ 抽成导出函数，让「只有一个实现」是结构保证，
+ * 而不是靠两处注释互相提醒。
+ *
+ * 【选人口径】**复用** `engine/dispatch.ts` 的 `pickWorker`（active + 技能全命中 + least_load）。
+ *   初一裁决 D-4：运送单先不加资质字段 ⇒ 不传 skillTags（required=[] ⇒ 只看"在岗 + 手上活最少"）。
+ *   刻意**不走** `resolveDispatch` 规则链：运送单没有 business_type/catalog 入参，
+ *   `NEED_RESOLVER_REGISTRY` 也没注册 `transport_task` ⇒ 规则链现在拿不到任何 need 维度，
+ *   接上去只会制造"配了规则其实没生效"的假象。等运送单真有资质维度再接，不预先铺路（YAGNI）。
+ *
+ * 【派不到人时】先查实：TRANSPORT_DEF（engine/themes.ts:22-36）的 states =
+ *   pending / assigned / transporting / done / exception / cancelled ⇒ **没有池态**。
+ *   ⇒ 保持 pending + 通知本租户 active admin（工单线 else 分支的可移植部分）。
+ *   **不发明新状态、不改状态机定义**——那等于新增一个变量，且没有池态消费方。
+ *
+ * @returns 派中时返回流转后的行；未派中返回 null（调用方保持原行）。
+ */
+export async function autoDispatchTransportOrder(
+  client: PoolClient,
+  tenantId: string,
+  row: { id: string; code?: string | null },
+): Promise<any | null> {
+  // 【降级纪律】只看 worker 读失败这一段（不是整个派单）：建单是主行为、自动派单是增强。
+  //   读不到工人 ⇒ 退化成"派不到人"分支（保持 pending + 通知 active admin），
+  //   而**不是**让建单 500 —— 建不出来比"建出来停在 pending"更糟，那正是洞②要消灭的处境。
+  //   与 `engine/dispatch/needResolver.ts:118-124` 同款处理：单个环节故障不得拖挂主流程。
+  // 🔴 故障不静默：console.error 留痕 + 下方必定走"通知 active admin"分支（管理员看得见）。
+  //   try 块**只包这一条查询**：派单流转本身若真 403/422（实现 bug）必须照常抛，不许被吞。
+  let workerRows: Array<{ id: string; skill_tags: string[]; load: number; active: boolean }> = [];
+  try {
+    const w = await client.query('SELECT id, skill_tags, load, active FROM worker WHERE tenant_id = $1', [tenantId]);
+    workerRows = w.rows.map((x: any) => ({ ...x, skill_tags: safeParseJsonb(x.skill_tags) ?? [] }));
+  } catch (e) {
+    console.error('[transport.autoDispatch] worker lookup failed, degrade to no-worker path', {
+      tenantId, transportOrderId: row.id, err: e,
+    });
+  }
+  const picked = pickWorker(workerRows, {});
+  const code = row.code ?? row.id;
+  if (!picked) {
+    // 与 `routes/workOrder.ts:263-280` 同款 SAVEPOINT 隔离：withTenantClient 是 BEGIN→fn→COMMIT，
+    // 通知段一旦真出错会把整个 PG 事务置为 aborted —— 单纯 try/catch 吞错后外层 COMMIT 实为
+    // ROLLBACK，运送单静默消失但 API 谎报 201。隔离后失败仅回滚通知段，建单保真。
+    // ⚠️ SAVEPOINT 只在**事务块内**合法（生产两个入口都经 withTenantClient，恒在事务里）；
+    //    直连 client 且没开事务时（如拿裸 PGlite client 直接调 adapter 的测试）会报
+    //    "SAVEPOINT can only be used in transaction blocks"。建不了不等于该放弃通知：
+    //    无事务 = 没有"整段被拖挂"的风险 ⇒ 照常通知，只是不再需要 RELEASE / ROLLBACK。
+    const inTx = await client
+      .query('SAVEPOINT transport_dispatch_notify_sp')
+      .then(() => true)
+      .catch(() => false);
+    try {
+      const admins = await client.query<{ id: string }>(
+        `SELECT id FROM account_user WHERE tenant_id=$1 AND role='admin' AND active=true`,
+        [tenantId],
+      );
+      for (const a of admins.rows) {
+        await insertNotification(client, {
+          tenantId, recipient: a.id, recipientKind: 'account', type: 'dispatch', workOrderId: row.id,
+          title: '运送单自动派单未命中', body: `运送单 ${code} 自动派单未命中（无在岗工人），请人工派单`,
+          payload: { entity_type: 'transport_order', code: row.code ?? null, from_status: 'pending' },
+        });
+      }
+      if (inTx) await client.query('RELEASE SAVEPOINT transport_dispatch_notify_sp');
+    } catch (notifyErr) {
+      // 回滚只回滚通知段，事务恢复可用 ⇒ 外层建单照常提交（运送单不会静默消失）。
+      if (inTx) {
+        await client.query('ROLLBACK TO SAVEPOINT transport_dispatch_notify_sp').catch(() => undefined);
+      }
+      console.error('[transport.autoDispatch] admin notification failed (non-blocking)', {
+        transportOrderId: row.id, err: notifyErr,
+      });
+    }
+    return null;
+  }
+  // 直接调 transitionOrder，**不经过 loadOwnedOrder**：后者带 #583 归属守卫
+  // （transport.ts:61 → middleware/role.ts:622，未指派单对 worker 必 403），
+  // 而系统没有 AuthLocals 可传；transitionOrder 本来就不含该守卫（见 :71-72 注释）。
+  const updated = await transitionOrder(
+    client,
+    tenantId,
+    row.id,
+    'dispatch',
+    { carrier: picked.id, depart_at: 'now()' },
+    { note: '自动派单' },
+    'auto_dispatch',
+    undefined,
+    { systemAuto: true },
+  );
+  // 与工单线 A5 fan-out 同口径：落库通知被派单人（sms/push 为 stub，诚实未真实发送）。
+  // payload 带 entity_type 是因为 notification.work_order_id 是 NOT NULL 文本列且无 FK，
+  // 运送单只能借位存放——`scheduler/slaScheduler.ts:198-215` 的运送单通知已是这个约定。
+  await insertNotification(client, {
+    tenantId, recipient: picked.id, recipientKind: 'worker', type: 'dispatch', workOrderId: row.id,
+    title: '您有一条新运送单', body: `运送单 ${code} 已自动派给您`,
+    payload: { entity_type: 'transport_order', code: row.code ?? null, from_status: 'pending', to_status: 'assigned' },
+  });
+  return updated;
+}
+
+/**
  * 建单（原 :169-201 事务体**逐字搬出**）。
  *
  * @param actor 事件记账的操作者。**默认 'config_role'** 是既有行为（原代码硬编码），
  *   调用方不传即与改动前完全一致；代理层若要改审计口径须单独立项，不许借重构顺手改。
+ *
+ * 洞②：建单成功后自动派单（仅在调用方**未**显式指定 carrier 时）——
+ *   显式指定了 carrier = 调用方已明确派给谁，系统不得覆盖（与
+ *   `engine/dispatch/needResolver.ts` 的 explicitSkillTagsResolver 同款"显式直通"原则）。
  */
 export async function createOrder(
   client: PoolClient,
@@ -256,6 +379,11 @@ export async function createOrder(
   );
   const row = r.rows[0];
   await emitDomainEvent(client, { tenantId, entityType: 'transport_order', entityId: row.id, type: 'create', actor });
+  // 洞②：建单即自动派单（第三条路）。派不中时 autoDispatch 返回 null ⇒ 保持 pending 原样返回。
+  if (b.carrier == null || b.carrier === '') {
+    const dispatched = await autoDispatchTransportOrder(client, tenantId, row);
+    if (dispatched) return dispatched;
+  }
   return row;
 }
 
