@@ -22,6 +22,17 @@ export const ENTER_HALL_EVENT = 'enter_hall';
 export const CANCEL_EVENT = 'cancel';
 /** 认领（抢单）事件名：认领边是"谁可以抢"的事实源，认领池口径由此派生。 */
 export const CLAIM_EVENT = 'claim';
+/**
+ * 退回（工人把单退回待派单池）事件名——洞①修复（2026-10-28）上提为常量。
+ *
+ * 【为什么必须上提】此前 `return` 只是 RICH def 里的一行裸字符串（无常量），
+ *   而洞①要在**路由层**判定「本次流转是不是一次退回」来决定是否自动回派。
+ *   若路由层再写一份字面量 ⇒ RICH def 与回派触发器两份真源，客户改了流程名/
+ *   自定义 def 用了别的事件名时，两边漂移且**不可观测**（与 F9「池态两份字面量」
+ *   完全同款的历史事故形态）。
+ *   与 CANCEL_EVENT / CLAIM_EVENT 同一哲学：内置词汇表的名，引擎核心说了算。
+ */
+export const RETURN_EVENT = 'return';
 
 export interface WorkflowTransition {
   from: string;
@@ -140,7 +151,7 @@ export const RICH_WORK_ORDER_DEF: WorkflowDef = {
     // 旧客户端/旧单兼容路径，绝不门死存量流转）。arrived 也属活跃态 → 补 cancel 逃逸边。
     { from: 'arrived', to: 'processing', event: 'start', allowedRoles: ['admin', 'worker'] },
     { from: 'assigned', to: 'processing', event: 'receive', allowedRoles: ['admin', 'worker'] },
-    { from: 'assigned', to: 'pending_dispatch', event: 'return', requiredFields: ['return_reason'] },
+    { from: 'assigned', to: 'pending_dispatch', event: RETURN_EVENT, requiredFields: ['return_reason'] },
     { from: 'assigned', to: 'assigned', event: 'forward', requiredFields: ['assignee'], allowedRoles: ['admin'], allowedPerms: ['dispatch.override'] },
     { from: 'processing', to: 'paused', event: 'pause', sideEffects: ['pause_sla'] },
     { from: 'paused', to: 'processing', event: 'resume', sideEffects: ['resume_sla'] },

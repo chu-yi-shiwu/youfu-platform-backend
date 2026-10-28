@@ -45,6 +45,7 @@ import { validateIntake } from '../services/dataQuality.js';
 import { buildRecommend } from '../services/dispatchRecommend.js';
 import { assertAcceptanceBackdoorGuard } from '../services/acceptance.js'; // 批次三 Y3 防后门守卫
 import { autoCreateSettlementForOrder, AUTO_SETTLEMENT_OPERATOR } from '../repo/settlement.js'; // E-9 自动结算（BUG-004）
+import { autoRedispatchAfterReturn } from '../services/autoRedispatch.js'; // 洞①：退回自动回派
 
 const router = Router();
 
@@ -539,6 +540,19 @@ router.post('/open/work_order/:id/transition', async (req, res, next) => {
       // 通用 transition 端点只要触发 acceptance_* 事件 → 一律 403（不看任何客户端自证标记），
       // 抛错令整个事务回滚（验收状态/凭证/事件全部不落库），堵"传 via 绕过验收联动"的后门路径。
       assertAcceptanceBackdoorGuard(r.transition?.event);
+      // 洞①（2026-10-28，初一裁定）：工人退回 ⇒ 自动回派给别人，**排除刚退回的那个工人**。
+      //   排除集 = row.assignee_id（退回不清空该列，见 repo/ticket.ts:264→:290→:308 实证）∪ 显式排除。
+      //   回派失败（排除后无人在岗 / 达上限）⇒ **落池 + 升级喊人**（D-1），**绝不自动关单**（D-2）。
+      // 挂在路由层而非 transition() 内核的理由见设计文档 §1.1（内核拿不到操作人 + systemAuto 递归风险）。
+      const redispatch = await autoRedispatchAfterReturn(client, tenantId, r.row, {
+        event: r.transition?.event,
+        actor: role ?? 'system',
+      });
+      // 回派成功 ⇒ r.row 里的 status/assignee 已过期（transition 已把单推进 assigned）。
+      //   不修正会让客户端拿到"待派单"的假状态（工单实际已派给新人，但界面还停在池里）。
+      if (redispatch.redispatch && redispatch.assignee) {
+        r.row = { ...r.row, status: redispatch.target ?? r.row.status, assignee_id: redispatch.assignee };
+      }
       // A5 手动派单/改派通知（forward/dispatched 经通用 transition 触发）
       if (r.transition?.event === 'forward' || r.transition?.event === 'dispatch') {
         const newAssignee =
