@@ -201,3 +201,126 @@ describe('T1-B 批2 · transport_order 在途单锁版本', () => {
     expect(m![1], 'def 口径实体名必须是 transport_task').toBe('transport_task');
   });
 });
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 洞② · 建单即自动派单（HTTP 层：真 express + 真 HTTP）
+//
+// 【为什么还要这一组】批 1 那 6 例（已迁至 src/test/autoDispatch.test.ts）是**引擎级**：
+//   直调 createOrder / transitionOrder，**不过 express、不发 HTTP**。而洞② 的产品承诺
+//   「把人从派单环节摘出去」是一条**对外接口承诺**——租户和小程序只看到
+//   `POST /api/v1/transport/orders` 的响应。中间隔着鉴权、zod 校验、权限点、
+//   withTenantClient 事务、响应外壳 5 层 ⇒ 引擎级绿推不出 HTTP 层绿：任何一层把派单行
+//   吞掉或绕过，引擎级用例照样全绿。本组把整条链真跑一遍。
+//
+// 【为什么落在 transportGuard.http.test.ts】
+//   · t5RouteParity.transport.test.ts 的主题是「两条路由行为一致」（原生 vs /flow），
+//     往里塞一条只关于单路由的业务断言会稀释它真正要验的东西；
+//   · 本文件的主题就是「真 express + 真 HTTP + 运送线」，且 ④⑤/A4 已经在这条链上建单，
+//     范式（scripted 桩 + 从 h.calls 断言 SQL 参数）完全同源，可直接复用。
+//     （注：ae3b8a6 否掉本文件是因为那批用例是**单元级**直调函数，不是因为文件选错。）
+//
+// 【断言真值落在哪】桩行是常量，回显什么取决于我写什么 ⇒ 一律**钉 SQL 参数**：
+//   UPDATE transport_order 的 $4 就是写入的 carrier（见 transitionOrder 的 values 组装），
+//   只有它能证明"选中的是手上活最少的那个"，而不是"桩里写了谁"。
+// ═══════════════════════════════════════════════════════════════════════════
+describe('洞② · 建单即自动派单（HTTP 层）', () => {
+  /** 建单链路的桩：worker 行由调用方给（其余与 scriptTransportOrder 同源）。 */
+  function scriptCreateWithWorkers(workerRows: any[], adminRows: any[] = []) {
+    h.scripted.length = 0;
+    h.calls.length = 0;
+    // workflow_def 查不到 ⇒ 走内置 TRANSPORT_DEF（拓扑/门禁口径 = 内置声明）
+    h.scripted.push({ match: /FROM workflow_def/, rows: [] });
+    // 洞② 选人读的就是这一条；列名必须与 routes/transport.ts 的 autoDispatch 查询逐字一致，
+    // 实现改了查询（比如漏掉 active）⇒ 这里匹配不上 ⇒ 桩回空 ⇒ 用例立刻红。
+    h.scripted.push({ match: /SELECT id, skill_tags, load, active FROM worker/, rows: workerRows });
+    h.scripted.push({
+      match: /INSERT INTO transport_order/,
+      rows: [{ id: 'to-new', code: 'T-1', status: 'pending', carrier: null, item_name: '标本', def_version: 0 }],
+    });
+    h.scripted.push({
+      match: /SELECT \* FROM transport_order WHERE id/,
+      rows: [{ id: 'to-new', status: 'pending', carrier: null, item_name: '标本', def_version: 0 }],
+    });
+    h.scripted.push({
+      match: /UPDATE transport_order/,
+      rows: [{ id: 'to-new', status: 'assigned', carrier: 'wt-2', item_name: '标本', def_version: 0 }],
+    });
+    h.scripted.push({ match: /INSERT INTO transport_track_point/, rows: [] });
+    h.scripted.push({ match: /INSERT INTO domain_event/, rows: [] });
+    h.scripted.push({ match: /INSERT INTO notification/, rows: [] });
+    h.scripted.push({ match: /SELECT id FROM account_user/, rows: adminRows });
+    h.scripted.push({ match: /SAVEPOINT/, rows: [] });
+    return h.calls;
+  }
+
+  function postOrder(body: unknown): Promise<Response> {
+    return fetch(`${base}/api/v1/admin-sim/orders`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  }
+
+  it('① 有在岗工人 ⇒ 201 + status:assigned + carrier 落库 + dispatch 事件 + 1 条通知', async () => {
+    const calls = scriptCreateWithWorkers([
+      { id: 'wt-1', skill_tags: '[]', load: 3, active: true },
+      { id: 'wt-2', skill_tags: '[]', load: 1, active: true },
+    ]);
+
+    const r = await postOrder({ item_name: '标本' });
+    expect(r.status, '建单必须 201（派单失败不得把建单拖成 500）').toBe(201);
+    const body: any = await r.json();
+    expect(body.item.status, '建单即自动派单：响应态必须是 assigned，不能停在 pending 等人来派').toBe('assigned');
+
+    const upd = calls.find((c) => /UPDATE transport_order/.test(c.sql));
+    expect(upd, '没发派单 UPDATE ⇒ 建单后根本没派出去（洞② 掉链子）').toBeTruthy();
+    expect(upd!.params[3], '必须挑中「手上活最少」的在岗工人 wt-2（least_load 口径）').toBe('wt-2');
+
+    // 事件口径：create + dispatch 两条，实体口径都是 transport_order（D1 永久双名）
+    const evs = calls.filter((c) => /INSERT INTO domain_event/.test(c.sql));
+    expect(evs.map((c) => String(c.params[1]))).toEqual(['transport_order', 'transport_order']);
+    expect(evs.map((c) => String(c.params[3])), '建单后必须留下 dispatch 事件').toEqual(['create', 'dispatch']);
+
+    // 通知：被派中的工人收到 1 条（payload 标 transport_order，借位存放的约定）
+    const notes = calls.filter((c) => /INSERT INTO notification/.test(c.sql));
+    expect(notes.length).toBe(1);
+    expect(String(notes[0].params[1]), '通知必须发给被派中的工人').toBe('wt-2');
+    expect(String(notes[0].params[9])).toContain('transport_order');
+  });
+
+  it('② 无在岗工人 ⇒ 仍 201 + 保持 pending（不谎报派出）+ 通知本租户 active admin', async () => {
+    const calls = scriptCreateWithWorkers(
+      [{ id: 'wt-off', skill_tags: '[]', load: 0, active: false }],
+      [{ id: 'u-admin-1' }],
+    );
+
+    const r = await postOrder({ item_name: '标本' });
+    expect(r.status, '派不到人不得让建单报错（建单是主行为、派单是增强）').toBe(201);
+    const body: any = await r.json();
+    // 运送线无池态 ⇒ 保持 pending，不发明新状态（设计如此，不是漏派）
+    expect(body.item.status).toBe('pending');
+    expect(calls.find((c) => /UPDATE transport_order/.test(c.sql)), '无人可派时不许偷偷把单推进 assigned').toBeUndefined();
+
+    const notes = calls.filter((c) => /INSERT INTO notification/.test(c.sql));
+    expect(notes.length).toBe(1);
+    expect(String(notes[0].params[1]), '必须通知本租户 active admin 去人工派单（否则这张单又是 56 天无人知）').toBe('u-admin-1');
+    // 通知段 SAVEPOINT 隔离：通知失败不得把整个事务拖挂 ⇒ 建单静默消失但 API 谎报 201
+    expect(calls.find((c) => /SAVEPOINT/.test(c.sql))).toBeTruthy();
+
+    const evs = calls.filter((c) => /INSERT INTO domain_event/.test(c.sql));
+    expect(evs.map((c) => String(c.params[3])), '建单事件照常留痕，且**没有** dispatch 事件').toEqual(['create']);
+  });
+
+  it('③ 显式传 carrier ⇒ 系统不覆盖（尊重调用方明确意图，与 needResolver 显式直通同口径）', async () => {
+    const calls = scriptCreateWithWorkers([{ id: 'wt-1', skill_tags: '[]', load: 0, active: true }]);
+
+    const r = await postOrder({ item_name: '标本', carrier: 'w-explicit' });
+    expect(r.status).toBe(201);
+    const ins = calls.find((c) => /INSERT INTO transport_order/.test(c.sql));
+    expect(ins?.params).toContain('w-explicit');
+    expect(
+      calls.find((c) => /UPDATE transport_order/.test(c.sql)),
+      '调用方已明确派给谁 ⇒ 系统不得再派一次覆盖它',
+    ).toBeUndefined();
+  });
+});

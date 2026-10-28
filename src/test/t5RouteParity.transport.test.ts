@@ -70,6 +70,20 @@ const NATIVE_LIST_ROWS = [
 const NATIVE_LIST_EXPECTED = NATIVE_LIST_ROWS.map((r) => ({ ...r, work_order: null }));
 const TRACK_ROWS = [{ id: 'tp-1', event: 'dispatch', loc: '检验科' }];
 
+/**
+ * 建单 INSERT 的 `RETURNING *` 行（生产会带回整行）。
+ * 🔴 为什么提成常量：洞② 之后**建单的响应体来自派单那条 UPDATE 的 RETURNING，不再来自 INSERT**
+ *    ⇒ UPDATE 桩也必须回"整行"，否则 A3 的「201 响应外壳 / item_name」断言是假绿
+ *    （拿到了一条残缺行还说通过了）。两处共用同一份骨架，避免两处各写一半字段。
+ */
+const INSERTED_ORDER_ROW = {
+  id: 'to-new',
+  status: TRANSPORT_DEF.initial,
+  item_name: '标本',
+  priority: 'urgent',
+  carrier: null as string | null,
+};
+
 /** `/flow` 侧（business_flow_tasks）的假数据：id 前缀故意与原生不同，便于一眼看出落点。 */
 const BFT_LIST_ROWS = [
   { id: 'bft-2', entity_type: 'transport_task', status: TRANSPORT_DEF.initial },
@@ -112,17 +126,30 @@ function makeClient(o: ClientOpts) {
       if (text.includes('FROM workflow_def')) return { rows: [], rowCount: 0 };
       // 关联工单回显（X6 明确排除：不参与对照，只需让路由安全降级为 null）
       if (text.includes('FROM work_orders')) return { rows: [], rowCount: 0 };
-      if (text.includes('FROM worker')) return { rows: [{ id: o.workerId }], rowCount: 1 };
+      // 🔴 洞② 之后这条桩**必须**是"真实在岗工人"，只回 `{ id }` 是假绿温床：
+      //   `createOrder` 建完单会调 `autoDispatchTransportOrder`，它查
+      //   `SELECT id, skill_tags, load, active FROM worker` 并把结果交给 `pickWorker`
+      //   选人；`pickWorker` 的第一道过滤就是 `w.active`。缺 `active` ⇒ 恒"派不中"
+      //   ⇒ 建单恒停在 pending ⇒ 任何"建单后应为 assigned"的断言都会假装通过。
+      //   生产上是有在岗工人的 ⇒ 夹具按生产真相补齐（least_load 用 load 排序）。
+      if (text.includes('FROM worker')) {
+        return { rows: [{ id: o.workerId, active: true, load: 0, skill_tags: '[]' }], rowCount: 1 };
+      }
       if (text.includes('INSERT INTO transport_track_point')) return { rows: [{ id: 'tp-1' }], rowCount: 1 };
       if (text.includes('FROM transport_track_point')) return { rows: TRACK_ROWS.map((r) => ({ ...r })), rowCount: TRACK_ROWS.length };
       if (text.includes('INSERT INTO transport_order')) {
         return {
-          rows: [{ id: 'to-new', status: TRANSPORT_DEF.initial, item_name: String(p[2]), priority: String(p[6]) }],
+          rows: [{ ...INSERTED_ORDER_ROW, item_name: String(p[2]), priority: String(p[6]) }],
           rowCount: 1,
         };
       }
       if (text.includes('UPDATE transport_order')) {
-        return { rows: [{ id: String(p[0]), status: String(p[2]) }], rowCount: 1 };
+        // `RETURNING *` ⇒ 回整行（见 INSERTED_ORDER_ROW 注释）。$4 起才是 extra 列，
+        // 建单自动派单时 extra = { carrier, depart_at:'now()' } ⇒ p[3] 就是写入的 carrier。
+        return {
+          rows: [{ ...INSERTED_ORDER_ROW, id: String(p[0]), status: String(p[2]), carrier: (p[3] as string) ?? null }],
+          rowCount: 1,
+        };
       }
       if (text.includes('FROM transport_order') && text.includes('ORDER BY')) {
         return { rows: NATIVE_LIST_ROWS.map((r) => ({ ...r })), rowCount: NATIVE_LIST_ROWS.length };
@@ -189,10 +216,21 @@ function countSql(calls: CapturedQuery[], needle: string): number {
   return calls.filter((c) => c.text.includes(needle)).length;
 }
 
+/**
+ * domain_event 的**实体口径**序列（参数序见 `db/eventBus.ts`：$2 = entity_type）。
+ * ⚠️ 函数名里的 "Types" 指的是 entity_type，不是事件名——事件名见 `domainEventKinds`。
+ */
 function domainEventTypes(calls: CapturedQuery[]): string[] {
   return calls
     .filter((c) => c.text.includes('INSERT INTO domain_event'))
     .map((c) => String((c.params ?? [])[1]));
+}
+
+/** domain_event 的**事件名**序列（参数序见 `db/eventBus.ts`：$4 = type）。 */
+function domainEventKinds(calls: CapturedQuery[]): string[] {
+  return calls
+    .filter((c) => c.text.includes('INSERT INTO domain_event'))
+    .map((c) => String((c.params ?? [])[3]));
 }
 
 /** 从 TRANSPORT_DEF 里挑一条"admin 能走"的合法流转，避免把夹具写成硬编码状态。 */
@@ -221,6 +259,11 @@ async function get(url: string): Promise<{ status: number; body: any }> {
 
 // ═══════════════════════════════════════════════════════════════════════════
 // A 组：老路由（/transport/orders*）行为快照 —— ★S2 前必须全绿，S2 后必须仍全绿★
+//
+// ⚠️ A3 已随洞②（建单后自动派单）同步为新行为：建单响应态 = assigned（不再是 initial/pending），
+//    事件序列 = create → dispatch。**它此前恰好是绿的纯属夹具巧合**（worker 桩行缺 `active`
+//    ⇒ pickWorker 恒派不中），不是"洞② 没生效"。夹具已按生产真相补成在岗工人，见 `makeClient`
+//    里 `FROM worker` 那条分支的注释——**改夹具前先读那段**，别把巧合再请回来。
 // ═══════════════════════════════════════════════════════════════════════════
 describe('T5/S6a-A 老路由行为快照（S2 前后必须一致）', () => {
   it('A1 list：条数与顺序原样透传，status 过滤真的下推到 SQL', async () => {
@@ -269,7 +312,12 @@ describe('T5/S6a-A 老路由行为快照（S2 前后必须一致）', () => {
 
     expect(status).toBe(201);
     expect(body.ok).toBe(true);
-    expect(body.item.status).toBe(TRANSPORT_DEF.initial);
+    // 洞②（建单后自动派单）：夹具里有**在岗工人** ⇒ 建单即被派出去，响应态不再是 initial(pending)。
+    // 🔴 这条此前断言 `TRANSPORT_DEF.initial`，在洞② 之后**只是靠夹具巧合才绿**：
+    //    worker 桩行缺 `active` ⇒ `pickWorker` 恒派不中 ⇒ 状态仍是 pending ⇒ 断言恰好通过。
+    //    夹具已按生产真相补成在岗工人，断言同步到新行为。
+    expect(body.item.status, '建单即自动派单：有在岗工人时响应态必须是 assigned，不再是 pending').toBe('assigned');
+    expect(body.item.carrier, '派中的工人必须写回 carrier（否则前端看不到"派给了谁"）').toBe('w-1');
     expect(body.item.item_name).toBe('标本');
 
     const ins = calls.find((c) => c.text.includes('INSERT INTO transport_order'));
@@ -285,7 +333,13 @@ describe('T5/S6a-A 老路由行为快照（S2 前后必须一致）', () => {
     expect(p[9], '$10 = order_type（zod 默认 scheduled）').toBe('scheduled');
     expect(p[10], '$11 = work_order_id（未传 ⇒ null）').toBeNull();
 
-    expect(domainEventTypes(calls)).toEqual(['transport_order']);
+    // 洞② 后建单留两条事件：create（建单）+ dispatch（自动派单）；
+    // 两条的实体口径都必须是 transport_order（D1 永久双名：表名/def 是 transport_task，事件是 transport_order）。
+    expect(domainEventTypes(calls)).toEqual(['transport_order', 'transport_order']);
+    expect(domainEventKinds(calls), '建单后必须留下 dispatch 事件（建单即派单；只有 create = 派单没发生）').toEqual([
+      'create',
+      'dispatch',
+    ]);
   });
 
   it('A4 transition：合法流转到目标态，非法流转 422', async () => {
