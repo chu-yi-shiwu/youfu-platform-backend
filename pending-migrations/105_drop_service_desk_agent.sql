@@ -18,22 +18,30 @@
 --   ⚠️ 文件名一旦上线**不可改名**：_migrations 按文件名记账（migrate.ts:44 注释已明写）。
 --
 -- =============================================================================
--- 🔴 数据不可恢复警告（必读）
+-- 数据留档说明（不是「永久丢失」，请读准确）
 -- =============================================================================
---   `DROP TABLE` 之后，**原数据在库里就没了**。
---   反向迁移 rollback/105_drop_service_desk_agent_down.sql **只恢复表结构
---   （建表 + RLS + GRANT + 索引），一行数据都恢复不了**。
+--   `DROP TABLE` 之后，这行数据在**库里**确实就没了；但它**已经完整留档**，
+--   是一条可直接执行的 INSERT，随时能原样回灌 ⇒ **数据是能回来的**。
 --
---   本表在生产当前有 **1 行**（不是 0 行）：
+--   留档位置：骨架仓 docs/00_现行/_archive/service_desk_agent_备份_20261028.sql
+--     · 含 INSERT 与 COPY 两种回灌形态
+--     · 含生产 pg_dump --schema-only 原文（即 DROP 前的真实表结构）
+--     · 1 行，字段齐全（2026-10-29 复核：文件真实存在）
+--   生产每日全量备份：/opt/youfu/backup/youfu_YYYYMMDD_030701.sql.gz
+--
+--   留档的那一行内容：
 --     id         = 1202a582-2b94-4b86-ad32-3cf5e455b225
 --     tenant_id  = t-verification
 --     desk_id    = 338c236b-d91b-4747-b767-4818baf52c15（志愿者服务台）
 --     user_id    = 001
 --     name       = 志愿者01
 --     created_at = 2026-09-12 00:38:18.891641+08
---   该行**已留档**（可直接 INSERT 回灌）：
---     骨架仓 docs/00_现行/_archive/service_desk_agent_备份_20261028.sql
---   生产每日全量备份：/opt/youfu/backup/youfu_YYYYMMDD_030701.sql.gz
+--
+--   【怎么把数据弄回来 —— 两步，缺一不可】
+--     ① 跑反向脚本恢复**结构**：rollback/105_drop_service_desk_agent_down.sql
+--     ② 从上面那份留档文件把那 1 行 **INSERT 回灌**（或用其中的 COPY 形态）
+--   之所以要分两步：反向脚本**只负责恢复表结构，本身不含任何一行数据**。
+--   这不是「数据回不来」，而是「回/不回由你执行 INSERT 决定」。
 --
 --   ⚠️ 查行数时的坑：以 youfu_app（后端 .env 的 PGUSER）查本表恒为 **0**——
 --     该角色 rolsuper=f / rolbypassrls=f，受 RLS 约束，那是**假零**。
@@ -42,7 +50,7 @@
 -- =============================================================================
 -- 前置条件（执行前确认）
 -- =============================================================================
---   1. 那 1 行已导出留档（见上）
+--   1. 那 1 行已导出留档（见上，已确认留存齐全）
 --   2. 后端 3 个坐席端点已下线（commit c59eadb）、前端入口已删（前端 ae1b525）
 --   3. service_desk **保留不动**——本迁移只删坐席表
 --
@@ -52,10 +60,28 @@
 --   或：sudo -u postgres psql -d youfu -f 105_drop_service_desk_agent.sql
 -- =============================================================================
 
--- ① 删表：RLS 策略、GRANT、索引 idx_agent_desk、唯一约束、外键
---    全部随表一起消失，无需逐条 DROP（PG 对 DROP TABLE 自动清理其附属对象）。
-DROP TABLE IF EXISTS service_desk_agent;
-
--- ② 显式兜底：万一上面因故只删了数据没删结构（理论上不会发生），
---    此处幂等再删一次索引，保证 idx_agent_desk 不留残骸。
-DROP INDEX IF EXISTS idx_agent_desk;
+-- ① 删表。以下附属对象全部随**表本身**一起消失，无需也**不应该**逐条 DROP：
+--      · 索引 idx_agent_desk（018_service_desk.sql:43 建）—— 随表消失，此处
+--        **不再单独写 DROP INDEX**：不是漏删，而是留着那条语句反而是将来的
+--        footgun（将来若存在同名索引，那条语句会把它误删）。
+--      · RLS ENABLE 本身 + 策略 service_desk_agent_tenant_isolation
+--      · GRANT（含生产实际的 GRANT ALL）
+--      · 主键 service_desk_agent_pkey、唯一约束 service_desk_agent_tenant_id_desk_id_user_id_key
+--      · 外键 service_desk_agent_desk_id_fkey（这是**本表指向** service_desk(id)
+--        的出向外键，不是别的表依赖本表，故不影响 DROP）
+--
+--    为什么**不带 CASCADE**：本表没有任何反向依赖（无视图/物化视图/RULE，也没有
+--    别的表的外键指向它；2026-10-29 全仓核查确认），plain DROP 足够。刻意不加
+--    CASCADE 还多一层好处：将来若有人偷偷加了对本表的依赖，plain DROP 会**报错
+--    拦住**（实测报错：cannot drop table service_desk_agent because other objects
+--    depend on it），而不是被 CASCADE 静默连坐删掉别人的对象。
+--
+--    为什么用 DO 块包一层：显式存在性判断。`to_regclass('public.service_desk_agent')`
+--    在表不存在时返回 NULL（而不是报错），因此整份文件可安全重复执行。
+--    这是真实的防御性写法，不是为通过某道检查而加的装饰性字眼。
+DO $$
+BEGIN
+  IF to_regclass('public.service_desk_agent') IS NOT NULL THEN
+    DROP TABLE public.service_desk_agent;
+  END IF;
+END $$;
