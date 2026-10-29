@@ -83,6 +83,18 @@ async function dictRows(db: PGlite) {
   return r.rows;
 }
 
+/**
+ * 按 **scope** 取 T1 的覆盖行。
+ * dictRows 会把两个域的行混在一起返回，而本次咬的正是"落在哪个域"——同名 key 跨域会互相掩盖。
+ */
+async function rowsInScope(db: PGlite, scope: string): Promise<Array<{ key: string; label: string }>> {
+  const r = await db.query<{ key: string; label: string }>(
+    `SELECT key, label FROM label_dict_tenant WHERE tenant_id = 'T1' AND scope = $1 ORDER BY key`,
+    [scope],
+  );
+  return r.rows;
+}
+
 describe('保存流程 → 状态名自动落进租户覆盖字典（saveWorkflowDef 真跑）', () => {
   it('首次保存：该 def 的每个状态都落行，label 缺省 = key（不再是空白）', async () => {
     const db = await freshDb();
@@ -194,6 +206,75 @@ describe('保存流程 → 状态名自动落进租户覆盖字典（saveWorkflo
     const rows = await dictRows(db);
     expect(rows.map((r) => r.key)).toEqual(['rated']); // 只有平台字典里没有的
     expect(rows[0].label).toBe('rated'); // 有行可改（不再永远裸 key）
+    await db.close();
+  });
+});
+
+/**
+ * 巡检独立字典域 insp_status —— **端到端（走真实 saveWorkflowDef 链路）**。
+ *
+ * 【为什么还要在 labelDictTenant.test.ts 之外再验一遍】
+ *   那一份验的是"ensureTenantStateLabels 传进来的域会被正确落成行"+"scopeFor 的映射对"，
+ *   但**调用点 `saveWorkflowDef` 有没有真的把 scopeFor(entityType) 传下去**没人咬住：
+ *   scopeFor 写对了却没人调用它（或将来有人重构时把第五个实参删掉），那份测试照样全绿，
+ *   而生产立刻退回"巡检状态以裸 key 落进工单域"。这里是唯一能咬住那 15 个字符的地方。
+ */
+describe('保存链路按业务文档分域：巡检 → insp_status（端到端）', () => {
+  it('entity_type=inspection_task：状态落 insp_status，工单域零新增', async () => {
+    const db = await freshDb();
+    await saveWorkflowDef(
+      db as never,
+      'T1',
+      'inspection_task',
+      def(['pending', 'in_progress', 'done', 'exception']),
+      { operator: 'alice', reason: 'test:insp-domain' },
+    );
+    // 巡检域：四个状态都在，label 缺省 = key（有行可改，不是空白）
+    const insp = await rowsInScope(db, 'insp_status');
+    expect(insp.map((r) => r.key)).toEqual(['done', 'exception', 'in_progress', 'pending']);
+    expect(insp.every((r) => r.label === r.key)).toBe(true);
+    // 工单域：**零新增**——这条是本次改动的成败线，多脏一行工单域就白改
+    expect(await rowsInScope(db, 'wo_status')).toEqual([]);
+    await db.close();
+  });
+
+  /**
+   * 对照组：没有对照组，"全都改走了 insp_status"和"只有巡检改走"是一样绿。
+   */
+  it('对照组 entity_type=work_order：仍落 wo_status（默认域零改动）', async () => {
+    const db = await freshDb();
+    await saveWorkflowDef(db as never, 'T1', 'work_order', def(['draft', 'assigned', 'rated']), {
+      operator: 'alice',
+      reason: 'test:wo-domain',
+    });
+    expect((await rowsInScope(db, 'wo_status')).map((r) => r.key)).toEqual(['assigned', 'draft', 'rated']);
+    expect(await rowsInScope(db, 'insp_status')).toEqual([]);
+    await db.close();
+  });
+
+  it('同一租户两种业务文档并存：巡检与工单互不串域', async () => {
+    const db = await freshDb();
+    await saveWorkflowDef(db as never, 'T1', 'inspection_task', def(['pending', 'done']), {
+      operator: 'alice',
+      reason: 'test:insp',
+    });
+    await saveWorkflowDef(db as never, 'T1', 'work_order', def(['draft', 'rated']), {
+      operator: 'alice',
+      reason: 'test:wo',
+    });
+    // 管理员把巡检的 done 改成中文名
+    await db.query(
+      `UPDATE label_dict_tenant SET label='巡检完成' WHERE tenant_id='T1' AND scope='insp_status' AND key='done'`,
+    );
+    // 再保存一次巡检流程：译名不被冲回裸 key（DO NOTHING 按 (tenant_id, scope, key) 判重）
+    await saveWorkflowDef(db as never, 'T1', 'inspection_task', def(['pending', 'done']), {
+      operator: 'bob',
+      reason: 'test:insp-resave',
+    });
+    expect((await rowsInScope(db, 'insp_status')).map((r) => r.key)).toEqual(['done', 'pending']);
+    expect((await rowsInScope(db, 'insp_status')).find((r) => r.key === 'done')?.label).toBe('巡检完成');
+    // 工单域始终只有自己那两个状态，且没被巡检的中文名带跑
+    expect((await rowsInScope(db, 'wo_status')).map((r) => r.key)).toEqual(['draft', 'rated']);
     await db.close();
   });
 });
