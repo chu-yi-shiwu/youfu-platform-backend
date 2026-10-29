@@ -21,6 +21,33 @@ function withMechanismStates(entityType: string, def: WorkflowDef): WorkflowDef 
 }
 
 /**
+ * 该业务文档的状态名应落在**哪个字典域**（label_dict_tenant.scope）。
+ *
+ * 【为什么巡检要单独一个 insp_status 域】
+ *   巡检的状态集（pending / in_progress / done / exception）与工单的状态集（073 的 wo_status
+ *   域那 19 条：draft / assigned / processing / completed ...）是**两套不相交的枚举**——
+ *   两边唯一的"交集"是英文撞名（例如巡检的 done 与将来任何业务的 done），而不是同一个含义。
+ *   混在一个域里的代价：
+ *     · 保存巡检流程 ⇒ 巡检状态以裸 key 落进**工单域**，读侧 /meta/labels/me 按 scope 合并下发，
+ *       界面拿到的是一张工单:巡检混编的状态表，无从分辨某行归属哪个业务文档；
+ *     · 唯一键是 (tenant_id, scope, key)：一旦工单侧出现同名 key，两业务共享同一行，
+ *       谁先占位谁定义译名，改巡检名会把工单名带跑（反之亦然），且**没有冲突提示**。
+ *   ⇒ 分域不是洁癖，是把"这两件事本来就不是一件事"写进数据。
+ *
+ * 【为什么其余一律回落 wo_status（而不是未知类型就抛错）】
+ *   entity_type 是开放集合（volunteer_activity / feedback / monitor_alert ...），当前只有
+ *   inspection_task 被证实"枚举与工单不相交"。未知类型抛错会把"配一个还没白名单化的新业务流"
+ *   变成 500 —— 展示层故障不该阻断写流程。回落默认域 = 与本次改动前逐字一致的行为。
+ *
+ * 【为什么 missed 不在这里】missed 属于**巡更/循环签到**（另一套闭环），不属于 inspection_task，
+ *   不在本函数的工作范围内；它同样证明了"状态名不能靠字面猜归属"。
+ */
+export function scopeFor(entityType: string): string {
+  if (entityType === 'inspection_task') return 'insp_status';
+  return 'wo_status';
+}
+
+/**
  * 2026-09-14 纵切③ P0-2：状态图写入口校验收口（纯函数可单测）。
  * 此前 PUT /workflow/def 的校验只做 ①initial∈states ②transitions from/to∈states（optimize.ts 内联），
  * 漏掉第三项：autoRoutes.to 允许指向 doneStates/terminalStates——自动派单直达终态，
@@ -528,7 +555,11 @@ export async function saveWorkflowDef(
   // 此处失败 ⇒ 界面退化为裸 key（= 本次改动前的行为），流程照常生效。
   try {
     // T0：落字典也留变更人（本次保存的操作人，与 live 行的 updated_by 同源）
-    await ensureTenantStateLabels(client, tenantId, def.states ?? [], opts.operator);
+    // scope 按**业务文档**走（巡检 → insp_status，其余 → wo_status，见 scopeFor）：
+    //   entityType 就在本函数作用域里，此前没往下传 ⇒ 巡检的 pending / in_progress / done /
+    //   exception 一律以裸 key 落进**工单域**，读侧 /meta/labels/me 拿到一张工单:巡检混编的
+    //   状态表，且 (tenant_id, scope, key) 唯一键让同名 key 两边互相抢译名。
+    await ensureTenantStateLabels(client, tenantId, def.states ?? [], opts.operator, scopeFor(entityType));
   } catch (e) {
     console.warn(
       '[workflowDef] 状态名落租户覆盖字典失败（展示层退化为裸 key，流程已生效）:',

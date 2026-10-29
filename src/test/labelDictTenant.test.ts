@@ -15,6 +15,7 @@ import { PGlite } from '@electric-sql/pglite';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { ensureTenantStateLabels } from '../engine/labelDictTenant.js';
+import { scopeFor } from '../engine/workflowDef.js';
 
 const ROOT = join(__dirname, '..', '..');
 const SQL = readFileSync(join(ROOT, '098_label_dict_tenant.sql'), 'utf8');
@@ -65,6 +66,22 @@ async function seedPlatform(db: PGlite, pairs: Array<[string, string]>) {
 async function labelsOf(db: PGlite): Promise<Array<{ key: string; label: string }>> {
   const r = await db.query<{ key: string; label: string }>(
     'SELECT key, label FROM label_dict_tenant ORDER BY key',
+  );
+  return r.rows;
+}
+
+/**
+ * 按 **scope** 取覆盖行（tenantId 缺省取各用例惯用的 T1）。
+ * 「落在哪个域」是本次改动的验收对象：labelsOf 不区分 scope，同名 key 跨域会互相掩盖。
+ */
+async function labelsInScope(
+  db: PGlite,
+  scope: string,
+  tenantId = 'T1',
+): Promise<Array<{ key: string; label: string }>> {
+  const r = await db.query<{ key: string; label: string }>(
+    'SELECT key, label FROM label_dict_tenant WHERE tenant_id = $1 AND scope = $2 ORDER BY key',
+    [tenantId, scope],
   );
   return r.rows;
 }
@@ -140,6 +157,80 @@ describe('098 label_dict_tenant：保存流程联动落标签', () => {
     expect(await ensureTenantStateLabels(db, 'T1', ['rated', 'rated'])).toBe(1);
     expect((await labelsOf(db)).map((r) => r.key)).toEqual(['rated']);
     await db.close();
+  });
+
+  /**
+   * 【巡检独立字典域 insp_status 的验收锚点①】巡检状态集与工单状态集是**两套枚举**：
+   * 073 的 wo_status 域只有工单那 19 条，不含巡检的 pending / in_progress / done / exception。
+   * 此前 scope 硬编码 'wo_status'，巡检的这 5 个状态一律以裸 key 落进**工单域**——
+   * 写侧造出跨文档脏数据，读侧无从分辨某行到底属于工单还是巡检。
+   */
+  it('巡检走自己的域：传 scope=insp_status 时只落 insp_status，工单域零新增', async () => {
+    const db = await freshDb();
+    const n = await ensureTenantStateLabels(db, 'T1', ['pending', 'in_progress', 'done'], 'alice', 'insp_status');
+    expect(n).toBe(3);
+    // 巡检域：三条都在，label 缺省 = key（有行可改，不是空白）
+    const insp = await labelsInScope(db, 'insp_status');
+    expect(insp).toEqual([
+      { key: 'done', label: 'done' },
+      { key: 'in_progress', label: 'in_progress' },
+      { key: 'pending', label: 'pending' },
+    ]);
+    // 工单域：**零新增**（这条是本次改动的成败线——多脏一行工单域就白改）
+    expect(await labelsInScope(db, 'wo_status')).toEqual([]);
+    await db.close();
+  });
+
+  /**
+   * 【验收锚点②：向后兼容锁定】scope 是**可选第 5 参、默认 wo_status**，
+   * 现有调用点（以及所有将来不显式传域的调用）行为必须与改前**逐字一致**。
+   * 没有这条，改默认域时手抖把默认值写成新域 = 全部既有调用点悄悄换域。
+   */
+  it('不传第 5 参 ⇒ 仍落 wo_status（默认域不动，现有调用点零改动）', async () => {
+    const db = await freshDb();
+    const n = await ensureTenantStateLabels(db, 'T1', ['pending', 'done'], 'alice');
+    expect(n).toBe(2);
+    expect(await labelsInScope(db, 'wo_status')).toEqual([
+      { key: 'done', label: 'done' },
+      { key: 'pending', label: 'pending' },
+    ]);
+    expect(await labelsInScope(db, 'insp_status')).toEqual([]);
+    // 库里出现过的 scope 只能有 wo_status 一个
+    const r = await db.query<{ scope: string }>(`SELECT DISTINCT scope FROM label_dict_tenant`);
+    expect(r.rows.map((x) => x.scope)).toEqual(['wo_status']);
+    await db.close();
+  });
+
+  it('同名 key 跨域各占一行：改巡检的 done 译名不动工单的 done', async () => {
+    const db = await freshDb();
+    await ensureTenantStateLabels(db, 'T1', ['done'], 'a', 'insp_status');
+    await ensureTenantStateLabels(db, 'T1', ['done'], 'a'); // 默认域 wo_status
+    await db.query(
+      `UPDATE label_dict_tenant SET label = '巡检完成' WHERE tenant_id='T1' AND scope='insp_status' AND key='done'`,
+    );
+    // 再次保存巡检流程：同 key 只在此域幂等（DO NOTHING 是按 (tenant_id, scope, key) 判重的）
+    expect(await ensureTenantStateLabels(db, 'T1', ['done'], 'b', 'insp_status')).toBe(0);
+    expect((await labelsInScope(db, 'insp_status')).map((r) => r.label)).toEqual(['巡检完成']);
+    // 工单域的 done 没被巡检的中文名带跑（这正是混域时会发生的串号）
+    expect((await labelsInScope(db, 'wo_status')).map((r) => r.label)).toEqual(['done']);
+    await db.close();
+  });
+});
+
+/**
+ * scopeFor —— 业务文档 → 字典域的映射（纯函数，无库）。
+ * 上面的用例验的是"传进来的域被正确落成行"，这一组验的是"**谁**该走哪个域"——
+ * 映射写错（或将来有人把它删掉回落默认域）不会有任何字典行报错，只会悄悄重新混域。
+ */
+describe('scopeFor：业务文档 → 字典域', () => {
+  it('巡检 inspection_task → insp_status（不进工单域）', () => {
+    expect(scopeFor('inspection_task')).toBe('insp_status');
+  });
+
+  it('工单及其余业务一律回落 wo_status（向后兼容，未知业务不因展示层 500）', () => {
+    for (const t of ['work_order', 'transport_order', 'volunteer_activity', 'feedback', '未登记的新业务']) {
+      expect(scopeFor(t)).toBe('wo_status');
+    }
   });
 });
 

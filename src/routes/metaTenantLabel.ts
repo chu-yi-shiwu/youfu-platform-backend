@@ -11,7 +11,7 @@
 //      挡不住"服务端老实按请求里的 tenant_id 去写"这种越权）。
 //   ② 只写 label_dict_tenant，**绝不写平台字典 label_dict**（无租户维度，写穿 = 全平台事故）。
 //      metaTenantLabelWrite.http.test.ts 里有静态护栏 + PGlite 真库双重卡这条。
-//   ③ scope 白名单（与 073 label_dict 的四个域一致），非法一律 400。
+//   ③ scope 白名单（流程状态域口径，见下方 SCOPES 注释），非法一律 400。
 //
 // 【为什么用 basicdata.edit 权限点】
 //   展示标签字典归属「基础数据」（accounts.ts:92 的权限展示名即「基础数据」）。basicdata.edit
@@ -85,8 +85,22 @@ router.get('/meta/labels/me', async (_req, res, next) => {
   }
 });
 
-/** 与 073 label_dict 的四个域严格一致；多一个域就是在给字典表开垃圾入口。 */
-const SCOPES = ['wo_status', 'source', 'business_type', 'priority'] as const;
+/**
+ * 允许写入租户覆盖字典的 scope 白名单（**流程状态域**口径，不是"073 的四个域"）。
+ *
+ * 【为什么 insp_status 在这里，但它没有 073 平台种子】
+ *   这个白名单圈的是「**用户可见的流程状态**」这件事——在 (tenant_id, scope, key) 唯一键下
+ *   谁能写 label_dict_tenant，判定标准是"有没有业务文档的状态会落进这个域"，
+ *   不是"073 里播过种才算合法域"。insp_status 是巡检的独立状态域：巡检的状态集
+ *   （pending / in_progress / done / exception）与工单 wo_status 域那 19 条**不相交**，
+ *   混在一个域里会让同名 key 互抢译名（详见 engine/workflowDef.ts 的 scopeFor 注释）。
+ *   platform 侧**故意不播** insp_status 种子：平台字典是跨租户共享的通用译名，而巡检状态
+ *   目前由各租户自行命名，没有成立的平台级默认名；硬播种子等于给所有租户预置一行可被覆盖的默认值。
+ *
+ *   ⇒ 一句话：白名单的边界是「写这个域不会制造垃圾行」，而不是「073 里有没有」。
+ *      新增一个域的前提是"某个业务文档的状态会落到这里"，不是"先去 073 补种子"。
+ */
+const SCOPES = ['wo_status', 'insp_status', 'source', 'business_type', 'priority'] as const;
 const KEY_MAX = 64;
 const LABEL_MAX = 64;
 
