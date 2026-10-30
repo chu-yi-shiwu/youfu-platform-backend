@@ -91,7 +91,7 @@ describe('报名守卫（signup 业务三重校验）', () => {
     expect(r.status).toBe(409);
     expect(r.body.ok).toBe(false);
     expect(r.body.code).toBe('BAD_STATE');
-    expect(r.body.message).toContain('已关闭');
+    expect(r.body.message).toBe('活动已关闭，无法报名');
     expect(h.calls.find((c) => c.sql.includes('INSERT INTO volunteer_record'))).toBeUndefined();
   });
 
@@ -103,7 +103,7 @@ describe('报名守卫（signup 业务三重校验）', () => {
     const r = await post('/volunteer/activities/act-2/signup', { user_name: '李四' });
     expect(r.status).toBe(409);
     expect(r.body.code).toBe('BAD_STATE');
-    expect(r.body.message).toContain('名额已满');
+    expect(r.body.message).toBe('报名名额已满');
     expect(h.calls.find((c) => c.sql.includes('INSERT INTO volunteer_record'))).toBeUndefined();
   });
 
@@ -114,7 +114,7 @@ describe('报名守卫（signup 业务三重校验）', () => {
     ];
     const r = await post('/volunteer/activities/act-3/signup', { user_name: '王五' });
     expect(r.status).toBe(409);
-    expect(r.body.message).toContain('名额已满');
+    expect(r.body.message).toBe('报名名额已满');
   });
 
   it('④ open 未满 signup → 201（正向回归：守卫不误伤正常报名）', async () => {
@@ -263,7 +263,7 @@ describe('去重守卫（signup DUPLICATE，V1 新增）', () => {
     expect(r.status).toBe(409);
     expect(r.body.ok).toBe(false);
     expect(r.body.code).toBe('DUPLICATE');
-    expect(r.body.message).toContain('您已报名过该活动');
+    expect(r.body.message).toBe('您已报名过该活动，无需重复报名');
     // 命中去重即短路：既不 INSERT，也不再走名额统计
     expect(h.calls.find((c) => c.sql.includes('INSERT INTO volunteer_record'))).toBeUndefined();
     expect(h.calls.find((c) => c.sql.includes('count(*)::int AS n'))).toBeUndefined();

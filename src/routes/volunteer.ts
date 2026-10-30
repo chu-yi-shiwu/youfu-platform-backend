@@ -155,6 +155,7 @@ router.post('/activities/:id/signup', async (req, res, next) => {
         [req.params.id, tenantId],
       );
       if (act.rowCount === 0) throw new AppError('NOT_FOUND', 'activity not found', 404);
+      // ⚠️ 逐字契约：小程序按子串「已关闭」分流（worker/volunteer.js handleSignupError）；改动须同步两端页面 + volunteerGuard.http.test.ts ②
       if (act.rows[0].status !== 'open') throw new AppError('BAD_STATE', '活动已关闭，无法报名', 409);
       // V2-UX F6/D5（20260912）：end_at 过期守卫——置于 status 检查之后、去重之前。
       // D5 顺序成文：status 优先于 end_at（closed 活动对外永远提示"已截止"，与 V1 口径一致；
@@ -162,6 +163,7 @@ router.post('/activities/:id/signup', async (req, res, next) => {
       // end_at 为 null 放行（S7 存量兼容：历史活动从未填过结束时间，不得一刀切误杀）。
       const endAt = act.rows[0].end_at;
       if (endAt !== null && endAt !== undefined && new Date(endAt) < new Date()) {
+        // ⚠️ 逐字契约：小程序按子串「已结束」分流；改动须同步两端页面 + volunteerGuard.http.test.ts ⑪
         throw new AppError('ACTIVITY_ENDED', '该活动已结束，无法报名', 409);
       }
       // V1 去重守卫（置于状态检查之后：closed 活动对外永远提示"已截止"，口径唯一；
@@ -171,12 +173,14 @@ router.post('/activities/:id/signup', async (req, res, next) => {
         [tenantId, req.params.id, b.user_name],
       );
       if (dup.rowCount && dup.rowCount > 0) {
+        // ⚠️ 逐字契约：小程序按子串「已报名过」分流；改动须同步两端页面 + volunteerGuard.http.test.ts ⑧
         throw new AppError('DUPLICATE', '您已报名过该活动，无需重复报名', 409);
       }
       const cnt = await client.query(
         `SELECT count(*)::int AS n FROM volunteer_record WHERE activity_id = $1 AND tenant_id = $2`,
         [req.params.id, tenantId],
       );
+      // ⚠️ 逐字契约：小程序按子串「名额已满」分流；改动须同步两端页面 + volunteerGuard.http.test.ts ②/③
       if (cnt.rows[0].n >= act.rows[0].slots) throw new AppError('BAD_STATE', '报名名额已满', 409);
       const r = await client.query(
         `INSERT INTO volunteer_record (tenant_id, activity_id, user_name, status) VALUES ($1,$2,$3,'registered') RETURNING *`,
