@@ -217,7 +217,7 @@ describe('活动结束守卫（signup ACTIVITY_ENDED，V2-UX 新增）', () => {
     expect(r.status).toBe(409);
     // 若 end_at 守卫先于 status 检查，这里会错报 ACTIVITY_ENDED——D5 口径：closed 永远提示已关闭
     expect(r.body.code).toBe('BAD_STATE');
-    expect(r.body.message).toContain('已关闭');
+    expect(r.body.message).toBe('活动已关闭，无法报名');
     expect(r.body.message).not.toContain('已结束');
     expect(h.calls.find((c) => c.sql.includes('INSERT INTO volunteer_record'))).toBeUndefined();
   });

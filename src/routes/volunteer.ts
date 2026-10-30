@@ -155,7 +155,7 @@ router.post('/activities/:id/signup', async (req, res, next) => {
         [req.params.id, tenantId],
       );
       if (act.rowCount === 0) throw new AppError('NOT_FOUND', 'activity not found', 404);
-      // ⚠️ 逐字契约：小程序按子串「已关闭」分流（worker/volunteer.js handleSignupError）；改动须同步两端页面 + volunteerGuard.http.test.ts ②
+      // ⚠️ 逐字契约：小程序按子串「已关闭」分流（worker/volunteer.js handleSignupError）；改动须同步两端页面 + volunteerGuard.http.test.ts ①/⑫
       if (act.rows[0].status !== 'open') throw new AppError('BAD_STATE', '活动已关闭，无法报名', 409);
       // V2-UX F6/D5（20260912）：end_at 过期守卫——置于 status 检查之后、去重之前。
       // D5 顺序成文：status 优先于 end_at（closed 活动对外永远提示"已截止"，与 V1 口径一致；
