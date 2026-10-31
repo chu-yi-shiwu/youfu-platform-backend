@@ -35,6 +35,8 @@ import {
   intersectStates,
 } from '../engine/workflowDef.js';
 import { CLAIM_HALL_STATE } from '../engine/claimHallEdges.js'; // F8：落抢单大厅走主通道（机制态单一事实源）
+// 2026-11-01 抢单池统一：巡检/运送两区的池态用各自内置模板兜底（租户未配 def 时）
+import { INSPECTION_DEF, TRANSPORT_DEF } from '../engine/themes.js';
 import {
   DEFAULT_WORK_ORDER_DEF,
   availableTransitions, learningTriggerStates, shouldTriggerLearning,
@@ -1144,7 +1146,7 @@ router.get('/open/claim-hall', async (req, res, next) => {
   try {
     const tenantId = res.locals.auth.tenantId;
     const department = req.query.department as string | undefined;
-    const { items, defs } = await withTenantClient(tenantId, async (client) => {
+    const { items, defs, insRows, trRows } = await withTenantClient(tenantId, async (client) => {
       // F10：池态不再写死 ('claim_hall','pending_dispatch')——与认领端点守卫共用
       //   claimableStates(def)（写在代码里的名单换成"能 claim 的态即池"的派生），
       //   杜绝「列表查得到、认领却 409」的两份字面量漂移。
@@ -1168,20 +1170,55 @@ router.get('/open/claim-hall', async (req, res, next) => {
       const poolDefs = await getDefsForVersions(client, tenantId, 'work_order', probeRows, DEFAULT_WORK_ORDER_DEF);
       // 并集去重。防御：Map 为空 ⇒ 并集为空 ⇒ 走下面的「无池」早退（实践上 probe 恒含 0，不会为空）。
       const poolSet = Array.from(new Set(Array.from(poolDefs.values()).flatMap((d) => claimableStates(d))));
-      // 流程无认领边 = 无池，诚实返回空（defs 为空 Map：零行 ⇒ 无需查任何版本）
-      if (poolSet.length === 0) return { items: [] as unknown[], defs: new Map<number, WorkflowDef>() };
-      const conds = ['tenant_id=$1', 'status = ANY($2::text[])'];
-      const params: unknown[] = [tenantId, poolSet];
-      if (department) { params.push(department); conds.push(`department = $${params.length}`); }
-      const r = await client.query(
-        `SELECT * FROM work_orders WHERE ${conds.join(' AND ')} ORDER BY created_at ASC LIMIT 500`,
-        params,
-      );
+      // 流程无认领边 = 工单区无池，诚实返回空（defs 为空 Map：零行 ⇒ 无需查任何版本）。
+      //   2026-11-01：不再整段 return —— 巡检/运送两区与本池无关，工单区空不代表它们也空。
+      let r: { rows: any[] } = { rows: [] };
+      if (poolSet.length > 0) {
+        const conds = ['tenant_id=$1', 'status = ANY($2::text[])'];
+        const params: unknown[] = [tenantId, poolSet];
+        if (department) { params.push(department); conds.push(`department = $${params.length}`); }
+        r = await client.query(
+          `SELECT * FROM work_orders WHERE ${conds.join(' AND ')} ORDER BY created_at ASC LIMIT 500`,
+          params,
+        );
+      }
       // T1-B 批4：available 是**逐行**的判定 ⇒ N 行可能锁不同版本，共用 wdef 会让老单
       //   凭空拿到新版本的按钮（点了才进不了 transition）。按 def_version 分组，几个版本查几次。
       //   上面 SQL 是 `SELECT *` ⇒ def_version 天然在位，无需拓宽 SELECT。
       const defs = await getDefsForVersions(client, tenantId, 'work_order', r.rows, DEFAULT_WORK_ORDER_DEF);
-      return { items: r.rows, defs };
+
+      // 2026-11-01 抢单池统一（用户决定"巡检、运送也进"）：
+      //   此前大厅只查 work_orders 单表 ⇒ 工人打开大厅永远只看到工单，巡检与运送"没被指派
+      //   就既看不见也接不了"，逼工人记住三套归属规则。现在三类未指派单一并进池。
+      // 池态口径不写死：仍由各自的 def 经 claimableStates() 派生（与工单同一机制），
+      //   租户没配认领边 = 该实体不进池（诚实返回空，不假装有）。
+      const insPool = claimableStates(
+        await getWorkflowDefAtVersion(client, tenantId, 'inspection_task', 0, INSPECTION_DEF),
+      );
+      const trPool = claimableStates(
+        await getWorkflowDefAtVersion(client, tenantId, 'transport_task', 0, TRANSPORT_DEF),
+      );
+      const insRows = insPool.length
+        ? (
+            await client.query(
+              `SELECT * FROM inspection_task
+                WHERE tenant_id=$1 AND assignee IS NULL AND status = ANY($2::text[])
+                ORDER BY scheduled_at ASC NULLS LAST, created_at ASC LIMIT 200`,
+              [tenantId, insPool],
+            )
+          ).rows
+        : [];
+      const trRows = trPool.length
+        ? (
+            await client.query(
+              `SELECT * FROM transport_order
+                WHERE tenant_id=$1 AND carrier IS NULL AND status = ANY($2::text[])
+                ORDER BY created_at ASC LIMIT 200`,
+              [tenantId, trPool],
+            )
+          ).rows
+        : [];
+      return { items: r.rows, defs, insRows, trRows };
     });
     const out = items.map((it: any) => ({
       ...it,
@@ -1190,7 +1227,36 @@ router.get('/open/claim-hall', async (req, res, next) => {
         to: t.to, event: t.event, requiredFields: t.requiredFields ?? [], allowedRoles: t.allowedRoles ?? [], sideEffects: t.sideEffects ?? [],
       })),
     }));
-    return res.json({ ok: true, code: 0, items: out, total: out.length });
+    // sections：三类实体分组的统一视图（新前端按 entity 分组渲染；items 保留给旧客户端不破坏）
+    const sections = [
+      { entity: 'work_order', label: '报修工单', claim_path: '/open/work_order/:id/claim', items: out },
+      {
+        entity: 'inspection_task',
+        label: '巡检任务',
+        claim_path: '/inspection/tasks/:id/claim',
+        items: (insRows as any[]).map((it) => ({
+          ...it,
+          entity: 'inspection_task',
+          code: it.title || it.id,
+          title: it.title,
+          claimed_owner: it.assignee ?? null,
+        })),
+      },
+      {
+        entity: 'transport_order',
+        label: '运送单',
+        claim_path: '/transport/orders/:id/claim',
+        items: (trRows as any[]).map((it) => ({
+          ...it,
+          entity: 'transport_order',
+          code: it.code || it.id,
+          title: it.item_name || it.code,
+          claimed_owner: it.carrier ?? null,
+        })),
+      },
+    ].filter((s) => s.items.length > 0);
+    const totalAll = sections.reduce((n, s) => n + s.items.length, 0);
+    return res.json({ ok: true, code: 0, items: out, total: totalAll, sections });
   } catch (e) {
     next(e);
   }

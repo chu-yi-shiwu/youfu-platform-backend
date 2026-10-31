@@ -10,6 +10,12 @@ export const INSPECTION_DEF: WorkflowDef = {
   initial: 'pending',
   states: ['pending', 'in_progress', 'done', 'exception', 'cancelled'],
   transitions: [
+    // 认领边（2026-11-01 抢单池统一）：让未指派的 pending 巡检单能进抢单大厅被工人自助认领。
+    //   为什么是自环（pending→pending）：巡检没有"已派单"这个中间态，认领只落地**归属**
+    //   （assignee=认领人），"开始干活"仍然是 checkin。若把它指到 in_progress，等于点个认领
+    //   就替工人签到了——那是替人做决定，不做。
+    //   claimableStates() 依据 event==='claim' 派生可认领态，此边即大厅数据来源。
+    { from: 'pending', to: 'pending', event: 'claim', allowedRoles: ['admin', 'worker'] },
     { from: 'pending', to: 'in_progress', event: 'checkin', allowedRoles: ['admin', 'operator', 'worker'] },
     { from: 'in_progress', to: 'done', event: 'complete', allowedRoles: ['admin', 'operator', 'worker'] },
     { from: 'in_progress', to: 'exception', event: 'exception', requiredFields: ['note'] },
@@ -25,6 +31,10 @@ export const TRANSPORT_DEF: WorkflowDef = {
   transitions: [
     // 【用户要求①】摘除退场的 dispatcher：operator 本就有 dispatch.override，此处补挂权限点保证零损失。
     { from: 'pending', to: 'assigned', event: 'dispatch', requiredFields: ['assignee'], allowedRoles: ['admin', 'operator'], allowedPerms: ['dispatch.override'] },
+    // 认领边（2026-11-01 抢单池统一）：运送有"已派单"态，认领即 pending→assigned、carrier=认领人。
+    //   与工单线 pending_dispatch --claim--> assigned 同形，不另设语义。
+    //   不挂 dispatch.override：抢单是工人自助动作，不该要求管理权限（与工单 claim 边一致）。
+    { from: 'pending', to: 'assigned', event: 'claim', allowedRoles: ['admin', 'worker'] },
     { from: 'assigned', to: 'transporting', event: 'receive', allowedRoles: ['admin', 'worker'] },
     { from: 'transporting', to: 'done', event: 'complete', allowedRoles: ['admin', 'worker'] },
     { from: 'transporting', to: 'exception', event: 'exception', requiredFields: ['note'] },

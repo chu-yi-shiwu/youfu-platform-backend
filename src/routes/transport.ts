@@ -507,4 +507,47 @@ router.post('/orders/:id/transition', async (req, res, next) => {
   }
 });
 
+// POST /api/v1/transport/orders/:id/claim —— 认领未指派的运送单（抢单大厅 · 运送区）
+// 2026-11-01 抢单池统一：运送单此前只能由管理端 dispatch（pending→assigned 要求 dispatch.override），
+//   工人没有任何自助入口——未指派的单在工人视角等于不存在。补此端点后与工单抢单同体验。
+// 语义：认领 = pending --claim--> assigned，carrier = 认领人（与工单 assigned 同形，不另设状态）。
+// 并发：行锁 + carrier 非空即 409。
+// 门禁：走 transitionOrder，def 里的 allowedRoles 照常生效（claim 边配的是 worker/admin）。
+router.post('/orders/:id/claim', async (req, res, next) => {
+  try {
+    const tenantId = res.locals.auth.tenantId;
+    const authUserId = res.locals.auth.userId;
+    const item = await withTenantClient(tenantId, async (client) => {
+      const cur = await client.query(
+        `SELECT carrier, status FROM transport_order WHERE id=$1 AND tenant_id=$2 FOR UPDATE`,
+        [req.params.id, tenantId],
+      );
+      if (cur.rowCount === 0) throw new AppError('NOT_FOUND', 'order not found', 404);
+      const owner = cur.rows[0].carrier;
+      if (owner != null && String(owner).trim() !== '') {
+        throw new AppError('CONFLICT', 'transport order already claimed', 409);
+      }
+      // 身份：token.sub 是 account_user.id，运送表存在 worker.id 域（与工单抢单同口径）
+      const w = await client.query(
+        'SELECT id FROM worker WHERE tenant_id=$2 AND (account_id=$1 OR id=$1) LIMIT 1',
+        [authUserId, tenantId],
+      );
+      if (w.rowCount === 0) throw new AppError('NOT_FOUND', 'worker not found', 404);
+      return transitionOrder(
+        client,
+        tenantId,
+        req.params.id,
+        'claim',
+        { carrier: w.rows[0].id },
+        {},
+        authUserId ?? 'config_role',
+        res.locals.auth.role,
+      );
+    });
+    return res.json({ ok: true, code: 0, item });
+  } catch (e) {
+    next(e);
+  }
+});
+
 export default router;

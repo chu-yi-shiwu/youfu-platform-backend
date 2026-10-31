@@ -115,7 +115,11 @@ export const RICH_WORK_ORDER_DEF: WorkflowDef = {
   initial: 'draft',
   states: [
     'draft',           // 草稿/新建
-    'pending_accept',  // 待受理
+    // 2026-11-01：删除 'pending_accept'（待受理）。该态全仓无任何产生点——`submit` 事件
+    //   从未被任何路由发出，公开报修/后台建单都是 draft 直接 autoDispatch 到 assigned
+    //   （见本文件下方「旧旁路不查边直接写 assigned」注释）。生产实测 0 条单子落在该态，
+    //   却让运营在配置台看到"待受理"这个永不会有单的环节、状态机给工人 accept 权但永不出现。
+    //   删态同时删除它的 3 条边（submit 入边 / accept 出边 / cancel 出边）。
     'pending_dispatch', // 待派单
     'claim_hall',      // 抢单大厅(未命中自动派单时归属，待人员抢单)
     'assigned',        // 已派单/待接收
@@ -136,12 +140,11 @@ export const RICH_WORK_ORDER_DEF: WorkflowDef = {
     { from: 'assigned', to: 'processing', event: 'start' },
     { from: 'processing', to: 'completed', event: 'complete' },
     // —— UOne 粒度主干（取之所长）——
-    { from: 'draft', to: 'pending_accept', event: 'submit' },
-    // 【用户原始诉求②"师傅不能接单谁接单？师傅的职能就是接单执行"】
-    // 原边 allowedRoles = ['admin','dispatcher','service_desk'] —— **不含 worker**，
-    // 即真正干活的师傅接不了单，接单权反而落在 dispatcher/service_desk 两个待退场角色上。
-    // 此为"师傅不能接单"的代码根因。修复：**加 worker**（纯加法，存量三者权限一字不动）。
-    { from: 'pending_accept', to: 'pending_dispatch', event: 'accept', allowedRoles: ['admin', 'worker'] },
+    // 2026-11-01 删除 draft --submit--> pending_accept 与 pending_accept --accept--> pending_dispatch
+    //   两条边：submit 事件无产生点、pending_accept 无数据，边留着只会让流程图说谎。
+    //   【"师傅不能接单谁接单"这条用户原始诉求②的护栏已迁移】——原 accept 边是它当年的落点，
+    //   现由下面两条 claim 边承接（pending_dispatch--claim-->assigned、claim_hall--claim-->assigned，
+    //   allowedRoles 都含 worker）。回归护栏同步迁到 roleConfigurable.test.ts 的 claim 组。
     { from: 'pending_dispatch', to: 'assigned', event: 'dispatch', allowedRoles: ['admin'], allowedPerms: ['dispatch.override'], requiredFields: ['assignee'] },
     // 抢单机制边（与 claimHallEdges.ts PENDING_DISPATCH_CLAIM_EDGE 同源，两处必须一起改）：
     // worker 认领待派单池的单——抢单端点历来允许，补成流程图上诚实的可见边。
@@ -176,7 +179,6 @@ export const RICH_WORK_ORDER_DEF: WorkflowDef = {
     // —— 撤销（活跃态 → cancelled）——
     { from: 'draft', to: 'cancelled', event: 'cancel', requiredFields: ['cancel_reason'], allowedRoles: ['admin'], allowedPerms: ['ticket.manage'] },
     { from: 'claim_hall', to: 'cancelled', event: 'cancel', requiredFields: ['cancel_reason'], allowedRoles: ['admin'], allowedPerms: ['ticket.manage'] },
-    { from: 'pending_accept', to: 'cancelled', event: 'cancel', requiredFields: ['cancel_reason'], allowedRoles: ['admin'], allowedPerms: ['ticket.manage'] },
     { from: 'pending_dispatch', to: 'cancelled', event: 'cancel', requiredFields: ['cancel_reason'], allowedRoles: ['admin'], allowedPerms: ['ticket.manage'] },
     { from: 'assigned', to: 'cancelled', event: 'cancel', requiredFields: ['cancel_reason'], allowedRoles: ['admin'], allowedPerms: ['ticket.manage'] },
     { from: 'arrived', to: 'cancelled', event: 'cancel', requiredFields: ['cancel_reason'], allowedRoles: ['admin'], allowedPerms: ['ticket.manage'] },
@@ -394,6 +396,8 @@ export function autoRouteFor(def: WorkflowDef, from: string): AutoRoute | null {
  *   submit→pending_accept / cancel→cancelled 两条出边——旧旁路不查边直接写 assigned
  *   = 跳过受理环节直达派单孤岛；走主通道（transition() 查边）后按拓扑诚实落到
  *   pending_accept。这不是迁就坏配置，是消灭"配置指向拓扑外跳转"的静默容忍。
+ *   【2026-11-01 补注】pending_accept 态已按用户决定删除（无产生点），上面这段是当时的
+ *   生产实证记录，保留原文是为了不抹掉判断依据；现行拓扑里该态与相关边均不存在。
  */
 export function resolveDispatchTarget(def: WorkflowDef, from: string): string | null {
   // F8（2026-10-19）：派单目标只能从**客户业务边**解析，必须排除引擎机制边
@@ -420,7 +424,8 @@ export function resolveDispatchTarget(def: WorkflowDef, from: string): string | 
 // 注：processing 为「最近一次进入」语义（resume/reject 再入会刷新 started_at），
 //     首末之分由 ticket_event/domain_event 事件流水兜底，不在此处做首次判定。
 export const STATUS_TIMESTAMP_COLUMNS: Readonly<Record<string, string>> = {
-  pending_accept: 'accepted_at', // 受理
+  // 2026-11-01：'pending_accept' 态已删（无产生点），其 accepted_at 映射同步删除。
+  //   work_orders.accepted_at 列保留不动（历史数据兼容），只是不再有状态触发写入。
   assigned: 'assigned_at',       // 派单（含抢单）
   arrived: 'arrived_at',         // 到场
   processing: 'started_at',      // 开始处理

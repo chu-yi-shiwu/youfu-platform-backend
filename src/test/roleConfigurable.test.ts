@@ -146,28 +146,37 @@ describe('角色 code 形状校验（与 090 role_def CHECK 同口径）', () =>
 });
 
 // ============ 用户原始诉求②："师傅不能接单谁接单？师傅的职能就是接单执行" ============
-// 根因（实测）：accept 边（pending_accept → pending_dispatch，即"接单"）allowedRoles 原为
-// ['admin','dispatcher','service_desk'] —— **不含 worker**，真正干活的师傅接不了单。
-// 本组把"师傅必须能接单 + 存量三方权限一字不动"钉成回归护栏。
-describe('师傅（worker）能接单 —— 用户原始诉求②', () => {
-  const acceptEdge = () =>
-    RICH_WORK_ORDER_DEF.transitions.find((x) => x.event === 'accept' && x.from === 'pending_accept');
+// 【2026-11-01 护栏迁移】原来的落点是 accept 边（pending_accept → pending_dispatch）。
+//   该态全仓无任何产生点、生产 0 条，已按用户决定删除，accept 边随之消失。
+//   但"师傅必须能接单"这条诉求**没有作废**——现在的承接点是 claim（认领）边：
+//     · pending_dispatch --claim--> assigned（待派单池里抢）
+//     · claim_hall     --claim--> assigned（抢单大厅里抢）
+//   本组断言从 accept 边平移到 claim 边，要求逐条等价：
+//     师傅能接 / 管理兜底在 / 退场角色不在 / 无关角色不得接。
+//   下面这些是**同一条产品要求的延续**，不是新增规格。
+describe('师傅（worker）能接单 —— 用户原始诉求②（护栏已迁至 claim 边）', () => {
+  // 一个 claim 边集合：两条都属"师傅自助接单"的合法入口
+  const claimEdges = () => RICH_WORK_ORDER_DEF.transitions.filter((x) => x.event === 'claim');
 
-  it('accept（接单）边存在且 allowedRoles 含 worker', () => {
-    const e = acceptEdge();
-    expect(e, 'RICH 模板应有 accept 边').toBeDefined();
-    expect(e?.allowedRoles).toContain('worker');
+  it('claim（接单）边存在，且每条边 allowedRoles 都含 worker', () => {
+    const es = claimEdges();
+    expect(es.length, 'RICH 模板应有 claim 边').toBeGreaterThan(0);
+    for (const e of es) {
+      expect(e.allowedRoles, `${e.from}--claim-->${e.to} 缺 worker`).toContain('worker');
+    }
   });
 
-  it('worker 走 accept 边 → 放行（师傅能接单）', () => {
-    const e = acceptEdge()!;
-    expect(isTransitionAllowed(e, { role: 'worker' })).toBe(true);
+  it('worker 走任一 claim 边 → 放行（师傅能接单）', () => {
+    for (const e of claimEdges()) {
+      expect(isTransitionAllowed(e, { role: 'worker' }), `${e.from}--claim-->${e.to}`).toBe(true);
+    }
   });
 
   it('admin 的接单权限保留（管理兜底不能丢）', () => {
-    const e = acceptEdge()!;
-    expect(e.allowedRoles).toContain('admin');
-    expect(isTransitionAllowed(e, { role: 'admin' })).toBe(true);
+    for (const e of claimEdges()) {
+      expect(e.allowedRoles).toContain('admin');
+      expect(isTransitionAllowed(e, { role: 'admin' })).toBe(true);
+    }
   });
 
   // 【用户要求①】dispatcher / service_desk 退场：接单权回归"谁干活谁接"（师傅 + 管理兜底）。
@@ -176,22 +185,25 @@ describe('师傅（worker）能接单 —— 用户原始诉求②', () => {
   // ⚠️ 真实影响（已如实告知用户）：存量 role='dispatcher'/'service_desk' 的账号将不能再接单，
   //    需管理员改派为 worker（他们本就在干执行的活）；存量数据一个不动，改派由人决策。
   it('退场角色（dispatcher/service_desk）不再出现在接单门禁里 —— 拿掉已生效', () => {
-    const e = acceptEdge()!;
-    expect(e.allowedRoles).not.toContain('dispatcher');
-    expect(e.allowedRoles).not.toContain('service_desk');
-    expect(isTransitionAllowed(e, { role: 'dispatcher' })).toBe(false);
-    expect(isTransitionAllowed(e, { role: 'service_desk' })).toBe(false);
+    for (const e of claimEdges()) {
+      expect(e.allowedRoles).not.toContain('dispatcher');
+      expect(e.allowedRoles).not.toContain('service_desk');
+      expect(isTransitionAllowed(e, { role: 'dispatcher' })).toBe(false);
+      expect(isTransitionAllowed(e, { role: 'service_desk' })).toBe(false);
+    }
   });
 
   it('存量退场账号的出路：改派 worker 后即可接单（有解，不是把人卡死）', () => {
-    const e = acceptEdge()!;
-    expect(isTransitionAllowed(e, { role: 'worker' })).toBe(true);
+    for (const e of claimEdges()) {
+      expect(isTransitionAllowed(e, { role: 'worker' })).toBe(true);
+    }
   });
 
   it('无关角色仍不得接单（不得因补 worker 而放宽成谁都能接）', () => {
-    const e = acceptEdge()!;
-    expect(isTransitionAllowed(e, { role: 'reviewer' })).toBe(false);
-    expect(isTransitionAllowed(e, { role: 'repair_lead' })).toBe(false);
-    expect(isTransitionAllowed(e, { role: undefined })).toBe(false);
+    for (const e of claimEdges()) {
+      expect(isTransitionAllowed(e, { role: 'reviewer' })).toBe(false);
+      expect(isTransitionAllowed(e, { role: 'repair_lead' })).toBe(false);
+      expect(isTransitionAllowed(e, { role: undefined })).toBe(false);
+    }
   });
 });

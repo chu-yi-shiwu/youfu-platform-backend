@@ -13,8 +13,9 @@ import {
 import { transition } from '../repo/ticket.js';
 
 describe('STATUS_TIMESTAMP_COLUMNS（单一事实源映射）', () => {
-  it('六状态→六里程碑列一一对应', () => {
-    expect(timestampColumnFor('pending_accept')).toBe('accepted_at');
+  // 2026-11-01：pending_accept 态已删（全仓无产生点、线上 0 条），映射随之减为五条。
+  // 该用例钉的是"状态→列"的对应关系，状态删了就得跟着减，不是放松断言。
+  it('五状态→五里程碑列一一对应', () => {
     expect(timestampColumnFor('assigned')).toBe('assigned_at');
     expect(timestampColumnFor('arrived')).toBe('arrived_at');
     expect(timestampColumnFor('processing')).toBe('started_at');
@@ -98,15 +99,18 @@ function lastUpdateSql(captured: Array<{ sql: string; params: unknown[] }>): str
 }
 
 describe('transition() 里程碑列回填', () => {
-  it('draft→pending_accept（submit）：回填 accepted_at', async () => {
-    const { client, captured } = fakeClient({ id: 'wo1', tenant_id: 't1', status: 'draft', assignee_id: null });
-    await transition(client, 't1', 'wo1', 'pending_accept', { actor: 'front_desk', role: 'admin' });
-    expect(lastUpdateSql(captured)).toContain('accepted_at = now()');
+  // 2026-11-01：原「draft→pending_accept 回填 accepted_at」用例随该态删除而失效。
+  //   改为钉「删干净」这个事实本身——留着旧用例就等于留着对已删状态的依赖。
+  it('draft→pending_accept 已删除：目标态不在拓扑内，必须 422 拒绝而非静默写库', async () => {
+    const { client } = fakeClient({ id: 'wo1', tenant_id: 't1', status: 'draft', assignee_id: null });
+    await expect(
+      transition(client, 't1', 'wo1', 'pending_accept', { actor: 'front_desk', role: 'admin' }),
+    ).rejects.toThrow(/unknown state/);
   });
 
-  it('pending_accept→pending_dispatch（accept）：非里程碑态，不回填任何里程碑列', async () => {
-    const { client, captured } = fakeClient({ id: 'wo1', tenant_id: 't1', status: 'pending_accept', assignee_id: null });
-    await transition(client, 't1', 'wo1', 'pending_dispatch', { actor: 'front_desk', role: 'admin' });
+  it('draft→claim_hall（enter_hall）：非里程碑态，不回填任何里程碑列', async () => {
+    const { client, captured } = fakeClient({ id: 'wo1', tenant_id: 't1', status: 'draft', assignee_id: null });
+    await transition(client, 't1', 'wo1', 'claim_hall', { actor: 'front_desk', role: 'admin' });
     const sql = lastUpdateSql(captured);
     expect(sql).not.toContain('accepted_at');
     expect(sql).not.toContain('assigned_at');

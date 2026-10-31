@@ -43,7 +43,9 @@ async function transitionTask(
     throw new AppError('BAD_STATE', `illegal transition ${t.status} --${event}-->`, 422);
   }
   // 防御纵深：仅允许白名单物理列被 SET，杜绝任意列名拼入 SQL（🔴① 修复）
-  const ALLOWED_COLS = new Set(['note', 'geo_lat', 'geo_lng', 'done_at', 'photos']);
+  // 2026-11-01：加入 'assignee'——抢单池统一后，"认领"是一条真实流转边（pending--claim-->pending），
+  //   归属要随该边一起落地。值由服务端取 token 身份反查得到，不接受请求体传入，故不构注入面。
+  const ALLOWED_COLS = new Set(['note', 'geo_lat', 'geo_lng', 'done_at', 'photos', 'assignee']);
   const extraKeys = Object.keys(extra).filter((k) => ALLOWED_COLS.has(k));
   const filteredKeys = extraKeys.filter((k) => extra[k] !== 'now()');
   const assigns = [
@@ -592,6 +594,51 @@ router.post('/tasks/:id/transition', async (req, res, next) => {
   }
 });
 
+// POST /api/v1/inspection/tasks/:id/claim —— 认领未指派的巡检单（抢单大厅 · 巡检区）
+// 2026-11-01 抢单池统一：此前巡检单只能"被指派才能干"——未指派的 pending 单工人既看不见
+//   （列表按 assignee=自己 过滤）也接不了（requireAssigneeOrConfig 对未指派直接 403）。
+//   于是工人要记三套归属规则才知道这活归不归自己。补此端点后：未指派巡检单进抢单大厅，
+//   谁先认领归谁，与工单抢单同一体验。
+// 语义边界（重要）：认领只落**归属**（assignee），状态仍 pending——"开始干活"由 checkin 决定。
+//   不把认领直接推进到 in_progress，是拒绝"点个认领就替工人签到"。
+// 并发：行锁 + assignee 非空即 409，两道一起保证先到先得（不靠前端"应该没人抢"）。
+router.post('/tasks/:id/claim', async (req, res, next) => {
+  try {
+    const tenantId = res.locals.auth.tenantId;
+    const authUserId = res.locals.auth.userId;
+    const item = await withTenantClient(tenantId, async (client) => {
+      const cur = await client.query(
+        `SELECT assignee, status FROM inspection_task WHERE id=$1 AND tenant_id=$2 FOR UPDATE`,
+        [req.params.id, tenantId],
+      );
+      if (cur.rowCount === 0) throw new AppError('NOT_FOUND', 'task not found', 404);
+      const owner = cur.rows[0].assignee;
+      if (owner != null && String(owner).trim() !== '') {
+        throw new AppError('CONFLICT', 'inspection task already claimed', 409);
+      }
+      // 与流转端点同口径的权限点（认领也是执行动作的一种）
+      await requirePermission(res.locals.auth, client, 'inspect.execute');
+      // 身份：token.sub 是 account_user.id，巡检表存的是 worker.id，必须反查（与工单抢单同口径）
+      const w = await client.query(
+        'SELECT id FROM worker WHERE tenant_id=$2 AND (account_id=$1 OR id=$1) LIMIT 1',
+        [authUserId, tenantId],
+      );
+      if (w.rowCount === 0) throw new AppError('NOT_FOUND', 'worker not found', 404);
+      // 走既有 transitionTask：def 校验 + 归属写入 + domain_event 记账，一条链路不另起炉灶
+      return transitionTask(
+        client,
+        tenantId,
+        req.params.id,
+        'claim',
+        { assignee: w.rows[0].id },
+        authUserId ?? 'config_role',
+      );
+    });
+    return res.json({ ok: true, code: 0, item });
+  } catch (e) {
+    next(e);
+  }
+});
 // ============ 周期/循环计划（G3 · MVP） ============
 // 设计：inspection_plan 记录频率/间隔/下次执行/暂停；建计划时按规则批量生成未来 N 期
 // scheduled 巡检单（plan_id 关联），暂停则不再推进。真 cron 调度列为后续增强。

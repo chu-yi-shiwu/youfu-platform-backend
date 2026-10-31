@@ -132,7 +132,8 @@ describe('乙 · 能力没断 —— 职能改由权限点承载', () => {
   });
 
   it('师傅能接单、能抢单（接单/抢单归干活的人，与退场无关）', () => {
-    expect(isTransitionAllowed(edges('accept')[0], { role: 'worker' })).toBe(true);
+    // 2026-11-01：accept 边随 pending_accept 态删除而消失（该态无产生点、生产 0 条），
+    //   "接单"能力现全部由 claim 边承载，故此处只断言 claim —— 不是放宽，是入口变了。
     expect(isTransitionAllowed(edges('claim')[0], { role: 'worker' })).toBe(true);
   });
 
