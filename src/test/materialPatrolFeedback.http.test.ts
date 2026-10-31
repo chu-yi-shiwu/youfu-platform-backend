@@ -466,6 +466,71 @@ describe('feedback.ts · 反馈提交/回复/统计', () => {
   });
 });
 
+// ============================================================================
+// 安全缺陷修复（2026-11）：反馈**读**端点此前零权限校验
+//
+// 【修的是什么】`GET /api/v1/feedback`（列表）与 `GET /api/v1/feedback/stats`（统计）
+//   改前**没有任何权限门**（同文件的 reply / export 有，用的是 feedback.manage）。
+//   后果：任何登录用户（含 worker）都能拉到**全租户**反馈正文、图片 URL、录音 URL
+//   —— 属横向越权读 PII。前端菜单用 feedback.manage 挡了，但那是前端门，API 是裸奔的。
+//
+// 【为什么必须 prod】requirePermission 在 authMode:'dev' 下**短路径放行**（role.ts:515）
+//   ⇒ 用 dev 写 403 断言是**恒绿的假绿**，测不出门是否真的存在。这与本文件 ⑲/㉑ 同先例。
+//
+// 【为什么既有 ⑰/⑳ 不红】它们跑在 dev 下（beforeEach 归位 authMode='dev'），
+//   守卫放行 ⇒ 正常路径（含 SQL 参数序）仍被覆盖，只是覆盖不到"门"本身。两组互补。
+// ============================================================================
+describe('feedback.ts · 读端点权限门（缺陷修复：列表/统计此前裸奔）', () => {
+  it('㉓（prod · worker）无 feedback.manage ⇒ GET / 与 GET /stats 均 403', async () => {
+    authMode = 'prod';
+    authRole = 'worker';
+    const r1 = await req('GET', '/api/v1/feedback');
+    expect(r1.status).toBe(403);
+    expect(String(((await r1.json()) as any).message)).toContain('feedback.manage');
+    const r2 = await req('GET', '/api/v1/feedback/stats');
+    expect(r2.status).toBe(403);
+    expect(String(((await r2.json()) as any).message)).toContain('feedback.manage');
+  });
+
+  it('㉔403 确实来自权限表比对：两条读端点被拦时都走了 SELECT perm FROM role_permission', async () => {
+    authMode = 'prod';
+    authRole = 'worker';
+    expect((await req('GET', '/api/v1/feedback')).status).toBe(403);
+    expect((await req('GET', '/api/v1/feedback/stats')).status).toBe(403);
+    const permQueries = calls().filter((s) => s.includes('SELECT perm FROM role_permission'));
+    expect(permQueries.length).toBe(2); // 两条端点各查一次，证明门在各自事务内
+    // 且被拦时**根本没有**执行 feedback 查询（fail-closed，不是查完再拒）
+    expect(calls().some((s) => s.includes('FROM feedback WHERE'))).toBe(false);
+  });
+
+  it('㉕（prod · operator）默认矩阵含 feedback.manage ⇒ 两条读端点仍 200（不把正常人挡了）', async () => {
+    authMode = 'prod';
+    authRole = 'operator';
+    const r1 = await req('GET', '/api/v1/feedback');
+    expect(r1.status).toBe(200);
+    expect(((await r1.json()) as any).items.length).toBe(1);
+    const r2 = await req('GET', '/api/v1/feedback/stats');
+    expect(r2.status).toBe(200);
+    expect(((await r2.json()) as any).stats.avg_rating).toBe('4.5');
+  });
+
+  it('㉖（prod · reviewer）租户显式授 feedback.manage ⇒ 两条读端点 200（可配置收益）', async () => {
+    authMode = 'prod';
+    authRole = 'reviewer';
+    permGrants['reviewer'] = ['feedback.manage'];
+    expect((await req('GET', '/api/v1/feedback?type=opinion')).status).toBe(200);
+    expect((await req('GET', '/api/v1/feedback/stats')).status).toBe(200);
+  });
+
+  it('㉗反例锚：授的是别家权限点（ticket.manage）⇒ 两条读端点仍 403（点不互通）', async () => {
+    authMode = 'prod';
+    authRole = 'reviewer';
+    permGrants['reviewer'] = ['ticket.manage'];
+    expect((await req('GET', '/api/v1/feedback')).status).toBe(403);
+    expect((await req('GET', '/api/v1/feedback/stats')).status).toBe(403);
+  });
+});
+
 describe('T8 第十二批 · 耗材 CSV 导出权限收敛（requireConfigRole → material.export）', () => {
   // B 组 = 收敛的全部价值：改前 requireConfigRole 只读角色白名单、不查 role_permission
   //      ⇒ 租户把 material.export 授给 reviewer 也放不了行。改前这条必红（403），改后绿。

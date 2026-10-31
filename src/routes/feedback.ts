@@ -23,6 +23,10 @@ const submitSchema = z.object({
   work_order_no: z.string().optional(),
 });
 
+// 安全修复（2026-11）：列表端点此前**零权限校验**——任何登录用户（含 worker）都能拉到
+// 全租户反馈正文、图片 URL、录音 URL。PC 前端菜单虽用 feedback.manage 挡了，但那是前端门，
+// API 层裸奔。此处补 feedback.manage，写法与同文件 POST /:id/reply、GET /export 一致
+// （守卫必须在 withTenantClient 内调用——requirePermission 需要 DB client 查 role_permission）。
 router.get('/', async (req, res, next) => {
   try {
     const tenantId = res.locals.auth.tenantId;
@@ -35,11 +39,14 @@ router.get('/', async (req, res, next) => {
     };
     if (type) add('type = ?', type);
     if (status) add('status = ?', status);
-    const items = await withTenantClient(tenantId, (client) =>
-      client
-        .query(`SELECT * FROM feedback WHERE ${clauses.join(' AND ')} ORDER BY created_at DESC`, params)
-        .then((r) => r.rows),
-    );
+    const items = await withTenantClient(tenantId, async (client) => {
+      await requirePermission(res.locals.auth, client, 'feedback.manage'); // 反馈列表属管理面
+      const r = await client.query(
+        `SELECT * FROM feedback WHERE ${clauses.join(' AND ')} ORDER BY created_at DESC`,
+        params,
+      );
+      return r.rows;
+    });
     return res.json({ ok: true, code: 0, items });
   } catch (e) {
     next(e);
@@ -101,23 +108,25 @@ router.post('/:id/reply', async (req, res, next) => {
   }
 });
 
+// 安全修复（2026-11）：统计端点与列表同病——此前零权限校验，任何登录用户可拉全租户满意度聚合。
+// 补 feedback.manage，与列表 / 回复 / 导出三处同口径。
 router.get('/stats', async (req, res, next) => {
   try {
     const tenantId = res.locals.auth.tenantId;
-    const stats = await withTenantClient(tenantId, (client) =>
-      client
-        .query(
-          `SELECT
-             COUNT(*) FILTER (WHERE type = 'satisfaction') AS satisfaction_count,
-             COUNT(*) FILTER (WHERE type = 'opinion') AS opinion_count,
-             COUNT(*) FILTER (WHERE status = 'new') AS new_count,
-             COUNT(*) FILTER (WHERE status = 'replied') AS replied_count,
-             COALESCE(AVG(rating) FILTER (WHERE type = 'satisfaction' AND rating IS NOT NULL), 0) AS avg_rating
-           FROM feedback WHERE tenant_id = $1`,
-          [tenantId],
-        )
-        .then((r) => r.rows[0]),
-    );
+    const stats = await withTenantClient(tenantId, async (client) => {
+      await requirePermission(res.locals.auth, client, 'feedback.manage'); // 反馈统计属管理面
+      const r = await client.query(
+        `SELECT
+           COUNT(*) FILTER (WHERE type = 'satisfaction') AS satisfaction_count,
+           COUNT(*) FILTER (WHERE type = 'opinion') AS opinion_count,
+           COUNT(*) FILTER (WHERE status = 'new') AS new_count,
+           COUNT(*) FILTER (WHERE status = 'replied') AS replied_count,
+           COALESCE(AVG(rating) FILTER (WHERE type = 'satisfaction' AND rating IS NOT NULL), 0) AS avg_rating
+         FROM feedback WHERE tenant_id = $1`,
+        [tenantId],
+      );
+      return r.rows[0];
+    });
     return res.json({ ok: true, code: 0, stats });
   } catch (e) {
     next(e);
