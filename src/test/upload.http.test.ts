@@ -48,6 +48,10 @@ import { signJwt } from '../middleware/auth.js';
 import { errorMiddleware } from '../middleware/error.js';
 
 const FILE_M4A = '123e4567-e89b-12d3-a456-42661417400a.m4a';
+// 缺陷修复（2026-11）：webm / amr 之前被 isValidUploadFileName 白名单拒掉 ⇒
+// /public/upload 落盘的这两个格式永远读不回来。此处落真文件、走真路由、验真 MIME 响应头。
+const FILE_WEBM = '123e4567-e89b-12d3-a456-42661417400b.webm';
+const FILE_AMR = '123e4567-e89b-12d3-a456-42661417400c.amr';
 const JPG_BODY = Buffer.from('fake-jpeg-bytes-931');
 const SECRET = 'test-jwt-secret-931';
 
@@ -70,6 +74,8 @@ beforeAll(async () => {
   fs.mkdirSync(path.join(TMP_ROOT, 't-other'), { recursive: true });
   fs.writeFileSync(path.join(TMP_ROOT, 't-verification', FILE_JPG), JPG_BODY);
   fs.writeFileSync(path.join(TMP_ROOT, 't-verification', FILE_M4A), Buffer.from('fake-audio'));
+  fs.writeFileSync(path.join(TMP_ROOT, 't-verification', FILE_WEBM), Buffer.from('fake-webm-audio'));
+  fs.writeFileSync(path.join(TMP_ROOT, 't-verification', FILE_AMR), Buffer.from('fake-amr-audio'));
   fs.writeFileSync(path.join(TMP_ROOT, 't-other', FILE_JPG), Buffer.from('other-tenant'));
   await new Promise<void>((r) => {
     server = app.listen(0, () => r());
@@ -247,5 +253,45 @@ describe('GET /uploads/:tenant/:file（受控读取，双通道鉴权）', () =>
     const r = await get(`/uploads/t-verification/${FILE_M4A}`, { cookie: dashCookie('t-verification') });
     expect(r.status).toBe(200);
     expect(r.headers.get('content-type')).toBe('audio/mp4');
+  });
+
+  // ==========================================================================
+  // 缺陷修复（2026-11）：webm / amr "能存不能读" 的**读回链路**回归护栏
+  //
+  // 改前：publicReportSchema.ts:20-21 允许 audio/webm → .webm、audio/amr → .amr，
+  //   POST /public/upload 201 成功落盘；但 uploads.ts 的 isValidUploadFileName 白名单与
+  //   MIME 表都没有这两个扩展名 ⇒ 本路由先 400 BAD_PATH（白名单拒）或退化成
+  //   application/octet-stream（MIME 缺）⇒ 浏览器 <audio> 播不出来。
+  //   这是**静默数据丢失**：写入期不报错，用户以为录上了。
+  // 断言同时钉住三件事：不再 400 / MIME 正确 / 字节无损。
+  // ==========================================================================
+  it('㉑webm（浏览器 MediaRecorder）→ 200 + audio/webm + 内容无损', async () => {
+    const r = await get(`/uploads/t-verification/${FILE_WEBM}`, { cookie: dashCookie('t-verification') });
+    expect(r.status).toBe(200);
+    expect(r.headers.get('content-type')).toBe('audio/webm');
+    expect(r.headers.get('x-content-type-options')).toBe('nosniff');
+    expect(Buffer.from(await r.arrayBuffer()).equals(Buffer.from('fake-webm-audio'))).toBe(true);
+  });
+
+  it('㉒amr（微信 wx.uploadVoice 原始格式）→ 200 + audio/amr + 内容无损', async () => {
+    const r = await get(`/uploads/t-verification/${FILE_AMR}`, { cookie: dashCookie('t-verification') });
+    expect(r.status).toBe(200);
+    expect(r.headers.get('content-type')).toBe('audio/amr');
+    expect(Buffer.from(await r.arrayBuffer()).equals(Buffer.from('fake-amr-audio'))).toBe(true);
+  });
+
+  it('㉓webm/amr 仍走双通道鉴权：无 cookie 无 token → 401（补齐白名单没顺手开洞）', async () => {
+    for (const f of [FILE_WEBM, FILE_AMR]) {
+      const r = await get(`/uploads/t-verification/${f}`);
+      expect(r.status).toBe(401);
+      expect(((await r.json()) as any).code).toBe('UPLOAD_AUTH');
+    }
+  });
+
+  it('㉔webm/amr 仍受跨租户隔离：t-other 的令牌 → 401', async () => {
+    for (const f of [FILE_WEBM, FILE_AMR]) {
+      const r = await get(`/uploads/t-verification/${f}`, { cookie: dashCookie('t-other') });
+      expect(r.status).toBe(401);
+    }
   });
 });

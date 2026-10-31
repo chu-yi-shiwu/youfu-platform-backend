@@ -22,6 +22,13 @@ import { withTenantClient } from '../db/pool.js';
 
 const router = Router();
 
+// 缺陷修复（2026-11）：webm / amr "能存不能读"。
+//   publicReportSchema.ts:20-21 的 CTYPE_EXT 允许 audio/webm → .webm、audio/amr → .amr，
+//   POST /public/upload（publicReport.ts:237）据此落盘并 201 返回 /uploads/{tenant}/{uuid}.webm，
+//   但本文件 MIME 表与 isValidUploadFileName 正则都没有这两个扩展名 ⇒ GET 被 BAD_PATH 400 拒掉
+//   ⇒ 浏览器 MediaRecorder 录的 webm 上传成功却永远读不回来（静默数据丢失）。
+//   ⇒ 以 schema 为准补齐本文件（不反向删 schema 的项）。amr 同时是微信 wx.uploadVoice 的原始格式
+//     （publicReportCreate.ts:54 兜底扩展名即 'amr'），故 amr 尤其不能缺。
 const MIME: Record<string, string> = {
   jpg: 'image/jpeg',
   jpeg: 'image/jpeg',
@@ -33,12 +40,14 @@ const MIME: Record<string, string> = {
   mp3: 'audio/mpeg',
   wav: 'audio/wav',
   ogg: 'audio/ogg',
+  webm: 'audio/webm',
+  amr: 'audio/amr',
 };
 
 /** R19-005：文件名严格白名单——仅允许 uuid 形态（hex+连字符）+ 已知扩展名，杜绝任何路径字符。 */
 export function isValidUploadFileName(file: string): boolean {
   if (typeof file !== 'string' || file.length === 0 || file.length > 255) return false;
-  return /^[a-f0-9-]+\.(jpg|jpeg|png|gif|webp|pdf|m4a|mp3|wav|ogg)$/i.test(file);
+  return /^[a-f0-9-]+\.(jpg|jpeg|png|gif|webp|pdf|m4a|mp3|wav|ogg|webm|amr)$/i.test(file);
 }
 
 /**
