@@ -434,6 +434,48 @@ async function assertNoInflightTransitionLoss(
   }
 }
 
+/**
+ * 回滚前判定：目标历史版本的 `config.fields` 会丢掉**当前**哪些字段。
+ *
+ * 【为什么必须在回滚前判】
+ *   回滚 = 用 history 快照**整体替换** live def。若目标版本早于表单字段配置
+ *   （实测 t-verification/work_order 的 v15 就没有 config.fields），回滚后小程序建单页
+ *   从"读配置"退回"未配置"，而**双方都不报错** —— 与 X1 同一类静默失效。
+ *
+ * 【为什么只判 fields，不判 autoRoutes / doneStates / learningTriggers】
+ *   后者随回滚变化属"回到当时的业务配置"，是回滚的**本意**；而 fields 缺失会让
+ *   前端建单表单整体退化，属可感知的破坏性副作用，必须由人显式确认。
+ *
+ * 【保守口径】目标版本 fields 非数组（脏数据）时按"无字段配置"处理 ⇒ 仍报丢失。
+ *   放行的代价是可能静默抹掉表单；拦截的代价只是多一次显式确认（有逃生口）。
+ *
+ * @returns droppedFieldKeys 会丢失的字段 key（顺序同 live def）；空数组 = 无丢失
+ */
+export function detectConfigFieldLoss(
+  liveDef: unknown,
+  targetDef: unknown,
+): { droppedFieldKeys: string[] } {
+  const liveKeys = fieldKeysOf(liveDef);
+  if (liveKeys.length === 0) return { droppedFieldKeys: [] };
+  const targetKeys = new Set(fieldKeysOf(targetDef));
+  return { droppedFieldKeys: liveKeys.filter((k) => !targetKeys.has(k)) };
+}
+
+/** 取 def.config.fields 里的字段 key（非数组/脏项一律忽略，不抛）。 */
+function fieldKeysOf(def: unknown): string[] {
+  const cfg = (def as { config?: unknown } | null | undefined)?.config as
+    | { fields?: unknown }
+    | undefined;
+  const fields = cfg?.fields;
+  if (!Array.isArray(fields)) return [];
+  const out: string[] = [];
+  for (const f of fields) {
+    const k = (f as { key?: unknown } | null | undefined)?.key;
+    if (typeof k === 'string' && k.length > 0) out.push(k);
+  }
+  return out;
+}
+
 export async function saveWorkflowDef(
   client: PoolClient,
   tenantId: string,

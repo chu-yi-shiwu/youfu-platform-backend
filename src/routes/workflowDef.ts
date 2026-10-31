@@ -14,7 +14,7 @@ import pool, { withTenantClient } from '../db/pool.js';
 import { AppError } from '../middleware/error.js';
 import { requirePermission, requireAnyPermission } from '../middleware/role.js';
 import { assertWorkflowConfigEditableByTenant, readWorkflowConfigOwner } from '../middleware/workflowConfigGuard.js';
-import { getWorkflowDef, saveWorkflowDef, ensureWorkflowDef, getWorkflowDefVersion, listWorkflowDefHistory, getWorkflowDefHistoryVersion, countInflightByStates } from '../engine/workflowDef.js';
+import { getWorkflowDef, saveWorkflowDef, ensureWorkflowDef, getWorkflowDefVersion, listWorkflowDefHistory, getWorkflowDefHistoryVersion, countInflightByStates, detectConfigFieldLoss } from '../engine/workflowDef.js';
 import { recordPlatformAudit } from '../repo/platformAudit.js';
 import {
   upsertWorkflowDefDraft,
@@ -595,7 +595,14 @@ router.post('/:entityType/versions/:version/rollback', async (req, res, next) =>
     const { entityType } = req.params;
     const version = Number(req.params.version);
     if (!Number.isInteger(version) || version < 1) throw new AppError('BAD_PARAM', 'bad version', 400);
-    const b = z.object({ confirm_inflight_loss: z.literal(true).optional() }).parse(req.body ?? {});
+    const b = z
+      .object({
+        confirm_inflight_loss: z.literal(true).optional(),
+        // R1 补强：回滚会丢掉当前建单表单字段（config.fields）时的显式确认口。
+        // 与 confirm_inflight_loss 同模式——不另设开关，避免"再来一个布尔"的碎片化。
+        confirm_field_loss: z.literal(true).optional(),
+      })
+      .parse(req.body ?? {});
     const target = await withTenantClient(tenantId, (client) =>
       getWorkflowDefHistoryVersion(client, tenantId, entityType, version),
     );
@@ -607,6 +614,25 @@ router.post('/:entityType/versions/:version/rollback', async (req, res, next) =>
         throw new AppError('NO_HISTORY', `该配置无历史快照，无可回滚版本：${entityType}（历史快照在审批通过时产生）`, 404);
       }
       throw new AppError('VERSION_NOT_FOUND', `版本 ${version} 不存在于 ${entityType} 的历史中（范围见版本历史接口）`, 404);
+    }
+    // R1 补强：回滚 = 用 history 快照**整体替换** live def。若目标版本没有当前已有的
+    // 建单表单字段（config.fields），回滚后小程序建单页会静默退回"未配置"——
+    // 与 X1「两端读不同行」属同一类静默失效，必须在写之前拦下来，等人显式确认。
+    // 只判 fields：autoRoutes/doneStates 等随回滚变化属"回到当时配置"，是回滚本意。
+    if (b.confirm_field_loss !== true) {
+      const liveDef = await withTenantClient(tenantId, (client) =>
+        getWorkflowDef(client, tenantId, entityType),
+      );
+      const { droppedFieldKeys } = detectConfigFieldLoss(liveDef, target);
+      if (droppedFieldKeys.length > 0) {
+        throw new AppError(
+          'ROLLBACK_WOULD_DROP_FIELDS',
+          `回滚到版本 ${version} 会丢掉当前 ${droppedFieldKeys.length} 个建单表单字段` +
+            `（${droppedFieldKeys.join(',')}），回滚后小程序建单页将退回"未配置"；` +
+            '确认无误请传 confirm_field_loss: true',
+          409,
+        );
+      }
     }
     await withTenantClient(tenantId, async (client) => {
       await assertWorkflowConfigEditableByTenant(client); // 097 归属闸门：platform 时租户侧（含 admin）一律 403
