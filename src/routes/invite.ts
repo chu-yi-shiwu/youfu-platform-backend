@@ -23,6 +23,7 @@ import {
   type AccountRole,
 } from '../account.js';
 import { AppError } from '../middleware/error.js';
+import { code2Session } from '../services/wechatMp.js';
 
 const router = Router();
 
@@ -231,10 +232,21 @@ router.delete('/invites/:id', async (req, res, next) => {
   }
 });
 
-const redeemSchema = z.object({
-  code: z.string().min(4).max(64),
-  password: z.string().min(6, '密码至少 6 位').max(200),
-});
+const redeemSchema = z
+  .object({
+    code: z.string().min(4).max(64),
+    // 微信身份路径（零输入）：员工扫管理员码，凭 wx.login 的 code 直接建号并绑定 openid，
+    // 全程不设密码、不填机构/账号。password 因此改为可选——但两者必须至少给一个，
+    // 否则既是"无凭证激活"又是"无密码账号"，属安全漏洞，由下方 refine 挡住。
+    password: z.string().min(6, '密码至少 6 位').max(200).optional(),
+    wx_code: z.string().min(1).max(200).optional(),
+  })
+  .refine((v) => !!v.password || !!v.wx_code, { message: '请提供 password 或 wx_code' });
+
+/** 微信路径下的占位密码：用户永不知道、永不使用，只为满足 account_user.password_hash 非空约束。 */
+function placeholderPassword(): string {
+  return crypto.randomBytes(24).toString('base64url');
+}
 
 // ---- POST /api/v1/invites/redeem —— 公开激活：凭码 + 设密码 → 建号 + 签发 JWT ----
 // 防枚举：码不存在/已过期/已使用/已作废 → 一律 400 INVITE_INVALID + 统一文案；
@@ -261,6 +273,14 @@ router.post('/invites/redeem', loginRateLimit(10), async (req, res, next) => {
       throw new AppError('INVITE_INVALID', INVITE_INVALID_MESSAGE, 400);
     }
     const tenantId = invite.tenant_id;
+    // 微信身份：先换 openid。失败即明确拒绝，绝不静默降级到密码路径——
+    // 静默降级的后果是建出一个"没密码、也登不进去"的账号，比报错更糟。
+    let openid: string | null = null;
+    if (b.wx_code) {
+      const sess = await code2Session(b.wx_code);
+      if (!sess?.openid) throw new AppError('WX_002', '微信身份校验失败，请重试一次', 502);
+      openid = sess.openid;
+    }
     const result = await withTenantClient(tenantId, async (client) => {
       // 🔴 P2 修复（R4 深测实锤）：租户 status 守卫——suspended/pending 租户的在途邀请码
       //    不得激活建号+发 JWT（与 /auth/login 的 TENANT_SUSPENDED/TENANT_PENDING 门同口径）。
@@ -276,6 +296,16 @@ router.post('/invites/redeem', loginRateLimit(10), async (req, res, next) => {
       if (regStatus === 'pending') {
         throw new AppError('TENANT_PENDING', '租户待激活，请联系平台管理员', 403);
       }
+      // 一微信一账号（与 /auth/wx-bind 同口径）。放在建号之前拦，避免白建一个号再回滚。
+      if (openid) {
+        const dup = await client.query(
+          `SELECT id FROM account_user WHERE wx_openid = $1 LIMIT 1`,
+          [openid],
+        );
+        if ((dup.rowCount ?? 0) > 0) {
+          throw new AppError('WX_ALREADY_BOUND', '该微信已绑定其他账号，请联系管理员处理', 409);
+        }
+      }
       // 账号名冲突（生成后又被手工建号）：语义化 409，与 POST /auth/users 同口径
       const existing = await findUserByUsername(client, tenantId, invite.username);
       if (existing) throw new AppError('USER_EXISTS', '该用户名在本机构已存在', 409);
@@ -288,7 +318,7 @@ router.post('/invites/redeem', loginRateLimit(10), async (req, res, next) => {
       if ((claim.rowCount ?? 0) === 0) throw new AppError('INVITE_INVALID', INVITE_INVALID_MESSAGE, 400);
       const user = await createUser(client, tenantId, {
         username: invite.username,
-        password: b.password,
+        password: b.password ?? placeholderPassword(),
         display_name: invite.display_name,
         // 地基第二步：内置角色照用；自定义岗位须仍在 role_def 中启用，否则兜底 operator
         // （不得静默降级为 operator 后放行——原逻辑对自定义角色一律降级，等于自建岗失效）。
@@ -296,6 +326,14 @@ router.post('/invites/redeem', loginRateLimit(10), async (req, res, next) => {
           ? (invite.role as AccountRole)
           : 'operator',
       });
+      // 微信身份落到账号上：此后 /auth/wx-login 可直接凭 openid 换 token，
+      // 也就是"第一次扫码，之后永久打开即进"，不再出现机构/账号/密码三个框。
+      if (openid) {
+        await client.query(
+          `UPDATE account_user SET wx_openid = $1, updated_at = now() WHERE id = $2 AND tenant_id = $3`,
+          [openid, user.id, tenantId],
+        );
+      }
       const permissions = await listPerms(
         { tenantId, requestId: '', role: user.role, authMode: 'prod' },
         client,

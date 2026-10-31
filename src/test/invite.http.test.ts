@@ -54,6 +54,12 @@ vi.mock('../db/pool.js', () => {
   };
 });
 
+// 微信身份：只认 'goodcode'（模拟有效 code），其余一律 null（模拟 code 失效/被复用）
+vi.mock('../services/wechatMp.js', () => ({
+  code2Session: async (c: string) =>
+    c === 'goodcode' ? { openid: 'openid-abc', sessionKey: 'sk-abc' } : null,
+}));
+
 import inviteRouter, { hmacInviteCode } from '../routes/invite.js';
 
 const T = 't-invite-test';
@@ -428,5 +434,101 @@ describe('T8 第十六批 · 邀请端点权限可配置（B 组：改前必红�
         });
       });
     });
+  });
+});
+
+// 零输入激活：员工扫管理员码 → 微信身份直接建号，全程不设密码、不输机构账号密码。
+// 密码位用随机串填（scrypt 哈希，用户永不知道也永不使用），登录只认 wx_openid。
+describe('redeem 微信身份激活（零输入路径）', () => {
+  const CODE = 'YF-WXYZ-2345-ABCD';
+
+  function scriptInvite(overrides: Record<string, any> = {}) {
+    h.reset();
+    h.script(/FROM invite_codes WHERE code_hash/, [{
+      id: 'inv-wx',
+      tenant_id: 't-wx',
+      username: 'wxuser',
+      display_name: '微信新人',
+      role: 'worker',
+      expires_at: new Date(Date.now() + 3600e3).toISOString(),
+      used_at: null,
+      revoked_at: null,
+      ...overrides,
+    }]);
+  }
+
+  function scriptCreate() {
+    h.script(/FROM account_user WHERE wx_openid/, []); // openid 未被占用
+    h.script(/FROM account_user/, []); // 用户名不重名
+    h.script(/UPDATE invite_codes SET used_at/, [{ id: 'inv-wx' }]);
+    h.script(/INSERT INTO account_user/, [{
+      id: 'u-wx', tenant_id: 't-wx', username: 'wxuser', display_name: '微信新人', role: 'worker', active: true,
+    }]);
+    h.script(/UPDATE account_user SET wx_openid/, [{ id: 'u-wx' }]);
+    h.script(/role_permission/, []);
+  }
+
+  it('⑰ 只给 wx_code、不给 password → 201 免密建号，openid 落库', async () => {
+    scriptInvite();
+    scriptCreate();
+    const r = await fetch(`${base}/api/v1/invites/redeem`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ code: CODE, wx_code: 'goodcode' }),
+    });
+    expect(r.status).toBe(201);
+    const j = (await r.json()) as any;
+    expect(j.ok).toBe(true);
+    expect(j.token.split('.').length).toBe(3);
+
+    // 密码位必须是随机串的 scrypt 哈希（不是空、不是明文）
+    const ins = h.calls.find((c) => /INSERT INTO account_user/.test(c.sql))!;
+    expect(String(ins.params[2])).toMatch(/^scrypt\$/);
+
+    // openid 必须写到这个新账号上
+    const upd = h.calls.find((c) => /UPDATE account_user SET wx_openid/.test(c.sql))!;
+    expect(upd.params[0]).toBe('openid-abc');
+    expect(upd.params[1]).toBe('u-wx');
+
+    // 邀请码照旧一次性消耗
+    const claim = h.calls.find((c) => /UPDATE invite_codes SET used_at/.test(c.sql))!;
+    expect(claim.params[0]).toBe('inv-wx');
+
+    expect(j.user.password_hash).toBeUndefined();
+  });
+
+  it('⑱ 既无 wx_code 也无 password → 422（老密码路径不静默放宽）', async () => {
+    scriptInvite();
+    const r = await fetch(`${base}/api/v1/invites/redeem`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ code: CODE }),
+    });
+    expect(r.status).toBe(422);
+    expect(h.calls.some((c) => /UPDATE invite_codes SET used_at/.test(c.sql))).toBe(false);
+  });
+
+  it('⑲ 该微信已绑其他账号 → 409，且不建号', async () => {
+    scriptInvite();
+    h.script(/FROM account_user WHERE wx_openid/, [{ id: 'u-other' }]);
+    const r = await fetch(`${base}/api/v1/invites/redeem`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ code: CODE, wx_code: 'goodcode' }),
+    });
+    expect(r.status).toBe(409);
+    expect(h.calls.some((c) => /INSERT INTO account_user/.test(c.sql))).toBe(false);
+  });
+
+  it('⑳ wx_code 无效 → 502，且不消耗邀请码、不建号', async () => {
+    scriptInvite();
+    const r = await fetch(`${base}/api/v1/invites/redeem`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ code: CODE, wx_code: 'badcode' }),
+    });
+    expect(r.status).toBe(502);
+    expect(h.calls.some((c) => /UPDATE invite_codes SET used_at/.test(c.sql))).toBe(false);
+    expect(h.calls.some((c) => /INSERT INTO account_user/.test(c.sql))).toBe(false);
   });
 });
