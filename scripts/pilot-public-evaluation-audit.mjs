@@ -4,6 +4,7 @@ import { readFileSync, existsSync, rmSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import http from 'node:http';
 import pg from 'pg';
+import { RICH_WORK_ORDER_DEF } from '../dist/engine/stateMachine.js';
 
 const { Client } = pg;
 const BASE = (process.env.PILOT_API_BASE || 'http://127.0.0.1:4101/api/v1').replace(/\/+$/, '');
@@ -78,6 +79,12 @@ async function main() {
   await db.query(`SELECT set_config('app.tenant_id',$1,true), set_config('app.scope','system',true)`, [TENANT]);
   await db.query(`INSERT INTO tenant_registry (tenant_id,name,status,category) VALUES ($1,'公共评价验收租户','active','other')`, [TENANT]);
   await db.query(`INSERT INTO dept (tenant_id,name,code,is_default,enabled) VALUES ($1,'评价验收科','EVAL',true,true)`, [TENANT]);
+  // 隔离租户需要与生产一致的工作流定义（closed -> evaluated satisfy）。
+  await db.query(
+    `INSERT INTO workflow_def (tenant_id,entity_type,def,version,updated_by)
+     VALUES ($1,'work_order',$2::jsonb,1,'eval-audit')`,
+    [TENANT, JSON.stringify(RICH_WORK_ORDER_DEF)],
+  );
   await db.query('COMMIT');
 
   const created = await request('POST', '/public/repair-report', {
