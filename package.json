@@ -37,7 +37,8 @@
     "preflight:asset-workflow": "node scripts/asset-workflow-preflight.mjs",
     "manifest": "node scripts/release-manifest.mjs",
     "baseline": "node scripts/release-baseline.mjs",
-    "diag:wechat": "node scripts/wechat-notify-diagnose.mjs"
+    "diag:wechat": "node scripts/wechat-notify-diagnose.mjs",
+    "diag:wechat-template": "node scripts/wechat-template-verify.mjs"
   },
   "dependencies": {
     "dotenv": "^16.4.5",
