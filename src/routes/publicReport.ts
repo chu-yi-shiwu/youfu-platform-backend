@@ -18,8 +18,10 @@ import { getLlmEnabled } from '../repo/tenantSettings.js';
 import { mpConfigured, decryptPhoneCode, genMpCode } from '../services/wechatMp.js';
 import { reportSchema, CTYPE_EXT, isAudioCType } from './publicReportSchema.js';
 import { createPublicRepairReport } from '../services/publicReportCreate.js';
-import { getDefsAcrossAllVersions, unionStates } from '../engine/workflowDef.js';
-import { DEFAULT_WORK_ORDER_DEF, doneStates } from '../engine/stateMachine.js';
+import { getDefsAcrossAllVersions, getWorkflowDefAtVersion, unionStates } from '../engine/workflowDef.js';
+import { DEFAULT_WORK_ORDER_DEF, doneStates, type WorkOrderStatus } from '../engine/stateMachine.js';
+import { transition } from '../repo/ticket.js';
+import { finalizeTransitionSideEffects } from './workOrder.js';
 import { emitDomainEvent } from '../db/eventBus.js';
 import { decodeBase64Strict } from '../util/base64.js';
 
@@ -415,7 +417,7 @@ router.get('/public/my-reports', loginRateLimit(30), async (req, res, next) => {
     let sql: string;
     let params: unknown[];
     if (tokens.length > 0) {
-      sql = `SELECT order_no, status, title, description, location, created_at, ext
+      sql = `SELECT order_no, status, title, description, location, created_at, satisfaction_score, ext
              FROM work_orders
              WHERE tenant_id = $1
                AND ext->>'public_view_token' = ANY($2::text[])
@@ -431,7 +433,7 @@ router.get('/public/my-reports', loginRateLimit(30), async (req, res, next) => {
         ),
       );
       if (proof.rowCount === 0) return res.json({ ok: true, code: 0, items: [] });
-      sql = `SELECT order_no, status, title, description, location, created_at, ext
+      sql = `SELECT order_no, status, title, description, location, created_at, satisfaction_score, ext
              FROM work_orders WHERE tenant_id = $1 AND (ext->>'reporter_phone' = $2 OR contact = $2)
              ORDER BY created_at DESC LIMIT 200`;
       params = [org, phone];
@@ -454,6 +456,7 @@ router.get('/public/my-reports', loginRateLimit(30), async (req, res, next) => {
         description: row.description || '',
         location: row.location,
         created_at: row.created_at,
+        satisfaction_score: row.satisfaction_score ?? null,
         view_token: ext.public_view_token || '',
         reporter_phone: isTokenPath ? undefined : reporterPhone, // R29-F3：token 路径（可分享）不返明文；phone 路径（本人找回）保留——前端 maskPhone(undefined)→'—' 已兼容
         filled: {
@@ -473,6 +476,78 @@ router.get('/public/my-reports', loginRateLimit(30), async (req, res, next) => {
 
 // ④ 回收闭环：PATCH /api/v1/public/report-correct —— 用户纠偏 AI 自动补全（分类/优先级/资产）+ 反馈入 ext.corrections（共振飞轮）
 // 安全：必须持有效 view_token；更新 filled 为「人工校正后真值」，并追加 corrections 记录（不删历史）
+// 公共报修本人评价：凭证 = 建单时下发的一次性 view_token（复用查看凭证，不新增表）。
+// 只允许公共报修单；必须存在当前状态 -> satisfy 的合法边；评价后自动学习/结算/资产回写。
+const evaluateSchema = z.object({
+  org: z.string().min(2).max(40),
+  token: z.string().min(8).max(120),
+  score: z.number().int().min(1).max(5),
+  comment: z.string().max(300).optional(),
+});
+
+router.post('/public/evaluate-report', loginRateLimit(20), async (req, res, next) => {
+  try {
+    const b = evaluateSchema.parse(req.body);
+    const tr = await pool.query(`SELECT 1 FROM tenant_registry WHERE tenant_id = $1 AND status = 'active'`, [b.org]);
+    if (tr.rowCount === 0) return res.status(404).json({ ok: false, code: 'ORG_404', message: '机构不存在或未开通' });
+
+    const result = await withPublicTenantClient(b.org, async (client) => {
+      const cur = await client.query(
+        `SELECT id, order_no, status, source, ext, def_version
+           FROM work_orders
+          WHERE tenant_id = $1 AND ext->>'public_view_token' = $2
+          LIMIT 1 FOR UPDATE`,
+        [b.org, b.token],
+      );
+      if (cur.rowCount === 0) return { error: 'REPORT_NOT_FOUND' as const };
+      const row = cur.rows[0] as {
+        id: string; order_no: string; status: string; source: string | null;
+        ext: Record<string, unknown> | null; def_version: number | null;
+      };
+      const ext = row.ext ?? {};
+      if (row.source !== 'public_report' && ext.source_channel !== 'public_report') {
+        return { error: 'REPORT_NOT_FOUND' as const };
+      }
+
+      const def = await getWorkflowDefAtVersion(
+        client, b.org, 'work_order', Number(row.def_version) || 0, DEFAULT_WORK_ORDER_DEF, true,
+      );
+      const edge = (def.transitions ?? []).find((t) => t.from === row.status && t.event === 'satisfy');
+      if (!edge) {
+        return { error: 'NOT_EVALUABLE' as const, message: `当前状态不可评价（${row.status}）` };
+      }
+
+      const r = await transition(client, b.org, row.id, edge.to as WorkOrderStatus, {
+        actor: 'public:reporter',
+        role: 'admin',
+        eventOverride: 'satisfy',
+        fields: { satisfaction_score: b.score },
+      });
+      await finalizeTransitionSideEffects(client, b.org, row.id, edge.to, r.from);
+
+      if (b.comment) {
+        await client.query(
+          `UPDATE work_orders
+              SET ext = COALESCE(ext, '{}'::jsonb) || jsonb_build_object('satisfaction_comment', $2::text)
+            WHERE tenant_id = $1 AND id = $3`,
+          [b.org, b.comment, row.id],
+        );
+      }
+      return { order_no: row.order_no, status: r.row.status };
+    });
+
+    if ('error' in result) {
+      if (result.error === 'NOT_EVALUABLE') {
+        return res.status(422).json({ ok: false, code: result.error, message: result.message });
+      }
+      return res.status(404).json({ ok: false, code: result.error, message: '报修凭证无效或工单不存在' });
+    }
+    return res.json({ ok: true, code: 0, order_no: result.order_no, status: result.status });
+  } catch (e) {
+    next(e);
+  }
+});
+
 const correctSchema = z.object({
   org: z.string().min(2).max(40),
   token: z.string().min(8).max(120),

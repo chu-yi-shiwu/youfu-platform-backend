@@ -17,9 +17,21 @@ const DEF_LIVE = { initial: 'draft', states: ['draft', 'done'], transitions: [],
 const versionProbeState = { enabled: false };
 // P0-7：公开报修日配额计数（走 withTenantClient 的 fakeClient，不再走裸 pool）。
 const quotaState = { publicReportCount: 0 };
+const evalState: {
+  row: Record<string, unknown> | null;
+  def: { transitions: Array<{ from: string; to: string; event: string }> };
+} = {
+  row: null,
+  def: { transitions: [{ from: 'closed', to: 'evaluated', event: 'satisfy' }] },
+};
 const fakeClient = {
   query: vi.fn(async (text: unknown) => {
     const sql = String(text);
+    if (sql.includes("ext->>'public_view_token'") && sql.includes('FOR UPDATE')) {
+      return evalState.row
+        ? { rows: [evalState.row], rowCount: 1 }
+        : { rows: [], rowCount: 0 };
+    }
     if (sql.includes('fault_category') && sql.includes('enabled = true')) {
       return { rows: [{ id: 'cat-1', name: '空调' }, { id: 'cat-2', name: '水电' }], rowCount: 2 };
     }
@@ -58,10 +70,23 @@ vi.mock('../db/pool.js', () => ({
 }));
 vi.mock('../repo/ticket.js', () => ({
   createWithIdem: vi.fn(),
+  transition: vi.fn(async () => ({
+    from: 'closed',
+    row: { status: 'evaluated', order_no: 'WO-EVAL' },
+    transition: { event: 'satisfy' },
+  })),
 }));
 vi.mock('../routes/workOrder.js', () => ({
   autoDispatchAfterCreate: vi.fn(async () => null),
+  finalizeTransitionSideEffects: vi.fn(async () => ({ learnError: null, settleError: null })),
 }));
+vi.mock('../engine/workflowDef.js', async (importOriginal) => {
+  const actual = (await importOriginal()) as Record<string, unknown>;
+  return {
+    ...actual,
+    getWorkflowDefAtVersion: vi.fn(async () => evalState.def),
+  };
+});
 vi.mock('../services/llm.js', () => ({
   llmInferCategory: vi.fn(async () => null),
 }));
@@ -81,7 +106,8 @@ vi.mock('../services/wechatMp.js', () => ({
 }));
 
 import publicReportRouter from '../routes/publicReport.js';
-import { createWithIdem } from '../repo/ticket.js';
+import { createWithIdem, transition } from '../repo/ticket.js';
+import { finalizeTransitionSideEffects } from '../routes/workOrder.js';
 import { doneStates } from '../engine/stateMachine.js';
 import { errorMiddleware } from '../middleware/error.js';
 import { mpConfigured, genMpCode } from '../services/wechatMp.js';
@@ -337,5 +363,56 @@ describe('GET /public/service-status（今日完成数 · 多版本完成态并�
     } finally {
       versionProbeState.enabled = false;
     }
+  });
+});
+
+describe('POST /public/evaluate-report 公共报修本人评价', () => {
+  it('有效 view_token：200，走 satisfy 流转并执行共享副作用', async () => {
+    evalState.row = {
+      id: 'wo-eval-1', order_no: 'WO-EVAL-1', status: 'closed', source: 'public_report',
+      ext: { public_view_token: 'tok_eval_12345678' }, def_version: 0,
+    };
+    evalState.def = { transitions: [{ from: 'closed', to: 'evaluated', event: 'satisfy' }] };
+    vi.mocked(transition).mockClear();
+    vi.mocked(finalizeTransitionSideEffects).mockClear();
+    const r = await post('/public/evaluate-report', {
+      org: 't-demo', token: 'tok_eval_12345678', score: 5, comment: '很好',
+    });
+    expect(r.status).toBe(200);
+    const j = (await r.json()) as any;
+    expect(j.ok).toBe(true);
+    expect(j.order_no).toBe('WO-EVAL-1');
+    expect(vi.mocked(transition)).toHaveBeenCalledWith(
+      expect.anything(), 't-demo', 'wo-eval-1', 'evaluated',
+      expect.objectContaining({ eventOverride: 'satisfy', fields: { satisfaction_score: 5 } }),
+    );
+    expect(vi.mocked(finalizeTransitionSideEffects)).toHaveBeenCalled();
+  });
+
+  it('无效 view_token → 404 REPORT_NOT_FOUND', async () => {
+    evalState.row = null;
+    const r = await post('/public/evaluate-report', { org: 't-demo', token: 'tok_missing_12345678', score: 5 });
+    expect(r.status).toBe(404);
+    expect(((await r.json()) as any).code).toBe('REPORT_NOT_FOUND');
+  });
+
+  it('非公共报修单 → 404，不能凭查看 token 评价内部工单', async () => {
+    evalState.row = {
+      id: 'wo-internal', order_no: 'WO-INTERNAL', status: 'closed', source: 'backend',
+      ext: { public_view_token: 'tok_internal_12345678' }, def_version: 0,
+    };
+    const r = await post('/public/evaluate-report', { org: 't-demo', token: 'tok_internal_12345678', score: 5 });
+    expect(r.status).toBe(404);
+  });
+
+  it('当前状态没有 satisfy 边 → 422 NOT_EVALUABLE', async () => {
+    evalState.row = {
+      id: 'wo-eval-2', order_no: 'WO-EVAL-2', status: 'processing', source: 'public_report',
+      ext: { public_view_token: 'tok_processing_12345678' }, def_version: 0,
+    };
+    evalState.def = { transitions: [] };
+    const r = await post('/public/evaluate-report', { org: 't-demo', token: 'tok_processing_12345678', score: 4 });
+    expect(r.status).toBe(422);
+    expect(((await r.json()) as any).code).toBe('NOT_EVALUABLE');
   });
 });

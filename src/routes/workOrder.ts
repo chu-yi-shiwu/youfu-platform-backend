@@ -376,6 +376,55 @@ const transitionSchema = z.object({
 // F10：删掉从未被使用的 _landedStatus 形参——它的默认值 assigned 是个隐患：
 //   默认值暗示派单目标可以兜底成 assigned，与 F4「严禁硬编码回退」的决议正面冲突，
 //   而返回体根本不含这个字段，纯粹是误导。
+/**
+ * 工单流转后的共享副作用：增量学习、评价自动结算、资产维修状态回写。
+ * 通用 /open/work_order/:id/transition 与公共报修 token 评价共用，避免两套口径漂移。
+ */
+export async function finalizeTransitionSideEffects(
+  client: PoolClient,
+  tenantId: string,
+  workOrderId: string,
+  to: string,
+  from: string,
+): Promise<{ learnError: string | null; settleError: string | null }> {
+  const woDefs = await getDefsAcrossAllVersions(client, tenantId, 'work_order', 'work_orders', DEFAULT_WORK_ORDER_DEF);
+  const learnStep = await runIncrementalLearnStep(client, tenantId, workOrderId, to, from, woDefs);
+  const evaluatedSet = unionStates(woDefs.map(evaluatedStates));
+  let settleError: string | null = null;
+  if (evaluatedSet.includes(to)) {
+    const settleStep = await runAutoSettleStep(client, tenantId, workOrderId);
+    settleError = settleStep.settleError;
+  }
+  const woDoneSet = unionStates(woDefs.map(doneStates));
+  const isDone = woDoneSet.includes(to);
+  const isTerminal = isDone || to === 'cancelled' || to === 'closed';
+  if (isTerminal) {
+    const woActiveSet = unionStates(woDefs.map(activeStates));
+    const restored = await client.query(
+      `UPDATE asset SET status='in_use', updated_at=now()
+        WHERE tenant_id=$1 AND status='repairing' AND $2::uuid = ANY(linked_order_ids)
+          AND NOT EXISTS (
+            SELECT 1 FROM work_orders w
+             WHERE w.tenant_id=$1 AND w.id = ANY(linked_order_ids::text[])
+               AND w.id <> $2::text AND w.status = ANY($3::text[])
+          )
+        RETURNING id`,
+      [tenantId, workOrderId, woActiveSet],
+    );
+    for (const a of restored.rows as Array<{ id: string }>) {
+      await emitDomainEvent(client, {
+        tenantId,
+        entityType: 'asset',
+        entityId: a.id,
+        type: isDone ? 'asset_repair_done' : 'asset_repair_cancelled',
+        actor: 'system',
+        payload: { work_order_id: workOrderId, to_status: to },
+      });
+    }
+  }
+  return { learnError: learnStep.learnError, settleError };
+}
+
 export function toCreateRes(row: any, autoFlow: boolean, assignee: string | null, reason: string) {
   return {
     ok: true, code: 0, id: row.id, order_no: row.order_no, status: row.status, auto_flow: autoFlow, assignee, reason,
@@ -556,53 +605,9 @@ router.post('/open/work_order/:id/transition', async (req, res, next) => {
       // 批 8：学习段与评价段**共用同一份 defs** —— 各取一次会让一次流转跑两条
       //   `SELECT DISTINCT def_version FROM work_orders`（全租户扫描，且发生在 FOR UPDATE 持锁期间）。
       //   由 evaluatedStatesHttp.test.ts「一次流转只扫一次 def_version」守卫。
-      const woDefs = await getDefsAcrossAllVersions(client, tenantId, 'work_order', 'work_orders', DEFAULT_WORK_ORDER_DEF);
-      const learnStep = await runIncrementalLearnStep(client, tenantId, req.params.id, to, r.from, woDefs);
-      learnError = learnStep.learnError;
-      // F10：评价完成态由 def 派生（存在 satisfy 入边的目标态），不再写死 evaluated 这个名
-      // T1-B 多版本并存兜底：`evaluatedSet.includes(to)` 是「包含」判定 ⇒ 取各版本**并集**。
-      //   老单按旧流程走到"已评价"，若新流程里该态不再算评价完成 ⇒ **满意度评分不回写**。
-      const evaluatedSet = unionStates(woDefs.map(evaluatedStates));
-      // 评价完成回写满意度评分（UOne 满意度颗粒度）
-      // 🔴 113 起评分已在 transition() 的同一条 UPDATE 内落库（满足 evaluated 分数约束），
-      //    此处不再二次 UPDATE；保留 evaluatedSet 仅供结算/学习判定。
-      // E-9 BUG-004：评价流转自动生成结算草稿（draft，待 admin 确认）。
-      // SAVEPOINT 隔离——结算故障不拖垮评价流转；幂等（已有明细则跳过）；失败经 settle_error 透出。
-      if (evaluatedSet.includes(to)) {
-        // created_by 固定留痕 'auto:evaluated'（与人工 POST /settlements 的 username 留痕相区分，FE 据此打「自动生成」标记）
-        const settleStep = await runAutoSettleStep(client, tenantId, req.params.id);
-        settleError = settleStep.settleError;
-      }
-      // 资产维修状态回写（2026-11-14；2026-11-17 扩展取消/关闭）：
-      // 完成 ⇒ 恢复 in_use；取消/关闭 ⇒ 若没有其它活跃关联工单，也恢复 in_use。
-      // 口径：仅 linked_order_ids 命中本单且资产仍为 repairing 的才动；并用活跃工单集合防并行维修误恢复。
-      const woDoneSet = unionStates(woDefs.map(doneStates));
-      const isDone = woDoneSet.includes(to);
-      const isTerminal = isDone || to === 'cancelled' || to === 'closed';
-      if (isTerminal) {
-        const woActiveSet = unionStates(woDefs.map(activeStates));
-        const restored = await client.query(
-          `UPDATE asset SET status='in_use', updated_at=now()
-            WHERE tenant_id=$1 AND status='repairing' AND $2::uuid = ANY(linked_order_ids)
-              AND NOT EXISTS (
-                SELECT 1 FROM work_orders w
-                 WHERE w.tenant_id=$1 AND w.id = ANY(linked_order_ids::text[])
-                   AND w.id <> $2::text AND w.status = ANY($3::text[])
-              )
-            RETURNING id`,
-          [tenantId, req.params.id, woActiveSet],
-        );
-        for (const a of restored.rows as Array<{ id: string }>) {
-          await emitDomainEvent(client, {
-            tenantId,
-            entityType: 'asset',
-            entityId: a.id,
-            type: isDone ? 'asset_repair_done' : 'asset_repair_cancelled',
-            actor: 'system',
-            payload: { work_order_id: req.params.id, to_status: to },
-          });
-        }
-      }
+      const side = await finalizeTransitionSideEffects(client, tenantId, req.params.id, to, r.from);
+      learnError = side.learnError;
+      settleError = side.settleError;
       return r;
     });
     void dispatchEvent(tenantId, { type: 'transition', workOrderId: req.params.id, fromStatus: row.from ?? null, toStatus: to, actor: 'system' }).catch(() => {});
