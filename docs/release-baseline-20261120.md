@@ -93,7 +93,24 @@ $env:GIT_BIN = "C:\Users\Administrator\AppData\Local\Programs\WorkBuddyAI\resour
 node scripts/release-baseline.mjs --frontend ..\youfu_frontend_dev
 ```
 
-## 6. 约束
+## 6. r2 补强：设置中心写门禁
+
+在 r1 基础上增加 `configuration` / `foundation` / `system` / `feedback` 写端点模块门禁，并修复 guard 路径越界。
+
+| 项 | 值 |
+| --- | --- |
+| 后端 r2 commit | `a53138911f96cbea03acb35c0298802b754497c0` |
+| 后端 r2 tag | `release-20261120-module-auth-r2` |
+| CI run | `44760794418`，success |
+| artifact | `youfu-release-a53138911f96cbea03acb35c0298802b754497c0`，635,510 bytes |
+| release ID | `20261120T151744-a53138911f96` |
+| 服务器 current | `/opt/youfu/releases/20261120T151744-a53138911f96` |
+| live 模块审计 | 17 / 17 PASS |
+| 主站/pilot 资产审计 | 38 / 38 PASS |
+
+r2 额外修复：`router.use(guard)` 未限定路径会把后续所有请求一起拦截（例如关闭 configuration 误伤 `/departments`、`/inventory/consume`）。现所有 guard 已限定到自身 router 前缀，并有跨 router 回归测试。
+
+## 7. 约束
 
 - `release-manifest.json` / `release-baseline.json` 是可复现发布 artifact，不进入源码库；
 - `release-baseline.mjs` 默认 fail-closed：commit 缺失或工作树不干净直接退出 1；
