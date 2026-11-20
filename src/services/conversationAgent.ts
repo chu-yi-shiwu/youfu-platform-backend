@@ -20,6 +20,11 @@ import { autoDispatchAfterCreate } from '../routes/workOrder.js';
 import { appendTurn, listTurns, type TurnRow } from '../repo/aiConversation.js';
 import crypto from 'node:crypto';
 
+// AI 对话是系统动作：无 JWT 场景也必须能建单/查单，显式 system scope。
+function withSystemTenantClient<T>(tenantId: string, fn: (client: PoolClient) => Promise<T>): Promise<T> {
+  return withTenantClient(tenantId, fn, { system: true });
+}
+
 export const MAX_TOOL_ROUNDS = 4;
 export const TOOL_NAMES = ['search_history', 'create_ticket', 'check_status'] as const;
 export type ToolName = (typeof TOOL_NAMES)[number];
@@ -72,7 +77,7 @@ export async function toolSearchHistory(tenantId: string, description: string): 
   if (!embeddingConfigured()) return { ok: false, summary: '语义检索未启用，请直接描述问题或报修' };
   const qvec = await embedText(desc, tenantId);
   if (!qvec) return { ok: false, summary: '语义检索暂不可用，请稍后再试' };
-  const rows = await withTenantClient(tenantId, (client) =>
+  const rows = await withSystemTenantClient(tenantId, (client) =>
     client.query(
       `SELECT ref_id, ref_type, category, priority, source_text, embedding
        FROM ai_case_embeddings WHERE tenant_id = $1
@@ -94,7 +99,7 @@ export async function toolSearchHistory(tenantId: string, description: string): 
   const ids = items.map((x) => x.ref_id);
   const orderMap: Record<string, string> = {};
   if (ids.length) {
-    const or = await withTenantClient(tenantId, (client) =>
+    const or = await withSystemTenantClient(tenantId, (client) =>
       client.query(`SELECT id, order_no FROM work_orders WHERE tenant_id = $1 AND id = ANY($2)`, [tenantId, ids]),
     );
     or.rows.forEach((r: any) => { orderMap[r.id] = r.order_no; });
@@ -115,7 +120,7 @@ export async function toolCheckStatus(tenantId: string, orderNo: string, phoneLa
     params.push(String(phoneLast4));
     conds.push(`right(contact, 4) = $${params.length}`);
   }
-  const r = await withTenantClient(tenantId, (client) =>
+  const r = await withSystemTenantClient(tenantId, (client) =>
     client.query(
       `SELECT order_no, status, title, location, created_at, updated_at
        FROM work_orders WHERE ${conds.join(' AND ')} LIMIT 1`,
@@ -146,7 +151,7 @@ export async function toolCreateTicket(
   let catalogId: string | undefined;
   let catalogName: string | undefined;
   if (catName) {
-    const m = await withTenantClient(tenantId, (client) =>
+    const m = await withSystemTenantClient(tenantId, (client) =>
       client.query(
         `SELECT id, name FROM fault_category WHERE tenant_id = $1 AND enabled = true AND name = $2 LIMIT 1`,
         [tenantId, catName],
@@ -158,7 +163,7 @@ export async function toolCreateTicket(
   const priority = llm?.priority || inferPriority(desc, catalogName);
   const title = generateTitle({ description: desc, categoryName: catalogName });
   const viewToken = crypto.randomBytes(24).toString('hex');
-  const { row } = await withTenantClient(tenantId, async (client) => {
+  const { row } = await withSystemTenantClient(tenantId, async (client) => {
     const created = await createWithIdem(client, {
       id: crypto.randomUUID(),
       tenantId,
@@ -215,7 +220,7 @@ export async function runAgentTurn(opts: RunTurnOpts): Promise<RunTurnResult> {
   //   最多 5 轮 LLM 调用（每轮可达数秒）会把池连接（max=10）占满，并发时饿死其他端点。
   //   改为每个 DB 操作独立短事务（话轮插入相互独立，无需跨调用原子性）；
   //   LLM 网络调用期间不占用任何池连接。
-  const db = <T>(fn: (client: PoolClient) => Promise<T>) => withTenantClient(tenantId, fn);
+  const db = <T>(fn: (client: PoolClient) => Promise<T>) => withSystemTenantClient(tenantId, fn);
 
   // 1) 用户话轮落库
   await db((client) => appendTurn(client, tenantId, conversationId, { role: 'user', content: userText.slice(0, 1000) }));

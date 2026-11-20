@@ -1,0 +1,33 @@
+# /etc/systemd/system/youfu-backend.service
+# 适用于现有阿里云 ECS：CentOS 7 / glibc 2.17 / Node 16.20.2（/opt/node16）。
+#
+# 为什么单独一份：
+#   - 本仓 deploy/youfu-backend.service 面向 Node 22（新 OS 环境，/opt/node22）。
+#   - 现有 ECS 无法运行 Node 22 官方二进制（要求 glibc >= 2.28），只能先用 Node16。
+#   - Node16 已 EOL，本文件仅用于试点期过渡；正式上线前应迁移到新 OS + Node22。
+#
+# 部署前确认：
+#   1) /opt/youfu/backend/dist/server.js 已用当前代码重建；
+#   2) /opt/youfu/backend/.env 已配置 AUTH_MODE=prod、JWT_SECRET、
+#      INVITE_SALT、APP_SECRET_SALT、PG*；
+#   3) 迁移已以 postgres 身份执行并核对 _migrations。
+[Unit]
+Description=youfu Backend（优服家后端 · CentOS7/Node16 过渡版）
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/youfu/backend
+Environment="PATH=/opt/node16/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin"
+Environment="NODE_ENV=production"
+Environment="ENV_FILE=/opt/youfu/backend/.env"
+Environment="AUTH_MODE=prod"
+ExecStart=/opt/node16/bin/node dist/server.js
+Restart=always
+RestartSec=5
+KillSignal=SIGTERM
+TimeoutStopSec=15
+
+[Install]
+WantedBy=multi-user.target

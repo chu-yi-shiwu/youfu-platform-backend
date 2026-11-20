@@ -66,6 +66,7 @@ function makeClient(handlers: Handler[], opts?: { strict?: boolean; failOn?: (te
       for (const hd of handlers) {
         if (hd.match(text)) return hd.reply(text, params ?? []);
       }
+      if (text.includes('SELECT def FROM workflow_def')) return { rows: [], rowCount: 0 };
       misses.push(text);
       if (opts?.strict) throw new Error(`[mock] 未命中 handler 的 SQL：${text}`);
       return { rows: [], rowCount: 1 };
@@ -87,11 +88,21 @@ function arr0(col: unknown): unknown {
 }
 
 /** 无租户覆盖行 → hasPerm 走默认矩阵（生产默认形态）。 */
+// 模块门禁（prod 路径）在本测试的 mock 中返回“默认全开”；必须同时进入 BASE 与 granted()，
+// 否则平台代授用例会在权限通过后卡在模块表的未处理 SQL 上。
+const MODULE_HANDLERS: Handler[] = [
+  {
+    match: (t) => t.includes('FROM tenant_module') || t.includes('FROM department_module') || t.includes('SELECT department_id FROM worker'),
+    reply: () => ({ rows: [], rowCount: 0 }),
+  },
+];
 const BASE: Handler[] = [
+  ...MODULE_HANDLERS,
   { match: (t) => t.includes('SELECT perm FROM role_permission'), reply: () => ({ rows: [], rowCount: 0 }) },
 ];
 /** 平台代授形态：role_permission 有行 → 覆盖集合生效。 */
 const granted = (perm: string): Handler[] => [
+  ...MODULE_HANDLERS,
   { match: (t) => t.includes('SELECT perm FROM role_permission'), reply: () => ({ rows: [{ perm }], rowCount: 1 }) },
 ];
 

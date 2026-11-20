@@ -40,7 +40,8 @@ export function parseServer(src: string): ServerShape {
   while ((x = ir.exec(src)) !== null) varBySpec.set(x[2], x[1]);
 
   const prefixByVar = new Map<string, string>();
-  const mr = /app\.use\(\s*'([^']*)'\s*,\s*(\w+)\s*\)/g;
+  // 允许挂载前有中间件包装（如 requireModule('settlement')），仍提取最后一个 router 变量。
+  const mr = /app\.use\(\s*'([^']*)'\s*,\s*(?:[A-Za-z_$][\w$]*\([^)]*\)\s*,\s*)*([A-Za-z_$][\w$]*)\s*\)/g;
   while ((x = mr.exec(src)) !== null) prefixByVar.set(x[2], x[1]);
   return { varBySpec, prefixByVar };
 }
@@ -140,7 +141,7 @@ describe('① router 挂载完整性（import 了就必须 app.use · 事故 A �
 
   it('⚙自检：删掉一行 app.use，挂载检查必须能发现（证明本组断言不是空过）', () => {
     // 不改动 server.ts 本体（避免与并行改动冲突）：对源文本副本做变异，验证探测器本身有效。
-    const line = "app.use('/api/v1', settlementRouter);";
+    const line = "app.use('/api/v1', requireModule('settlement'), settlementRouter);";
     expect(serverSrc, 'server.ts 挂载行形态变化，本自检需同步更新').toContain(line);
     const mutated = parseServer(serverSrc.replace(line, ''));
     const varName = mutated.varBySpec.get('./routes/settlement.js');

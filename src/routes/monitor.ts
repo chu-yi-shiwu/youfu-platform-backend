@@ -11,7 +11,11 @@ import { requirePermission } from '../middleware/role.js';
 import { createLinkedWorkOrder } from '../services/linkedWorkOrder.js';
 import { emitDomainEvent } from '../db/eventBus.js';
 
+import { requireModuleWrites } from '../middleware/moduleGuard.js';
+
 const router = Router();
+router.use(requireModuleWrites('monitor', { only: [/^\/devices/] }));
+
 
 // ============ 设备 ============
 const deviceSchema = z.object({

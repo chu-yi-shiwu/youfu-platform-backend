@@ -144,6 +144,20 @@ describe('emergency.ts · 写端点权限（A 组：等价性，改前改后都�
       expect(r.status, `GET ${p} 应仍 200`).toBe(200);
     }
   });
+
+  it('P0-8 · GET /alerts 带 level/status 过滤：条件必须加 a. 别名（JOIN 后不得 ambiguous 500）', async () => {
+    authRole = 'worker';
+    fakeClient.query.mockClear();
+    const r = await req('GET', '/api/v1/emergency/alerts?level=L2&status=pending');
+    expect(r.status).toBe(200);
+    const sql = fakeClient.query.mock.calls.map((c) => String(c[0])).find((s) => s.includes('FROM alert a LEFT JOIN'));
+    expect(sql).toBeTruthy();
+    expect(sql).toContain('a.level = $');
+    expect(sql).toContain('a.status = $');
+    // 跨租户防线：预案 JOIN 也必须对齐租户
+    expect(sql).toContain('p.tenant_id = a.tenant_id');
+    expect(sql).not.toMatch(/(^|[^.\w])level = \$/);
+  });
 });
 
 describe('emergency.ts · 可配置收益（B 组：改前必红，改后转绿）', () => {

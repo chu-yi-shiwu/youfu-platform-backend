@@ -2,7 +2,13 @@
 // GET /api/v1/process-mining?entityType=work_order&days=30&limit=50000
 // 复用 withTenantClient（SET LOCAL app.tenant_id + SET LOCAL ROLE youfu_app → RLS 生效）。
 import { Router } from 'express';
+import type { PoolClient } from 'pg';
 import { withTenantClient } from '../db/pool.js';
+
+// 过程挖掘走 dash cookie 同域导航，不在 JWT authMiddleware 内；显式 system scope。
+function withSystemTenantClient<T>(tenantId: string, fn: (client: PoolClient) => Promise<T>): Promise<T> {
+  return withTenantClient(tenantId, fn, { system: true });
+}
 import { processMining } from '../repo/processMining.js';
 
 const router = Router();
@@ -21,7 +27,7 @@ router.get('/process-mining', async (req, res, next) => {
     if (req.query.limit !== undefined && !Number.isFinite(limit)) {
       return res.status(400).json({ ok: false, code: 'BAD_PARAM', message: 'limit must be a finite number' });
     }
-    const result = await withTenantClient(tenantId, (client) =>
+    const result = await withSystemTenantClient(tenantId, (client) =>
       processMining(client, tenantId, { entityType, days, limit }),
     );
     return res.json({ ok: true, code: 0, result });

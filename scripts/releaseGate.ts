@@ -14,12 +14,20 @@ import { execSync } from 'node:child_process';
 import { readFileSync, readdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { listMigrationFiles, listUnrecognizedSqlFiles } from '../src/db/migrationFiles.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = join(__dirname, '..');
 let failed = false;
 const fail = (m: string) => { console.error('  ✗ ' + m); failed = true; };
 const pass = (m: string) => console.log('  ✓ ' + m);
+
+// P0-1：迁移清单 fail-closed。根目录出现非规范 .sql ⇒ 它不会进入自动迁移通道，
+// 必须在发布前显式移走/改名，不能靠人工记忆。
+const migrationFiles = listMigrationFiles(root);
+const unrecognizedSql = listUnrecognizedSqlFiles(root);
+if (unrecognizedSql.length === 0) pass(`迁移命名规范（${migrationFiles.length} 个文件）`);
+else fail(`仓根存在非规范 SQL，自动迁移不会执行：${unrecognizedSql.join(', ')}`);
 
 function walk(dir: string, out: string[] = []): string[] {
   for (const e of readdirSync(dir, { withFileTypes: true })) {
@@ -96,7 +104,7 @@ else fail(`${hits} 处 SQL 注入风险`);
 // 3) 迁移幂等静态检查
 console.log('[3/5] 迁移幂等检查');
 let nonIdem = 0;
-for (const f of readdirSync(root).filter((x) => /^\d+_.*\.sql$/.test(x))) {
+for (const f of migrationFiles) {
   const sql = readFileSync(join(root, f), 'utf8');
   const guarded =
     /IF NOT EXISTS/i.test(sql) ||
@@ -173,7 +181,7 @@ const rlsWhitelist = new Set<string>([
   //   无会话租户可隔离，与 tenant_registry 同域。
   'trial_applications',
 ]);
-for (const f of readdirSync(root).filter((x) => /^\d+_.*\.sql$/.test(x))) {
+for (const f of migrationFiles) {
   const sql = readFileSync(join(root, f), 'utf8');
   for (const { name, body } of createTableBodies(sql)) {
     if (/\btenant_id\b/i.test(body)) tenantTables.add(name);

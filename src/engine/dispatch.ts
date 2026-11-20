@@ -12,6 +12,8 @@ export interface WorkerRow {
   skill_tags: string[];
   load: number;
   active: boolean;
+  /** 所属部门；空 = 机动/共享人员，可服务任意部门 */
+  department_id?: string | null;
 }
 
 // 注意：match/strategy/need 的字段名与 DB 存储(jsonb)、前端表单、路由层保持
@@ -33,16 +35,24 @@ export interface Need {
   business_type?: string;
   skill_tags?: string[];
   priority?: string;
+  /** 明确责任部门时只选本部门或机动人员；默认部门单不传（由 assignment 晚绑定） */
+  department_id?: string | null;
 }
 
-// 纯函数：least_load 兜底选人（active + 技能全命中 + 负载最低）
+/** 部门过滤：明确部门时，本部门或机动（department_id 为空）人员可参与；默认部门单不传。 */
+function inDepartment(w: WorkerRow, departmentId?: string | null): boolean {
+  if (!departmentId) return true;
+  return !w.department_id || w.department_id === departmentId;
+}
+
+// 纯函数：least_load 兜底选人（active + 技能全命中 + 部门匹配 + 负载最低）
 export function pickWorker(
   workers: WorkerRow[],
-  need: { skillTags?: string[] },
+  need: { skillTags?: string[]; departmentId?: string | null },
 ): WorkerRow | null {
   const required = need.skillTags ?? [];
   const matched = workers.filter(
-    (w) => w.active && required.every((t) => w.skill_tags.includes(t)),
+    (w) => w.active && inDepartment(w, need.departmentId) && required.every((t) => w.skill_tags.includes(t)),
   );
   if (matched.length === 0) return null;
   // least_load：负载最低的优先（[...] 避免原地排序污染入参）
@@ -103,7 +113,7 @@ export function resolveDispatch(
     if (!matchRule(rule, need)) continue;
     const needTags = rule.strategy?.skill_tags ?? need.skill_tags ?? [];
     const candidates = workers.filter(
-      (w) => w.active && needTags.every((t) => w.skill_tags.includes(t)),
+      (w) => w.active && inDepartment(w, need.department_id) && needTags.every((t) => w.skill_tags.includes(t)),
     );
     if (candidates.length === 0) continue;
     // 按 strategy.type 查表选人；未注册的 type 不抛错，fail-safe 回退 pickWorker 兜底并打 warn。
@@ -111,7 +121,7 @@ export function resolveDispatch(
     const strategy = DISPATCH_STRATEGY_REGISTRY[type];
     const picked = strategy
       ? strategy(candidates, need, rule.strategy ?? { type }, { rule, model })
-      : fallbackPick(candidates, needTags, rule, type);
+      : fallbackPick(candidates, needTags, rule, type, need.department_id);
     if (picked) {
       return {
         worker: picked,
@@ -130,12 +140,13 @@ function fallbackPick(
   needTags: string[],
   rule: DispatchRule,
   type: string,
+  departmentId?: string | null,
 ): WorkerRow | null {
   console.warn(
     `[dispatch] unknown dispatch strategy type "${type}" on rule ${rule.id} ("${rule.name}"), ` +
       `fallback to pickWorker (least_load)`,
   );
-  return pickWorker(candidates, { skillTags: needTags });
+  return pickWorker(candidates, { skillTags: needTags, departmentId });
 }
 
 // 纯函数：按 规则权 × 模型分 × 负载因子 降序返回最优候选（上下文 bandit 选臂）。

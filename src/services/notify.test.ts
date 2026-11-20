@@ -133,6 +133,18 @@ describe('notify 诚实边界 + 路由', () => {
     expect(resolveCall).toBeTruthy();
   });
 
+  it('🔴 回归：省略 recipientKind 时默认按 worker 解析 openid（改派/抢单/部门变更通知曾因此 STUB）', async () => {
+    process.env.MP_APPID = 'appid';
+    process.env.MP_SECRET = 'secret';
+    process.env.WX_MP_TEMPLATE_ID = 'tpl_1';
+    const client = makeClient(defaultHandler({ workerOpenid: 'OPENID_DEFAULT_WORKER' }));
+    const { recipientKind, ...withoutKind } = baseInput;
+    const r = await dispatchNotification(client, { ...withoutKind, channel: 'wechat' });
+    expect(r.delivered).toBe(true);
+    const resolveCall = (client.query as any).mock.calls.find((c: any[]) => c[0].includes('FROM worker w'));
+    expect(resolveCall).toBeTruthy();
+  });
+
   it('wechat 配置齐全 + account 接收方已绑 openid → 真发 delivered=true', async () => {
     process.env.MP_APPID = 'appid';
     process.env.MP_SECRET = 'secret';

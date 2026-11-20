@@ -5,7 +5,7 @@
 import type { PoolClient } from 'pg';
 import { AppError } from '../middleware/error.js';
 import { csvEscape } from '../services/csvUtil.js';
-import { getDefsAcrossAllVersions, unionStates } from '../engine/workflowDef.js';
+import { getDefsAcrossAllVersions, getDefsForVersions, unionStates } from '../engine/workflowDef.js';
 import { RICH_WORK_ORDER_DEF, doneStates } from '../engine/stateMachine.js';
 
 /**
@@ -45,7 +45,7 @@ export async function settlementEligibleStatuses(client: PoolClient, tenantId: s
 export interface ConflictItem {
   work_order_id: string;
   order_no: string | null;
-  reason: 'not_found' | 'bad_status' | 'already_settled';
+  reason: 'not_found' | 'bad_status' | 'already_settled' | 'definition_missing';
   status?: string;
 }
 
@@ -110,14 +110,14 @@ export async function createSettlementDraft(
   // QA🟡3：加 FOR UPDATE 行锁——先 SELECT 判占用再 INSERT 存在 TOCTOU 窗口（并发建单双双通过校验），
   // 锁住工单行让同单的并发建结算串行化（锁在调用方事务内，COMMIT/ROLLBACK 即释放）。
   const found = await client.query(
-    `SELECT id, order_no, status, catalog AS category FROM work_orders
+    `SELECT id, order_no, status, catalog AS category, def_version FROM work_orders
      -- live 修复（#927）：work_orders 的分类列实名是 catalog（001_init.sql:28），别名 category 供预填复用
      WHERE tenant_id = $1 AND id = ANY($2::text[])
      ORDER BY id
      FOR UPDATE`,
     [tenantId, workOrderIds],
   );
-  const foundMap = new Map<string, { order_no: string; status: string; category: string | null }>(
+  const foundMap = new Map<string, { order_no: string; status: string; category: string | null; def_version: number | null }>(
     found.rows.map((r: any) => [r.id, r]),
   );
   const settled = await client.query(
@@ -127,14 +127,22 @@ export async function createSettlementDraft(
     [tenantId, workOrderIds],
   );
   const settledSet = new Set(settled.rows.map((r: any) => r.work_order_id));
-  // F10：可入账状态不再是写死的名单——取租户流程的完成态（见 settlementEligibleStatuses）。
-  const eligible = await settlementEligibleStatuses(client, tenantId);
+  // F10 / P1-1：资金闸门必须按“每张工单锁定的 def_version”判定完成态，
+  // 不能对全部版本取并集，否则旧版完成态会在当前版本仍为在途时被误入账。
+  const defs = await getDefsForVersions(
+    client, tenantId, 'work_order', found.rows as Array<{ def_version?: number | null }>, RICH_WORK_ORDER_DEF, true,
+  );
   const conflicts: ConflictItem[] = [];
   for (const id of workOrderIds) {
     const row = foundMap.get(id);
     if (!row) {
       conflicts.push({ work_order_id: id, order_no: null, reason: 'not_found' });
-    } else if (!eligible.includes(row.status)) {
+      continue;
+    }
+    const def = defs.get(Number(row.def_version) || 0);
+    if (!def) {
+      conflicts.push({ work_order_id: id, order_no: row.order_no, reason: 'definition_missing', status: row.status });
+    } else if (!doneStates(def).includes(row.status)) {
       conflicts.push({ work_order_id: id, order_no: row.order_no, reason: 'bad_status', status: row.status });
     } else if (settledSet.has(id)) {
       conflicts.push({ work_order_id: id, order_no: row.order_no, reason: 'already_settled' });

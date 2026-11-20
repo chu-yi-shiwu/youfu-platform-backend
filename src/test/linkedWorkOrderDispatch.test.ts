@@ -37,6 +37,7 @@ function linkedHandler(opts: {
   catalogRows?: any[];
 } = {}): QueryFn {
   return async (text: string) => {
+    if (text.includes('SELECT department_id FROM worker WHERE id')) return { rows: [{ department_id: null }], rowCount: 1 };
     if (text.includes('FROM worker WHERE tenant_id')) return { rows: opts.workerRows ?? [] };
     if (text.includes('FROM fault_category')) return { rows: opts.catalogRows ?? [] };
     if (text.includes('FROM dispatch_rule WHERE')) return { rows: opts.ruleRows ?? [] };

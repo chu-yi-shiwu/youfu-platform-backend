@@ -106,7 +106,7 @@ export function buildAdminSystemPrompt(
   }
   if (allowedTools.includes('query_tickets')) {
     lines.push(
-      `${++n}. query_tickets {"status":"...","priority":"urgent|normal|low","department":"...","service_desk":"...","source":"...","today_only":true,"limit":5} —— 只读查询工单：`,
+      `${++n}. query_tickets {"status":"...","priority":"urgent|normal|low","department_id":"...","source":"...","today_only":true,"limit":5} —— 只读查询工单：`,
       '   各参数只放用户明确说出的条件，不用的字段省略；status 可逗号分隔多个；limit 建议 5，最大 10。',
     );
     // R2-C：把本机构真实的状态名摆到模型面前，杜绝它照抄内置模板名造出本租户不存在的状态
@@ -246,8 +246,7 @@ export function buildConfirmCard(args: Record<string, unknown>): ConfirmCard | n
 export interface TicketQueryArgs {
   status?: string;
   priority?: string;
-  department?: string;
-  service_desk?: string;
+  department_id?: string;
   source?: string;
   today_only?: boolean;
   limit: number;
@@ -270,7 +269,7 @@ export function sanitizeTicketQueryArgs(args: unknown): TicketQueryArgs | null {
     const p = a.priority.trim().toLowerCase();
     if (TICKET_PRIORITY_WHITELIST.includes(p)) out.priority = p;
   }
-  for (const k of ['department', 'service_desk', 'source'] as const) {
+  for (const k of ['department_id', 'source'] as const) {
     const s = sanitizeStr(a[k], 60);
     if (s !== undefined) out[k] = s;
   }
@@ -286,7 +285,8 @@ export interface TicketResultItem {
   order_no?: string;
   status?: string;
   priority?: string;
-  department?: string;
+  department_id?: string;
+  department_name?: string | null;
   assignee_name?: string | null;
   created_at?: string;
 }

@@ -33,13 +33,13 @@ export const KNOWN_API_PREFIXES: readonly string[] = [
 // （含 businessFlow/workflowDef 等挂在前缀下的段名冗余项——白名单宁多勿误杀）。
 export const KNOWN_V1_SEGMENTS: ReadonlySet<string> = new Set([
   'accounts', 'activities', 'admin', 'agent-stats', 'alerts', 'applies', 'apps', 'assets',
-  'audit-logs', 'auth', 'auto-tune', 'basic-data', 'config', 'devices', 'entities',
+  'audit-logs', 'auth', 'auto-tune', 'basic-data', 'config', 'department-route-rules', 'departments', 'devices', 'entities',
   'equipment', 'export', 'fault-categories', 'features', 'feedback', 'gen-config',
   'generate', 'generate-from-theme', 'health', 'inventory', 'invites', 'items', 'jssdk-config',
   'materials', 'meta', 'open', 'open-api-logs', 'optimize', 'orders', 'plans', 'points',
   'preview', 'process-mining', 'product-catalog', 'public', 'records', 'scan',
-  'service-desks', 'settlements', 'similar', 'sla', 'stats', 'summary', 'tasks',
-  'template-contributions', 'templates', 'tenant-info', 'tenants', 'themes',
+  'settlements', 'similar', 'sla', 'stats', 'summary', 'tasks',
+  'template-contributions', 'templates', 'tenant', 'tenant-info', 'tenants', 'themes',
   // 🔴 'tickets' 已于 2026-10-28 移除：原 POST /api/v1/tickets（代申告）随代申告下线删除，
   //    全仓再无 router 以 tickets 作首段。留着会被 routerRegistry 的
   //    「白名单不得冗余」反向检查判红（该检查就是防白名单腐烂的）。

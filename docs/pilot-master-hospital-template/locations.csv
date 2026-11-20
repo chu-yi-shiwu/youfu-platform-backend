@@ -1,0 +1,9 @@
+code,name,category
+HOSP-LOC-001,住院部,住院
+HOSP-LOC-002,门诊楼,门诊
+HOSP-LOC-003,医技楼,医技
+HOSP-LOC-004,急诊科,急诊
+HOSP-LOC-005,行政楼,行政
+HOSP-LOC-006,手术室,医技
+HOSP-LOC-007,供应室,医技
+HOSP-LOC-008,院区公共区域,公共

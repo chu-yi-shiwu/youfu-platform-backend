@@ -28,6 +28,14 @@ const router = Router();
 
 const ENTITY = 'energy_collection';
 const SIGNATURE_WINDOW_MS = 5 * 60 * 1000; // 与能源侧 dispatchToYoufu 对齐的防重放窗口
+
+// 本路由挂载在 authMiddleware 之前（server.ts），没有 ALS 租户上下文。
+// webhook 走 HMAC 验签、列表/详情走 worker token 校验，身份已在路由内裁决，
+// 因此内部查询必须显式 system 作用域；否则 withTenantClient 抛 MISSING_AUTH_CONTEXT → 500。
+// （2026-11-12 实测工作台第四源报错，根因即此处缺 system。）
+function withEnergyTenant(tenantId: string, fn: (client: any) => any): Promise<any> {
+  return withTenantClient(tenantId, fn, { system: true });
+}
 const TOKEN_TTL_SECONDS = 15 * 60; // worker token 时效 15min（任务书口径）
 
 // ---------------------------------------------------------------------------
@@ -101,7 +109,7 @@ router.post('/energy/webhook/dispatch', async (req: any, res: any, next: any) =>
     const b = DispatchBody.parse(req.body);
     const tenantId = process.env.ENERGY_DISPATCH_TENANT ?? DEFAULT_TENANT_ID;
 
-    const result = await withTenantClient(tenantId, async (client: any) => {
+    const result = await withEnergyTenant(tenantId, async (client: any) => {
       // 幂等检查（先于建单）：同 task_ref 直接回放
       const dup = await client.query(
         `SELECT * FROM business_flow_tasks
@@ -144,6 +152,8 @@ router.post('/energy/webhook/dispatch', async (req: any, res: any, next: any) =>
         entityType: ENTITY,
         fallbackDef: ENERGY_COLLECTION_DEF,
         actor: 'energy-webhook',
+        // 系统动作：来源已通过 X-Energy-Signature HMAC 验签，无人类角色可传。
+        systemAuto: true,
       });
       return { replay: false as const, item: row };
     });
@@ -253,7 +263,7 @@ async function resolveWorkerIdentity(req: any): Promise<{ workerId: string; work
         `SELECT id FROM worker WHERE tenant_id = $1 AND account_id = $2 AND active = true LIMIT 1`,
         [tid, accountId],
       ),
-    );
+    { system: true });
     const workerId = w.rows[0]?.id ? String(w.rows[0].id) : '';
     if (!workerId) {
       throw new AppError('ENERGY_FORBIDDEN', '账号未绑定工人档案，暂无能耗采集任务', 403);
@@ -281,7 +291,7 @@ router.get('/energy/tasks', async (req: any, res: any, next: any) => {
       });
     }
 
-    const items = await withTenantClient(tenantId, async (client: any) => {
+    const items = await withEnergyTenant(tenantId, async (client: any) => {
       const clauses = ['tenant_id = $1', "entity_type = 'energy_collection'", "(data->>'worker_ref' = $2 OR assignee = $3)"];
       const params: unknown[] = [tenantId, workerRef, workerId];
       if (assignee) {
@@ -309,7 +319,7 @@ router.get('/energy/tasks', async (req: any, res: any, next: any) => {
 router.get('/energy/tasks/:id', async (req: any, res: any, next: any) => {
   try {
     const { workerId, workerRef, tid: tenantId } = await resolveWorkerIdentity(req);
-    const item = await withTenantClient(tenantId, async (client: any) => {
+    const item = await withEnergyTenant(tenantId, async (client: any) => {
       const r = await client.query(
         `SELECT * FROM business_flow_tasks WHERE id = $1 AND tenant_id = $2 AND entity_type = $3`,
         [req.params.id, tenantId, ENTITY],
@@ -337,7 +347,7 @@ router.get('/energy/def', async (_req: any, res: any, next: any) => {
     // T1-B 批3：**刻意保持读 live、不改** —— 本端点是「当前生效状态图」的自述
     //   （响应里就写着 source_note：workflow_def DB 行优先），没有行可锁，
     //   锁了反而让自述失真。⇒ 这也是本文件为何仍 import getWorkflowDefOrDefault。
-    const def = await withTenantClient(tenantId, (client: any) =>
+    const def = await withEnergyTenant(tenantId, (client: any) =>
       getWorkflowDefOrDefault(client, tenantId, ENTITY, ENERGY_COLLECTION_DEF),
     );
     return res.json({ ok: true, code: 0, entity_type: ENTITY, source_note: 'workflow_def DB 行优先；无配置回退 ENERGY_COLLECTION_DEF 内置镜像态', def });
@@ -370,7 +380,7 @@ router.post('/energy/webhook/status-update', async (req: any, res: any, next: an
     const b = StatusUpdateBody.parse(req.body);
     const tenantId = process.env.ENERGY_DISPATCH_TENANT ?? DEFAULT_TENANT_ID;
 
-    const result = await withTenantClient(tenantId, async (client: any) => {
+    const result = await withEnergyTenant(tenantId, async (client: any) => {
       const found = await client.query(
         `SELECT * FROM business_flow_tasks
          WHERE tenant_id = $1 AND entity_type = $2 AND data->>'task_ref' = $3 LIMIT 1`,
@@ -402,6 +412,8 @@ router.post('/energy/webhook/status-update', async (req: any, res: any, next: an
         fallbackDef: ENERGY_COLLECTION_DEF,
         actor: 'energy-webhook',
         extra,
+        // 系统动作：来源已通过 X-Energy-Signature HMAC 验签，无人类角色可传。
+        systemAuto: true,
       });
       return { replay: false as const, item: updated };
     });

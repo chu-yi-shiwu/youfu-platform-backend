@@ -80,7 +80,7 @@ async function resolveOpenid(
   client: PoolClient,
   input: NotifyInput,
 ): Promise<string | null> {
-  if (input.recipientKind === 'worker') {
+  if ((input.recipientKind ?? 'worker') === 'worker') {
     const { rows } = await client.query<{ wx_openid: string | null }>(
       `SELECT a.wx_openid
          FROM worker w
@@ -114,7 +114,7 @@ async function resolveSmsTarget(
   const fromPayload = input.payload?.phone;
   if (typeof fromPayload === 'string' && /^1[3-9]\d{9}$/.test(fromPayload)) return fromPayload;
   // 数据层：worker 经 worker.phone（057 迁移已加列）；account/desk 暂无 phone 列，依赖 payload.phone。
-  if (input.recipientKind === 'worker') {
+  if ((input.recipientKind ?? 'worker') === 'worker') {
     const { rows } = await client.query<{ phone: string | null }>(
       `SELECT phone FROM worker WHERE tenant_id = $1 AND id = $2`,
       [input.tenantId, input.recipient],
@@ -340,16 +340,23 @@ export async function wechatSelfTest(client: PoolClient, input: NotifyInput): Pr
 /** 默认模板 data 拼装（thing1~thing4，各 20 字上限）。 */
 function buildDefaultData(input: NotifyInput): Record<string, { value: string }> {
   const p = (input.payload ?? {}) as Record<string, unknown>;
+  const TYPE_LABEL: Record<string, string> = {
+    create: '建单', assign: '派单', dispatch: '派单', forward: '改派',
+    return: '退回', complete: '完成', satisfy: '评价', change_department: '改部门',
+    transpond: '转台', sla_escalated: '超时升级', claim: '抢单',
+  };
   const title = String(input.title || input.body || '工单通知').slice(0, 20);
-  const type = String(input.type || input.body || input.title || '请查看详情').slice(0, 20);
+  const type = String(TYPE_LABEL[input.type] || input.type || input.body || input.title || '请查看详情').slice(0, 20);
   const assignee = String(p.assignee || p.workerName || '系统').slice(0, 20);
   const status = String(p.status || '待处理').slice(0, 20);
-  return {
-    thing1: { value: title },
-    thing2: { value: type },
-    thing3: { value: assignee },
-    thing4: { value: status },
-  };
+  // 模板关键词按实际模板配置。默认兼容既有 thing1~thing4；
+  // 公共模板选用的 kid 会生成 thing28/thing16/... 这类 key，通过 env 映射，不改代码。
+  const keys = (process.env.WX_MP_TEMPLATE_KEYS || 'thing1,thing2,thing3,thing4')
+    .split(',').map((s) => s.trim()).filter(Boolean).slice(0, 4);
+  const values = [title, type, assignee, status];
+  const data: Record<string, { value: string }> = {};
+  keys.forEach((k, i) => { data[k] = { value: values[i] ?? '' }; });
+  return data;
 }
 
 /**
@@ -436,7 +443,11 @@ export async function insertNotification(client: PoolClient, input: NotifyInput)
  * @param executor 可注入（测试用），默认 withTenantClient。
  */
 export function flushWechatDeliveries(
-  executor: (tenantId: string, fn: (client: PoolClient) => Promise<unknown>) => Promise<unknown> = withTenantClient,
+  executor: (tenantId: string, fn: (client: PoolClient) => Promise<unknown>) => Promise<unknown> = (tenantId, fn) =>
+    // 2026-11-15 主站同步实测：本函数在 HTTP 响应完成后调用（server.ts res.on('finish')），
+    // 此时没有请求级 ALS 上下文；默认 executor 必须显式 system，否则每次补投递都 500
+    // （MISSING_AUTH_CONTEXT）且微信通知永远发不出。
+    withTenantClient(tenantId, fn, { system: true }),
 ): number {
   const batch = wechatPendingQueue.splice(0, wechatPendingQueue.length);
   for (const input of batch) {

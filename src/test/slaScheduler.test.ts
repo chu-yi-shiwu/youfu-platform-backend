@@ -41,7 +41,11 @@ function makeClient(scanRows: any[]) {
     query: (async (text: string, params?: any[]) => {
       calls.push({ text, params });
       if (text.includes('SELECT def FROM workflow_def')) return { rows: [] }; // DEFAULT 状态机
-      if (text.includes('FROM work_orders') && text.includes('status <> ALL')) return { rows: scanRows };
+      if (text.includes('FROM work_orders') && text.includes('status <> ALL')) {
+        // 模拟 SQL 的暂停过滤：暂停中（sla_paused_at 非空）不进入扫描
+        const rows = text.includes('sla_paused_at IS NULL') ? scanRows.filter((r) => !r.sla_paused_at) : scanRows;
+        return { rows };
+      }
       if (text.includes('FROM account_user')) return { rows: [{ id: ADMIN }] };
       return { rows: [] }; // UPDATE / INSERT ticket_event / domain_event / notification / webhook_subscription
     }) as QueryFn,
@@ -88,6 +92,15 @@ describe('runSlaScanForTenant（SLA 闭环回归护栏）', () => {
     h.client = client;
     const hits = await runSlaScanForTenant(TENANT);
     expect(hits).toHaveLength(0);
+    expect(calls.find((c) => c.text.includes('INSERT INTO notification'))).toBeUndefined();
+  });
+
+  it('暂停中（sla_paused_at 非空）→ 不升级、不通知', async () => {
+    const { client, calls } = makeClient([{ ...overdueRow, sla_paused_at: new Date() }]);
+    h.client = client;
+    const hits = await runSlaScanForTenant(TENANT);
+    expect(hits).toHaveLength(0);
+    expect(calls.find((c) => c.text.includes('UPDATE work_orders SET escalated_at'))).toBeUndefined();
     expect(calls.find((c) => c.text.includes('INSERT INTO notification'))).toBeUndefined();
   });
 
@@ -259,5 +272,64 @@ describe('runSlaScanForTenant（续）', () => {
     h.tenants = [TENANT, 't-other'];
     const total = await runSlaSchedulerOnce();
     expect(total).toBe(2); // 两个租户各命中同一 overdue 种子（fake client 复用）
+  });
+});
+
+
+// P1-2 负控制：旧版完成态在 live 版本可能是中间态，不能因“版本并集”被 SLA 误升级
+describe('work_order SLA 按行 def_version 精确判定', () => {
+  const V1_DONE: any = {
+    initial: 'draft',
+    states: ['draft', 'doing', 'done'],
+    transitions: [{ from: 'draft', to: 'doing', event: 'start' }, { from: 'doing', to: 'done', event: 'finish' }],
+    config: {},
+  };
+  const V2_FINISHED: any = {
+    initial: 'draft',
+    states: ['draft', 'doing', 'done', 'finished'],
+    transitions: [
+      { from: 'draft', to: 'doing', event: 'start' },
+      { from: 'doing', to: 'done', event: 'finish' },
+      { from: 'done', to: 'finished', event: 'close' },
+    ],
+    config: {},
+  };
+  const WORK_ORDER_ROW = {
+    id: WO,
+    status: 'done',
+    sla_due_at: new Date(Date.now() - 60 * 60_000),
+    escalated_at: null,
+    assignee_id: W1,
+    order_no: 'WO-VERSION-1',
+    def_version: 1,
+  };
+
+  function makeVersionedClient(rows: any[]) {
+    const calls: Array<{ text: string; params?: any[] }> = [];
+    const client = {
+      query: (async (text: string, params?: any[]) => {
+        calls.push({ text, params });
+        if (text.includes('SELECT DISTINCT def_version')) return { rows: [{ def_version: 1 }, { def_version: 2 }] };
+        if (text.includes('SELECT version FROM workflow_def')) return { rows: [{ version: 2 }] };
+        if (text.includes('FROM workflow_def_history')) {
+          const d = Number(params?.[2]) === 1 ? V1_DONE : V2_FINISHED;
+          return { rows: [{ def: JSON.stringify(d) }] };
+        }
+        if (text.includes('SELECT def FROM workflow_def')) return { rows: [{ def: JSON.stringify(V2_FINISHED) }] };
+        if (text.includes('FROM work_orders') && text.includes('status <> ALL')) return { rows };
+        if (text.includes('FROM account_user')) return { rows: [{ id: ADMIN }] };
+        return { rows: [] };
+      }) as QueryFn,
+    } as any;
+    return { client, calls };
+  }
+
+  it('v1 已完成、v2 中 done 是中间态 → 不升级、不通知', async () => {
+    const { client, calls } = makeVersionedClient([WORK_ORDER_ROW]);
+    h.client = client;
+    const hits = await runSlaScanForTenant(TENANT);
+    expect(hits).toHaveLength(0);
+    expect(calls.find((c) => c.text.includes('UPDATE work_orders SET escalated_at'))).toBeUndefined();
+    expect(calls.find((c) => c.text.includes('INSERT INTO notification'))).toBeUndefined();
   });
 });

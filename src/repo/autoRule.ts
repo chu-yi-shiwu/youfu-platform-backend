@@ -47,9 +47,14 @@ export async function listAutoRules(
       [tenantId, entityType],
     );
     return (r.rows as AutoRuleRow[]).map((x) => toRule(tenantId, x));
-  } catch {
-    // 094 未应用 → 无规则（执行器因此零自动行为，与改造前逐字等价）
-    return [];
+  } catch (e: unknown) {
+    // 只兼容“094 迁移未应用”的预期缺表；其它 SQL/权限/连接错误必须抛出，
+    // 否则 PostgreSQL 事务已 aborted，后续 COMMIT 实际回滚，调用方却拿到成功结果。
+    if ((e as { code?: string })?.code === '42P01') {
+      console.warn('[autoRule] workflow_auto_rule missing (094 not applied), treat as no rules');
+      return [];
+    }
+    throw e;
   }
 }
 

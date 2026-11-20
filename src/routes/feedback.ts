@@ -8,7 +8,7 @@ import { withTenantClient } from '../db/pool.js';
 import { AppError } from '../middleware/error.js';
 import { requirePermission } from '../middleware/role.js';
 import { emitDomainEvent } from '../db/eventBus.js';
-import { csvEscape } from '../services/csvUtil.js';
+import { csvHeader, csvRowLine, csvDateTime, type CsvField } from '../services/csvUtil.js';
 
 const router = Router();
 
@@ -94,6 +94,10 @@ router.post('/:id/reply', async (req, res, next) => {
       const b = z.object({ reply: z.string().min(1) }).parse(req.body);
       const cur = await client.query(`SELECT * FROM feedback WHERE id = $1 AND tenant_id = $2`, [req.params.id, tenantId]);
       if (cur.rowCount === 0) throw new AppError('NOT_FOUND', 'feedback not found', 404);
+      // 关闭是终态：回复不得把已关闭反馈悄悄改回 replied（否则“关闭”形同虚设）。
+      if (cur.rows[0].status === 'closed') {
+        throw new AppError('CONFLICT', '反馈已关闭，不可再回复；如需跟进请新建反馈', 409);
+      }
       const r = await client.query(
         `UPDATE feedback SET status = 'replied', reply = $3, replied_at = now() WHERE id = $1 AND tenant_id = $2 RETURNING *`,
         [req.params.id, tenantId, b.reply],
@@ -101,6 +105,32 @@ router.post('/:id/reply', async (req, res, next) => {
       const row = r.rows[0];
       await emitDomainEvent(client, { tenantId, entityType: 'feedback', entityId: row.id, type: 'reply', actor: 'config_role' });
       return row;
+    });
+    return res.json({ ok: true, code: 0, item });
+  } catch (e) {
+    next(e);
+  }
+});
+
+// 关闭反馈（2026-11-14）：new/replied → closed，留痕关闭人/时间/说明。
+// 为什么单独端点：回复≠结案——回复后仍可能继续跟进；关闭是明确的终态，便于列表收口与统计。
+router.post('/:id/close', async (req, res, next) => {
+  try {
+    const tenantId = res.locals.auth.tenantId;
+    const b = z.object({ note: z.string().max(500).optional() }).parse(req.body ?? {});
+    const item = await withTenantClient(tenantId, async (client) => {
+      await requirePermission(res.locals.auth, client, 'feedback.manage');
+      const cur = await client.query(`SELECT * FROM feedback WHERE id=$1 AND tenant_id=$2 FOR UPDATE`, [req.params.id, tenantId]);
+      if (cur.rowCount === 0) throw new AppError('NOT_FOUND', 'feedback not found', 404);
+      if (cur.rows[0].status === 'closed') throw new AppError('CONFLICT', '反馈已关闭，不可重复关闭', 409);
+      const r = await client.query(
+        `UPDATE feedback
+            SET status='closed', closed_at=now(), closed_by=$3, close_note=$4
+          WHERE id=$1 AND tenant_id=$2 RETURNING *`,
+        [req.params.id, tenantId, res.locals.auth.username ?? 'unknown', b.note ?? null],
+      );
+      await emitDomainEvent(client, { tenantId, entityType: 'feedback', entityId: req.params.id, type: 'close', actor: 'config_role' });
+      return r.rows[0];
     });
     return res.json({ ok: true, code: 0, item });
   } catch (e) {
@@ -121,6 +151,7 @@ router.get('/stats', async (req, res, next) => {
            COUNT(*) FILTER (WHERE type = 'opinion') AS opinion_count,
            COUNT(*) FILTER (WHERE status = 'new') AS new_count,
            COUNT(*) FILTER (WHERE status = 'replied') AS replied_count,
+           COUNT(*) FILTER (WHERE status = 'closed') AS closed_count,
            COALESCE(AVG(rating) FILTER (WHERE type = 'satisfaction' AND rating IS NOT NULL), 0) AS avg_rating
          FROM feedback WHERE tenant_id = $1`,
         [tenantId],
@@ -134,7 +165,20 @@ router.get('/stats', async (req, res, next) => {
 });
 
 // ============ 反馈 CSV 导出（UOne H 导出） ============
-const FEEDBACK_CSV_COLS = ['created_at', 'type', 'content', 'rating', 'status', 'channel', 'reply', 'replied_at'];
+const FEEDBACK_CSV_FIELDS: CsvField[] = [
+  { key: 'created_at', label: '提交时间', export: (r) => csvDateTime(r.created_at) },
+  { key: 'type', label: '类型', export: (r) => (r.type === 'satisfaction' ? '满意度' : '意见') },
+  { key: 'content', label: '内容' },
+  { key: 'rating', label: '评分' },
+  { key: 'status', label: '状态', export: (r) => (r.status === 'closed' ? '已关闭' : r.status === 'replied' ? '已回复' : '待处理') },
+  { key: 'channel', label: '渠道', export: (r) => (r.channel === 'mobile' ? '移动端' : r.channel === 'desk' ? '后台' : r.channel || '') },
+  { key: 'reply', label: '回复内容' },
+  { key: 'replied_at', label: '回复时间', export: (r) => csvDateTime(r.replied_at) },
+  { key: 'closed_at', label: '关闭时间', export: (r) => csvDateTime(r.closed_at) },
+  { key: 'closed_by', label: '关闭人' },
+  { key: 'close_note', label: '关闭说明' },
+];
+
 router.get('/export', async (req, res, next) => {
   try {
     const tenantId = res.locals.auth.tenantId;
@@ -144,10 +188,8 @@ router.get('/export', async (req, res, next) => {
         .query(`SELECT * FROM feedback WHERE tenant_id=$1 ORDER BY created_at DESC`, [tenantId])
         .then((r) => r.rows);
     });
-    const lines = [FEEDBACK_CSV_COLS.join(',')];
-    for (const row of items) {
-      lines.push(FEEDBACK_CSV_COLS.map((h) => csvEscape((row as any)[h])).join(','));
-    }
+    const lines = [csvHeader(FEEDBACK_CSV_FIELDS)];
+    for (const row of items) lines.push(csvRowLine(row, FEEDBACK_CSV_FIELDS));
     const csv = '﻿' + lines.join('\r\n');
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
     res.setHeader('Content-Disposition', 'attachment; filename="feedback.csv"');

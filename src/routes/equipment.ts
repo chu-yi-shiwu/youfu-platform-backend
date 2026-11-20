@@ -4,16 +4,28 @@
 // 契约形态对齐 basicData.ts（{ ok, code, items / item }），与前端 EquipmentPage.tsx 配套。
 // 对齐 UOne C 族（equipment / type / company）。
 import { Router } from 'express';
+import { withRowSavepoint } from '../services/rowSavepoint.js';
 import { z } from 'zod';
 import { randomUUID } from 'crypto';
 import { withTenantClient } from '../db/pool.js';
 import { AppError } from '../middleware/error.js';
 import { requirePermission } from '../middleware/role.js';
-import { parseCsv, csvEscape } from '../services/csvUtil.js';
+import { parseCsv, csvHeader, csvRowLine, csvHeaderMap, csvParseRow, csvDateOnly, type CsvField } from '../services/csvUtil.js';
 
 const router = Router();
 
-type FieldDef = { key: string; label: string };
+type FieldDef = {
+  key: string;
+  label: string;
+  /**
+   * 列类型提示（仅用于搜索表达式生成，默认 text）。
+   * P0-8（2026-11-07）：equipment.type_id/vendor_id 是 UUID、purchase_date 是 DATE、price 是
+   * NUMERIC，旧实现对所有字段一律 `${col} ILIKE $n` → PostgreSQL 报
+   * `operator does not exist: uuid ~~* unknown`，用户一点搜索就 500。
+   * 非文本列先 ::text 再 ILIKE，既保留模糊搜索能力，又不依赖隐式转换。
+   */
+  kind?: 'text' | 'uuid' | 'date' | 'numeric';
+};
 type TypeDef = {
   table: string;
   columns: string[];
@@ -38,14 +50,14 @@ const TYPES: Record<string, TypeDef> = {
     fields: [
       { key: 'name', label: '设备名称' },
       { key: 'code', label: '设备编号' },
-      { key: 'type_id', label: '设备类型' },
-      { key: 'vendor_id', label: '设备厂商' },
+      { key: 'type_id', label: '设备类型', kind: 'uuid' },
+      { key: 'vendor_id', label: '设备厂商', kind: 'uuid' },
       { key: 'model', label: '型号' },
       { key: 'sn', label: '序列号' },
       { key: 'location', label: '安装位置' },
       { key: 'status', label: '状态' },
-      { key: 'purchase_date', label: '购置日期' },
-      { key: 'price', label: '购置金额' },
+      { key: 'purchase_date', label: '购置日期', kind: 'date' },
+      { key: 'price', label: '购置金额', kind: 'numeric' },
       { key: 'responsible', label: '责任人' },
       { key: 'remark', label: '备注' },
     ],
@@ -108,6 +120,16 @@ function getType(t: string): TypeDef {
   const d = TYPES[t];
   if (!d) throw new AppError('BAD_TYPE', `unknown equipment type: ${t}`, 400);
   return d;
+}
+
+/**
+ * 生成单列搜索表达式（P0-8，单一事实源）。
+ * 文本列直接 ILIKE；uuid/date/numeric 先 ::text 再 ILIKE，避免
+ * `operator does not exist: uuid ~~* unknown` 之类的类型错误（用户搜索即 500）。
+ */
+export function equipmentSearchExpr(f: FieldDef, paramRef: string): string {
+  const cast = f.kind && f.kind !== 'text' ? '::text' : '';
+  return `${f.key}${cast} ILIKE ${paramRef}`;
 }
 
 /**
@@ -233,8 +255,9 @@ router.get('/equipment/:type', async (req, res, next) => {
     const params: unknown[] = [tenantId];
     if (q) {
       const like = `%${q}%`;
-      const searchCols = def.fields.map((f) => f.key);
-      const ors = searchCols.map((c) => `${c} ILIKE $${params.length + 1}`).join(' OR ');
+      // P0-8：按字段类型生成搜索表达式（uuid/date/numeric 不能直接 ILIKE）。
+      const ref = `$${params.length + 1}`;
+      const ors = def.fields.map((f) => equipmentSearchExpr(f, ref)).join(' OR ');
       params.push(like);
       clauses.push(`(${ors})`);
     }
@@ -325,18 +348,73 @@ router.delete('/equipment/:type/:id', async (req, res, next) => {
 });
 
 // ============ CSV 导出 ============
+const EQUIP_STATUS_CN: Record<string, string> = {
+  in_use: '在用', idle: '闲置', repair: '维修中', repairing: '维修中', scrapped: '报废', disabled: '停用',
+};
+const EQUIP_STATUS_FROM_CN: Record<string, string> = {
+  在用: 'in_use', 闲置: 'idle', 维修中: 'repair', 报废: 'scrapped', 停用: 'disabled',
+};
+
+function equipCsvFields(
+  def: TypeDef,
+  type: string,
+  typeName: Map<string, string>,
+  vendorName: Map<string, string>,
+): CsvField[] {
+  return def.fields.map((f) => {
+    if (type === 'equipment' && f.key === 'type_id') {
+      return { key: f.key, label: f.label, export: (r: any) => typeName.get(String(r.type_id)) || '' };
+    }
+    if (type === 'equipment' && f.key === 'vendor_id') {
+      return { key: f.key, label: f.label, export: (r: any) => vendorName.get(String(r.vendor_id)) || '' };
+    }
+    if (type === 'equipment' && f.key === 'status') {
+      return {
+        key: f.key, label: f.label,
+        export: (r: any) => EQUIP_STATUS_CN[r.status] || r.status || '',
+        parse: (v: string) => EQUIP_STATUS_FROM_CN[v] || v || undefined,
+      };
+    }
+    if (f.key === 'purchase_date') {
+      return { key: f.key, label: f.label, export: (r: any) => csvDateOnly(r.purchase_date) };
+    }
+    return { key: f.key, label: f.label };
+  });
+}
+
+async function loadEquipNames(client: any, tenantId: string): Promise<{ type: Map<string, string>; vendor: Map<string, string>; typeId: Map<string, string>; vendorId: Map<string, string> }> {
+  const typeRows = (await client.query(`SELECT id, code, name FROM equipment_type WHERE tenant_id=$1`, [tenantId])).rows;
+  const vendorRows = (await client.query(`SELECT id, code, name FROM equipment_vendor WHERE tenant_id=$1`, [tenantId])).rows;
+  const type = new Map<string, string>();
+  const typeId = new Map<string, string>();
+  for (const r of typeRows) {
+    type.set(String(r.id), String(r.name));
+    typeId.set(String(r.name), String(r.id));
+    if (r.code) typeId.set(String(r.code), String(r.id));
+  }
+  const vendor = new Map<string, string>();
+  const vendorId = new Map<string, string>();
+  for (const r of vendorRows) {
+    vendor.set(String(r.id), String(r.name));
+    vendorId.set(String(r.name), String(r.id));
+    if (r.code) vendorId.set(String(r.code), String(r.id));
+  }
+  return { type, vendor, typeId, vendorId };
+}
+
 router.get('/equipment/:type/export', async (req, res, next) => {
   try {
     const def = getType(req.params.type);
     const tenantId = res.locals.auth.tenantId;
-    // R9-F1：导出属管理面，仅 admin/operator ⇒ 现由 equipment.manage 权限点表达（operator 默认有）
-    const items = await withTenantClient(tenantId, async (client) => {
+    const result = await withTenantClient(tenantId, async (client) => {
       await requirePermission(res.locals.auth, client, 'equipment.manage');
-      return client.query(`SELECT * FROM ${def.table} WHERE tenant_id=$1 ORDER BY created_at DESC`, [tenantId]).then((r) => r.rows);
+      const items = await client.query(`SELECT * FROM ${def.table} WHERE tenant_id=$1 ORDER BY created_at DESC`, [tenantId]).then((r) => r.rows);
+      const names = req.params.type === 'equipment' ? await loadEquipNames(client, tenantId) : { type: new Map(), vendor: new Map(), typeId: new Map(), vendorId: new Map() };
+      return { items, names };
     });
-    const headers = def.insertCols;
-    const lines = [headers.join(',')];
-    for (const row of items) lines.push(headers.map((h) => csvEscape(row[h])).join(','));
+    const fields = equipCsvFields(def, req.params.type, result.names.type, result.names.vendor);
+    const lines = [csvHeader(fields)];
+    for (const row of result.items) lines.push(csvRowLine(row, fields));
     const csv = '﻿' + lines.join('\r\n');
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
     res.setHeader('Content-Disposition', `attachment; filename="${def.table}.csv"`);
@@ -354,30 +432,43 @@ router.post('/equipment/:type/import', async (req, res, next) => {
     const text = typeof req.body === 'string' ? req.body : (req.body as any)?.csv;
     if (!text || typeof text !== 'string') throw new AppError('BAD_INPUT', 'csv text required', 400);
     const rows = parseCsv(text);
-    if (rows.length < 2) return res.json({ ok: true, code: 0, inserted: 0 });
-    const headers = rows[0].map((h) => h.trim());
-    const dataRows = rows.slice(1);
+    if (rows.length < 2) return res.json({ ok: true, code: 0, inserted: 0, skipped: 0, errors: [] });
+    if (rows.length - 1 > 2000) throw new AppError('BAD_INPUT', '单次导入最多 2000 行，请拆分后分批导入', 400);
     let inserted = 0;
+    const errors: Array<{ row: number; reason: string }> = [];
     await withTenantClient(tenantId, async (client) => {
       await requirePermission(res.locals.auth, client, 'equipment.manage');
-      for (const r of dataRows) {
-        const obj: Record<string, unknown> = {};
-        headers.forEach((h, i) => {
-          if (def.insertCols.includes(h)) obj[h] = r[i] ?? null;
-        });
-        if (!obj.name) continue; // 名称必填，跳过空行
-        const id = randomUUID();
-        // 仅插入 CSV 实际提供的列（省略未提供/空列，让 DB 的 DEFAULT/NOT NULL DEFAULT 生效，
-        // 避免对 status 等 NOT NULL 列强行写 NULL 触发 23502）。与 basicData 导入逻辑一致。
-        const provided = resolveInsertColumns(def, obj);
-        const cols = ['id', 'tenant_id', ...provided];
-        const ph = cols.map((_, i) => `$${i + 1}`).join(', ');
-        const vals = [id, tenantId, ...provided.map((c) => obj[c])];
-        await client.query(`INSERT INTO ${def.table} (${cols.join(', ')}) VALUES (${ph})`, vals);
-        inserted++;
+      const names = req.params.type === 'equipment' ? await loadEquipNames(client, tenantId) : null;
+      const fields = equipCsvFields(def, req.params.type, names?.type ?? new Map(), names?.vendor ?? new Map());
+      const headerMap = csvHeaderMap(rows[0], fields);
+      const dataRows = rows.slice(1);
+      for (let i = 0; i < dataRows.length; i++) {
+        const obj = csvParseRow(dataRows[i], headerMap);
+        if (req.params.type === 'equipment') {
+          const typeName = String(obj.type_id ?? '').trim();
+          const vendorName = String(obj.vendor_id ?? '').trim();
+          if (typeName) obj.type_id = names!.typeId.get(typeName) ?? (typeName.length === 36 ? typeName : undefined);
+          if (vendorName) obj.vendor_id = names!.vendorId.get(vendorName) ?? (vendorName.length === 36 ? vendorName : undefined);
+          if (typeName && !obj.type_id) { errors.push({ row: i + 2, reason: `设备类型不存在：${typeName}` }); continue; }
+          if (vendorName && !obj.vendor_id) { errors.push({ row: i + 2, reason: `设备厂商不存在：${vendorName}` }); continue; }
+        }
+        if (!obj.name) { errors.push({ row: i + 2, reason: '缺少名称' }); continue; }
+        try {
+          await withRowSavepoint(client, async () => {
+            const id = randomUUID();
+            const provided = resolveInsertColumns(def, obj);
+            const cols = ['id', 'tenant_id', ...provided];
+            const ph = cols.map((_, n) => `$${n + 1}`).join(', ');
+            const vals = [id, tenantId, ...provided.map((c) => obj[c])];
+            await client.query(`INSERT INTO ${def.table} (${cols.join(', ')}) VALUES (${ph})`, vals);
+          });
+          inserted++;
+        } catch (e: any) {
+          errors.push({ row: i + 2, reason: e?.message || '写入失败' });
+        }
       }
     });
-    return res.json({ ok: true, code: 0, inserted });
+    return res.json({ ok: true, code: 0, inserted, skipped: errors.length, errors: errors.slice(0, 20) });
   } catch (e) {
     next(e);
   }

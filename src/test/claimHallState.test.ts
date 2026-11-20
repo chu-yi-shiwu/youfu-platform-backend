@@ -94,8 +94,9 @@ describe('端到端：4 态 def 租户 派单未命中 → 落大厅 → transit
   it('派单未命中（无工人）→ 真实 autoDispatchAfterCreate 落 claim_hall（读路径注入不影响落厅行为）', async () => {
     // F8：落大厅改走 transition() 主通道 → mock 必须提供工单行锁读（FOR UPDATE）与 UPDATE RETURNING
     //   （此前旁路直接 UPDATE，不需要读行；这正是"旁路不校验任何东西"的副作用之一）。
-    const WO = { id: 'wo-hall-1', tenant_id: 't-4state', status: 'draft', assignee_id: null, ext: {}, priority: 'normal', catalog: null };
+    const WO = { id: 'wo-hall-1', tenant_id: 't-4state', status: 'draft', assignee_id: null, department_id: null, department_source: null, ext: {}, priority: 'normal', catalog: null };
     const { client, calls } = makeClient(async (text: string, params?: any[]) => {
+      if (text.includes('SELECT department_id FROM worker WHERE id')) return { rows: [{ department_id: null }], rowCount: 1 };
       if (text.includes('FROM worker WHERE tenant_id')) return { rows: [] };
       if (text.includes('SELECT def FROM workflow_def')) return { rows: [] }; // 无 def 行 → DEFAULT → 注入
       if (text.includes('FOR UPDATE')) return { rows: [WO], rowCount: 1 };
@@ -142,9 +143,10 @@ describe('端到端：4 态 def 租户 派单未命中 → 落大厅 → transit
   it('真实 transition() 从 claim_hall dispatch 出厅 → assigned + worker load+1（大厅积压可人工派单消化）', async () => {
     const { client, calls } = makeClient(async (text: string) => {
       if (text.includes('FOR UPDATE')) {
-        return { rows: [{ id: 'wo-hall-2', tenant_id: 't-4state', order_no: 'WO_2', status: 'claim_hall', assignee_id: null }] };
+        return { rows: [{ id: 'wo-hall-2', tenant_id: 't-4state', order_no: 'WO_2', status: 'claim_hall', assignee_id: null, department_id: null, department_source: null }] };
       }
       if (text.includes('SELECT def FROM workflow_def')) return { rows: [{ def: FOUR_STATE_DEF }] };
+      if (text.includes('SELECT department_id FROM worker WHERE id')) return { rows: [{ department_id: null }], rowCount: 1 };
       if (text.includes('SELECT 1 FROM worker')) return { rows: [{ ok: 1 }], rowCount: 1 };
       if (text.includes('UPDATE work_orders SET status')) {
         return { rows: [{ id: 'wo-hall-2', status: 'assigned', assignee_id: 'wk-9' }] };

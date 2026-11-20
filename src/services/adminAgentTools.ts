@@ -34,19 +34,19 @@ function toResultItem(r: WorkOrderRow): TicketResultItem {
     order_no: r.order_no,
     status: r.status,
     priority: r.priority,
-    department: r.department ?? undefined,
+    department_id: r.department_id ?? undefined,
+    department_name: r.department_name ?? null,
     assignee_name: r.assignee_name ?? null,
     created_at: r.created_at,
   };
 }
 
-function describeConds(q: { status?: string; priority?: string; department?: string; service_desk?: string; source?: string; today_only?: boolean }): string {
+function describeConds(q: { status?: string; priority?: string; department_id?: string; source?: string; today_only?: boolean }): string {
   const parts: string[] = [];
   if (q.today_only) parts.push('仅今天');
   if (q.priority) parts.push(`优先级 ${q.priority}`);
   if (q.status) parts.push(`状态 ${q.status}`);
-  if (q.department) parts.push(`科室/位置 ${q.department}`);
-  if (q.service_desk) parts.push(`服务台 ${q.service_desk}`);
+  if (q.department_id) parts.push(`责任部门 ${q.department_id}`);
   if (q.source) parts.push(`来源 ${q.source}`);
   return parts.join(' · ');
 }
@@ -96,9 +96,8 @@ async function queryTickets(tenantId: string, rawArgs: Record<string, unknown>, 
     const { items, total } = await list(client, tenantId, {
       status: q.status as never,
       priority: q.priority,
-      department: q.department,
+      departmentId: q.department_id,
       source: q.source,
-      service_desk: q.service_desk,
       limit: 10,
       offset: 0,
       createdSince: q.today_only ? startOfToday() : undefined,

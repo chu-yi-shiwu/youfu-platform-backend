@@ -69,7 +69,9 @@ function addCol(table, col, type) {
   tables.get(table).set(col, type);
 }
 
-const sqlFiles = readdirSync(root).filter((f) => /^\d{3}[a-z]?_.*\.sql$/i.test(f)).sort();
+// P0-1：严格迁移命名（与 src/db/migrationFiles.ts 同口径）。053b/053c 这类
+// 数字后带字母的文件不再被误认为可自动执行的迁移；其加法部分已由 106/107 接管。
+const sqlFiles = readdirSync(root).filter((f) => /^\d{3,6}_[a-z0-9][a-z0-9_]*\.sql$/i.test(f)).sort();
 for (const f of sqlFiles) {
   const raw = readFileSync(join(root, f), 'utf8');
   // 迁移文件是 CRLF：先统一换行符，否则逐行 `--.*$` 的 `.` 不吃 \r 会导致整行注释失配
@@ -321,6 +323,10 @@ console.log(
 const KNOWN_SKIPPED_TABLES = new Map([
   // _migrations：迁移登记工具表，由初始化通道建立且 DDL 不在业务迁移文件中，列引用均为静态字面量。
   ['_migrations', '迁移登记工具表，DDL 不在业务迁移文件中，由初始化通道建立'],
+  // pg_class / pg_namespace：PostgreSQL 系统目录，用于 RLS 开启表数自检；
+  // 不是业务表，也不应有业务迁移 DDL，列名（relrowsecurity/oid/relkind/nspname）由 PG 保证。
+  ['pg_class', 'PostgreSQL 系统目录（RLS 自检），非业务表，无业务迁移 DDL'],
+  ['pg_namespace', 'PostgreSQL 系统目录（RLS 自检），非业务表，无业务迁移 DDL'],
 ]);
 if (skippedTables.size > 0) {
   const unknown = [...skippedTables].filter((t) => !KNOWN_SKIPPED_TABLES.has(t));

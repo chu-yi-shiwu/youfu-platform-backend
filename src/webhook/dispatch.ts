@@ -9,7 +9,13 @@ import http from 'node:http';
 import https from 'node:https';
 import dns from 'node:dns';
 import net from 'node:net';
+import type { PoolClient } from 'pg';
 import { withTenantClient } from '../db/pool.js';
+
+// Webhook 投递是后台系统动作（fire-and-forget），显式 system scope。
+function withSystemTenantClient<T>(tenantId: string, fn: (client: PoolClient) => Promise<T>): Promise<T> {
+  return withTenantClient(tenantId, fn, { system: true });
+}
 
 export interface WebhookEvent {
   type: string; // create | assign | transition | sla_escalated | webhook_test
@@ -228,7 +234,7 @@ const DELIVERY_TIMEOUT_MS = 5000;
  */
 export async function dispatchEvent(tenantId: string, event: WebhookEvent): Promise<void> {
   try {
-    await withTenantClient(tenantId, async (client) => {
+    await withSystemTenantClient(tenantId, async (client) => {
       const subsRes = await client.query<SubscriptionRow>(
         `SELECT id, url, secret, events FROM webhook_subscription
          WHERE tenant_id = $1 AND active = true`,

@@ -11,7 +11,11 @@ import { requirePermission } from '../middleware/role.js';
 import { emitDomainEvent } from '../db/eventBus.js';
 import { createLinkedWorkOrder } from '../services/linkedWorkOrder.js';
 
+import { requireModuleWrites } from '../middleware/moduleGuard.js';
+
 const router = Router();
+router.use(requireModuleWrites('emergency', { only: [/^\/plans/] }));
+
 
 // ============ 应急预案库 ============
 const planSchema = z.object({
@@ -245,14 +249,16 @@ router.get('/alerts', async (req, res, next) => {
       params.push(v);
       clauses.push(sql.replace(/\?/g, `$${params.length}`));
     };
-    if (status) add('status = ?', status);
-    if (level) add('level = ?', level);
-    if (source_type) add('source_type = ?', source_type);
+    // P0-8（2026-11-07）：alert 与 emergency_plan 都有 status/level 列，JOIN 后不加别名
+    // 会触发 `column reference "level" is ambiguous` → 带筛选的列表请求直接 500。
+    if (status) add('a.status = ?', status);
+    if (level) add('a.level = ?', level);
+    if (source_type) add('a.source_type = ?', source_type);
     const items = await withTenantClient(tenantId, (client) =>
       client
         .query(
           `SELECT a.*, p.title AS plan_title
-           FROM alert a LEFT JOIN emergency_plan p ON p.id = a.related_plan_id
+           FROM alert a LEFT JOIN emergency_plan p ON p.id = a.related_plan_id AND p.tenant_id = a.tenant_id
            WHERE ${clauses.join(' AND ')} ORDER BY a.created_at DESC`,
           params,
         )

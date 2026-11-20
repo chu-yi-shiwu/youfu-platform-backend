@@ -101,14 +101,18 @@ function makeClient(opts: { orderStatus: string }) {
 }
 
 /** 从 TRANSPORT_DEF 里挑一条"admin 能走"的合法流转，避免把夹具写成硬编码状态。 */
-function pickLegalTransition(): { from: string; event: string } {
+function pickLegalTransition(): { from: string; event: string; fields: Record<string, string> } {
   const initial = (TRANSPORT_DEF as { initial: string }).initial;
-  const t = (TRANSPORT_DEF as { transitions: Array<{ from: string; event: string; allowedRoles?: string[] }> })
+  const t = (TRANSPORT_DEF as { transitions: Array<{ from: string; event: string; allowedRoles?: string[]; requiredFields?: string[] }> })
     .transitions.find(
       (x) => x.from === initial && (!x.allowedRoles || x.allowedRoles.length === 0 || x.allowedRoles.includes('admin')),
     );
   if (!t) throw new Error('[夹具] TRANSPORT_DEF 里找不到 admin 可从 initial 发起的流转，夹具需同步更新');
-  return { from: initial, event: t.event };
+  const fields: Record<string, string> = {};
+  for (const f of t.requiredFields ?? []) {
+    fields[f] = f === 'assignee' || f === 'carrier' ? 'w-1' : '夹具备注';
+  }
+  return { from: initial, event: t.event, fields };
 }
 
 interface ListenResult {
@@ -155,7 +159,7 @@ function entityTypeOf(q: CapturedQuery): string {
 
 describe('T5-探针：同一笔运送业务的 domain_event.entityType 必须一致', () => {
   it('🔴 原生运送路由与通用业务流通道，产生的 entity_type 必须相同（现状：不同 ⇒ 口径断裂）', async () => {
-    const { from, event } = pickLegalTransition();
+    const { from, event, fields } = pickLegalTransition();
 
     // —— 通道 A：原生运送路由 POST /transport/orders/:id/transition（transport.ts:74 发事件）——
     const a = makeClient({ orderStatus: from });
@@ -164,7 +168,7 @@ describe('T5-探针：同一笔运送业务的 domain_event.entityType 必须一
     const resA = await fetch(`${appA.url}/transport/orders/${ORDER_ID}/transition`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ event }),
+      body: JSON.stringify({ event, ...fields }),
     });
     appA.server.close();
     expect(resA.status, '原生运送路由应当跑通（跑不通说明是端点问题，不是口径问题）').toBe(200);
@@ -197,14 +201,14 @@ describe('T5-探针：同一笔运送业务的 domain_event.entityType 必须一
   });
 
   it('对照（现状实拍·绿）：原生运送路由记的是 transport_order', async () => {
-    const { from, event } = pickLegalTransition();
+    const { from, event, fields } = pickLegalTransition();
     const a = makeClient({ orderStatus: from });
     h.client = a.client;
     const appA = await listen(appWith(transportRouter, '/transport'));
     await fetch(`${appA.url}/transport/orders/${ORDER_ID}/transition`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ event }),
+      body: JSON.stringify({ event, ...fields }),
     });
     appA.server.close();
     const evA = domainEventParams(a.calls);
@@ -247,14 +251,14 @@ describe('T5-探针：同一笔运送业务的 domain_event.entityType 必须一
   // · 🔴 这不是"改断言把红抹绿"：被断言的对象从"两者相等"换成"两者各自为裁定值 + 有说明"，
   //     断言的仍然是外部可见行为，且第三条形状护栏专门防"后人当成 bug 修回去"（D1 代价条款）。
   it('🔴 D1 双名护栏：def 口径必须 transport_task、事件口径必须 transport_order，且源码必须写明', async () => {
-    const { from, event } = pickLegalTransition();
+    const { from, event, fields } = pickLegalTransition();
     const a = makeClient({ orderStatus: from });
     h.client = a.client;
     const appA = await listen(appWith(transportRouter, '/transport'));
     await fetch(`${appA.url}/transport/orders/${ORDER_ID}/transition`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ event }),
+      body: JSON.stringify({ event, ...fields }),
     });
     appA.server.close();
 

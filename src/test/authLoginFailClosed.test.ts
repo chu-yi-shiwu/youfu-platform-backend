@@ -80,8 +80,22 @@ CREATE TABLE account_user (
   updated_at     timestamptz NOT NULL DEFAULT now(),
   phone          text,
   wx_openid      text,
+  token_version  integer NOT NULL DEFAULT 0,
   UNIQUE (tenant_id, username)
 );
+CREATE OR REPLACE FUNCTION bump_account_token_version() RETURNS trigger AS $$
+BEGIN
+  IF NEW.role IS DISTINCT FROM OLD.role
+     OR NEW.active IS DISTINCT FROM OLD.active
+     OR NEW.password_hash IS DISTINCT FROM OLD.password_hash THEN
+    NEW.token_version := OLD.token_version + 1;
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+CREATE TRIGGER trg_account_token_version
+  BEFORE UPDATE ON account_user
+  FOR EACH ROW EXECUTE FUNCTION bump_account_token_version();
 CREATE TABLE role_permission (
   tenant_id  text NOT NULL,
   role       text NOT NULL,
@@ -130,6 +144,12 @@ beforeEach(async () => {
     );
   }
   await db().query(
+    `INSERT INTO account_user (tenant_id, username, password_hash, role, active)
+     VALUES ($1, 'worker-a', $2, 'worker', true),
+            ($1, 'operator-a', $2, 'operator', true)`,
+    [T_ACTIVE, hashPassword('Passw0rd2026')],
+  );
+  await db().query(
     `INSERT INTO tenant_registry (tenant_id, name, status) VALUES
      ($1, '在册机构', 'active'),
      ($2, '封禁机构', 'suspended'),
@@ -139,11 +159,11 @@ beforeEach(async () => {
   // 注意：T_ORPHAN 故意不建登记行（账号在、登记行不在 = 生产漏尾形态）
 });
 
-async function login(tenant: string, password = 'Passw0rd2026') {
+async function login(tenant: string, password = 'Passw0rd2026', username = 'zhangsan', channel?: 'pc' | 'mp') {
   const r = await fetch(`${base}/auth/login`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ username: 'zhangsan', password, tenant }),
+    body: JSON.stringify({ username, password, tenant, ...(channel ? { channel } : {}) }),
   });
   const text = await r.text();
   let j: Record<string, unknown> = {};
@@ -190,5 +210,50 @@ describe('登录 fail-closed —— 登记行是登录的前置条件', () => {
     const r = await login(T_ACTIVE, 'wrong-password');
     expect(r.status).toBe(401);
     expect((r.body as { code?: string }).code).toBe('AUTH_003');
+  });
+});
+
+describe('token_version 即时失效（115）', () => {
+  it('新签发 token 带 tv；角色变化后 token_version 自增', async () => {
+    const r = await login(T_ACTIVE);
+    const token = String((r.body as { token?: string }).token || '');
+    const payload = JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString('utf8')) as { tv?: number };
+    expect(payload.tv).toBe(0);
+
+    await db().query(`UPDATE account_user SET role='worker' WHERE tenant_id=$1 AND username='zhangsan'`, [T_ACTIVE]);
+    const row = await db().query(`SELECT token_version FROM account_user WHERE tenant_id=$1 AND username='zhangsan'`, [T_ACTIVE]);
+    expect(row.rows[0].token_version).toBe(1);
+  });
+});
+
+describe('渠道收口（服务端强校验）', () => {
+  it('worker + pc → 403 CHANNEL_FORBIDDEN，且不发 token', async () => {
+    const r = await login(T_ACTIVE, 'Passw0rd2026', 'worker-a', 'pc');
+    expect(r.status).toBe(403);
+    expect((r.body as { code?: string }).code).toBe('CHANNEL_FORBIDDEN');
+    expect(String((r.body as { message?: string }).message)).toContain('小程序');
+    expect((r.body as { token?: string }).token).toBeUndefined();
+  });
+
+  it('operator + mp → 403 CHANNEL_FORBIDDEN，且不发 token', async () => {
+    const r = await login(T_ACTIVE, 'Passw0rd2026', 'operator-a', 'mp');
+    expect(r.status).toBe(403);
+    expect((r.body as { code?: string }).code).toBe('CHANNEL_FORBIDDEN');
+    expect(String((r.body as { message?: string }).message)).toContain('PC 管理端');
+    expect((r.body as { token?: string }).token).toBeUndefined();
+  });
+
+  it('worker + mp / operator + pc → 正常签发', async () => {
+    const w = await login(T_ACTIVE, 'Passw0rd2026', 'worker-a', 'mp');
+    expect(w.status).toBe(200);
+    expect(String((w.body as { token?: string }).token ?? '').length).toBeGreaterThan(10);
+    const o = await login(T_ACTIVE, 'Passw0rd2026', 'operator-a', 'pc');
+    expect(o.status).toBe(200);
+    expect(String((o.body as { token?: string }).token ?? '').length).toBeGreaterThan(10);
+  });
+
+  it('缺省 channel（老客户端）不拦，保持兼容', async () => {
+    const r = await login(T_ACTIVE, 'Passw0rd2026', 'worker-a');
+    expect(r.status).toBe(200);
   });
 });

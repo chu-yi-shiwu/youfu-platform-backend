@@ -1,0 +1,9 @@
+code,name,business_type,skill_tags,sort
+hosp_water,水管漏水,repair,"[""repair"",""plumbing""]",10
+hosp_electric,电路跳闸,repair,"[""repair"",""electric""]",20
+hosp_ac,空调不制冷,repair,"[""repair"",""hvac""]",30
+hosp_door,门窗损坏,repair,"[""repair""]",40
+hosp_network,网络故障,repair,"[""repair"",""network""]",50
+hosp_clean,日常保洁,cleaning,"[""cleaning""]",60
+hosp_security,安保巡查,security,"[""security""]",70
+hosp_other,其他,repair,"[""repair""]",999

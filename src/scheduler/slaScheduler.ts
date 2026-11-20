@@ -6,6 +6,7 @@
 //      （064 迁移，绕 RLS 只返回 tenant_id 列表，逐租户回 withTenantClient 隔离执行）；
 //   ③ 通知闭环：命中升级时 insertNotification 通知 该单在身 assignee（若有）+ 租户在岗管理员，
 //      in_app 渠道落库即可达；sms/push/wechat 仍按网关配置诚实 stub（delivered=false）。
+import type { PoolClient } from 'pg';
 import pool from '../db/pool.js';
 import { withTenantClient } from '../db/pool.js';
 import { getDefsAcrossAllVersions, getDefsForVersions, intersectStates, unionStates } from '../engine/workflowDef.js';
@@ -16,6 +17,11 @@ import { emitDomainEvent } from '../db/eventBus.js';
 import { dispatchEvent } from '../webhook/dispatch.js';
 import { insertNotification } from '../services/notify.js';
 import { tryAcquireSchedulerLock, releaseSchedulerLock } from './lock.js';
+
+// 后台 cron 没有 JWT，必须显式 system scope。
+function withSystemTenantClient<T>(tenantId: string, fn: (client: PoolClient) => Promise<T>): Promise<T> {
+  return withTenantClient(tenantId, fn, { system: true });
+}
 
 const TICK_MS = 60_000;
 let timer: ReturnType<typeof setInterval> | null = null;
@@ -55,7 +61,7 @@ export function claimHallTimeoutMinutes(): number {
 
 export async function runClaimHallTimeoutScanForTenant(tenantId: string): Promise<ClaimHallHit[]> {
   const timeoutMin = claimHallTimeoutMinutes();
-  return withTenantClient(tenantId, async (client) => {
+  return withSystemTenantClient(tenantId, async (client) => {
     const rows = await client.query<{ id: string; order_no: string; updated_at: string }>(
       `SELECT w.id, w.order_no, w.updated_at FROM work_orders w
        WHERE w.tenant_id = $1 AND w.status = $2
@@ -132,7 +138,7 @@ export interface TransportSlaHit {
  * 与工单线 runSlaScanForTenant 同租户隔离（withTenantClient），复用 cron 的逐租户枚举。
  */
 export async function runTransportSlaScanForTenant(tenantId: string): Promise<TransportSlaHit[]> {
-  return withTenantClient(tenantId, async (client) => {
+  return withSystemTenantClient(tenantId, async (client) => {
     // ============================ T1-B 批 8 · 根治（独立评审 M1） ============================
     // 【批 5 的老写法为什么挡不住洞】那时候手上没有具体行，只能"读各版本的 def 求集合"：
     //   SQL 用 `status <> ALL(各版本终态的**交集**)` 排除。客户把完成态改名（v1='done'
@@ -175,7 +181,7 @@ export async function runTransportSlaScanForTenant(tenantId: string): Promise<Tr
          AND sla_due_at IS NOT NULL AND escalated_at IS NULL AND sla_due_at < now()`,
       [tenantId, exclude],
     );
-    const defs = await getDefsForVersions(client, tenantId, 'transport_task', rows.rows, TRANSPORT_DEF);
+    const defs = await getDefsForVersions(client, tenantId, 'transport_task', rows.rows, TRANSPORT_DEF, true);
     const candidates = rows.rows.filter((r) => {
       // getDefsForVersions 的 key 就是 `Number(row.def_version) || 0`，永远命中（查不到的版本
       // 已在函数内降级到 live 并保留自己的 key）⇒ 取不到只可能是 Map 本身为空（rows 为空），保守跳过。
@@ -228,7 +234,7 @@ export async function runTransportSlaScanForTenant(tenantId: string): Promise<Tr
  * 返回命中清单（供端点透出 / cron 统计）。
  */
 export async function runSlaScanForTenant(tenantId: string): Promise<SlaHit[]> {
-  return withTenantClient(tenantId, async (client) => {
+  return withSystemTenantClient(tenantId, async (client) => {
     // A+ Phase1.5：SLA 活跃集由 workflow_def 派生（排除完成态 ∪ 终态 ∪ 挂起态），
     // 与富模板对齐且不写死 4 态（R13-005 修复口径，保持不变）。
     // F8：挂起态与 load 结算共用 holdStates 派生（客户自定义挂起态名不再被漏排）。
@@ -242,13 +248,25 @@ export async function runSlaScanForTenant(tenantId: string): Promise<SlaHit[]> {
       workOrderDefs.map((d) => Array.from(new Set([...doneStates(d), ...terminalStates(d)]))),
     );
     const activeStates = unionStates(workOrderDefs.map((d) => engineActiveStates(d)));
-    const active = await client.query<SlaScanRow & { assignee_id: string | null; order_no: string }>(
-      `SELECT id, status, sla_due_at, escalated_at, assignee_id, order_no FROM work_orders
-       WHERE tenant_id = $1 AND status <> ALL($2::text[])`,
+    const active = await client.query<SlaScanRow & { assignee_id: string | null; order_no: string; def_version: number | null }>(
+      `SELECT id, status, sla_due_at, escalated_at, assignee_id, order_no, def_version FROM work_orders
+       WHERE tenant_id = $1 AND status <> ALL($2::text[]) AND sla_paused_at IS NULL`,
       [tenantId, slaExclude],
     );
+    // P1-2：SQL 只做“不漏报”的预过滤；最终按每张工单锁定的 def_version 精确判定，
+    // 避免旧版完成态在当前版本是在途态时被误升级。
+    const defs = await getDefsForVersions(
+      client, tenantId, 'work_order', active.rows, DEFAULT_WORK_ORDER_DEF, true,
+    );
+    const preciseRows = active.rows.filter((r) => {
+      const d = defs.get(Number(r.def_version) || 0);
+      if (!d) return false;
+      const status = String(r.status);
+      if (deadStatesOf(d).includes(status)) return false;
+      return engineActiveStates(d).includes(status as WorkOrderStatus);
+    });
     const hits = slaScan(
-      active.rows.map((r) => ({
+      preciseRows.map((r) => ({
         id: r.id,
         status: r.status as WorkOrderStatus,
         sla_due_at: r.sla_due_at,
@@ -257,8 +275,8 @@ export async function runSlaScanForTenant(tenantId: string): Promise<SlaHit[]> {
       new Date(),
       activeStates,
     );
-    const orderNoById = new Map(active.rows.map((r) => [r.id, r.order_no] as const));
-    const assigneeById = new Map(active.rows.map((r) => [r.id, r.assignee_id] as const));
+    const orderNoById = new Map(preciseRows.map((r) => [r.id, r.order_no] as const));
+    const assigneeById = new Map(preciseRows.map((r) => [r.id, r.assignee_id] as const));
     for (const h of hits) {
       await client.query(
         'UPDATE work_orders SET escalated_at = now() WHERE id = $1',

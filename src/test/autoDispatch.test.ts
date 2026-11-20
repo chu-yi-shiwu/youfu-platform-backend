@@ -35,6 +35,8 @@ function dispatchHandler(opts: {
 } = {}): QueryFn {
   return async (text: string, params?: any[]) => {
     if (text.includes('UPDATE work_orders SET sla_minutes')) return { rows: [] };
+    // transition 的部门 late-bind 查询（与候选池查询区分）
+    if (text.includes('SELECT department_id FROM worker WHERE id')) return { rows: [{ department_id: null }], rowCount: 1 };
     if (text.includes('FROM worker WHERE tenant_id')) return { rows: opts.workerRows ?? [] };
     if (text.includes('FROM fault_category')) return { rows: opts.catalogRows ?? [] };
     if (text.includes('FROM dispatch_rule WHERE')) return { rows: opts.ruleRows ?? [] }; // 无规则 → least_load 兜底

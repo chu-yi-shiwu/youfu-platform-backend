@@ -64,6 +64,9 @@ CREATE TABLE worker (
   active     boolean NOT NULL DEFAULT true,
   created_at timestamptz NOT NULL DEFAULT now()
 );
+CREATE TABLE dept (
+  id uuid PRIMARY KEY, tenant_id text NOT NULL, name text, is_default boolean NOT NULL DEFAULT false
+);
 CREATE TABLE work_orders (
   id            text PRIMARY KEY,
   tenant_id     text NOT NULL,
@@ -76,6 +79,7 @@ CREATE TABLE work_orders (
   contact       text,
   order_no      text,
   department    text,
+  department_id uuid,
   status        text NOT NULL DEFAULT 'draft',
   assignee_id   text,
   auto_flow     boolean NOT NULL DEFAULT false,

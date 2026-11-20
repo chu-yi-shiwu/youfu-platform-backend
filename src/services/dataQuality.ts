@@ -141,7 +141,9 @@ export async function qualityReport(client: PoolClient, tenantId: string): Promi
 const PHONE_RE = /^(?:1[3-9]\d{9}|0\d{2,3}-?\d{7,8}(?:-\d{1,5})?|\d{7,8})$/;
 // 标题去噪：去首尾空白/控制字符/重复空格，长度 3-120（过短无信息量、超长刷屏）
 const TITLE_MAX = 120;
-const TITLE_MIN = 3;
+// 2026-11-10：3 → 2。医院现场常见「空调」「漏水」「跳闸」这类两字标题，
+// 配合描述/目录已足够派单；1 字/空标题仍硬拒。避免把真实报修挡在门外。
+const TITLE_MIN = 2;
 // 术语联想（轻量内置映射，009_term 语义层接入留后续）：常见口语 → 规范业务词
 const TERM_MAP: Array<[RegExp, string]> = [
   [/空调不冷|不制冷|没冷气/i, '暖通空调故障'],

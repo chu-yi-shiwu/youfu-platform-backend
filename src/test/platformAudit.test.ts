@@ -22,9 +22,8 @@
  */
 
 import { describe, it, expect, vi } from 'vitest';
-import { readFileSync } from 'node:fs';
-import { execSync } from 'node:child_process';
-import { join } from 'node:path';
+import { readFileSync, readdirSync } from 'node:fs';
+import { join, relative } from 'node:path';
 
 const ROOT = join(process.cwd(), 'src');
 
@@ -152,20 +151,36 @@ describe('C. 接入守卫：抽了必须有人用（防"造了个没人调的函
   }
 
   it('C8 全仓 INSERT 只剩共享模块 + 一处有据的 fail-closed 例外', () => {
-    // 只扫源码目录，排除 src/test（测试自身含该字符串，不能算进来）
-    const out = execSync(
-      'grep -rn "INSERT INTO platform_audit" src/repo src/routes src/services src/engine src/middleware src/scheduler src/webhook --include=*.ts || true',
-      { cwd: process.cwd(), encoding: 'utf8' },
-    );
-    const lines = out
-      .split('\n')
-      .filter((l: string) => l.includes('INSERT INTO platform_audit'))
-      // 排除注释行（模块头注释里复述了这句 SQL，不算实现）
-      .filter((l: string) => !/:\d+:\s*(\*|\/\/)/.test(l));
+    // 只扫源码目录，排除 src/test（测试自身含该字符串，不能算进来）。
+    // 2026-11-04：原实现调外部 `grep`，Windows 无 grep 时 execSync 直接抛错——
+    // 门禁在 CI/Linux 能过、本地全量却永远红。改为 Node 原生递归扫描，跨平台一致。
+    const SCAN_DIRS = ['repo', 'routes', 'services', 'engine', 'middleware', 'scheduler', 'webhook'];
+    const hits: string[] = [];
+    const walk = (dir: string): void => {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const p = join(dir, entry.name);
+        if (entry.isDirectory()) {
+          walk(p);
+          continue;
+        }
+        if (!entry.isFile() || !entry.name.endsWith('.ts')) continue;
+        const rel = relative(ROOT, p).split('\\').join('/');
+        readFileSync(p, 'utf8')
+          .split(/\r?\n/)
+          .forEach((line, i) => {
+            if (!line.includes('INSERT INTO platform_audit')) return;
+            // 排除注释行（模块头注释里复述了这句 SQL，不算实现）
+            if (/^\s*(\*|\/\/)/.test(line)) return;
+            hits.push(`${rel}:${i + 1}:${line}`);
+          });
+      }
+    };
+    for (const d of SCAN_DIRS) walk(join(ROOT, d));
+
     // 允许两处：共享模块本体 + workflowDef 的自批豁免留痕（后者契约相反，见其注释）。
     // 第三处出现即视为"又有人复制了一份"，必须回到共享模块。
-    expect(lines.length).toBeLessThanOrEqual(2);
-    expect(lines.some((l: string) => l.includes('repo/platformAudit.ts'))).toBe(true);
+    expect(hits.length).toBeLessThanOrEqual(2);
+    expect(hits.some((l) => l.includes('repo/platformAudit.ts'))).toBe(true);
   });
 
   it('C9 fail-closed 例外必须写明理由（不许悄悄保留内联实现）', () => {

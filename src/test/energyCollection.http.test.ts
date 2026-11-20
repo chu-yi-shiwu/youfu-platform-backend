@@ -122,9 +122,16 @@ function makeClient() {
   };
 }
 
+const tenantClientCalls = vi.hoisted(() => [] as Array<{ tid: string; system: boolean }>);
+
 vi.mock('../db/pool.js', () => ({
   default: { query: vi.fn(async () => ({ rows: [], rowCount: 0 })) },
-  withTenantClient: async (_tid: string, fn: (c: unknown) => unknown) => fn(makeClient()),
+  withTenantClient: async (tid: string, fn: (c: unknown) => unknown, opts?: { system?: boolean }) => {
+    // 2026-11-12 回归：energy 路由挂在 authMiddleware 之前，无 ALS 上下文，
+    // 若不传 { system: true } 真实池会抛 MISSING_AUTH_CONTEXT → 500。此处留痕供断言。
+    tenantClientCalls.push({ tid, system: !!opts?.system });
+    return fn(makeClient());
+  },
   assertSafeTenantId: (t: string) => t,
 }));
 vi.mock('../db/eventBus.js', () => ({
@@ -341,6 +348,22 @@ describe('POST /energy/token-exchange + worker 只读列表 —— token 三链'
     // 无 token → 401
     const anon = await fetch(url + '/api/v1/energy/tasks');
     expect(anon.status).toBe(401);
+  });
+
+  it('E07b 回归：worker JWT 链查询必须显式 system 作用域（否则真实池 500 MISSING_AUTH_CONTEXT）', async () => {
+    const nowSec = Math.floor(Date.now() / 1000);
+    const token = signJwt(
+      { sub: 'w-001', worker_ref: 'youfu:w-001', scope: 'energy_collection', tid: 't-verification', iat: nowSec, exp: nowSec + 900 },
+      't303a-test-jwt-secret',
+    );
+    tenantClientCalls.length = 0;
+    const r = await fetch(url + '/api/v1/energy/tasks?assignee=w-001', {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    expect(r.status).toBe(200);
+    expect(tenantClientCalls.length).toBeGreaterThan(0);
+    // 本路由所有 DB 访问都无 ALS 上下文，必须全部走 system；有一条漏传即会在生产 500。
+    expect(tenantClientCalls.every((c) => c.system)).toBe(true);
   });
 
   it('E08 配置驱动实证：workflow_def DB 行优先于内置兜底（收单后落自定义目标态）', async () => {

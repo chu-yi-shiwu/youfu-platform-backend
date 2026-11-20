@@ -32,7 +32,11 @@ import {
   shadowTuneThresholds,
 } from '../services/k2Shadow.js';
 
+import { requireModuleWrites } from '../middleware/moduleGuard.js';
+
 const router = Router();
+router.use(requireModuleWrites('optimize', { only: [/^\/optimize/] }));
+
 
 // 生成优化决策：dev 下仅记录 pending 建议；AUTO_TUNE 生效时应用 dispatch 写回 + 记录 workflow 建议。
 // V2-F4（派单纵切 P0-10/11）：autoTune 判定统一收敛到 isAutoTuneEffective 单一来源——

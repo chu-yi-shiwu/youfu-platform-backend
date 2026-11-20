@@ -89,6 +89,8 @@ function authInfo(res: any): { actor: string } {
  */
 const RETIRED_FLOW_ENDPOINT: Record<string, string> = {
   emergency_plan: '/emergency/plans',
+  // 陪检统一走标准工单中枢（work_orders），保留 /intake?template=escort 建单入口。
+  escort: '/intake?template=escort',
 };
 
 /** 命中废弃入口 ⇒ 410 Gone + 指路（放在四个 handler 校验之后、业务逻辑之前）。 */
@@ -97,8 +99,10 @@ function assertFlowEndpointAlive(entityType: string): void {
   if (!replacement) return;
   throw new AppError(
     'GONE',
-    `${entityType} 不再走通用业务流通道 /flow（应急预案是知识库目录，不是带状态的业务流；` +
-      `emergency_plan 表没有 status 列，状态机对它无落点）。请改用 ${replacement}`,
+    `${entityType} 不再走通用业务流通道 /flow；` +
+      (entityType === 'escort'
+        ? `陪检统一走标准工单中枢（work_orders），请改用 ${replacement} 或 /tickets`
+        : `应急预案是知识库目录，不是带状态的业务流（emergency_plan 表没有 status 列，状态机对它无落点）。请改用 ${replacement}`),
     410,
   );
 }
@@ -333,6 +337,9 @@ router.post('/:entityType/:id/transition', async (req, res, next) => {
         entityType,
         fallbackDef: fallbackFor(entityType),
         actor,
+        // P0-5：通用实体也必须消费 workflow_def 的角色/权限门禁（此前只校验拓扑）。
+        actorRole: res.locals.auth.role,
+        actorAuthMode: res.locals.auth.authMode,
       });
       return { ...row, available: availableTransitions(def, row.status) };
     });

@@ -21,6 +21,7 @@ import { errorMiddleware } from '../middleware/error.js';
 const h = vi.hoisted(() => ({
   calls: [] as Array<{ sql: string; params: unknown[] }>,
   scripted: [] as Array<{ match: RegExp; rows: any[]; rowCount?: number }>,
+  auth: { tenantId: 't-volunteer-guard', role: 'admin', authMode: 'dev', userId: 'u1', requestId: 'test' } as Record<string, unknown>,
 }));
 vi.mock('../db/pool.js', () => ({
   default: {},
@@ -29,6 +30,10 @@ vi.mock('../db/pool.js', () => ({
     const client = {
       query: async (sql: string, params: unknown[] = []) => {
         h.calls.push({ sql, params });
+        // 稳定账号身份：报名前必须能解析 account_user
+        if (sql.includes('FROM account_user')) {
+          return { rows: [{ display_name: '志愿者甲', username: 'u1' }], rowCount: 1 };
+        }
         for (const s of h.scripted) {
           if (s.match.test(sql)) return { rows: s.rows, rowCount: s.rowCount ?? s.rows.length };
         }
@@ -50,7 +55,7 @@ beforeAll(async () => {
   const app = express();
   app.use(express.json());
   app.use((_req, res, next) => {
-    res.locals.auth = { tenantId: T, role: 'admin', authMode: 'dev', userId: 'u1', requestId: 'test' };
+    res.locals.auth = h.auth as any;
     next();
   });
   app.use('/api/v1/volunteer', volunteerRouter); // 与生产 server.ts 挂载一致
@@ -68,6 +73,7 @@ afterAll(async () => {
 beforeEach(() => {
   h.calls.length = 0;
   h.scripted = [];
+  h.auth = { tenantId: T, role: 'admin', authMode: 'dev', userId: 'u1', requestId: 'test' };
 });
 
 async function post(path: string, body?: unknown): Promise<{ status: number; body: Record<string, unknown> }> {
@@ -76,6 +82,14 @@ async function post(path: string, body?: unknown): Promise<{ status: number; bod
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body ?? {}),
   });
+  const text = await r.text();
+  let parsed: Record<string, unknown> = {};
+  try { parsed = JSON.parse(text) as Record<string, unknown>; } catch { parsed = { raw: text }; }
+  return { status: r.status, body: parsed };
+}
+
+async function get(path: string): Promise<{ status: number; body: Record<string, unknown> }> {
+  const r = await fetch(`${base}${path}`);
   const text = await r.text();
   let parsed: Record<string, unknown> = {};
   try { parsed = JSON.parse(text) as Record<string, unknown>; } catch { parsed = { raw: text }; }
@@ -257,7 +271,7 @@ describe('去重守卫（signup DUPLICATE，V1 新增）', () => {
   it('⑧ 同 (activity_id, user_name) 二次 signup → 409 DUPLICATE「您已报名过该活动，无需重复报名」，无二次 INSERT', async () => {
     h.scripted = [
       { match: /FROM volunteer_activity/, rows: [{ id: 'act-7', status: 'open', slots: 5 }] },
-      { match: /user_name = \$3 LIMIT 1/, rows: [{ id: 'rec-9' }], rowCount: 1 },
+      { match: /FROM volunteer_record[\s\S]*LIMIT 1/, rows: [{ id: 'rec-9' }], rowCount: 1 },
     ];
     const r = await post('/volunteer/activities/act-7/signup', { user_name: '张三' });
     expect(r.status).toBe(409);
@@ -272,7 +286,7 @@ describe('去重守卫（signup DUPLICATE，V1 新增）', () => {
   it('⑨ 去重 SQL 契约：判重查询必须含 tenant_id + activity_id + user_name 三条件（LIMIT 1）', async () => {
     h.scripted = [
       { match: /FROM volunteer_activity/, rows: [{ id: 'act-8', status: 'open', slots: 5 }] },
-      { match: /user_name = \$3 LIMIT 1/, rows: [], rowCount: 0 },
+      { match: /FROM volunteer_record[\s\S]*LIMIT 1/, rows: [], rowCount: 0 },
       { match: /count\(\*\)::int AS n/, rows: [{ n: 0 }] },
       { match: /INSERT INTO volunteer_record/, rows: [{ id: 'rec-10', status: 'registered' }] },
     ];
@@ -282,13 +296,14 @@ describe('去重守卫（signup DUPLICATE，V1 新增）', () => {
     expect(dup).toBeDefined();
     expect(dup!.sql).toMatch(/tenant_id = \$1/);
     expect(dup!.sql).toMatch(/activity_id = \$2/);
-    expect(dup!.sql).toMatch(/user_name = \$3/);
+    expect(dup!.sql).toMatch(/user_id = \$3/);
+    expect(dup!.sql).toMatch(/user_name = \$4/);
   });
 
   it('⑩ 不同 user_name 同活动不触发去重（幂等键是三元组，不是 activity 单键）', async () => {
     h.scripted = [
       { match: /FROM volunteer_activity/, rows: [{ id: 'act-9', status: 'open', slots: 5 }] },
-      { match: /user_name = \$3 LIMIT 1/, rows: [], rowCount: 0 },
+      { match: /FROM volunteer_record[\s\S]*LIMIT 1/, rows: [], rowCount: 0 },
       { match: /count\(\*\)::int AS n/, rows: [{ n: 1 }] },
       { match: /INSERT INTO volunteer_record/, rows: [{ id: 'rec-11', status: 'registered' }] },
     ];
@@ -308,7 +323,7 @@ describe('补签守卫（checkin 过期 3 天宽限，D-2 新增）', () => {
     return [
       { match: /SELECT \* FROM volunteer_record/, rows: [{ id: 'rec-l1', status: 'registered', check_in_at: null, activity_id: 'act-l1' }] },
       // checkin 新增 act 查询（SELECT end_at FROM volunteer_activity）——按用例给 end_at
-      { match: /SELECT end_at FROM volunteer_activity/, rows: endAt === null ? [] : [{ end_at: endAt }], rowCount: endAt === null ? 0 : 1 },
+      { match: /SELECT start_at, end_at FROM volunteer_activity/, rows: endAt === null ? [] : [{ start_at: null, end_at: endAt }], rowCount: endAt === null ? 0 : 1 },
       { match: /SET status = 'checked_in'/, rows: [{ id: 'rec-l1', status: 'checked_in', check_in_late: true }] },
     ];
   }
@@ -364,7 +379,7 @@ describe('补签守卫（checkin 过期 3 天宽限，D-2 新增）', () => {
   it('㉕ SQL 契约：act 查询带 tenant_id 租户隔离 + record 行取 activity_id 关联', async () => {
     h.scripted = checkinScripts(hoursAgo(48));
     await post('/volunteer/records/rec-l1/checkin');
-    const act = h.calls.find((c) => c.sql.includes('SELECT end_at FROM volunteer_activity'));
+    const act = h.calls.find((c) => c.sql.includes('SELECT start_at, end_at FROM volunteer_activity'));
     expect(act).toBeDefined();
     expect(act!.sql).toMatch(/tenant_id = \$2/);
     expect(act!.params![0]).toBe('act-l1');
@@ -400,11 +415,30 @@ describe('E-6 V2-D：083 三新列', () => {
     expect(r.status).toBe(201);
     const ins = h.calls.find((c) => c.sql.includes('INSERT INTO volunteer_activity'));
     expect(ins).toBeDefined();
-    expect(ins!.sql).toMatch(/user_id, signup_deadline, description/);
-    // 参数契约：$8=user_id $9=signup_deadline $10=description（顺序锁定防串位）
+    expect(ins!.sql).toMatch(/user_id, signup_deadline, cancel_deadline, description, checkin_code/);
+    // 参数契约：$8=user_id $9=signup_deadline $10=cancel_deadline $11=description $12=checkin_code
     expect(ins!.params![7]).toBe('21fecdc5-fb1c-4457-804a-2575ab3eef12');
     expect(ins!.params![8]).toBe('2026-09-20T00:00:00Z');
-    expect(ins!.params![9]).toBe('活动描述长文案');
+    expect(ins!.params![10]).toBe('活动描述长文案');
+  });
+
+  it('V2-D①b 可选字段显式 null（前端空表单）→ 201，不得 422', async () => {
+    h.scripted = [
+      { match: /INSERT INTO volunteer_activity/, rows: [{ id: 'act-null', status: 'open' }] },
+    ];
+    const r = await post('/volunteer/activities', {
+      title: '空可选字段活动',
+      slots: 1,
+      batch: null,
+      location: null,
+      start_at: null,
+      end_at: null,
+      signup_deadline: null,
+      cancel_deadline: null,
+      description: null,
+      user_id: null,
+    });
+    expect(r.status).toBe(201);
   });
 
   it('V2-D② signup_deadline ≥ end_at 同给 → 422 INVALID_RANGE（报名截止不得晚于活动结束）', async () => {
@@ -425,6 +459,171 @@ describe('E-6 V2-D：083 三新列', () => {
     expect(r.status).toBe(200);
     const sel = h.calls.find((c) => c.sql.includes('FROM volunteer_activity a'));
     expect(sel).toBeDefined();
-    expect(sel!.sql).toMatch(/a\.user_id, a\.signup_deadline, a\.description/);
+    expect(sel!.sql).toMatch(/a\.user_id, a\.signup_deadline, a\.cancel_deadline, a\.description, a\.checkin_code/);
+  });
+});
+
+// ============================================================================
+// P0 志愿者最小修复（2026-11-04）——试点阻断项。
+//
+// 修复前两个真实故障：
+//   ① `slots` 默认值是 0：发布者不填名额 → signup_count(0) >= slots(0) → 活动永久满员，
+//      报名入口形同虚设（前端早已默认 1，后端没跟上 ⇒ 两端口径不一致）。
+//   ② `signup_deadline` 列存在（083 迁移）且管理端可配置，但 signup 路径**从不校验**：
+//      截止时间只是页面上的装饰，过了截止仍然能报名。
+//
+// 本组用例钉死默认值与截止守卫，并锁定「不误伤存量 null」的兼容口径。
+// ============================================================================
+describe('P0 志愿者最小修复：slots 默认 1 + 报名截止守卫', () => {
+  it('VOL① POST /activities 不传 slots → INSERT 参数为 1（不是 0）', async () => {
+    h.scripted = [
+      { match: /INSERT INTO volunteer_activity/, rows: [{ id: 'act-p0-1', status: 'open', slots: 1 }] },
+    ];
+    const r = await post('/volunteer/activities', { title: '默认名额活动' });
+    expect(r.status).toBe(201);
+    const ins = h.calls.find((c) => c.sql.includes('INSERT INTO volunteer_activity'));
+    expect(ins).toBeDefined();
+    // $7 = slots（INSERT 列序：tenant,title,batch,location,start,end,slots,...）
+    expect(ins!.params![6]).toBe(1);
+  });
+
+  it('VOL② POST /activities 显式 slots=0 → 仍按 0 入库（尊重发布者显式意图，不被默认值覆盖）', async () => {
+    h.scripted = [
+      { match: /INSERT INTO volunteer_activity/, rows: [{ id: 'act-p0-2', status: 'open', slots: 0 }] },
+    ];
+    const r = await post('/volunteer/activities', { title: '零名额活动', slots: 0 });
+    expect(r.status).toBe(201);
+    const ins = h.calls.find((c) => c.sql.includes('INSERT INTO volunteer_activity'));
+    expect(ins!.params![6]).toBe(0);
+  });
+
+  it('VOL③ signup_deadline 已过 → 409 SIGNUP_CLOSED「报名已截止，无法报名」，且不产生 INSERT', async () => {
+    h.scripted = [
+      {
+        match: /FROM volunteer_activity/,
+        rows: [{ id: 'act-p0-3', status: 'open', slots: 5, end_at: null, signup_deadline: '2020-01-01T00:00:00Z' }],
+      },
+    ];
+    const r = await post('/volunteer/activities/act-p0-3/signup', { user_name: '张三' });
+    expect(r.status).toBe(409);
+    expect(r.body.ok).toBe(false);
+    expect(r.body.code).toBe('SIGNUP_CLOSED');
+    // 逐字契约：mp handleSignupError 按子串「已截止」分流（volunteer.js），子串断裂即静默失联
+    expect(r.body.message).toBe('报名已截止，无法报名');
+    expect(r.body.message).toContain('已截止');
+    expect(h.calls.find((c) => c.sql.includes('INSERT INTO volunteer_record'))).toBeUndefined();
+    // 守卫在去重/名额统计之前短路，不产生无谓查询
+    expect(h.calls.find((c) => c.sql.includes('user_name = $3 LIMIT 1'))).toBeUndefined();
+    expect(h.calls.find((c) => c.sql.includes('count(*)::int AS n'))).toBeUndefined();
+  });
+
+  it('VOL④ signup_deadline 未到 → 正常放行 201（守卫不误伤进行中的报名）', async () => {
+    h.scripted = [
+      {
+        match: /FROM volunteer_activity/,
+        rows: [{ id: 'act-p0-4', status: 'open', slots: 5, end_at: null, signup_deadline: '2999-01-01T00:00:00Z' }],
+      },
+      { match: /FROM volunteer_record[\s\S]*LIMIT 1/, rows: [], rowCount: 0 },
+      { match: /count\(\*\)::int AS n/, rows: [{ n: 0 }] },
+      { match: /INSERT INTO volunteer_record/, rows: [{ id: 'rec-p0-4', status: 'registered' }] },
+    ];
+    const r = await post('/volunteer/activities/act-p0-4/signup', { user_name: '李四' });
+    expect(r.status).toBe(201);
+    expect(h.calls.find((c) => c.sql.includes('INSERT INTO volunteer_record'))).toBeDefined();
+  });
+
+  it('VOL⑤ signup_deadline=null（存量活动）→ 正常放行 201（S7 存量兼容，不误杀）', async () => {
+    h.scripted = [
+      { match: /FROM volunteer_activity/, rows: [{ id: 'act-p0-5', status: 'open', slots: 5, end_at: null, signup_deadline: null }] },
+      { match: /FROM volunteer_record[\s\S]*LIMIT 1/, rows: [], rowCount: 0 },
+      { match: /count\(\*\)::int AS n/, rows: [{ n: 0 }] },
+      { match: /INSERT INTO volunteer_record/, rows: [{ id: 'rec-p0-5', status: 'registered' }] },
+    ];
+    const r = await post('/volunteer/activities/act-p0-5/signup', { user_name: '王五' });
+    expect(r.status).toBe(201);
+  });
+
+  it('VOL⑥ SQL 契约：signup 的 act SELECT 必须显式带 signup_deadline（否则守卫静默失效）', async () => {
+    h.scripted = [
+      { match: /FROM volunteer_activity/, rows: [{ id: 'act-p0-6', status: 'open', slots: 5, end_at: null, signup_deadline: null }] },
+      { match: /count\(\*\)::int AS n/, rows: [{ n: 0 }] },
+      { match: /INSERT INTO volunteer_record/, rows: [{ id: 'rec-p0-6', status: 'registered' }] },
+    ];
+    await post('/volunteer/activities/act-p0-6/signup', { user_name: '赵六' });
+    const act = h.calls.find((c) => c.sql.includes('FROM volunteer_activity'));
+    expect(act).toBeDefined();
+    expect(act!.sql).toContain('signup_deadline');
+    expect(act!.sql).toMatch(/FOR UPDATE/);
+  });
+
+  it('VOL⑦ 顺序契约：status=closed 且截止已过 → 仍报「活动已关闭」（状态优先，口径唯一）', async () => {
+    h.scripted = [
+      {
+        match: /FROM volunteer_activity/,
+        rows: [{ id: 'act-p0-7', status: 'closed', slots: 5, end_at: null, signup_deadline: '2020-01-01T00:00:00Z' }],
+      },
+    ];
+    const r = await post('/volunteer/activities/act-p0-7/signup', { user_name: '钱七' });
+    expect(r.status).toBe(409);
+    expect(r.body.code).toBe('BAD_STATE');
+    expect(r.body.message).toBe('活动已关闭，无法报名');
+  });
+
+  it('VOL⑧ 顺序契约：end_at 与 signup_deadline 同时过期 → 报「活动已结束」（end_at 守卫在前）', async () => {
+    h.scripted = [
+      {
+        match: /FROM volunteer_activity/,
+        rows: [{ id: 'act-p0-8', status: 'open', slots: 5, end_at: '2020-01-01T00:00:00Z', signup_deadline: '2019-12-31T00:00:00Z' }],
+      },
+    ];
+    const r = await post('/volunteer/activities/act-p0-8/signup', { user_name: '孙八' });
+    expect(r.status).toBe(409);
+    expect(r.body.code).toBe('ACTIVITY_ENDED');
+    expect(r.body.message).toBe('该活动已结束，无法报名');
+  });
+});
+
+describe('志愿者统计总览（GET /volunteer/stats/overview）', () => {
+  it('返回全局统计 + 活动明细，且两条 SQL 都带 tenant_id（跨租户零泄漏）', async () => {
+    h.scripted = [
+      {
+        match: /SELECT\s+COUNT\(\*\) FILTER \(WHERE status = 'registered'\)/,
+        rows: [{ registered_count: 4, served_count: 6, total_duration_min: 360, total_points: 12 }],
+      },
+      {
+        match: /FROM volunteer_activity a/,
+        rows: [
+          {
+            id: 'act-1', title: '院区导诊', status: 'open', slots: 10,
+            start_at: null, end_at: null, signup_count: 4,
+            checked_in_count: 1, checked_out_count: 2, approved_count: 3,
+            total_duration_min: 360, total_points: 12,
+          },
+        ],
+      },
+    ];
+    const r = await get('/volunteer/stats/overview');
+    expect(r.status).toBe(200);
+    expect(r.body.ok).toBe(true);
+    expect((r.body.stats as Record<string, unknown>).registered_count).toBe(4);
+    expect((r.body.activities as unknown[]).length).toBe(1);
+    const sqls = h.calls.filter((c) => /volunteer_record|FROM volunteer_activity a/.test(c.sql));
+    expect(sqls.length).toBeGreaterThanOrEqual(2);
+    for (const s of sqls) expect(s.sql).toContain('tenant_id');
+    for (const s of sqls) expect(s.params).toContain(T);
+  });
+
+  it('负控制：口径必须排除已取消以外的四态——served 只累计 checked_in/checked_out/approved', async () => {
+    h.scripted = [
+      { match: /SELECT\s+COUNT\(\*\) FILTER \(WHERE status = 'registered'\)/, rows: [{}] },
+      { match: /FROM volunteer_activity a/, rows: [] },
+    ];
+    const r = await get('/volunteer/stats/overview');
+    expect(r.status).toBe(200);
+    const statsSql = h.calls.find((c) => /SELECT\s+COUNT\(\*\) FILTER \(WHERE status = 'registered'\)/.test(c.sql));
+    expect(statsSql).toBeTruthy();
+    expect(statsSql!.sql).toContain("status IN ('checked_in','checked_out','approved')");
+    // 负控制：已取消（记录被删除或状态非四态）不得计入服务人次
+    expect(statsSql!.sql).not.toMatch(/serving/);
   });
 });

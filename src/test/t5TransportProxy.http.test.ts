@@ -466,6 +466,11 @@ function makeOldRowClient() {
       if (text.startsWith('SELECT status, def_version FROM business_flow_tasks')) {
         return { rows: [{ id: String(p[0]), status: 'pending', def_version: 1 }], rowCount: 1 };
       }
+      // transitionEntity 内部是 `SELECT * ... FOR UPDATE`：真实数据库里 `*` 必然包含
+      // def_version，所以这里必须带上 1。否则会把「引擎按行锁版本取 def」误判成读 live。
+      if (text.includes('SELECT * FROM business_flow_tasks')) {
+        return { rows: [{ id: String(p[0]), status: 'pending', def_version: 1, data: {} }], rowCount: 1 };
+      }
       // 🔴 这条兜底**刻意不带 def_version**：真实数据库里没 SELECT 的列就不会出现在行上。
       //    之前它顺手带上 def_version:1，等于替产品把「漏查这一列」的洞填平了 ⇒
       //    把产品 :317 的 `SELECT status, def_version` 改成 `SELECT status`，A3b 照样绿（假绿）。

@@ -134,6 +134,24 @@ describe('equipment.ts · 写端点权限（A 组：等价性，改前改后都�
     expect(a.status).toBe(200);
     expect(b.status).toBe(200);
   });
+
+  it('P0-8 · q 搜索：uuid/date/numeric 列先 ::text 再 ILIKE（不得让用户一点搜索就 500）', async () => {
+    authRole = 'worker';
+    fakeClient.query.mockClear();
+    const r = await req('GET', '/api/v1/equipment/equipment?q=abc');
+    expect(r.status).toBe(200);
+    const sql = fakeClient.query.mock.calls.map((c) => String(c[0])).find((s) => s.includes('FROM equipment WHERE'));
+    expect(sql).toBeTruthy();
+    // 文本列保持原样（可走索引）
+    expect(sql).toContain('name ILIKE');
+    // 非文本列必须显式转 text：uuid/date/numeric 不支持 ~~* 运算符
+    expect(sql).toContain('type_id::text ILIKE');
+    expect(sql).toContain('vendor_id::text ILIKE');
+    expect(sql).toContain('purchase_date::text ILIKE');
+    expect(sql).toContain('price::text ILIKE');
+    expect(sql).not.toMatch(/(^|[^_])type_id ILIKE/);
+    expect(sql).not.toMatch(/(^|[^_])price ILIKE/);
+  });
 });
 
 describe('equipment.ts · 可配置收益（B 组：改前必红，改后转绿）', () => {

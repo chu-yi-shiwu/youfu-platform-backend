@@ -73,7 +73,7 @@ export interface DdlModel {
 export function parseMigrations(): DdlModel {
   const tables = new Map<string, Map<string, string>>();
   const files = readdirSync(root)
-    .filter((f) => /^\d{3}[a-z]?_.*\.sql$/i.test(f))
+    .filter((f) => /^\d{3,6}_[a-z0-9][a-z0-9_]*\.sql$/i.test(f))
     .sort();
   const addCol = (table: string, col: string, type: string) => {
     if (!tables.has(table)) tables.set(table, new Map());

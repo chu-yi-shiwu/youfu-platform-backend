@@ -9,6 +9,10 @@
 //
 // 需先跑迁移 022_workflow_def.sql（建表）+ 026_work_order_sla_paused.sql（side-effect 落库列）。
 import { withTenantClient } from '../src/db/pool.js';
+
+function withSystemTenantClient<T>(tenantId: string, fn: (client: any) => Promise<T>): Promise<T> {
+  return withTenantClient(tenantId, fn, { system: true });
+}
 import { saveWorkflowDef } from '../src/engine/workflowDef.js';
 import { RICH_WORK_ORDER_DEF, DEFAULT_WORK_ORDER_DEF, type WorkflowDef } from '../src/engine/stateMachine.js';
 
@@ -21,7 +25,7 @@ const def: WorkflowDef = JSON.parse(JSON.stringify(source));
 
 async function main() {
   const label = RESET ? 'DEFAULT(最小4态)' : 'RICH(富13态·UOne颗粒度)';
-  await withTenantClient(TENANT, async (client) => {
+  await withSystemTenantClient(TENANT, async (client) => {
     // V3-D5：saveWorkflowDef opts 必填——种子直写同样强制留痕。
     await saveWorkflowDef(client, TENANT, ENTITY, def, {
       operator: 'seed',

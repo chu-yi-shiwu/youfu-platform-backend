@@ -12,7 +12,9 @@
 import type { Request, Response, NextFunction } from 'express';
 import crypto from 'node:crypto';
 import { AppError } from './error.js';
-import pool from '../db/pool.js';
+import pool, { withTenantClient } from '../db/pool.js';
+import { runWithAuthContext } from '../db/authContext.js';
+import { resolveDataScope } from './dataScope.js';
 
 export interface AuthLocals {
   tenantId: string;
@@ -21,6 +23,8 @@ export interface AuthLocals {
   userId?: string;
   username?: string;
   role?: string;
+  /** 115：新签发 JWT 携带；旧 token 缺省 → 不做版本回查（兼容） */
+  tokenVersion?: number;
   authMode: 'dev' | 'prod';
 }
 
@@ -246,6 +250,7 @@ export function resolveIdentity(req: Request): IdentityResult {
         userId: str(payload.sub) ?? str(payload.uid),
         username: str(payload.username) ?? undefined,
         role: str(payload.role) ?? undefined,
+        tokenVersion: typeof payload.tv === 'number' ? payload.tv : undefined,
         authMode: 'prod',
       },
     };
@@ -271,19 +276,60 @@ export function resolveIdentity(req: Request): IdentityResult {
 }
 
 export function authMiddleware(req: Request, res: Response, next: NextFunction) {
-  // 公开路径（登录）直接放行，不进入任何鉴权分支
+  // 公开路径（登录/公开报修）直接放行，不进入任何鉴权分支。
+  // 这些路径没有 auth context，调用 withTenantClient 时必须显式 { system: true }；
+  // 连接层不会默认放行，避免“忘了设上下文 = 看全租户”。
   if (isPublicPath(req)) return next();
 
   const result = resolveIdentity(req);
   if (!result.ok) {
     return res.status(result.status).json({ ok: false, code: result.code, message: result.message });
   }
-  res.locals.auth = result.auth;
-  // P3 守卫：prod 下校验租户 registry 状态（60s 缓存）；dev 联调放行以免干扰本地测试
-  if (AUTH_MODE !== 'prod') return next();
-  assertTenantActive(result.auth.tenantId)
-    .then(() => next())
-    .catch(next);
+  // P0-12：与 accessLogMiddleware 共享 request_id。accessLog 在 body parser 之前生成/沿用
+  // X-Request-Id；这里必须回填，否则同一请求会出现「访问日志一个 id、业务日志另一个 id」。
+  const sharedRequestId = typeof res.locals.requestId === 'string' ? res.locals.requestId : undefined;
+  const auth = sharedRequestId ? { ...result.auth, requestId: sharedRequestId } : result.auth;
+  res.locals.auth = auth;
+
+  // 请求级 auth scope：RLS 在连接层读取，不靠每个路由自己写 if。
+  const ctx = {
+    userId: auth.userId,
+    role: auth.role,
+    scope: resolveDataScope(auth.role),
+  };
+
+  return runWithAuthContext(ctx, () => {
+    // P3 守卫：prod 下校验租户 registry 状态（60s 缓存）；dev 联调放行以免干扰本地测试
+    if (AUTH_MODE !== 'prod') return next();
+    const proceed = () => assertTenantActive(auth.tenantId).then(() => next()).catch(next);
+
+    // 115：新 token 带 tv → 回查账号当前 token_version / active。
+    // 旧 token 没有 tv → 跳过，保持兼容（等 TTL 自然过期）。
+    if (!auth.userId || auth.tokenVersion === undefined) return proceed();
+    return withTenantClient(
+      auth.tenantId,
+      async (client) => {
+        const r = await client.query<{ token_version: number; active: boolean }>(
+          'SELECT token_version, active FROM account_user WHERE tenant_id=$1 AND id=$2 LIMIT 1',
+          [auth.tenantId, auth.userId],
+        );
+        return r.rows[0] ?? null;
+      },
+      { system: true },
+    )
+      .then((row) => {
+        if (!row || !row.active || Number(row.token_version) !== auth.tokenVersion) {
+          res.status(401).json({
+            ok: false,
+            code: 'AUTH_004',
+            message: '账号信息已变更，请重新登录',
+          });
+          return;
+        }
+        return proceed();
+      })
+      .catch(next);
+  });
 }
 
 /**

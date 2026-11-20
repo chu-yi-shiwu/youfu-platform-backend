@@ -39,8 +39,14 @@ const fakeClient = {
     }
     if (sql.includes('SELECT * FROM asset WHERE id=$1 AND tenant_id=$2'))
       return detailFound ? { rows: [detailRow], rowCount: 1 } : { rows: [], rowCount: 0 };
+    if (sql.includes('FROM domain_event'))
+      return { rows: [], rowCount: 0 };
+    if (sql.includes('SELECT id FROM asset WHERE id=$1 AND tenant_id=$2'))
+      return detailFound ? { rows: [{ id: 'a-1' }], rowCount: 1 } : { rows: [], rowCount: 0 };
     if (sql.includes('SELECT linked_order_ids FROM asset WHERE id=$1'))
       return detailFound ? { rows: [{ linked_order_ids: detailRow.linked_order_ids }], rowCount: 1 } : { rows: [], rowCount: 0 };
+    if (sql.includes('SELECT asset_id FROM asset_maintenance'))
+      return deleteCount ? { rows: [{ asset_id: 'a-1' }], rowCount: 1 } : { rows: [], rowCount: 0 };
     if (sql.includes('SELECT * FROM asset_maintenance WHERE id=$1 AND tenant_id=$2'))
       return detailFound ? { rows: [{ id: 'm-1' }], rowCount: 1 } : { rows: [], rowCount: 0 };
     if (sql.includes('INSERT INTO asset ('))
@@ -199,7 +205,7 @@ describe('asset.ts · 资产档案（GET/POST/PUT + 过滤器）', () => {
     expect(r.status).toBe(201);
     const j = (await r.json()) as any;
     expect(j.item.asset_no).toMatch(/^ASSET-[0-9A-F]{8}$/);
-    expect(String(j.item.qr_code)).toMatch(/^ASSET:[0-9a-f-]{36}$/);
+    expect(String(j.item.qr_code)).toMatch(/^AST-ASSET-[0-9A-F]{8}$/);
     expect(j.item.status).toBe('in_use');
     const params = fakeClient.query.mock.calls[0][1] as unknown[];
     expect(params[0]).toBe(TENANT);
@@ -332,7 +338,7 @@ describe('asset.ts · 维保台账 + CSV 导出/导入', () => {
     // BOM 断言必须看原始字节：fetch().text() 的 UTF-8 解码默认剥 BOM（ignoreBOM:false），看 text 会假阴
     const buf = new Uint8Array(await (await req('GET', '/assets/export')).arrayBuffer());
     expect(buf[0]).toBe(0xef); expect(buf[1]).toBe(0xbb); expect(buf[2]).toBe(0xbf);
-    expect(new TextDecoder('utf-8').decode(buf.slice(3)).startsWith('asset_no,name,model')).toBe(true);
+    expect(new TextDecoder('utf-8').decode(buf.slice(3)).startsWith('资产编号,资产名称,型号')).toBe(true);
     authRole = 'worker';
     const r2 = await req('GET', '/assets/export');
     expect(r2.status).toBe(403);
@@ -348,7 +354,22 @@ describe('asset.ts · 维保台账 + CSV 导出/导入', () => {
     expect(ins).toBeTruthy();
     const params = ins![1] as unknown[];
     expect(params[1]).toBe(TENANT);
-    expect(params[3]).toBe('空调1'); // cols: id, tenant_id, asset_no, name → index 3
+    // cols: id, tenant_id, asset_no, qr_code, name → index 4；二维码必须随导入生成
+    expect(params[3]).toBe(`AST-${String(params[2])}`);
+    expect(params[4]).toBe('空调1');
+  });
+
+  it('⑱b POST /assets/import 中文表头（新模板）→ inserted=1，状态中文转枚举', async () => {
+    const csv = '资产名称,型号,位置,状态,购置日期\n空调2,KF-2,二号楼,维修中,2026-08-18\n';
+    const r = await req('POST', '/assets/import', { csv });
+    expect(r.status).toBe(200);
+    const j = (await r.json()) as any;
+    expect(j.inserted).toBe(1);
+    const ins = fakeClient.query.mock.calls.find((c: unknown[]) => String(c[0]).includes('INSERT INTO asset ('));
+    const params = ins![1] as unknown[];
+    expect(params[4]).toBe('空调2');
+    expect(params[3]).toBe(`AST-${String(params[2])}`);
+    expect(params).toContain('repairing');
   });
 
   it('⑲POST /assets/import 仅表头 → inserted=0；缺 csv → 400 BAD_INPUT', async () => {

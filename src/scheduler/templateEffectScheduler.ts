@@ -37,3 +37,11 @@ export function startTemplateEffectsScheduler(): void {
   }, TICK_MS);
   console.log('[scheduler] template effects scheduler started (tick 60s)');
 }
+
+/** P0-8：优雅停机时停止轮询（幂等；已停止再调用不报错）。 */
+export function stopTemplateEffectsScheduler(): void {
+  if (timer) {
+    clearInterval(timer);
+    timer = null;
+  }
+}

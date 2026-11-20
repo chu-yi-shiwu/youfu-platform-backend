@@ -22,10 +22,10 @@ import type { AuthLocals } from './auth.js';
 //     退场角色不可新建、不可再分配给新账号、不出现在角色下拉里。
 //     存量账号由管理员自行改派，系统不自动改数据（改数据是破坏性动作，需人决策）。
 //
-// ⚠️ 名字撞车警告：'service_desk' 既是角色 code，**也是业务表名**（018_service_desk.sql）
-//   与业务模块（src/routes/serviceDesk.ts，服务台管理，挂 server.ts:195）。
-//   ⚠️ 原「+ 来电弹屏代申告」随该端点 2026-10-28 下线删除（代申告与坐席同批下线）。
-//   本退场**只针对角色**，绝不触碰表与模块——删角色 ≠ 删服务台业务。
+// ⚠️ 名字撞车：'service_desk' 既是角色 code，历史上也是业务表名/模块名。
+//   2026-11-08 服务台业务已退场：018 的 service_desk 表、routes/serviceDesk.ts、
+//   转台端点与坐席表均已删除（112/114）。**角色 code 仍保留**，只为存量账号不炸；
+//   它不再代表任何业务实体，也不可再分配给新账号。
 export const ROLES = ['admin', 'operator', 'dispatcher', 'worker', 'reviewer', 'service_desk'] as const;
 export type Role = (typeof ROLES)[number];
 
@@ -82,6 +82,9 @@ export const PERM_DEFS = {
   'basicdata.edit': { label: '基础数据', defaults: ['operator'] },
   'dispatch.override': { label: '派单覆盖', defaults: ['operator', 'dispatcher', 'service_desk'] },
   'role.manage': { label: '账号权限', defaults: [] },
+  // 部门管理员：只能管理本人所在部门的模块开关与成员角色；不能新建角色、不能改角色权限。
+  // 默认不授予任何角色；由租户管理员在「账号权限」矩阵中按角色显式授予。
+  'dept.manage': { label: '部门管理', defaults: [] },
   // T8（2026-10-25）：巡检**配置面**独立权限点。此前 13 处巡检配置端点走 requireConfigRole
   // （同步、只读 res.locals.auth.role 的 admin/operator 白名单，**不查权限表** ⇒ 租户无法配置）。
   //   命名沿用既有 xxx.manage 模式（material.manage / asset.manage / volunteer.manage），
@@ -92,6 +95,12 @@ export const PERM_DEFS = {
   //     不给就会从放行变 403。**与 material.manage / asset.manage「收口 admin」策略不一致**
   //     ⇒「巡检配置要不要也收紧到 admin」是独立产品决策，已登记待做项（E6 不夹带）。
   'inspect.manage': { label: '巡检配置', defaults: ['operator'] },
+  // P0-3（2026-11-07）：巡检**读侧**独立权限点。
+  //   此前 GET /tasks、GET /tasks/:id 无任何门禁：任一登录账号可枚举全租户巡检任务/
+  //   执行人/点位/检查记录；worker 也被允许传任意 assignee 查别人的单。
+  //   口径：非 worker 角色需 inspect.view；worker 不看权限点，只按本人 worker 档案过滤
+  //   （本人数据访问不依赖租户配置，避免配置漂移把一线锁死）。
+  'inspect.view': { label: '巡检查看', defaults: ['operator', 'dispatcher', 'reviewer', 'service_desk'] },
   'inspect.execute': { label: '巡检执行', defaults: ['operator', 'dispatcher', 'worker'] },
   'asset.scan': { label: '资产扫码', defaults: ['operator', 'dispatcher', 'worker'] },
   'optimize.tune': { label: '优化调参', defaults: [] },
@@ -179,21 +188,8 @@ export const PERM_DEFS = {
   //   （PatrolPage vs InspectionPage + InspectionPlansPage）⇒ 复用会「只管巡检的人顺带能改巡更任务」。
   // 🔴 operator 默认给是**为了等价**（原 requireConfigRole 白名单 admin+operator），非策略选择。
   'patrol.manage': { label: '巡更配置', defaults: ['operator'] },
-  // T8 第十一批（2026-10-25）：服务台模块独立权限点。**只用一个点、不拆**。
-  // 🔴 2026-10-28 坐席下线后，本点守卫面从 4 处缩到 **2 处**：
-  //   只剩服务台主数据（POST /service-desks、PUT /service-desks/:id）。
-  //   原「客服人员编排」POST/DELETE /service-desks/:id/agents 已随坐席下线一并删除
-  //   （决策：初一「取消坐席」——只删坐席，服务台保留）；
-  //   **代报修 POST /tickets 从不在内**（它是服务台人员的执行动作，早已走 intake.create）。
-  // 🔴 为什么不复用 `basicdata.edit`（**前提已变，结论不变，2026-10-28 重写**）：
-  //   旧论证写的是「**两套表**（service_desk + service_desk_agent）」——坐席表删掉后
-  //   **只剩 service_desk 一张表**，这条理由**不再成立**，故此处重写而非保留原话。
-  //   但**换一条理由结论依旧成立**：服务台是**独立业务域**（批次 C，自带代报修通道
-  //   与幂等键），且蹭基础数据是已淘汰做法。
-  //   ⚠️ 服务台配置入口确在 `BasicData.tsx` / `AdminPage.tsx`，但那只是**页面归属**，
-  //      不是权限点归属 —— 按页面判会把服务台和字典/术语捆成"要么都给要么都不给"。
-  // 🔴 operator 默认给是**为了等价**（原 requireConfigRole 白名单 admin+operator），非策略选择。
-  'servicedesk.manage': { label: '服务台配置', defaults: ['operator'] },
+  // 2026-11-08：服务台业务退场，servicedesk.manage 权限点删除。
+  // 服务台职责并入部门（dept）/ 部门路由规则；配置面走 basicdata.edit。
   // T8 第十二批（2026-10-25）：**CSV 导出独立权限点**（material / asset 两处新增；
   //   basicData 复用既有的 basicdata.edit，见下）。三个导出端点原本是同一句
   //   `requireConfigRole(req, res) // R9-F1：导出属管理面，仅 admin/operator`。
@@ -483,6 +479,49 @@ export function canAssignRole(caller: string | undefined, target: string): boole
   // 非 admin 既不能分配高于自身的角色，也绝不可分配 admin。
   // 自定义角色取 CUSTOM_ROLE_RANK → operator/worker 均可分配（090 已允许建，此处放行分配）。
   return target !== 'admin' && targetRank <= callerRank;
+}
+
+/**
+ * 账号写操作的 caller→target 层级校验（P0 提权链收口）。
+ *
+ * 与 canAssignRole 的分工（**两者不可互相替代，改动前必读**）：
+ *   · canAssignRole 回答「能不能把这个角色分配给某人」——看的是**新角色**；
+ *   · 本函数回答「能不能动这个账号」——看的是 target 的**当前**角色。
+ * 缺了本函数时的真实事故（2026-11 已确认三条）：持 role.manage 的 operator 因为
+ * 「只校验调用者有没有 role.manage、不校验目标是谁」，可以重置 admin 密码后直接登录、
+ * 把 admin 降级/停用/删除。canAssignRole 对这些**一步都拦不住**——它只在新角色
+ * 高于调用者时才拒，而「把 admin 改成 operator」的新角色恰好更低。
+ *
+ * 语义：admin 可操作任何人；非 admin 只能操作**层级不高于自己**的账号。
+ * ⚠️ 自定义角色走 CUSTOM_ROLE_RANK（=worker 层，最低）：这是刻意的——
+ *    自建岗位（如"维修组长"）不得天然获得高于既有执行岗的管辖面；
+ *    ⇒ operator 能管自定义角色，自定义角色管不了 operator。
+ */
+export function canOperateAccount(caller: string | undefined, targetRole: string): boolean {
+  if (caller === 'admin') return true;
+  // caller 缺失沿用 canAssignRole 的口径（按 worker 层计），避免收紧既有行为。
+  return roleRank(targetRole) <= roleRank(caller ?? 'worker');
+}
+
+/**
+ * 重置密码的层级校验 —— 比 canOperateAccount **更严一档：同层也不允许**。
+ *
+ * 为什么单独一条而不是复用 canOperateAccount：
+ *   重置密码 = 直接拿到该账号的**登录能力**，严重程度比"改个显示名/停用"高一个量级。
+ *   而 ROLE_RANK 里 operator 与 reviewer **同为 3 层**：
+ *     · 若沿用 `<=`，持 role.manage 的 operator 可以重置 reviewer 的密码，然后以
+ *       reviewer 身份登录；
+ *     · 而 reviewer 的 workflow.approve 是设计上允许租户授予的，
+ *       "自审自批禁令"又是**按 username 比对**的（submitted_by ≠ 当前 username）——
+ *       用 reviewer 的马甲登录，这条合规控制就被绕过了。
+ *   ⇒ 所以重置密码必须是严格小于：只有**上级**能重置**下级**的密码。
+ *
+ * 代价（明确记录）：非 admin 不能重置**同层同事**的密码，需由管理员操作。
+ *   admin 走首行短路，不受影响。
+ */
+export function canResetPasswordOf(caller: string | undefined, targetRole: string): boolean {
+  if (caller === 'admin') return true;
+  return roleRank(targetRole) < roleRank(caller ?? 'worker');
 }
 
 /** 默认矩阵判定（无租户覆盖时用）；admin 恒 true */

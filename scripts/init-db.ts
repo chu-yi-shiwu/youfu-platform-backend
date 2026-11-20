@@ -11,12 +11,13 @@
 //   npx tsx scripts/init-db.ts
 //
 // 脚本会打印 youfu_app 的最终密码，供后续 CloudRun / 后端 .env 配置 PGPASSWORD 使用。
-import { readFileSync, readdirSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { Pool } from 'pg';
 import { stripPsqlMeta } from '../src/db/psqlMeta';
+import { assertNoUnrecognizedSqlFiles, listMigrationFiles } from '../src/db/migrationFiles.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 // 迁移/种子 SQL 与本脚本同在 backend/ 下；__dirname = backend/scripts，上一级即 backend 根。
@@ -76,9 +77,9 @@ async function main() {
   console.log(`[init-db] 角色 ${APP_ROLE} 就绪`);
 
   // 3) 跑迁移 001..007（以管理员身份，DDL/RLS 策略/授权）
-  const migrationFiles = readdirSync(backendRoot)
-    .filter((f) => /^\d+_.*\.sql$/.test(f))
-    .sort();
+  // P0-1：与 src/db/migrate.ts 共用严格命名与 fail-closed 口径。
+  assertNoUnrecognizedSqlFiles(backendRoot);
+  const migrationFiles = listMigrationFiles(backendRoot);
   const migPool = new Pool({ connectionString: adminConn(DBNAME) });
   try {
     for (const file of migrationFiles) {

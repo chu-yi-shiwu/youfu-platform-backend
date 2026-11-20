@@ -3,8 +3,11 @@
 import { Router } from 'express';
 import z from 'zod';
 import { AUTH_MODE, DEFAULT_TENANT_ID, loginRateLimit, type AuthLocals } from '../middleware/auth.js';
-import { listPerms, requirePermission, ROLE_CODE_RE } from '../middleware/role.js';
+import { canAssignRole, listPerms, requirePermission, ROLE_CODE_RE } from '../middleware/role.js';
+import { AppError } from '../middleware/error.js';
 import { code2Session } from '../services/wechatMp.js';
+import { MODULE_KEYS } from '../modules/catalog.js';
+import { userDepartmentId, userModuleKeys } from '../modules/service.js';
 import {
   createUser,
   findUserByUsername,
@@ -44,18 +47,31 @@ const loginSchema = z.object({
   username: z.string().min(1).max(64),
   password: z.string().min(1).max(200),
   tenant: z.string().max(64).optional(),
+  // 渠道收口：pc=管理端，mp=微信小程序。缺省（老客户端）不拦，保持兼容。
+  channel: z.enum(['pc', 'mp']).optional(),
 });
+
+/** 渠道与角色冲突：师傅只允许小程序，运营只允许 PC。管理员/审核员两边均可用。 */
+function assertChannelRole(role: string, channel: 'pc' | 'mp' | undefined): void {
+  if (!channel) return;
+  if (channel === 'pc' && role === 'worker') {
+    throw new AppError('CHANNEL_FORBIDDEN', '师傅账号请使用「优服家」微信小程序登录', 403);
+  }
+  if (channel === 'mp' && role === 'operator') {
+    throw new AppError('CHANNEL_FORBIDDEN', '运营账号请使用 PC 管理端登录', 403);
+  }
+}
 
 // POST /api/v1/auth/login —— 公开（豁免鉴权）：校验账密并签发 JWT
 router.post('/auth/login', loginRateLimit(), async (req, res, next) => {
   try {
-    const { username, password, tenant } = loginSchema.parse(req.body);
+    const { username, password, tenant, channel } = loginSchema.parse(req.body);
     const tenantId = normalizeTenant(tenant) ?? req.header('X-Tenant-Id') ?? DEFAULT_LOGIN_TENANT;
 
     // 平台层停用/未激活租户禁止登录（E_min：tenant_registry.status）
     const reg = await withTenantClient(tenantId, (client) =>
       client.query(`SELECT status FROM tenant_registry WHERE tenant_id=$1`, [tenantId]),
-    );
+    { system: true });
     // fail-closed（2026-10-19）：登记行是登录的前置条件。
     // 原口径 `if (reg.rowCount && reg.rowCount > 0)` 查不到行就整段跳过 = fail-open：
     // 账号在 account_user、登记行不在（人工删库漏尾，2026-09-05 probe 实证 2 个）的租户
@@ -78,11 +94,13 @@ router.post('/auth/login', loginRateLimit(), async (req, res, next) => {
       return res.status(403).json({ ok: false, code: 'TENANT_PENDING', message: '租户待激活，请联系平台管理员' });
     }
 
-    const user = await withTenantClient(tenantId, (client) => findUserByUsername(client, tenantId, username));
+    const user = await withTenantClient(tenantId, (client) => findUserByUsername(client, tenantId, username), { system: true });
     // 统一返回 401，避免暴露"用户是否存在"（防枚举）
     if (!user || !user.active || !verifyPassword(password, user.password_hash)) {
       return res.status(401).json({ ok: false, code: 'AUTH_003', message: 'invalid credentials' });
     }
+    // 渠道收口（服务端强校验，前端拦截只是第一层）
+    assertChannelRole(user.role, channel);
 
     const secret = resolveSecret();
     if (!secret) {
@@ -91,9 +109,9 @@ router.post('/auth/login', loginRateLimit(), async (req, res, next) => {
     // RBAC：登录即携带当前租户角色的权限点（前端菜单过滤用）
     const permissions = await withTenantClient(tenantId, (client) =>
       listPerms({ tenantId, requestId: '', role: user.role, authMode: 'prod' }, client),
-    );
+    { system: true });
     const token = signLoginToken(
-      { sub: user.id, tid: tenantId, role: user.role as AccountRole, username: user.username },
+      { sub: user.id, tid: tenantId, role: user.role as AccountRole, username: user.username, tokenVersion: Number(user.token_version ?? 0) },
       secret,
     );
     // A-1：种下看板鉴权 cookie（httpOnly + sameSite），供 /process-mining 等管理页同域导航自动携带。
@@ -120,6 +138,9 @@ router.get('/auth/me', async (req, res, next) => {
         ok: true,
         code: 0,
         user: { id: 'dev', username: 'dev', display_name: '开发模式', role: 'admin', tenant_id: auth.tenantId, active: true },
+        // dev 模式不查库：返回完整模块目录，保证本地开发不受模块表迁移影响。
+        modules: [...MODULE_KEYS],
+        department_id: null,
       });
     }
     // 健壮性（2026-08-29 主轮加深测试轮2发现）：JWT sub 非 UUID 时 findUserById 会触发 PG 22P02
@@ -132,10 +153,19 @@ router.get('/auth/me', async (req, res, next) => {
       const u = await findUserById(client, auth.tenantId, auth.userId!);
       if (!u) return null;
       const perms = await listPerms(auth, client);
-      return { user: u, perms };
+      const modules = await userModuleKeys(client, auth.tenantId, auth.userId!, u.role);
+      const departmentId = u.role === 'admin' ? null : await userDepartmentId(client, auth.tenantId, auth.userId!);
+      return { user: u, perms, modules, departmentId };
     });
     if (!user) return res.status(404).json({ ok: false, code: 'USER_404', message: 'user not found' });
-    return res.json({ ok: true, code: 0, user: toPublic(user.user), permissions: user.perms });
+    return res.json({
+      ok: true,
+      code: 0,
+      user: toPublic(user.user),
+      permissions: user.perms,
+      modules: user.modules,
+      department_id: user.departmentId,
+    });
   } catch (e) {
     next(e);
   }
@@ -203,6 +233,14 @@ router.post('/auth/users', async (req, res, next) => {
     if (!auth) return res.status(401).json({ ok: false, code: 'AUTH_001', message: 'missing auth' });
     await requireAccountAdmin(auth); // 403 由 requirePermission 抛出（code=FORBIDDEN）
     const input = createUserSchema.parse(req.body);
+    // P0-5（提权门禁）：`role.manage` 只证明「能进账号管理」，不证明「能分配任意角色」。
+    // 与 accounts.ts:408/472 同一口径：operator 即使被授予 role.manage，也不得铸造 admin
+    // 或分配高于自身的角色；否则邀请码/建号端点会成为绕过 canAssignRole 的旁路。
+    const targetRole = input.role ?? 'operator';
+    const callerRole = auth.authMode === 'dev' ? 'admin' : auth.role;
+    if (!canAssignRole(callerRole, targetRole)) {
+      throw new AppError('FORBIDDEN', '无权分配该角色（不可越级或授予 admin）', 403);
+    }
     const created = await withTenantClient(auth.tenantId, (client) => createUser(client, auth.tenantId, input));
     return res.status(201).json({ ok: true, code: 0, user: toPublic(created) });
   } catch (e) {
@@ -254,27 +292,33 @@ router.post('/auth/wx-bind', loginRateLimit(), async (req, res, next) => {
 // POST /api/v1/auth/wx-login —— 免登录：openid 直接换 JWT（未绑定返回提示）
 router.post('/auth/wx-login', loginRateLimit(), async (req, res, next) => {
   try {
-    const { code, tenant } = z.object({ code: z.string().min(1).max(200), tenant: z.string().max(64).optional() }).parse(req.body);
+    const { code, tenant, channel } = z.object({
+      code: z.string().min(1).max(200),
+      tenant: z.string().max(64).optional(),
+      channel: z.enum(['pc', 'mp']).optional(),
+    }).parse(req.body);
     const tenantId = normalizeTenant(tenant) ?? req.header('X-Tenant-Id') ?? DEFAULT_LOGIN_TENANT;
     const sess = await code2Session(code);
     if (!sess?.openid) return res.status(502).json({ ok: false, code: 'WX_002', message: 'wx code2session fail' });
     const user = await withTenantClient(tenantId, (client) =>
       client.query(`SELECT * FROM account_user WHERE wx_openid = $1 AND tenant_id = $2 AND active = true LIMIT 1`, [sess.openid, tenantId]),
-    );
+    { system: true });
     if (user.rowCount === 0) {
       // 未绑定：返回需绑定提示（不暴露是否存在）
       return res.status(409).json({ ok: false, code: 'WX_NOT_BOUND', message: '微信未绑定账号，请先用账号密码登录并绑定' });
     }
     const row = user.rows[0];
+    // 渠道收口：运营不能用小程序静默登录
+    assertChannelRole(row.role, channel);
     const secret = resolveSecret();
     if (!secret) return res.status(500).json({ ok: false, code: 'AUTH_CFG', message: 'JWT_SECRET not configured' });
     const token = signLoginToken(
-      { sub: row.id, tid: tenantId, role: row.role as AccountRole, username: row.username },
+      { sub: row.id, tid: tenantId, role: row.role as AccountRole, username: row.username, tokenVersion: Number(row.token_version ?? 0) },
       secret,
     );
     const permissions = await withTenantClient(tenantId, (client) =>
       listPerms({ tenantId, requestId: '', role: row.role, authMode: 'prod' }, client),
-    );
+    { system: true });
     return res.json({ ok: true, code: 0, token, user: toPublic(row), permissions, via: 'wx' });
   } catch (e) {
     next(e);

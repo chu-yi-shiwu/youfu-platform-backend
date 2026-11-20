@@ -1,16 +1,12 @@
-// workOrderMasterVisibility.http.test.ts —— P2-2（初一拍板：派了才可见）回归护栏。
+// workOrderMasterVisibility.http.test.ts —— 角色数据范围收敛后的路由契约测试。
 //
-//   师傅角色（worker / operator）×（分派/未分派）可见性矩阵：
-//     - 列表：worker 与 operator 一律 scope 到 assignee=本人（未分派单列表不可见）；
-//       显式传 assignee=他人 被覆盖（防越权）；
-//     - 详情：本人单 200；他人单/未分派单 403（未分派唯一可见面=抢单大厅）；
-//     - 降级纪律：档案查不到 → 放行全量（一线可用性优先，既有口径回归；
-//       列表侧 M4 + 详情侧 M10 双覆盖）；
-//     - 防越权覆盖：显式传 assignee=他人被覆盖，worker（M1）与 operator（M11）双覆盖；
-//     - 8 operator 试点兼容：抢单大厅 /open/claim-hall 未分派单照常可见（不受影响）；
-//     - 非师傅角色（admin/dispatcher）行为零变化（列表不过滤）。
+// 2026-11-08 根治：
+//   - 行可见性已下沉到 work_orders RLS（见 principalRls.pglite.test.ts）；
+//   - 路由不再写 MASTER_ROLES，也不再把 operator 当师傅；
+//   - 路由不再“worker 档案查不到 → 放行全量”；
+//   - 本文件只验证路由不再注入越权 scope、详情在 RLS 不可见时返回 404。
 //
-// 断言纪律：一律断言真实 HTTP 状态码，禁止 try/catch 空过。
+// 真正的“谁能看到哪一行”由 principalRls.pglite.test.ts 用真库策略验证。
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import express from 'express';
 import type { Server } from 'node:http';
@@ -18,8 +14,10 @@ import type { AddressInfo } from 'node:net';
 import { errorMiddleware } from '../middleware/error.js';
 
 const h = vi.hoisted(() => ({ client: null as unknown }));
+
 vi.mock('../db/pool.js', () => ({
   withTenantClient: async (_tenantId: string, fn: (c: unknown) => unknown) => fn(h.client),
+  withTenantScope: async (_c: unknown, _scope: string, fn: () => unknown) => fn(),
   assertSafeTenantId: (t: string) => t,
   default: { connect: async () => { throw new Error('[workOrderMasterVisibility.http.test] 单测禁用真实 pool'); } },
 }));
@@ -46,12 +44,9 @@ function makeClient(handlers: Handler[]) {
 }
 
 const T = 't-master-vis';
-const ME = 'W0001';
-const OTHER = 'W0002';
-
 let server: Server;
 let baseUrl = '';
-const auth = { tenantId: T, requestId: 'req-p2-2', userId: 'u-1', username: 'master', role: 'worker', authMode: 'prod' as const };
+const auth = { tenantId: T, requestId: 'req-scope', userId: 'u-1', username: 'u', role: 'worker', authMode: 'prod' as const };
 
 beforeAll(async () => {
   const app = express();
@@ -72,17 +67,16 @@ afterAll(async () => {
   await new Promise<void>((resolve) => server.close(() => resolve()));
 });
 
-const listHandlers = (profiles: string[] = [ME]): Handler[] => [
-  // resolveWorkerIds：token userId → worker.id 列表（E-8 QA P3-1：多档案返回全部行）
-  { match: (t) => t.includes('FROM worker WHERE tenant_id=$2 AND (account_id=$1 OR id=$1)'), reply: () => ({ rows: profiles.map((id) => ({ id })) }) },
-  // list()：把收到的 SQL/参数原样放行（断言在 calls 上做）
-  { match: (t) => t.includes('FROM work_orders wo') && (t.includes('COUNT(*)') || t.includes('ORDER BY wo.created_at')), reply: (t, p) => (t.includes('COUNT(*)') ? { rows: [{ c: '1' }] } : { rows: [{ id: 'wo-1', order_no: 'WO_1', status: 'assigned', assignee_id: profiles[0] }] }) },
+const listHandlers = (): Handler[] => [
+  {
+    match: (t) => t.includes('FROM work_orders wo') && (t.includes('COUNT(*)') || t.includes('ORDER BY wo.created_at')),
+    reply: (t) => (t.includes('COUNT(*)') ? { rows: [{ c: '1' }] } : { rows: [{ id: 'wo-1', order_no: 'WO_1', status: 'assigned', assignee_id: 'W0001' }] }),
+  },
   { match: (t) => t.includes('FROM workflow_def'), reply: () => ({ rows: [] }) },
 ];
 
-const findOneHandlers = (assigneeId: string | null, profiles: string[] = [ME]): Handler[] => [
-  { match: (t) => t.includes('FROM worker WHERE tenant_id=$2 AND (account_id=$1 OR id=$1)'), reply: () => ({ rows: profiles.map((id) => ({ id })) }) },
-  { match: (t) => t.includes('FROM work_orders') && t.includes('WHERE'), reply: () => ({ rows: [{ id: 'wo-x', order_no: 'WO_X', status: 'assigned', assignee_id: assigneeId }] }) },
+const detailHandlers = (row: Record<string, unknown> | null): Handler[] => [
+  { match: (t) => t.includes('FROM work_orders') && t.includes('WHERE'), reply: () => ({ rows: row ? [row] : [] }) },
   { match: (t) => t.includes('FROM workflow_def'), reply: () => ({ rows: [] }) },
   { match: (t) => t.includes('FROM ticket_event'), reply: () => ({ rows: [] }) },
 ];
@@ -94,128 +88,43 @@ const get = async (path: string, role = 'worker') => {
   return { status: r.status, body: (await r.json().catch(() => ({}))) as Record<string, any> };
 };
 
-describe('P2-2 派了才可见：师傅角色列表按分派关系过滤', () => {
-  it('M1 worker 列表：assignee 强制=本人（显式传他人被覆盖，未分派单天然不可见）', async () => {
+describe('角色数据范围收敛：路由不再注入 MASTER_ROLES scope', () => {
+  it('worker 显式 assignee=别人：路由原样透传，交给 RLS 过滤', async () => {
     const calls = makeClient(listHandlers());
     const r = await get('/open/work_orders?assignee=W9999', 'worker');
     expect(r.status).toBe(200);
     const listCall = calls.find((c) => c.text.includes('FROM work_orders wo') && c.text.includes('ORDER BY'));
     expect(listCall).toBeTruthy();
-    // E-8 QA P3-1：scoped assignee 现为集合参数（ANY($n::text[])），断言数组元素深等
-    expect(listCall!.params).toContainEqual([ME]);
-    expect(listCall!.params).not.toContain('W9999');
+    expect(listCall!.params).toContain('W9999');
+    expect(listCall!.params).not.toContainEqual(['W0001']);
   });
 
-  it('M2 operator 列表：同口径 scope 到本人（P2-2 新行为，未分派单列表不可见）', async () => {
+  it('operator 不传 assignee：不注入本人 scope（运营看全局）', async () => {
     const calls = makeClient(listHandlers());
     const r = await get('/open/work_orders', 'operator');
     expect(r.status).toBe(200);
     const listCall = calls.find((c) => c.text.includes('FROM work_orders wo') && c.text.includes('ORDER BY'));
-    expect(listCall!.params).toContainEqual([ME]);
+    expect(listCall).toBeTruthy();
+    expect(listCall!.params).not.toContainEqual(['W0001']);
   });
 
-  it('M3 admin 列表：行为零变化（不注入 assignee 过滤）', async () => {
+  it('admin 不传 assignee：不注入本人 scope', async () => {
     const calls = makeClient(listHandlers());
     const r = await get('/open/work_orders', 'admin');
     expect(r.status).toBe(200);
     const listCall = calls.find((c) => c.text.includes('FROM work_orders wo') && c.text.includes('ORDER BY'));
-    expect(listCall!.params).not.toContain(ME);
+    expect(listCall!.params).not.toContainEqual(['W0001']);
   });
 
-  it('M4 降级纪律：师傅档案查不到 → 放行全量（warn，不阻断一线）', async () => {
-    const calls = makeClient([
-      { match: (t) => t.includes('FROM worker WHERE'), reply: () => ({ rows: [], rowCount: 0 }) },
-      ...listHandlers().slice(1),
-    ]);
-    const r = await get('/open/work_orders', 'operator');
-    expect(r.status).toBe(200);
-    const listCall = calls.find((c) => c.text.includes('FROM work_orders wo') && c.text.includes('ORDER BY'));
-    expect(listCall!.params).not.toContain(ME); // 未注入 scope = 降级放行
-  });
-  it('M11 operator 列表：显式传 assignee=他人同样被覆盖（QA 复验缺口②：operator 侧防越权对齐 worker）', async () => {
-    const calls = makeClient(listHandlers());
-    const r = await get('/open/work_orders?assignee=W9999', 'operator');
-    expect(r.status).toBe(200);
-    const listCall = calls.find((c) => c.text.includes('FROM work_orders wo') && c.text.includes('ORDER BY'));
-    expect(listCall).toBeTruthy();
-    expect(listCall!.params).toContainEqual([ME]);
-    expect(listCall!.params).not.toContain('W9999');
+  it('worker 详情：RLS 不可见（findOne 返回空）→ 404', async () => {
+    makeClient(detailHandlers(null));
+    const r = await get('/open/work_order/wo-other', 'worker');
+    expect(r.status).toBe(404);
   });
 
-  it('M12 双档案列表：多档案按集合过滤（E-8 QA P3-1——任一档案名下的单都可见，SQL 走 ANY）', async () => {
-    const calls = makeClient(listHandlers([ME, 'W0003']));
-    const r = await get('/open/work_orders?assignee=W9999', 'worker');
-    expect(r.status).toBe(200);
-    const listCall = calls.find((c) => c.text.includes('FROM work_orders wo') && c.text.includes('ORDER BY'));
-    expect(listCall).toBeTruthy();
-    // 集合参数完整下发（两条档案都进 ANY），显式 W9999 仍被覆盖
-    expect(listCall!.params).toContainEqual([ME, 'W0003']);
-    expect(listCall!.params).not.toContain('W9999');
-    expect(listCall!.text).toContain('ANY(');
-  });
-});
-
-describe('P2-2 派了才可见：详情同口径', () => {
-  it('M5 worker 详情：本人单 200', async () => {
-    makeClient(findOneHandlers(ME));
-    const r = await get('/open/work_order/wo-x', 'worker');
-    expect(r.status).toBe(200);
-  });
-
-  it('M6 worker 详情：他人单 403（既有行为回归）', async () => {
-    makeClient(findOneHandlers(OTHER));
-    const r = await get('/open/work_order/wo-x', 'worker');
-    expect(r.status).toBe(403);
-  });
-
-  it('M7 operator 详情：未分派单（assignee_id NULL）→ 403（派了才可见，唯一可见面=抢单大厅）', async () => {
-    makeClient(findOneHandlers(null));
-    const r = await get('/open/work_order/wo-x', 'operator');
-    expect(r.status).toBe(403);
-  });
-
-  it('M8 operator 详情：分派给本人 → 200（试点师傅正常作业）', async () => {
-    makeClient(findOneHandlers(ME));
+  it('operator 详情：RLS 可见（findOne 返回行）→ 200', async () => {
+    makeClient(detailHandlers({ id: 'wo-x', order_no: 'WO_X', status: 'assigned', assignee_id: 'W0002', def_version: 0 }));
     const r = await get('/open/work_order/wo-x', 'operator');
     expect(r.status).toBe(200);
-  });
-
-  it('M10 详情降级纪律：operator 档案查不到 → 放行（QA 复验缺口①：详情侧降级同列表，不 500 不误 403）', async () => {
-    makeClient([
-      { match: (t) => t.includes('FROM worker WHERE'), reply: () => ({ rows: [], rowCount: 0 }) },
-      ...findOneHandlers(OTHER).slice(1),
-    ]);
-    const r = await get('/open/work_order/wo-x', 'operator');
-    expect(r.status).toBe(200);
-  });
-
-  it('M13 双档案详情：第一条不命中、第二条命中 → 200（E-8 QA P3-1 漏判锚定——旧逻辑只比 rows[0] 会误 403）', async () => {
-    makeClient(findOneHandlers(OTHER, [ME, OTHER]));
-    const r = await get('/open/work_order/wo-x', 'worker');
-    expect(r.status, `期望 200，实际 ${r.status} ${JSON.stringify(r.body)}`).toBe(200);
-  });
-
-  it('M14 双档案详情：两条档案都不命中 → 403（多档案不放大可见面）', async () => {
-    makeClient(findOneHandlers('W0009', [ME, OTHER]));
-    const r = await get('/open/work_order/wo-x', 'worker');
-    expect(r.status).toBe(403);
-  });
-});
-
-describe('P2-2 兼容性：抢单大厅不受影响（8 operator 试点行为保留）', () => {
-  it('M9 claim-hall 未分派单照常可见（operator 视角回归）', async () => {
-    // F10：列表 SQL 不再含 'claim_hall' 字面量（旧 mock 匹配 `status IN ('claim_hall',...)`），
-    //   池态改由 claimableStates(def) 派生并以参数数组传入。租户无 def → DEFAULT + 机制注入，
-    //   故池 = ['claim_hall']——M9 的可见性行为（未分派单仍可见）不因派生化而改变。
-    const calls = makeClient([
-      { match: (t) => t.includes('SELECT * FROM work_orders') && t.includes('status = ANY($2::text[])'), reply: () => ({ rows: [{ id: 'wo-hall', order_no: 'WO_H', status: 'claim_hall', assignee_id: null }] }) },
-      { match: (t) => t.includes('FROM workflow_def'), reply: () => ({ rows: [] }) },
-    ]);
-    const r = await get('/open/claim-hall', 'operator');
-    expect(r.status).toBe(200);
-    expect((r.body as any).items.length).toBe(1);
-    const hallCall = calls.find((c) => c.text.includes('status = ANY($2::text[])'));
-    expect(hallCall).toBeTruthy();
-    expect(hallCall!.params?.[1]).toEqual(['claim_hall']);
   });
 });

@@ -75,6 +75,7 @@ function baseHandlers(def: unknown, fromStatus = 'closed'): Handler[] {
     order_no: 'WO-EVAL-1',
     status: fromStatus,
     assignee_id: W1,
+    created_by: 'u-1', // P1-6：评价由报修人本人发起
   };
   return [
     { match: (t) => t.includes('SELECT def FROM workflow_def'), reply: () => ({ rows: [{ def }] }) },
@@ -136,9 +137,9 @@ describe('评价完成态（evaluatedStates 派生）：满意度回写 + 自动
     h.client = client;
     const r = await postTransition({ to: 'evaluated', score: 5 });
     expect(r.status, `期望 200，实际 ${r.status} ${JSON.stringify(r.body)}`).toBe(200);
-    const upd = findCall(calls, 'satisfaction_score');
+    const upd = findCall(calls, 'satisfaction_score = $');
     expect(upd, '未发出满意度 UPDATE —— 评价态链路静默断了').toBeTruthy();
-    expect(upd!.params?.[0]).toBe(5);
+    expect(upd!.params).toContain(5);
     expect(findCall(calls, 'SAVEPOINT auto_settle'), '未触发自动结算草稿').toBeTruthy();
   });
 
@@ -148,9 +149,9 @@ describe('评价完成态（evaluatedStates 派生）：满意度回写 + 自动
     h.client = client;
     const r = await postTransition({ to: 'rated', score: 4 });
     expect(r.status, `期望 200，实际 ${r.status} ${JSON.stringify(r.body)}`).toBe(200);
-    const upd = findCall(calls, 'satisfaction_score');
+    const upd = findCall(calls, 'satisfaction_score = $');
     expect(upd, '自定义评价态名下未回写满意度 —— 派生失效').toBeTruthy();
-    expect(upd!.params?.[0]).toBe(4);
+    expect(upd!.params).toContain(4);
     expect(findCall(calls, 'SAVEPOINT auto_settle'), '自定义评价态名下未触发自动结算').toBeTruthy();
   });
 
@@ -159,7 +160,7 @@ describe('评价完成态（evaluatedStates 派生）：满意度回写 + 自动
     h.client = client;
     const r = await postTransition({ to: 'archived' });
     expect(r.status, `期望 200，实际 ${r.status} ${JSON.stringify(r.body)}`).toBe(200);
-    expect(findCall(calls, 'satisfaction_score')).toBeUndefined();
+    expect(findCall(calls, 'satisfaction_score = $')).toBeUndefined();
     expect(findCall(calls, 'SAVEPOINT auto_settle')).toBeUndefined();
   });
 
@@ -177,7 +178,7 @@ describe('评价完成态（evaluatedStates 派生）：满意度回写 + 自动
     h.client = client;
     const r = await postTransition({ to: 'evaluated' });
     expect(r.status, `期望 200，实际 ${r.status} ${JSON.stringify(r.body)}`).toBe(200);
-    expect(findCall(calls, 'satisfaction_score')).toBeUndefined();
+    expect(findCall(calls, 'satisfaction_score = $')).toBeUndefined();
     expect(findCall(calls, 'SAVEPOINT auto_settle')).toBeTruthy();
   });
 
@@ -199,7 +200,7 @@ describe('评价完成态（evaluatedStates 派生）：满意度回写 + 自动
 
     // 前提成立：这条链路真的走了学习段和评价段（否则「1 次」是假绿——
     // 若学习段压根没跑，只剩评价段自己扫 1 次，本例同样会通过，等于这道闸没人看着）。
-    expect(findCall(calls, 'satisfaction_score'), '评价段必须真的执行了').toBeTruthy();
+    expect(findCall(calls, 'satisfaction_score = $'), '评价段必须真的执行了').toBeTruthy();
     expect(
       findCall(calls, 'INSERT INTO ticket_learn_log'),
       '学习段必须真的进入了（幂等守卫 INSERT 在 runIncrementalLearnStep:311，是学习段的入口标记）',

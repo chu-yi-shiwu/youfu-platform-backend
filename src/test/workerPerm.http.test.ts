@@ -1,4 +1,7 @@
-// workerPerm.http.test.ts —— worker.ts 4 处写端点的**权限行为**特征测试（T8 第六批）
+// workerPerm.http.test.ts —— worker.ts 权限行为特征测试（T8 第六批）
+//
+// 2026-11-11 安全审计补充：GET /workers 与 /workers/:id 返回手机号/账号关联，
+// 原先对 worker 开放属 PII 泄漏；现与写端点同收口（ticket.manage / dispatch.override）。
 //
 // 【为什么补这份】
 //   worker.ts 虽已有 workerWithAccount.test.ts / workerLoadDrift.test.ts，但它们**不覆盖权限**：
@@ -144,12 +147,22 @@ describe('worker.ts · 写端点权限（A 组：等价性，改前改后都必�
     }
   });
 
-  it('③只读端点不收口：GET /workers 与 GET /workers/:id 对 worker 仍 200', async () => {
+  it('③只读人员档案已收口：worker → 403；operator / dispatcher → 200', async () => {
     authRole = 'worker';
-    const a = await req('GET', '/api/v1/workers');
-    const b = await req('GET', '/api/v1/workers/W001');
-    expect(a.status).toBe(200);
-    expect(b.status).toBe(200);
+    const deniedList = await req('GET', '/api/v1/workers');
+    const deniedOne = await req('GET', '/api/v1/workers/W001');
+    expect(deniedList.status).toBe(403);
+    expect(deniedOne.status).toBe(403);
+
+    authRole = 'operator';
+    const okList = await req('GET', '/api/v1/workers');
+    const okOne = await req('GET', '/api/v1/workers/W001');
+    expect(okList.status).toBe(200);
+    expect(okOne.status).toBe(200);
+
+    authRole = 'dispatcher';
+    const dispatchList = await req('GET', '/api/v1/workers');
+    expect(dispatchList.status).toBe(200);
   });
 });
 

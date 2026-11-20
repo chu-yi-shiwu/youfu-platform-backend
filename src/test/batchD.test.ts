@@ -30,6 +30,13 @@ function makeMock(handlers: Handler[], opts?: { strict?: boolean }) {
   const client = {
     query: async (text: string, params?: any[]) => {
       calls.push({ text, params });
+      // 可选自动规则读取的事务控制 SQL 是 known-safe 的；strict 门禁只关心业务 SQL 是否漏 handler。
+      if (/^(SAVEPOINT|RELEASE SAVEPOINT|ROLLBACK TO SAVEPOINT)/i.test(text.trim())) {
+        return { rows: [], rowCount: 1 };
+      }
+      if (text.includes('FROM workflow_auto_rule')) {
+        return { rows: [], rowCount: 0 };
+      }
       for (const h of handlers) {
         if (h.match(text)) return h.reply(text, params ?? []);
       }

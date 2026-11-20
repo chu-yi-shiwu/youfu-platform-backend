@@ -3,7 +3,13 @@
 // V6 标准载体（官方模板=行业基线）、V7 官方预置冷启动；R5 依赖批次 B 版本回滚（应用可回滚）。
 import { Router } from 'express';
 import { z } from 'zod';
+import type { PoolClient } from 'pg';
 import pool, { withTenantClient } from '../db/pool.js';
+
+// 平台模板市场用 platformAdminAuth，不是租户 JWT；显式 system scope。
+function withSystemTenantClient<T>(tenantId: string, fn: (client: PoolClient) => Promise<T>): Promise<T> {
+  return withTenantClient(tenantId, fn, { system: true });
+}
 import { saveWorkflowDef, getWorkflowDef, getWorkflowDefVersion } from '../engine/workflowDef.js';
 import { activeStates, doneStates } from '../engine/stateMachine.js';
 import { AppError } from '../middleware/error.js';
@@ -120,6 +126,13 @@ router.post('/templates/:id/apply', async (req, res, next) => {
   try {
     const actor = res.locals.platformAdmin?.username ?? 'platform';
     const { tenantId } = applySchema.parse(req.body);
+    // 2026-11-14 深度探针：先判租户是否存在。此前直接进 withSystemTenantClient，
+    // 不存在租户会在 saveWorkflowDef 里以 DRAFT_STALE（版本 0 vs 无定义）冒出来——把
+    // 「租户写错」误报成「草稿冲突」，运维无法判断。这里按契约返回 404。
+    const tenantExists = await pool.query(`SELECT 1 FROM tenant_registry WHERE tenant_id = $1`, [tenantId]);
+    if ((tenantExists.rowCount ?? 0) === 0) {
+      throw new AppError('NOT_FOUND', 'tenant not found', 404);
+    }
     const tplR = await pool.query(`SELECT * FROM platform_template WHERE id = $1 AND status = 'published'`, [req.params.id]);
     if (tplR.rowCount === 0) throw new AppError('NOT_FOUND', 'published template not found', 404);
     const tpl = tplR.rows[0];
@@ -142,7 +155,7 @@ router.post('/templates/:id/apply', async (req, res, next) => {
     }
 
     // 事务化：#7 修复——saveWorkflowDef + INSERT apply + applied_count 原子（withTenantClient 自带 BEGIN/COMMIT）
-    const result = await withTenantClient(tenantId, async (client) => {
+    const result = await withSystemTenantClient(tenantId, async (client) => {
       // 应用前快照：版本 + 指标（闭环率/超时率）
       const beforeVersion = await getWorkflowDefVersion(client, tenantId, entityType);
       // 闭环率/超时率口径由客户流程派生（同 templateEffects.ts 的 after 刷新：

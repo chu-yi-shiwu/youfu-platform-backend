@@ -120,7 +120,6 @@ const WRITE_ENDPOINTS: Array<{ name: string; method: string; path: string; body?
   { name: 'PUT /config/terms/:id', method: 'PUT', path: '/api/v1/config/terms/t-1', body: { custom_label: '进度2' } },
   { name: 'DELETE /config/terms/:id', method: 'DELETE', path: '/api/v1/config/terms/t-1' },
   { name: 'PUT /config/system', method: 'PUT', path: '/api/v1/config/system', body: { items: [{ key: 'brand', value: '优服家' }] } },
-  { name: 'PUT /config/ticket-require-service-desk', method: 'PUT', path: '/api/v1/config/ticket-require-service-desk', body: { enabled: true } },
 ];
 
 describe('config.ts · 配置写端点权限（A 组：等价性，改前改后都必须绿）', () => {

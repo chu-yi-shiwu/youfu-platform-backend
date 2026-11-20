@@ -75,7 +75,7 @@ async function inferOutsideTransaction(
         `SELECT name FROM fault_category WHERE tenant_id = $1 AND enabled = true`,
         [tenantId],
       ),
-    )
+    { system: true })
   ).rows.map((r) => r.name);
   return llmInferCategory(desc, catNames);
 }
@@ -304,7 +304,7 @@ export async function createPublicRepairReport(
       dispatch = await autoDispatchAfterCreate(client, tenantId, row, { business_type: dispatchBusinessType, priority, catalog: catalogId });
     }
     return { row, created, catalogName, priority, assetName: asset?.name ?? null, scanResolved: scan.scanResolved, location, dispatch };
-  });
+  }, { system: true });
 
   return { ...result, finalAttachments };
 }

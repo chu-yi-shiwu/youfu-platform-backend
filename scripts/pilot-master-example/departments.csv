@@ -1,0 +1,4 @@
+name,code,remark,is_default
+维修组,HOSP_WX,水电空调门窗维修,false
+保洁组,HOSP_BJ,病区与公共区域保洁,false
+安保组,HOSP_AB,门禁与夜间巡查,false

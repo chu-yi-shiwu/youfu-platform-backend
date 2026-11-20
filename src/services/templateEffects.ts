@@ -36,7 +36,7 @@ export async function refreshApplyEffect(applyId: string): Promise<{ refreshed: 
        FROM work_orders WHERE tenant_id = $1`,
       [row.tenant_id, tplDone, tplActive],
     ).then((r) => r.rows[0]);
-  });
+  }, { system: true });
   const after = { close_rate: m?.close_rate ?? null, overdue_rate: m?.overdue_rate ?? null, total: Number(m?.total ?? 0) };
   let effect: number | null = null;
   const before = row.before_metrics && typeof row.before_metrics === 'object' ? row.before_metrics : {};

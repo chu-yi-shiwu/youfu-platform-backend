@@ -12,7 +12,7 @@ import z from 'zod';
 import crypto from 'node:crypto';
 import pool, { withTenantClient } from '../db/pool.js';
 import { AUTH_MODE, loginRateLimit, type AuthLocals } from '../middleware/auth.js';
-import { listPerms, requirePermission, ROLE_CODE_RE } from '../middleware/role.js';
+import { canAssignRole, listPerms, requirePermission, ROLE_CODE_RE } from '../middleware/role.js';
 import { isRoleUsable } from '../repo/roleDef.js';
 import { recordPlatformAudit } from '../repo/platformAudit.js';
 import {
@@ -101,6 +101,13 @@ router.post('/invites', async (req, res, next) => {
     const tenantId = auth.tenantId;
     const code = randomInviteCode();
     const expiresAt = new Date(Date.now() + INVITE_TTL_HOURS * 3600 * 1000);
+    // P0-5（提权门禁）：邀请码是建号前置动作，必须与 /auth/users、/accounts 同口径。
+    // requireAdminAuth 的 role.manage 只回答「能否管理账号」，canAssignRole 才回答
+    // 「能否分配这个角色」——operator 不得开出 admin 邀请码，也不得越级分配。
+    const role = b.role ?? 'operator';
+    if (!canAssignRole(auth.role, role)) {
+      throw new AppError('FORBIDDEN', '无权分配该角色（不可越级或授予 admin）', 403);
+    }
     const row = await withTenantClient(tenantId, async (client) => {
       // 地基第二步补漏②（2026-10-17 二轮审查）：退场角色闸门。
       // 此前本端点只有 inviteCreateSchema 的 ROLE_CODE_RE **形状**校验，没有"这个岗位还能不能用"
@@ -108,7 +115,6 @@ router.post('/invites', async (req, res, next) => {
       // 而兑换时（invite.ts:282）isRoleUsable=false 会把它**静默** fallback 成 operator：
       // dispatcher 5 个权限点 → operator 11 个，等于"意图拿掉、实际静默升权"，全程零报错。
       // 闸门装在最前面（写入前），杜绝"先落库再靠兑换端兜底"。
-      const role = b.role ?? 'operator';
       if (!(await isRoleUsable(client, tenantId, role))) {
         throw new AppError('BAD_PARAM', `unknown role: ${role}`, 400);
       }
@@ -126,7 +132,7 @@ router.post('/invites', async (req, res, next) => {
           `INSERT INTO invite_codes (tenant_id, code_hash, username, display_name, role, created_by, expires_at)
            VALUES ($1, $2, $3, $4, $5, $6, $7)
            RETURNING id, username, display_name, role, expires_at, created_at`,
-          [tenantId, hmacInviteCode(code), b.username, b.display_name ?? null, b.role ?? 'operator', auth.username ?? null, expiresAt.toISOString()],
+          [tenantId, hmacInviteCode(code), b.username, b.display_name ?? null, role, auth.username ?? null, expiresAt.toISOString()],
         )
         .catch((e: any) => {
           // 并发双发兜底（uq_invite_codes_one_active 部分唯一索引，八件 QA P3）：
@@ -339,11 +345,11 @@ router.post('/invites/redeem', loginRateLimit(10), async (req, res, next) => {
         client,
       );
       return { user, permissions };
-    });
+    }, { system: true });
     const secret = resolveJwtSecret();
     if (!secret) throw new AppError('AUTH_CFG', 'JWT_SECRET not configured on server', 500);
     const token = signLoginToken(
-      { sub: result.user.id, tid: tenantId, role: result.user.role, username: result.user.username },
+      { sub: result.user.id, tid: tenantId, role: result.user.role, username: result.user.username, tokenVersion: Number(result.user.token_version ?? 0) },
       secret,
     );
     await audit(invite.username, 'invite.redeem', invite.id, tenantId, { username: invite.username });

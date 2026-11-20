@@ -29,10 +29,20 @@ describe('assertSafeTenantId · 多租户隔离守卫（R8 收口，原缺专职
     "a'b", // 单引号（SET 注入载体）
     'a`b', // 反引号
     'a"b', // 双引号
+    '资兴市第一人民医院', // 2026-11-11：登录页填医院中文名 → 400（不是租户编码）
     'a'.repeat(65), // 超长
   ];
   it.each(INVALID)('拒绝非法租户标识: %s', (id) => {
     expect(() => assertSafeTenantId(id)).toThrow('INVALID_TENANT_ID');
+  });
+
+  it('中文医院名被拒时给出可操作提示（不是医院中文名）', () => {
+    try {
+      assertSafeTenantId('资兴市第一人民医院');
+      expect.unreachable('should have thrown');
+    } catch (e) {
+      expect((e as AppError).message).toContain('不是医院中文名');
+    }
   });
 
   it('拒绝 SQL/SET 注入片段（防 SET LOCAL app.tenant_id 拼接注入；代码另有单引号二次转义作为第二道防线）', () => {

@@ -1,0 +1,22 @@
+-- 108_drop_open_api_app_secret.sql —— 【人工执行，非自动迁移】
+--
+-- 来源：053b_review_fixes.sql 的 #4 项。把 open_api_app 的明文 app_secret 列删除，
+--   只保留 secret_hash，缩小泄密面。
+--
+-- 🔴 为什么放在 pending-migrations/：
+--   这是破坏性 DDL（删列）。P0-1 的迁移纪律要求「加法自动、破坏性人工」：
+--   自动迁移通道只应做可重复、可回滚的加法；删列/删表必须由人确认观察期与备份后执行。
+--
+-- 执行前置条件：
+--   1. 确认当前代码版本已不再读取 open_api_app.app_secret（platform.ts 只写 secret_hash）；
+--   2. 已完成数据库全量备份（至少包含 open_api_app 表）；
+--   3. 在维护窗口内由数据库属主执行，并记录到 _migrations。
+--
+-- 执行：
+--   sudo -u postgres psql -d youfu -v ON_ERROR_STOP=1 -f pending-migrations/108_drop_open_api_app_secret.sql
+--   sudo -u postgres psql -d youfu -c "INSERT INTO _migrations(name) VALUES ('108_drop_open_api_app_secret.sql') ON CONFLICT DO NOTHING"
+--
+-- 回滚：本操作不可逆（明文密钥列删除后无法从库内恢复）；如需恢复列结构，只能重新 ADD COLUMN，
+--   但历史明文值必须从备份中找回。执行前务必确认备份可用。
+
+ALTER TABLE open_api_app DROP COLUMN IF EXISTS app_secret;

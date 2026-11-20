@@ -7,7 +7,7 @@ import { randomUUID } from 'crypto';
 import { withTenantClient } from '../db/pool.js';
 import { AppError } from '../middleware/error.js';
 import { requirePermission } from '../middleware/role.js';
-import { parseCsv, csvEscape } from '../services/csvUtil.js';
+import { parseCsv, csvHeader, csvRowLine, csvHeaderMap, csvParseRow, csvBool, csvDateOnly, type CsvField } from '../services/csvUtil.js';
 
 const router = Router();
 
@@ -43,44 +43,56 @@ type TypeDef = {
   uniqueCode?: boolean;
 };
 
+// 有 enabled 列的字典表（055/117 迁移）。列表默认只返回启用项；
+// include_disabled=1 时才连停用项一起返回（管理端“显示已停用”开关）。
+// 历史单据按 id/名称解析，不依赖列表过滤，所以停用不会造成历史数据丢失。
+const ENABLED_TABLES = new Set([
+  'dept', 'region', 'contact', 'supplier', 'equipment_type', 'equipment_brand', 'priority_dict',
+  'sla_policy', 'work_order_template', 'business_type_dict', 'location_dict', 'reporter_dict',
+]);
+
 // export 供测试/静态门禁断言「声明列必存在于迁移 DDL」不变式（M0-1 C 件配套），无运行时行为变更。
 export const TYPES: Record<string, TypeDef> = {
   dept: {
     table: 'dept',
-    columns: ['id', 'tenant_id', 'name', 'code', 'remark', 'created_at', 'updated_at'],
-    insertCols: ['name', 'code', 'remark'],
+    columns: ['id', 'tenant_id', 'name', 'code', 'remark', 'is_default', 'enabled', 'created_at', 'updated_at'],
+    insertCols: ['name', 'code', 'remark', 'enabled'],
     fields: [
       { key: 'name', label: '部门名称' },
       { key: 'code', label: '编码' },
       { key: 'remark', label: '备注' },
+      { key: 'enabled', label: '启用' },
     ],
     schema: z.object({
       name: z.string().min(1),
       code: z.string().optional(),
       remark: z.string().optional(),
+      enabled: z.boolean().optional(),
     }),
   },
   region: {
     table: 'region',
-    columns: ['id', 'tenant_id', 'name', 'code', 'parent_id', 'remark', 'created_at', 'updated_at'],
-    insertCols: ['name', 'code', 'parent_id', 'remark'],
+    columns: ['id', 'tenant_id', 'name', 'code', 'parent_id', 'remark', 'enabled', 'created_at', 'updated_at'],
+    insertCols: ['name', 'code', 'parent_id', 'remark', 'enabled'],
     fields: [
       { key: 'name', label: '名称' },
       { key: 'code', label: '编码' },
-      { key: 'parent_id', label: '上级区域ID' },
+      { key: 'parent_id', label: '上级区域' },
       { key: 'remark', label: '备注' },
+      { key: 'enabled', label: '启用' },
     ],
     schema: z.object({
       name: z.string().min(1),
       code: z.string().optional(),
       parent_id: z.string().optional(),
       remark: z.string().optional(),
+      enabled: z.boolean().optional(),
     }),
   },
   contact: {
     table: 'contact',
-    columns: ['id', 'tenant_id', 'name', 'phone', 'email', 'org', 'dept', 'remark', 'created_at', 'updated_at'],
-    insertCols: ['name', 'phone', 'email', 'org', 'dept', 'remark'],
+    columns: ['id', 'tenant_id', 'name', 'phone', 'email', 'org', 'dept', 'remark', 'enabled', 'created_at', 'updated_at'],
+    insertCols: ['name', 'phone', 'email', 'org', 'dept', 'remark', 'enabled'],
     fields: [
       { key: 'name', label: '姓名' },
       { key: 'phone', label: '电话' },
@@ -88,6 +100,7 @@ export const TYPES: Record<string, TypeDef> = {
       { key: 'org', label: '单位' },
       { key: 'dept', label: '部门' },
       { key: 'remark', label: '备注' },
+      { key: 'enabled', label: '启用' },
     ],
     schema: z.object({
       name: z.string().min(1),
@@ -96,12 +109,13 @@ export const TYPES: Record<string, TypeDef> = {
       org: z.string().optional(),
       dept: z.string().optional(),
       remark: z.string().optional(),
+      enabled: z.boolean().optional(),
     }),
   },
   supplier: {
     table: 'supplier',
-    columns: ['id', 'tenant_id', 'name', 'contact_person', 'phone', 'address', 'category', 'remark', 'created_at', 'updated_at'],
-    insertCols: ['name', 'contact_person', 'phone', 'address', 'category', 'remark'],
+    columns: ['id', 'tenant_id', 'name', 'contact_person', 'phone', 'address', 'category', 'remark', 'enabled', 'created_at', 'updated_at'],
+    insertCols: ['name', 'contact_person', 'phone', 'address', 'category', 'remark', 'enabled'],
     fields: [
       { key: 'name', label: '名称' },
       { key: 'contact_person', label: '联系人' },
@@ -109,6 +123,7 @@ export const TYPES: Record<string, TypeDef> = {
       { key: 'address', label: '地址' },
       { key: 'category', label: '分类' },
       { key: 'remark', label: '备注' },
+      { key: 'enabled', label: '启用' },
     ],
     schema: z.object({
       name: z.string().min(1),
@@ -117,43 +132,48 @@ export const TYPES: Record<string, TypeDef> = {
       address: z.string().optional(),
       category: z.string().optional(),
       remark: z.string().optional(),
+      enabled: z.boolean().optional(),
     }),
   },
   // ===== 批次 B 新增（047 迁移）=====
   equipment_type: {
     table: 'equipment_type',
-    columns: ['id', 'tenant_id', 'name', 'code', 'remark', 'created_at', 'updated_at'],
-    insertCols: ['name', 'code', 'remark'],
+    columns: ['id', 'tenant_id', 'name', 'code', 'remark', 'enabled', 'created_at', 'updated_at'],
+    insertCols: ['name', 'code', 'remark', 'enabled'],
     fields: [
       { key: 'name', label: '类型名称' },
       { key: 'code', label: '编码' },
       { key: 'remark', label: '备注' },
+      { key: 'enabled', label: '启用' },
     ],
     schema: z.object({
       name: z.string().min(1),
       code: z.string().optional(),
       remark: z.string().optional(),
+      enabled: z.boolean().optional(),
     }),
   },
   equipment_brand: {
     table: 'equipment_brand',
-    columns: ['id', 'tenant_id', 'name', 'code', 'remark', 'created_at', 'updated_at'],
-    insertCols: ['name', 'code', 'remark'],
+    columns: ['id', 'tenant_id', 'name', 'code', 'remark', 'enabled', 'created_at', 'updated_at'],
+    insertCols: ['name', 'code', 'remark', 'enabled'],
     fields: [
       { key: 'name', label: '厂商名称' },
       { key: 'code', label: '编码' },
       { key: 'remark', label: '备注' },
+      { key: 'enabled', label: '启用' },
     ],
     schema: z.object({
       name: z.string().min(1),
       code: z.string().optional(),
       remark: z.string().optional(),
+      enabled: z.boolean().optional(),
     }),
   },
   priority_dict: {
     table: 'priority_dict',
-    columns: ['id', 'tenant_id', 'name', 'code', 'sort', 'color', 'remark', 'created_at', 'updated_at'],
-    insertCols: ['name', 'code', 'sort', 'color', 'remark'],
+    columns: ['id', 'tenant_id', 'name', 'code', 'sort', 'color', 'remark', 'enabled', 'created_at', 'updated_at'],
+    insertCols: ['name', 'code', 'sort', 'color', 'remark', 'enabled'],
     // numeric 列 sort 不可 ILIKE（P0-2 引擎修复①配套声明；回退逻辑也会排除 z.number()，双保险）
     searchCols: ['name', 'code', 'color', 'remark'],
     fields: [
@@ -162,6 +182,7 @@ export const TYPES: Record<string, TypeDef> = {
       { key: 'sort', label: '排序(小在前)' },
       { key: 'color', label: '颜色(red/orange)' },
       { key: 'remark', label: '备注' },
+      { key: 'enabled', label: '启用' },
     ],
     schema: z.object({
       name: z.string().min(1),
@@ -169,6 +190,7 @@ export const TYPES: Record<string, TypeDef> = {
       sort: z.number().optional(),
       color: z.string().optional(),
       remark: z.string().optional(),
+      enabled: z.boolean().optional(),
     }),
   },
   sla_policy: {
@@ -251,7 +273,7 @@ export const TYPES: Record<string, TypeDef> = {
       { key: 'code', label: '编号' },
       { key: 'name', label: '名称' },
       { key: 'category', label: '类别' },
-      { key: 'default_reporter_id', label: '默认报修人ID' },
+      { key: 'default_reporter_id', label: '默认报修人' },
     ],
     schema: z.object({
       code: z.string().min(1),
@@ -306,14 +328,33 @@ function searchColsOf(def: TypeDef): string[] {
     .map((f) => f.key);
 }
 
+/**
+ * P0-6（2026-11-04）：敏感字典读守卫。
+ * contact / supplier / reporter 含姓名、电话、邮箱、住址等 PII，此前任意登录账号
+ * （含最低权限 worker）都能列表读取。现在读取与写入统一到 `basicdata.edit`
+ * （默认 operator 及以上；租户可通过 role_permission 显式授予）。
+ * 
+ * 为什么不收 location/dept：这两类是建单必填字典（公开报修/小程序建单选区域、部门），
+ * 对登录用户只读放行是业务必需；它们不含个人联系方式，泄露面与 PII 不同级。
+ */
+const SENSITIVE_READ_TYPES = new Set(['contact', 'supplier', 'reporter']);
+
 // ============ 列表（支持名称/关键字搜索）============
 router.get('/basic-data/:type', async (req, res, next) => {
   try {
     const def = getType(req.params.type);
-    const tenantId = res.locals.auth.tenantId;
+    const auth = res.locals.auth;
+    const tenantId = auth.tenantId;
+    if (SENSITIVE_READ_TYPES.has(req.params.type)) {
+      await withTenantClient(tenantId, (client) => requirePermission(auth, client, 'basicdata.edit'));
+    }
     const q = (req.query.q as string) || '';
     const clauses = ['tenant_id = $1'];
     const params: unknown[] = [tenantId];
+    // 停用项默认不出现在列表/下拉；管理端显式 include_disabled=1 才返回。
+    if (ENABLED_TABLES.has(def.table) && req.query.include_disabled !== '1') {
+      clauses.push('enabled IS NOT FALSE');
+    }
     if (q) {
       const like = `%${q}%`;
       // 在可搜索字段上做 ILIKE（searchCols 声明优先，回退 z.string() 字段，杜绝 uuid/numeric 列 500）
@@ -435,22 +476,49 @@ router.delete('/basic-data/:type/:id', async (req, res, next) => {
 });
 
 // ============ CSV 导出 ============
+function basicCsvFields(def: TypeDef, type: string, nameMap: Map<string, string> = new Map()): CsvField[] {
+  const byKey = new Map(def.fields.map((f) => [f.key, f]));
+  return def.insertCols.map((key) => {
+    const f = byKey.get(key);
+    return {
+      key,
+      label: f?.label ?? key,
+      export: (row: any) => {
+        const v = row?.[key];
+        if ((type === 'region' && key === 'parent_id') || (type === 'location' && key === 'default_reporter_id')) {
+          return nameMap.get(String(v)) || '';
+        }
+        if (typeof v === 'boolean') return csvBool(v);
+        if (/_date$/.test(key) || key === 'purchase_date') return csvDateOnly(v);
+        return v;
+      },
+    };
+  });
+}
+
 router.get('/basic-data/:type/export', async (req, res, next) => {
   try {
     const def = getType(req.params.type);
     const auth = res.locals.auth;
     const tenantId = auth.tenantId;
-    const items = await withTenantClient(tenantId, async (client) => {
-      // R9-F1：导出属管理面 ⇒ 收敛到可配置权限点（原 requireConfigRole 只读角色白名单、不查权限表）。
-      // 复用本模块写操作同一权限点 basicdata.edit（CRUD 4 处已走它，defaults 含 operator ⇒ 等价保住）。
+    const result = await withTenantClient(tenantId, async (client) => {
       await requirePermission(auth, client, 'basicdata.edit');
-      return client
+      const items = await client
         .query(`SELECT * FROM ${def.table} WHERE tenant_id=$1 ORDER BY created_at DESC`, [tenantId])
         .then((r) => r.rows);
+      const nameMap = new Map<string, string>();
+      if (req.params.type === 'region') {
+        const rows = (await client.query(`SELECT id, name FROM region WHERE tenant_id=$1`, [tenantId])).rows;
+        for (const r of rows) nameMap.set(String(r.id), String(r.name));
+      } else if (req.params.type === 'location') {
+        const rows = (await client.query(`SELECT id, name FROM reporter_dict WHERE tenant_id=$1`, [tenantId])).rows;
+        for (const r of rows) nameMap.set(String(r.id), String(r.name));
+      }
+      return { items, nameMap };
     });
-    const headers = def.insertCols;
-    const lines = [headers.join(',')];
-    for (const row of items) lines.push(headers.map((h) => csvEscape(row[h])).join(','));
+    const fields = basicCsvFields(def, req.params.type, result.nameMap);
+    const lines = [csvHeader(fields)];
+    for (const row of result.items) lines.push(csvRowLine(row, fields));
     const csv = '﻿' + lines.join('\r\n');
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
     res.setHeader('Content-Disposition', `attachment; filename="${def.table}.csv"`);
@@ -470,8 +538,9 @@ router.post('/basic-data/:type/import', async (req, res, next) => {
     if (!text || typeof text !== 'string') throw new AppError('BAD_INPUT', 'csv text required', 400);
     const rows = parseCsv(text);
     if (rows.length < 2) return res.json({ ok: true, code: 0, inserted: 0 });
-    const headers = rows[0].map((h) => h.trim());
-    const dataRows = rows.slice(1);
+    const fields = basicCsvFields(def, req.params.type);
+    const headerMap = csvHeaderMap(rows[0], fields);
+    const dataRows = rows.slice(1).map((r) => csvParseRow(r, headerMap));
     // QA🟡9①：行数上限（见 CSV_IMPORT_MAX_ROWS 注释）——超限直接 400，不静默截断。
     if (dataRows.length > CSV_IMPORT_MAX_ROWS) {
       throw new AppError(
@@ -483,11 +552,10 @@ router.post('/basic-data/:type/import', async (req, res, next) => {
     // QA🟡9②：唯一码预检（仅对声明 uniqueCode 的字典，与 POST 建档同口径）。
     // 先做「CSV 内自撞」，再做「与库内撞码」——撞码一律前置为 409，
     // 否则中途撞 DB 唯一索引会抛 23505 把整个事务打成 aborted，错误信息还是 PG 方言。
-    const codeIdx = def.uniqueCode ? headers.indexOf('code') : -1;
     const codeLines = new Map<string, number[]>(); // code → 出现过的 CSV 行号（表头算第 1 行）
-    if (codeIdx >= 0) {
-      dataRows.forEach((r, i) => {
-        const raw = String(r[codeIdx] ?? '').trim();
+    if (def.uniqueCode) {
+      dataRows.forEach((obj, i) => {
+        const raw = String(obj.code ?? '').trim();
         if (!raw) return; // 无编号的行不参与撞码（后续按 !obj.name 跳过）
         const lines = codeLines.get(raw) ?? [];
         lines.push(i + 2);
@@ -505,6 +573,20 @@ router.post('/basic-data/:type/import', async (req, res, next) => {
     let inserted = 0;
     await withTenantClient(tenantId, async (client) => {
       await requirePermission(auth, client, 'basicdata.edit');
+      const refMap = new Map<string, string>();
+      if (req.params.type === 'region') {
+        const rows = (await client.query(`SELECT id, name, code FROM region WHERE tenant_id=$1`, [tenantId])).rows;
+        for (const r of rows) {
+          refMap.set(String(r.name), String(r.id));
+          if (r.code) refMap.set(String(r.code), String(r.id));
+        }
+      } else if (req.params.type === 'location') {
+        const rows = (await client.query(`SELECT id, name, code FROM reporter_dict WHERE tenant_id=$1`, [tenantId])).rows;
+        for (const r of rows) {
+          refMap.set(String(r.name), String(r.id));
+          if (r.code) refMap.set(String(r.code), String(r.id));
+        }
+      }
       if (codeLines.size > 0) {
         const dup = await client.query(
           `SELECT code FROM ${def.table} WHERE tenant_id=$1 AND code = ANY($2::text[])`,
@@ -515,12 +597,26 @@ router.post('/basic-data/:type/import', async (req, res, next) => {
           throw new AppError('CONFLICT', `以下编号已存在，无法导入：${hit}`, 409);
         }
       }
-      for (const r of dataRows) {
-        const obj: Record<string, unknown> = {};
-        headers.forEach((h, i) => {
-          if (def.insertCols.includes(h)) obj[h] = r[i] ?? null;
-        });
+      for (let rowIdx = 0; rowIdx < dataRows.length; rowIdx++) {
+        const obj = dataRows[rowIdx];
         if (!obj.name) continue; // 名称必填，跳过空行
+        const refKey = req.params.type === 'region' ? 'parent_id' : req.params.type === 'location' ? 'default_reporter_id' : '';
+        if (refKey && obj[refKey]) {
+          const raw = String(obj[refKey]).trim();
+          if (raw) {
+            const id = refMap.get(raw) ?? (/^[0-9a-f-]{36}$/i.test(raw) ? raw : '');
+            if (!id) throw new AppError('BAD_INPUT', `${refKey} 第 ${rowIdx + 2} 行引用不存在：${raw}`, 400);
+            obj[refKey] = id;
+          }
+        }
+        // 布尔列：导出为「是/否」，导入还原为 boolean（Postgres 不认中文布尔字面量）
+        for (const key of Object.keys(obj)) {
+          if (/^(is_|has_|enabled$|active$)/.test(key) && typeof obj[key] === 'string') {
+            const v = String(obj[key]).trim();
+            if (['是', 'true', '1', '启用'].includes(v)) obj[key] = true;
+            else if (['否', 'false', '0', '停用'].includes(v)) obj[key] = false;
+          }
+        }
         // jsonb 列：CSV 单元格按 JSON 解析（非法 JSON 给友好 400，而非 500）
         for (const jc of def.jsonCols ?? []) {
           const raw = obj[jc];

@@ -164,6 +164,12 @@ beforeAll(async () => {
       tenant_id text NOT NULL, role text NOT NULL, perm text NOT NULL,
       PRIMARY KEY (tenant_id, role, perm)
     );
+    -- withTenantClient 在 self scope 下解析 worker 档案；本测试只测 meta 字典，
+    -- 给最小表形状即可（无行 ⇒ worker_ids 为空，fail-closed）。
+    CREATE TABLE worker (
+      id text PRIMARY KEY, tenant_id text NOT NULL, account_id text
+    );
+    GRANT SELECT ON worker TO youfu_app;
     GRANT SELECT, INSERT, UPDATE, DELETE ON role_permission TO youfu_app;
     GRANT SELECT ON tenant_registry TO youfu_app;
   `);

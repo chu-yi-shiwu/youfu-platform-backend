@@ -5,7 +5,13 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import crypto from 'node:crypto';
+import type { PoolClient } from 'pg';
 import pool, { withTenantClient } from '../db/pool.js';
+
+// 平台管理端在 authMiddleware 之前/之外运行，没有租户 JWT，显式 system scope（仍按 tenantId 隔离）。
+function withSystemTenantClient<T>(tenantId: string, fn: (client: PoolClient) => Promise<T>): Promise<T> {
+  return withTenantClient(tenantId, fn, { system: true });
+}
 import { signJwt, loginRateLimit } from '../middleware/auth.js';
 import { platformAdminAuth } from '../middleware/platformAuth.js';
 import { verifyPassword, hashPassword } from '../account.js';
@@ -81,9 +87,9 @@ router.get('/tenants', async (req, res, next) => {
   try {
     const r = await pool.query(
       `SELECT tr.tenant_id, tr.name, tr.category, tr.status, tr.parent_id, tr.quota, tr.created_at, tr.updated_at,
-              COALESCE(ts.settings->>'llm_enabled', 'false') AS llm_enabled
+              COALESCE(llm.llm_enabled, 'false') AS llm_enabled
        FROM tenant_registry tr
-       LEFT JOIN tenant_settings ts ON ts.tenant_id = tr.tenant_id
+       LEFT JOIN platform_tenant_llm() llm ON llm.tenant_id = tr.tenant_id
        ORDER BY tr.tenant_id`,
     );
     await audit(res.locals.platformAdmin!.username, 'tenant.list', null, null, null);
@@ -430,7 +436,7 @@ router.put('/tenants/:id/llm', async (req, res, next) => {
 router.get('/tenants/:id/locations', async (req, res, next) => {
   try {
     const tenantId = (req.params.id || '').trim();
-    const r = await withTenantClient(tenantId, (client) =>
+    const r = await withSystemTenantClient(tenantId, (client) =>
       client.query(
         `SELECT id, code, name, category, default_reporter_id, enabled
          FROM location_dict WHERE tenant_id = $1 ORDER BY code LIMIT 500`,
@@ -449,7 +455,7 @@ router.post('/tenants/:id/locations', async (req, res, next) => {
       category: z.string().max(40).optional(),
       default_reporter_id: z.string().uuid().optional(),
     }).parse(req.body);
-    const r = await withTenantClient(tenantId, (client) =>
+    const r = await withSystemTenantClient(tenantId, (client) =>
       client.query(
         `INSERT INTO location_dict (tenant_id, code, name, category, default_reporter_id)
          VALUES ($1, $2, $3, $4, $5) RETURNING id, code, name, category, default_reporter_id`,
@@ -469,7 +475,7 @@ router.get('/tenants/:id/reporters', async (req, res, next) => {
     // 永远取不到后半页，且前端无法分页。改为受控分页（上限 500 保持既有防护），并回 total。
     const limit = clampInt(req.query.limit, 100, 1, 500);
     const offset = clampInt(req.query.offset, 0, 0, 100000);
-    const r = await withTenantClient(tenantId, async (client) => {
+    const r = await withSystemTenantClient(tenantId, async (client) => {
       const items = await client.query(
         `SELECT id, code, name, phone, role, enabled
          FROM reporter_dict WHERE tenant_id = $1 ORDER BY name LIMIT $2 OFFSET $3`,
@@ -493,7 +499,7 @@ router.post('/tenants/:id/reporters', async (req, res, next) => {
       phone: z.string().regex(/^1\d{10}$/, '手机号需 11 位'),
       role: z.string().max(40).optional(),
     }).parse(req.body);
-    const r = await withTenantClient(tenantId, (client) =>
+    const r = await withSystemTenantClient(tenantId, (client) =>
       client.query(
         `INSERT INTO reporter_dict (tenant_id, code, name, phone, role)
          VALUES ($1, $2, $3, $4, $5) RETURNING id, code, name, phone, role`,

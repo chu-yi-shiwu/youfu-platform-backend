@@ -63,15 +63,24 @@ CREATE TABLE worker (
   id         text PRIMARY KEY,
   tenant_id  text NOT NULL,
   name       text NOT NULL,
+  department_id uuid,
   skill_tags text[] NOT NULL DEFAULT '{}',
   load       int NOT NULL DEFAULT 0,
   active     boolean NOT NULL DEFAULT true,
   created_at timestamptz NOT NULL DEFAULT now()
 );
+CREATE TABLE dept (
+  id uuid PRIMARY KEY,
+  tenant_id text NOT NULL,
+  name text,
+  is_default boolean NOT NULL DEFAULT false
+);
 CREATE TABLE work_orders (
   id            text PRIMARY KEY,
   tenant_id     text NOT NULL,
   business_type text NOT NULL,
+  department_id uuid,
+  department_source text,
   catalog       text,
   priority      text NOT NULL DEFAULT 'normal',
   location      text,

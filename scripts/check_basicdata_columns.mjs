@@ -41,7 +41,8 @@ const addCols = (table, cols) => {
   if (!effective.has(table)) effective.set(table, new Set());
   cols.forEach((c) => effective.get(table).add(c));
 };
-const sqlFiles = readdirSync(root).filter((f) => /^\d{3}[a-z]?_.*\.sql$/.test(f)).sort();
+// P0-1：严格迁移命名（与 src/db/migrationFiles.ts 同口径）。
+const sqlFiles = readdirSync(root).filter((f) => /^\d{3,6}_[a-z0-9][a-z0-9_]*\.sql$/i.test(f)).sort();
 for (const f of sqlFiles) {
   const sql = readFileSync(join(root, f), 'utf8');
   // CREATE TABLE [IF NOT EXISTS] name ( ... );  —— 捕获到独立 ");" 行，容忍列内逗号与约束

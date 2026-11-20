@@ -31,11 +31,13 @@ const matRow = { id: 'm-1', tenant_id: TENANT, code: 'M-001', name: '滤芯', ca
 // patrol 夹具
 let pointExists = true;
 let taskFound = true;
-let taskRow: any = { id: 'pt-1', tenant_id: TENANT, title: '夜间巡更', status: 'pending', point_ids: ['p1', 'p2'], checkins: [] };
+let taskRow: any = { id: 'pt-1', tenant_id: TENANT, title: '夜间巡更', status: 'pending', point_ids: ['11111111-1111-4111-8111-111111111111', 'p2'], checkins: [] };
+let pointCodeFound = true;
 let missedRows: any[] = [];
 let anomalyPts: any[] = [];
 // feedback 夹具
 let fbFound = true;
+let fbStatus = 'new';
 let lastTenant = '';
 // T8 第九批：租户级权限覆盖（role_permission 行）。空 ⇒ 回退默认矩阵
 let permGrants: Record<string, string[]> = {};
@@ -58,12 +60,18 @@ const fakeClient = {
     if (sql.includes('UPDATE material SET')) return { rows: [matRow], rowCount: 1 };
     if (sql.includes('DELETE FROM material')) return { rows: [], rowCount: deleteCount };
     if (sql.includes('SELECT * FROM material WHERE')) return { rows: [matRow], rowCount: 1 };
+    if (sql.includes('min_qty > 0 AND qty < min_qty') && sql.includes('COUNT(*)')) return { rows: [{ low_count: 2 }], rowCount: 1 };
+    if (sql.includes('min_qty = EXCLUDED.min_qty')) return { rows: [{ material_id: 'm-1', warehouse: '中心库', qty: 0, min_qty: params?.[3] }], rowCount: 1 };
     if (sql.includes('ON CONFLICT (tenant_id, material_id, warehouse)')) return { rows: [{ qty: 15 }], rowCount: 1 };
-    if (sql.includes('FOR UPDATE')) return lockFound ? { rows: [{ qty: lockQty }], rowCount: 1 } : { rows: [], rowCount: 0 };
+    if (sql.includes('FOR UPDATE') && sql.includes('inventory')) return lockFound ? { rows: [{ qty: lockQty }], rowCount: 1 } : { rows: [], rowCount: 0 };
     if (sql.includes('UPDATE inventory SET qty=')) return { rows: [], rowCount: 1 };
     if (sql.includes('INSERT INTO inventory_log')) return { rows: [], rowCount: 1 };
     if (sql.includes('FROM inventory_log WHERE')) return { rows: [{ id: 'l-1', type: 'out', qty: 2 }], rowCount: 1 };
     // —— patrol ——
+    if (sql.includes('FROM worker WHERE tenant_id=$2')) return { rows: [{ id: 'W1' }], rowCount: 1 };
+    if (sql.includes('SELECT id FROM patrol_point WHERE tenant_id=$1 AND checkin_code=$2')) {
+      return pointCodeFound ? { rows: [{ id: taskRow.point_ids?.[0] ?? 'p1' }], rowCount: 1 } : { rows: [], rowCount: 0 };
+    }
     if (sql.includes("SELECT point_ids, checkins FROM patrol_task WHERE tenant_id=$1 AND status='missed'")) return { rows: missedRows, rowCount: missedRows.length };
     if (sql.includes('SELECT id, name FROM patrol_point WHERE tenant_id=$1 AND id = ANY')) return { rows: anomalyPts, rowCount: anomalyPts.length };
     if (sql.includes('SELECT * FROM patrol_task WHERE tenant_id=$1 AND id=$2')) return taskFound ? { rows: [taskRow], rowCount: 1 } : { rows: [], rowCount: 0 };
@@ -75,8 +83,13 @@ const fakeClient = {
     if (sql.includes('DELETE FROM patrol_point')) return { rows: [], rowCount: pointExists ? 1 : 0 };
     if (sql.includes('SELECT * FROM patrol_point WHERE')) return { rows: [{ id: 'pp-1', name: '东门' }], rowCount: 1 };
     // —— feedback ——
-    if (sql.includes('SELECT * FROM feedback WHERE id = $1 AND tenant_id = $2')) return fbFound ? { rows: [{ id: 'fb-1', status: 'new' }], rowCount: 1 } : { rows: [], rowCount: 0 };
+    if (sql.includes('SELECT * FROM feedback WHERE id=$1 AND tenant_id=$2 FOR UPDATE')) return fbFound ? { rows: [{ id: 'fb-1', status: fbStatus }], rowCount: 1 } : { rows: [], rowCount: 0 };
+    if (sql.includes('SELECT * FROM feedback WHERE id = $1 AND tenant_id = $2')) return fbFound ? { rows: [{ id: 'fb-1', status: fbStatus }], rowCount: 1 } : { rows: [], rowCount: 0 };
     if (sql.includes('INSERT INTO feedback')) return { rows: [{ id: 'fb-1', status: 'new' }], rowCount: 1 };
+    if (sql.includes('UPDATE feedback') && sql.includes("status='closed'")) {
+      fbStatus = 'closed';
+      return { rows: [{ id: 'fb-1', status: 'closed', closed_by: 'operator', close_note: params?.[3] ?? null }], rowCount: 1 };
+    }
     if (sql.includes('UPDATE feedback SET status')) return { rows: [{ id: 'fb-1', status: 'replied' }], rowCount: 1 };
     if (sql.includes('COUNT(*) FILTER')) return { rows: [{ satisfaction_count: 2, opinion_count: 3, new_count: 1, replied_count: 4, avg_rating: '4.5' }], rowCount: 1 };
     if (sql.includes('SELECT * FROM feedback WHERE tenant_id=$1 ORDER BY')) return { rows: [{ id: 'fb-1', type: 'opinion', content: '很满意' }], rowCount: 1 };
@@ -132,9 +145,10 @@ beforeEach(() => {
   authMode = 'dev'; // 归位：②/⑧ 等会把 authMode 切 'prod'，不归位会让后续 dev 用例被权限点挡成 403
   matFound = true; invExists = false; logExists = false; deleteCount = 1; lockQty = 10; lockFound = true; woFound = false;
   pointExists = true; taskFound = true;
-  taskRow = { id: 'pt-1', tenant_id: TENANT, title: '夜间巡更', status: 'pending', point_ids: ['p1', 'p2'], checkins: [] };
+  pointCodeFound = true;
+  taskRow = { id: 'pt-1', tenant_id: TENANT, title: '夜间巡更', status: 'pending', point_ids: ['11111111-1111-4111-8111-111111111111', 'p2'], checkins: [] };
   missedRows = []; anomalyPts = [];
-  fbFound = true; lastTenant = ''; permGrants = {};
+  fbFound = true; fbStatus = 'new'; lastTenant = ''; permGrants = {};
   fakeClient.query.mockClear();
   emitDomainEvent.mockClear();
   createAlert.mockClear();
@@ -169,7 +183,8 @@ describe('material.ts · 材料档案 CRUD', () => {
     authRole = 'admin';
     const r = await req('POST', '/api/v1/materials', { code: 'M-002', name: '密封圈' });
     expect(r.status).toBe(201);
-    const p = callParams(0);
+    const insert = fakeClient.query.mock.calls.find((c: unknown[]) => String(c[0]).includes('INSERT INTO material'));
+    const p = (insert?.[1] ?? []) as unknown[];
     expect(p[0]).toBe(TENANT);
     expect(p[7]).toBe(true); // enabled 默认
     expect(p[6]).toBe(0); // price 默认
@@ -217,10 +232,30 @@ describe('material.ts · 材料档案 CRUD', () => {
 });
 
 describe('material.ts · 库存与出入库（真 applyStockAction）', () => {
-  it('⑤GET /inventory?low=1 → 低库存过滤 SQL（qty < min_qty）', async () => {
+  it('⑤GET /inventory?low=1 → 低库存过滤 SQL（阈值>0 且 qty < min_qty）', async () => {
     const r = await req('GET', '/api/v1/inventory?low=1');
     expect(r.status).toBe(200);
-    expect(calls()[0]).toContain('qty < min_qty');
+    expect(calls()[0]).toContain('min_qty > 0 AND qty < min_qty');
+  });
+
+  it('⑤b 低库存汇总 + 阈值设置：summary 返回 low_count；PUT threshold 落库并校验 material 归属', async () => {
+    const sum = await req('GET', '/api/v1/inventory/summary');
+    expect(sum.status).toBe(200);
+    expect(((await sum.json()) as any).summary.low_count).toBe(2);
+
+    const put = await req('PUT', '/api/v1/inventory/threshold', {
+      material_id: '11111111-1111-4111-8111-111111111111', warehouse: '中心库', min_qty: 8,
+    });
+    expect(put.status).toBe(200);
+    expect(((await put.json()) as any).item.min_qty).toBe(8);
+    const ins = fakeClient.query.mock.calls.find((c: unknown[]) => String(c[0]).includes('min_qty = EXCLUDED.min_qty'));
+    expect(ins).toBeTruthy();
+
+    matFound = false;
+    const bad = await req('PUT', '/api/v1/inventory/threshold', {
+      material_id: '22222222-2222-4222-8222-222222222222', min_qty: 8,
+    });
+    expect(bad.status).toBe(404);
   });
 
   it('⑥POST /inventory/in → 物料不存在 404；happy 走 ON CONFLICT 原子 upsert + 流水 type=in + 操作人', async () => {
@@ -279,11 +314,14 @@ describe('material.ts · 流水/CSV 导出导入', () => {
     expect(r.headers.get('content-type')).toContain('text/csv');
     const buf = new Uint8Array(await r.arrayBuffer());
     expect([buf[0], buf[1], buf[2]]).toEqual([0xef, 0xbb, 0xbf]);
-    expect(new TextDecoder('utf-8').decode(buf.slice(3)).startsWith('code,name,category')).toBe(true);
+    expect(new TextDecoder('utf-8').decode(buf.slice(3)).startsWith('材料编号,材料名称,类别')).toBe(true);
     const r2 = await req('POST', '/api/v1/materials/import', { csv: 'code,name\nM-A,胶带\n' });
     const j2 = (await r2.json()) as any;
     expect(j2.inserted).toBe(1);
     expect(calls().some((s) => s.includes('INSERT INTO material ('))).toBe(true);
+    const r3 = await req('POST', '/api/v1/materials/import', { csv: '材料编号,材料名称,启用\nM-B,纱布,是\n' });
+    const j3 = (await r3.json()) as any;
+    expect(j3.inserted).toBe(1);
     // T8 第十二批：导出守卫收敛到 requirePermission('material.export') ⇒ dev 恒放行会让 403 变成恒绿假绿。
     // 放最后：authMode / authRole 由 beforeEach 归位，不影响后续用例。
     authMode = 'prod';
@@ -398,8 +436,63 @@ describe('patrol.ts · 巡更点位与任务', () => {
   });
 });
 
-describe('feedback.ts · 反馈提交/回复/统计', () => {
-  it('⑰GET / → type/status 过滤', async () => {
+// 2026-11-14 方向 B：巡更签到必须扫码（点位二维码），管理端可手工补签。
+describe('patrol.ts · 扫码签到在场校验', () => {
+  const P1 = '11111111-1111-4111-8111-111111111111';
+  const resetTask = () => {
+    taskFound = true;
+    pointCodeFound = true;
+    taskRow = { id: 'pt-1', tenant_id: TENANT, title: '夜间巡更', status: 'pending', assignee: 'W1', point_ids: [P1, 'p2'], checkins: [] };
+  };
+
+  it('worker 只传 point_id → 403 SCAN_REQUIRED，且不写签到', async () => {
+    authRole = 'worker';
+    authMode = 'prod';
+    resetTask();
+    const r = await req('POST', '/api/v1/patrol/tasks/pt-1/checkin', { point_id: P1 });
+    expect(r.status).toBe(403);
+    const j = (await r.json()) as any;
+    expect(j.code).toBe('SCAN_REQUIRED');
+    expect(calls().some((s) => s.includes('UPDATE patrol_task SET status'))).toBe(false);
+  });
+
+  it('worker 扫码（code 命中任务点位）→ 200，签到记录 via=scan', async () => {
+    authRole = 'worker';
+    authMode = 'prod';
+    resetTask();
+    const r = await req('POST', '/api/v1/patrol/tasks/pt-1/checkin', { code: 'ABCD1234' });
+    expect(r.status, JSON.stringify(await r.clone().json().catch(() => ({})))).toBe(200);
+    const upd = calls().find((s) => s.includes('UPDATE patrol_task SET status'));
+    expect(upd).toBeTruthy();
+    const params = fakeClient.query.mock.calls.find((c: unknown[]) => String(c[0]).includes('UPDATE patrol_task SET status'))?.[1] as any[];
+    const checkins = JSON.parse(String(params?.[3] ?? '[]'));
+    expect(checkins[0]?.via).toBe('scan');
+    expect(checkins[0]?.point_id).toBe(P1);
+  });
+
+  it('负控制：签到码不属于本任务 → 404，不写签到', async () => {
+    authRole = 'worker';
+    authMode = 'prod';
+    resetTask();
+    pointCodeFound = false;
+    const r = await req('POST', '/api/v1/patrol/tasks/pt-1/checkin', { code: 'WRONG999' });
+    expect(r.status).toBe(404);
+    expect(calls().some((s) => s.includes('UPDATE patrol_task SET status'))).toBe(false);
+  });
+
+  it('管理端手工补签（point_id）→ 200，签到记录 via=manual', async () => {
+    authRole = 'admin';
+    authMode = 'prod';
+    resetTask();
+    const r = await req('POST', '/api/v1/patrol/tasks/pt-1/checkin', { point_id: P1 });
+    expect(r.status, JSON.stringify(await r.clone().json().catch(() => ({})))).toBe(200);
+    const params = fakeClient.query.mock.calls.find((c: unknown[]) => String(c[0]).includes('UPDATE patrol_task SET status'))?.[1] as any[];
+    const checkins = JSON.parse(String(params?.[3] ?? '[]'));
+    expect(checkins[0]?.via).toBe('manual');
+  });
+});
+
+describe('feedback.ts · 反馈提交/回复/统计', () => {  it('⑰GET / → type/status 过滤', async () => {
     const r = await req('GET', '/api/v1/feedback?type=satisfaction&status=new');
     expect(r.status).toBe(200);
     expect(calls()[0]).toContain('type = $2');
@@ -433,6 +526,24 @@ describe('feedback.ts · 反馈提交/回复/统计', () => {
     expect((await req('POST', '/api/v1/feedback/none/reply', { reply: 'x' })).status).toBe(404);
   });
 
+  it('⑲b POST /:id/close → status=closed + 关闭人/说明留痕；重复关闭 409；不存在 404', async () => {
+    const r = await req('POST', '/api/v1/feedback/fb-1/close', { note: '已处理完毕' });
+    expect(r.status).toBe(200);
+    const j = (await r.json()) as any;
+    expect(j.item.status).toBe('closed');
+    expect(evArg().type).toBe('close');
+    const upd = calls().findIndex((s) => s.includes("status='closed'"));
+    expect(upd).toBeGreaterThanOrEqual(0);
+    expect(callParams(upd)[2]).toBe('unknown'); // 测试夹具无 username → 服务端回退 unknown
+    expect(callParams(upd)[3]).toBe('已处理完毕');
+    const again = await req('POST', '/api/v1/feedback/fb-1/close', {});
+    expect(again.status).toBe(409);
+    // 关闭是终态：回复不得把已关闭反馈改回 replied
+    expect((await req('POST', '/api/v1/feedback/fb-1/reply', { reply: '再处理一下' })).status).toBe(409);
+    fbFound = false;
+    expect((await req('POST', '/api/v1/feedback/none/close', {})).status).toBe(404);
+  });
+
   it('⑳GET /stats → 满意度聚合透传（诚实口径：数从库来）', async () => {
     const r = await req('GET', '/api/v1/feedback/stats');
     expect(r.status).toBe(200);
@@ -447,7 +558,7 @@ describe('feedback.ts · 反馈提交/回复/统计', () => {
     expect(r.status).toBe(200);
     const buf = new Uint8Array(await r.arrayBuffer());
     expect([buf[0], buf[1], buf[2]]).toEqual([0xef, 0xbb, 0xbf]);
-    expect(new TextDecoder('utf-8').decode(buf.slice(3)).startsWith('created_at,type,content')).toBe(true);
+    expect(new TextDecoder('utf-8').decode(buf.slice(3)).startsWith('提交时间,类型,内容')).toBe(true);
     authRole = 'worker';
     expect((await req('GET', '/api/v1/feedback/export')).status).toBe(403);
   });

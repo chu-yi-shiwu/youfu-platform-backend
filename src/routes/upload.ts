@@ -8,27 +8,15 @@ import { Router } from 'express';
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { decodeBase64Strict } from '../util/base64.js';
+import { resolveUploadExt } from '../services/uploadPolicy.js';
 
 const router = Router();
 
 export const UPLOAD_ROOT = process.env.UPLOAD_DIR ?? '/opt/youfu/uploads';
-const MAX_BYTES = 5 * 1024 * 1024; // 5MB
+export const UPLOAD_MAX_BYTES = 5 * 1024 * 1024; // 5MB
 // D1：加入语音（工人语音留言/报修语音说明）
-const EXT_WHITELIST = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'pdf', 'm4a', 'mp3', 'wav', 'ogg'];
-const CTYPE_EXT: Record<string, string> = {
-  'image/jpeg': 'jpg',
-  'image/png': 'png',
-  'image/gif': 'gif',
-  'image/webp': 'webp',
-  'application/pdf': 'pdf',
-  'audio/mp4': 'm4a',
-  'audio/m4a': 'm4a',
-  'audio/mpeg': 'mp3',
-  'audio/mp3': 'mp3',
-  'audio/wav': 'wav',
-  'audio/x-wav': 'wav',
-  'audio/ogg': 'ogg',
-};
+
 
 async function ensureDir(p: string) {
   await fs.promises.mkdir(p, { recursive: true });
@@ -59,17 +47,20 @@ router.post('/upload', async (req, res, next) => {
     }
     let buf: Buffer;
     try {
-      buf = Buffer.from(base64, 'base64');
+      const decoded = decodeBase64Strict(base64);
+      if (!decoded) {
+        return res.status(400).json({ ok: false, code: 'BAD_PARAM', message: 'invalid base64' });
+      }
+      buf = decoded;
     } catch {
       return res.status(400).json({ ok: false, code: 'BAD_PARAM', message: 'invalid base64' });
     }
-    if (buf.length === 0 || buf.length > MAX_BYTES) {
+    if (buf.length === 0 || buf.length > UPLOAD_MAX_BYTES) {
       return res.status(413).json({ ok: false, code: 'TOO_LARGE', message: 'max 5MB' });
     }
-    // 扩展名：优先从 filename 取，否则从 contentType 推导
-    let ext = (typeof filename === 'string' ? path.extname(filename).replace(/^\./, '').toLowerCase() : '') || '';
-    if (!ext) ext = CTYPE_EXT[contentType ?? ''] ?? 'bin';
-    if (!EXT_WHITELIST.includes(ext)) {
+    // 扩展名白名单与下载 MIME 共用 uploadPolicy；文件名带非法扩展名时直接拒绝，不能靠 contentType 绕过
+    const ext = resolveUploadExt(filename, contentType);
+    if (!ext) {
       return res.status(400).json({ ok: false, code: 'BAD_EXT', message: 'unsupported file type' });
     }
     const dir = path.join(UPLOAD_ROOT, tenantId);

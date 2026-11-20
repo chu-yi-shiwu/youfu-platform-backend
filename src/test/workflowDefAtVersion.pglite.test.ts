@@ -177,6 +177,15 @@ describe('getWorkflowDefAtVersion 支取判定', () => {
     expect(d2.transitions[0]?.event).not.toBe('assign_v3');
   });
 
+  it('写路径 strict：版本缺失必须 409 fail-closed，不能静默回退 live', async () => {
+    const db = await freshDb();
+    const { client } = wrap(db);
+    await expect(getWorkflowDefAtVersion(client, T, ET, 999, FALLBACK, true)).rejects.toMatchObject({
+      status: 409,
+      code: 'WORKFLOW_DEF_VERSION_MISSING',
+    });
+  });
+
   it('④ 版本查不到 ⇒ 降级到 live + console.warn，**不抛 500**（R-6）', async () => {
     const db = await freshDb();
     const spy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
@@ -713,6 +722,35 @@ async function freshWoDb(): Promise<PGlite> {
   await db.exec(addColumnStatements('031_reporter_name.sql', 'work_orders'));
   await db.exec(addColumnStatements('074_work_order_milestone_timestamps.sql', 'work_orders'));
   await db.exec(UP_103); // 🔴 真跑迁移，不是自己手写 ALTER
+  // 110：createWithIdem 现在会写 created_by（RLS 创建人可见）；本文件只建到 103，
+  // 必须补同形列，否则 INSERT 会 42703。
+  await db.exec('ALTER TABLE work_orders ADD COLUMN IF NOT EXISTS created_by text;');
+  await db.exec(`
+    ALTER TABLE work_orders ADD COLUMN IF NOT EXISTS department_id uuid;
+    ALTER TABLE work_orders ADD COLUMN IF NOT EXISTS department_source text;
+  `);
+  // 111：建单走 departmentResolver（dept 默认 + 路由规则）；transition 可能查 worker.department_id。
+  await db.exec(`
+    CREATE TABLE dept (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id text NOT NULL, name text NOT NULL, code text,
+      is_default boolean NOT NULL DEFAULT false,
+      created_at timestamptz NOT NULL DEFAULT now()
+    );
+    CREATE TABLE department_route_rule (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id text NOT NULL,
+      name text NOT NULL, priority int NOT NULL DEFAULT 100,
+      enabled boolean NOT NULL DEFAULT true, match_json jsonb NOT NULL DEFAULT '{}'::jsonb,
+      department_id uuid NOT NULL, created_at timestamptz NOT NULL DEFAULT now()
+    );
+    CREATE TABLE worker (
+      id text PRIMARY KEY, tenant_id text NOT NULL, name text NOT NULL,
+      department_id uuid, skill_tags text[] NOT NULL DEFAULT '{}',
+      load int NOT NULL DEFAULT 0, active boolean NOT NULL DEFAULT true
+    );
+    INSERT INTO dept (tenant_id, name, code, is_default)
+      VALUES ('${T}', '总务科', '001', true);
+  `);
   await db.query(`INSERT INTO workflow_def (tenant_id, entity_type, def, version) VALUES ($1,$2,$3::jsonb,1)`, [
     T,
     WO_ET,
@@ -883,29 +921,14 @@ describe('批4 · work_orders 在途工单锁版本（真库 A1-W / A2-W / A5-W�
     const dirty = (await db.query(`SELECT def_version FROM work_orders WHERE id = $1`, [wo.id])).rows[0] as any;
     expect(dirty.def_version, 'fixture 自检：脏版本号确实落库了（回库查，不信任 UPDATE 返回值）').toBe(99999);
 
-    const spy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
-    try {
-      // ① 真实流转路径：走 repo/ticket.ts 的 transition（:207 按行上的 def_version 取 def），
-      //    不是直接调读取函数 ⇒ 这才证明「行上的脏版本号」真的流到了读路径、且没把流转搞成 500。
-      const toAssigned = await woTransition(c, wo.id, 'assigned');
-      expect(toAssigned.row.status, '脏版本号不得让流转失败').toBe('assigned');
-
-      // ② 结果按 live(v2) 走：用只有 v2 才有的边 assigned --fast_close--> completed 判别。
-      const closed = await woTransition(c, wo.id, 'completed');
-      expect(closed.row.status, '降级到 live(v2) ⇒ v2 的新边可用（未降级/退回 v1 则 422）').toBe('completed');
-      const back = (await db.query(`SELECT status FROM work_orders WHERE id = $1`, [wo.id])).rows[0] as any;
-      expect(back.status, '落库状态同样是 completed（不信任 RETURNING）').toBe('completed');
-
-      // ③ 不静默失败（E3）：warn 必须出现，且日志里能带得出来是哪个租户 / 实体 / 版本号。
-      expect(spy.mock.calls.length, '失效版本号必须打 warn，不能静默降级').toBeGreaterThanOrEqual(1);
-      const hit = spy.mock.calls.some((args: unknown[]) => {
-        const blob = args.map((a) => (typeof a === 'string' ? a : JSON.stringify(a))).join(' ');
-        return blob.includes(T) && blob.includes(WO_ET) && blob.includes('99999');
-      });
-      expect(hit, `warn 必须能定位到租户/实体/版本号，实际调用：${JSON.stringify(spy.mock.calls)}`).toBe(true);
-    } finally {
-      spy.mockRestore();
-    }
+    // P1-7：写路径 strict。版本号损坏/历史缺失必须 409 fail-closed，不能按 live 继续流转。
+    await expect(woTransition(c, wo.id, 'assigned')).rejects.toMatchObject({
+      status: 409,
+      code: 'WORKFLOW_DEF_VERSION_MISSING',
+    });
+    const after = (await db.query(`SELECT status, def_version FROM work_orders WHERE id = $1`, [wo.id])).rows[0] as any;
+    expect(after.status).toBe('draft');
+    expect(after.def_version).toBe(99999);
   });
 });
 
@@ -1201,7 +1224,7 @@ async function freshTplDb(multiVersion: boolean): Promise<PGlite> {
   await db.exec(addColumnStatements('004_sla.sql', 'work_orders')); // sla_due_at（效果回写的逾期率口径要用）
   await db.exec(createTableBlock('053_platform_template.sql', 'platform_template'));
   await db.exec(createTableBlock('053_platform_template.sql', 'platform_template_apply'));
-  await db.exec(addColumnStatements('053b_review_fixes.sql', 'platform_template_apply')); // refreshed_at
+  await db.exec(addColumnStatements('106_review_fixes_additive.sql', 'platform_template_apply')); // refreshed_at
   if (multiVersion) {
     await db.query(
       `INSERT INTO workflow_def_history (tenant_id, entity_type, version, def) VALUES ($1,$2,1,$3::jsonb)`,

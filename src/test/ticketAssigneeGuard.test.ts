@@ -17,12 +17,17 @@ function makeClient(opts: { workerExists: boolean; cur?: { status: string; assig
     order_no: 'WO-TEST-1',
     status: cur.status,
     assignee_id: cur.assignee_id,
+    department_id: null,
+    department_source: null,
   };
   const client = {
     query: (async (text: string, params?: any[]) => {
       calls.push({ text, params });
       if (text.includes('FOR UPDATE')) return { rows: [woRow] };
       if (text.includes('SELECT def FROM workflow_def')) return { rows: [] }; // 无自定义 def → DEFAULT（4 态 3 转移）
+      if (text.includes('SELECT department_id FROM worker WHERE id')) {
+        return opts.workerExists ? { rows: [{ department_id: null }], rowCount: 1 } : { rows: [], rowCount: 0 };
+      }
       if (text.includes('SELECT 1 FROM worker')) {
         return opts.workerExists ? { rows: [{ '?column?': 1 }], rowCount: 1 } : { rows: [], rowCount: 0 };
       }
@@ -76,5 +81,68 @@ describe('transition assignee 守卫与 auto_flow 修正（纵切② P0-5/P0-6�
     await expect(
       transition(client, TENANT, WO, 'assigned', { actor: 'dispatcher', fields: { assignee: 'other-tenant-worker' } }),
     ).rejects.toMatchObject({ code: 'BAD_PARAM', status: 422 });
+  });
+});
+
+// P0-4（2026-11-04）：worker 流转归属守卫。
+// 路由层只在 role==='worker' 时传 actorWorkerIds；没有这个集合的调用方（operator/admin/
+// 系统自动推进）行为保持原样。以下用例直接打 transition() 内核，钉死守卫语义。
+describe('P0-4 worker 只能流转本人名下工单', () => {
+  it('非 assignee → 403，且不发生任何 UPDATE / 事件写入', async () => {
+    const { client, calls } = makeClient({ workerExists: true, cur: { status: 'assigned', assignee_id: 'W-OTHER' } });
+    await expect(
+      transition(client, TENANT, WO, 'processing', { actor: 'worker', role: 'worker', actorWorkerIds: ['W1'] }),
+    ).rejects.toMatchObject({ code: 'FORBIDDEN', status: 403 });
+    expect(calls.find((c) => c.text.includes('UPDATE work_orders SET status'))).toBeUndefined();
+    expect(calls.find((c) => c.text.includes('INSERT INTO ticket_event'))).toBeUndefined();
+  });
+
+  it('工人无档案（空集合）→ 403，不得把未派单/他人单当成自己的', async () => {
+    const { client, calls } = makeClient({ workerExists: true, cur: { status: 'assigned', assignee_id: 'W1' } });
+    await expect(
+      transition(client, TENANT, WO, 'processing', { actor: 'worker', role: 'worker', actorWorkerIds: [] }),
+    ).rejects.toMatchObject({ code: 'FORBIDDEN', status: 403 });
+    expect(calls.find((c) => c.text.includes('UPDATE work_orders SET status'))).toBeUndefined();
+  });
+
+  it('未派单（assignee_id=null）→ 403，工人不能凭 id 直接流转大厅单', async () => {
+    const { client } = makeClient({ workerExists: true, cur: { status: 'assigned', assignee_id: null } });
+    await expect(
+      transition(client, TENANT, WO, 'processing', { actor: 'worker', role: 'worker', actorWorkerIds: ['W1'] }),
+    ).rejects.toMatchObject({ code: 'FORBIDDEN', status: 403 });
+  });
+
+  it('本人名下 → 放行（正常接单/完成不受影响）', async () => {
+    const { client, calls } = makeClient({ workerExists: true, cur: { status: 'assigned', assignee_id: 'W1' } });
+    const r = await transition(client, TENANT, WO, 'processing', {
+      actor: 'worker', role: 'worker', actorWorkerIds: ['W1'],
+    });
+    expect(r.row.status).toBe('processing');
+    expect(calls.find((c) => c.text.includes('UPDATE work_orders SET status'))).toBeTruthy();
+  });
+
+  it('工人携带 fields.assignee 改派 → 403，且不改库', async () => {
+    const { client, calls } = makeClient({ workerExists: true, cur: { status: 'assigned', assignee_id: 'W1' } });
+    await expect(
+      transition(client, TENANT, WO, 'processing', {
+        actor: 'worker', role: 'worker', actorWorkerIds: ['W1'], fields: { assignee: 'W2' },
+      }),
+    ).rejects.toMatchObject({ code: 'FORBIDDEN', status: 403 });
+    expect(calls.find((c) => c.text.includes('UPDATE work_orders SET status'))).toBeUndefined();
+  });
+
+  it('同值 assignee（幂等回传本人）→ 放行，不改变归属', async () => {
+    const { client } = makeClient({ workerExists: true, cur: { status: 'assigned', assignee_id: 'W1' } });
+    const r = await transition(client, TENANT, WO, 'processing', {
+      actor: 'worker', role: 'worker', actorWorkerIds: ['W1'], fields: { assignee: 'W1' },
+    });
+    expect(r.row.status).toBe('processing');
+  });
+
+  it('非 worker（不传 actorWorkerIds）→ 既有行为不变：可流转他人名下工单', async () => {
+    const { client, calls } = makeClient({ workerExists: true, cur: { status: 'assigned', assignee_id: 'W-OTHER' } });
+    const r = await transition(client, TENANT, WO, 'processing', { actor: 'operator', role: 'operator' });
+    expect(r.row.status).toBe('processing');
+    expect(calls.find((c) => c.text.includes('UPDATE work_orders SET status'))).toBeTruthy();
   });
 });

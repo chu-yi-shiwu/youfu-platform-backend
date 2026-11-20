@@ -227,3 +227,106 @@ describe('T8 第十二批 · 基础数据 CSV 导出权限收敛（requireConfig
     expect(calls.some((c) => c.sql.includes('SELECT * FROM location_dict'))).toBe(true);
   });
 });
+
+// P0-6（2026-11-04）：敏感字典（联系人/供应商/报修人）读守卫。
+// 修复前：任一登录账号都能 GET 列表，拿到姓名/电话/邮箱等 PII。
+// 修复后：读取与写入统一 basicdata.edit；location/dept 等建单字典仍登录可读。
+describe('P0-6 · 敏感字典读取需要 basicdata.edit', () => {
+  const sensitive = ['contact', 'supplier', 'reporter'] as const;
+
+  for (const type of sensitive) {
+    it(`worker（prod · 无授权）GET /basic-data/${type} → 403，且不查该表`, async () => {
+      authMode = 'prod';
+      authRole = 'worker';
+      const r = await fetch(`${base}/basic-data/${type}`);
+      expect(r.status).toBe(403);
+      expect(((await r.json()) as any).code).toBe('FORBIDDEN');
+      expect(calls.some((c) => c.sql.includes(`FROM ${type}`))).toBe(false);
+    });
+  }
+
+  it('worker 经 role_permission 授 basicdata.edit → GET reporter 200（可配置，不是写死角色）', async () => {
+    authMode = 'prod';
+    authRole = 'worker';
+    scripted = [
+      { match: /SELECT perm FROM role_permission/, rows: [{ perm: 'basicdata.edit' }] },
+      { match: /SELECT \* FROM reporter_dict/, rows: [{ id: 'rep-1', name: '张三' }] },
+    ];
+    const r = await fetch(`${base}/basic-data/reporter`);
+    expect(r.status).toBe(200);
+    expect(((await r.json()) as any).items).toHaveLength(1);
+  });
+
+  it('worker 无授权仍可读 location（建单字典不误伤）', async () => {
+    authMode = 'prod';
+    authRole = 'worker';
+    scripted = [{ match: /SELECT \* FROM location_dict/, rows: [{ id: 'loc-1', code: '3F-A01' }] }];
+    const r = await fetch(`${base}/basic-data/location`);
+    expect(r.status).toBe(200);
+    expect(((await r.json()) as any).items).toHaveLength(1);
+  });
+
+  it('admin 默认放行（basicdata.edit 在默认矩阵中）', async () => {
+    authMode = 'prod';
+    authRole = 'admin';
+    scripted = [{ match: /SELECT \* FROM contact/, rows: [{ id: 'c-1', name: '王五' }] }];
+    const r = await fetch(`${base}/basic-data/contact`);
+    expect(r.status).toBe(200);
+  });
+
+  it('dev 模式保持联调语义（恒放行）', async () => {
+    authMode = 'dev';
+    authRole = 'worker';
+    const r = await fetch(`${base}/basic-data/supplier`);
+    expect(r.status).toBe(200);
+  });
+});
+
+// 2026-11-14：基础数据「停用优先」。
+// 根因：删除字典项只清理报修人一处引用，其余字典被历史单据引用时仍可删，导致历史不可追溯。
+// 契约：列表默认只返回启用项；include_disabled=1 才包含停用项；enabled 可更新。
+describe('基础数据停用优先（enabled）', () => {
+  it('GET /basic-data/dept 默认带 enabled IS NOT FALSE 过滤', async () => {
+    scripted = [{ match: /SELECT \* FROM dept/, rows: [{ id: 'd-1', name: '后勤部', enabled: true }] }];
+    const r = await fetch(`${base}/basic-data/dept`);
+    expect(r.status).toBe(200);
+    const sql = calls[0]?.sql ?? '';
+    expect(sql).toContain('enabled IS NOT FALSE');
+  });
+
+  it('include_disabled=1 → 不加过滤（管理端可看到并恢复停用项）', async () => {
+    scripted = [{ match: /SELECT \* FROM dept/, rows: [{ id: 'd-1', name: '后勤部', enabled: false }] }];
+    const r = await fetch(`${base}/basic-data/dept?include_disabled=1`);
+    expect(r.status).toBe(200);
+    expect(calls[0]?.sql ?? '').not.toContain('enabled IS NOT FALSE');
+  });
+
+  it('PUT enabled=false → UPDATE 写入 enabled=false（不是删除）', async () => {
+    scripted = [
+      { match: /SELECT \* FROM dept/, rows: [{ id: 'd-1', name: '后勤部', enabled: true }] },
+      { match: /UPDATE dept SET/, rows: [{ id: 'd-1', name: '后勤部', enabled: false }] },
+    ];
+    const r = await fetch(`${base}/basic-data/dept/d-1`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: false }),
+    });
+    expect(r.status).toBe(200);
+    const upd = calls.find((c) => c.sql.includes('UPDATE dept SET'));
+    expect(upd?.sql).toContain('enabled =');
+    expect(upd?.params).toContain(false);
+  });
+
+  it('新建时可显式 enabled=false（新项默认启用由 DB DEFAULT 兜底）', async () => {
+    scripted = [{ match: /INSERT INTO dept/, rows: [{ id: 'd-2', name: '停用科室', enabled: false }] }];
+    const r = await fetch(`${base}/basic-data/dept`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: '停用科室', enabled: false }),
+    });
+    expect(r.status).toBe(201);
+    const ins = calls.find((c) => c.sql.includes('INSERT INTO dept'));
+    expect(ins?.sql).toContain('enabled');
+    expect(ins?.params).toContain(false);
+  });
+});

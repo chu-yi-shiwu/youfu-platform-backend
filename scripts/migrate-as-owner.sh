@@ -16,8 +16,18 @@ BACKEND_DIR="${1:-/opt/youfu/backend}"
 # 因此先在 BACKEND_DIR 取文件清单，再显式切到 /tmp（1777，任何用户可进入）后才调 psql。
 RUN_DIR="${RUN_DIR:-/tmp}"
 
-cd "$BACKEND_DIR"
-FILES=$(ls [0-9][0-9][0-9]_*.sql 2>/dev/null | sort || true)
+# P0-1：严格迁移命名 + fail-closed（与 src/db/migrationFiles.ts 同口径）。
+# 根目录出现 053b_*.sql / a1_*.sql 这类非规范文件时必须拦住，而不是静默跳过。
+MIGRATION_RE='^[0-9]{3,6}_[a-z0-9][a-z0-9_]*\.sql$'
+ALL_SQL=$(find "$BACKEND_DIR" -maxdepth 1 -type f -name '*.sql' -printf '%f\n' | sort || true)
+UNRECOGNIZED=$(printf '%s\n' "$ALL_SQL" | grep -Ev "$MIGRATION_RE" || true)
+if [ -n "$UNRECOGNIZED" ]; then
+  echo "ERROR: 仓根存在不符合迁移命名的 SQL，自动迁移不会执行：" >&2
+  printf '  %s\n' $UNRECOGNIZED >&2
+  echo "请移入 pending-migrations/、seeds/ 或按 <数字>_<名称>.sql 重命名。" >&2
+  exit 1
+fi
+FILES=$(printf '%s\n' "$ALL_SQL" | grep -E "$MIGRATION_RE" || true)
 cd "$RUN_DIR"
 
 # 确保追踪表存在

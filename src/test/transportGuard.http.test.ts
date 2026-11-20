@@ -66,6 +66,34 @@ function scriptTransportOrder(status: string) {
   h.scripted.push({ match: /INSERT INTO domain_event/, rows: [] });
 }
 
+/** 自定义 def：只有 allowedPerms，没有 allowedRoles（验证“权限点单独放行”）。 */
+function scriptPermOnly(grant: boolean) {
+  h.scripted.length = 0;
+  h.calls.length = 0;
+  h.scripted.push({
+    match: /FROM workflow_def/,
+    rows: [{
+      def: {
+        initial: 'pending',
+        states: ['pending', 'assigned'],
+        transitions: [{ from: 'pending', to: 'assigned', event: 'dispatch', allowedPerms: ['dispatch.override'] }],
+      },
+    }],
+  });
+  h.scripted.push({
+    match: /FROM role_permission/,
+    rows: grant ? [{ perm: 'dispatch.override' }] : [],
+  });
+  h.scripted.push({
+    match: /FROM transport_order WHERE id/,
+    rows: [{ id: 'to-1', tenant_id: T, status: 'pending', carrier: 'w-1', item_name: '标本' }],
+  });
+  h.scripted.push({ match: /FROM worker WHERE tenant_id/, rows: [{ id: 'w-1' }] });
+  h.scripted.push({ match: /UPDATE transport_order/, rows: [{ id: 'to-1', status: 'assigned' }] });
+  h.scripted.push({ match: /INSERT INTO transport_track_point/, rows: [] });
+  h.scripted.push({ match: /INSERT INTO domain_event/, rows: [] });
+}
+
 beforeAll(async () => {
   const app = express();
   app.use(express.json());
@@ -113,6 +141,59 @@ describe('transport transition allowedRoles 门禁（P1）', () => {
       body: JSON.stringify({ event: 'cancel' }),
     });
     expect(r.status).toBe(200);
+  });
+
+  it('④ exception 缺 note → 422，且不 UPDATE（def.requiredFields 真正生效）', async () => {
+    scriptTransportOrder('transporting');
+    const r = await fetch(`${base}/api/v1/admin-sim/orders/to-1/transition`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ event: 'exception' }),
+    });
+    expect(r.status).toBe(422);
+    expect(h.calls.some((c) => /UPDATE transport_order/.test(c.sql))).toBe(false);
+  });
+
+  it('⑤ exception 带 note → 200', async () => {
+    scriptTransportOrder('transporting');
+    const r = await fetch(`${base}/api/v1/admin-sim/orders/to-1/transition`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ event: 'exception', note: '车辆故障' }),
+    });
+    expect(r.status).toBe(200);
+  });
+
+  it('⑥ dispatch 传 assignee 时也落到 carrier（H5 按 def 字段名提交）', async () => {
+    scriptTransportOrder('pending');
+    const r = await fetch(`${base}/api/v1/admin-sim/orders/to-1/transition`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ event: 'dispatch', assignee: 'w-2' }),
+    });
+    expect(r.status).toBe(200);
+    const upd = h.calls.find((c) => /UPDATE transport_order/.test(c.sql));
+    expect(upd?.params).toContain('w-2');
+  });
+
+  it('⑦ 仅 allowedPerms：worker 持 dispatch.override → 200', async () => {
+    scriptPermOnly(true);
+    const r = await fetch(`${base}/api/v1/transport/orders/to-1/transition`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ event: 'dispatch', assignee: 'w-1' }),
+    });
+    expect(r.status).toBe(200);
+  });
+
+  it('⑧ 仅 allowedPerms：无该权限点 → 403', async () => {
+    scriptPermOnly(false);
+    const r = await fetch(`${base}/api/v1/transport/orders/to-1/transition`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ event: 'dispatch', assignee: 'w-1' }),
+    });
+    expect(r.status).toBe(403);
   });
 });
 

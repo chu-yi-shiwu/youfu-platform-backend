@@ -1,11 +1,23 @@
 # /etc/systemd/system/youfu-backend.service
+# ⚠️ 本文件是 **Node 22 目标环境** 的部署单元（新 Alibaba Cloud Linux 3 / Ubuntu 22）。
+# 现有 CentOS7/glibc2.17 主机不能跑 Node22，请使用 deploy/youfu-backend.centos7.service。
+# 详见 docs/runbook.md §1 与 docs/cloud-current-state-20261107.md。
 # 【M0 后部署固化 2026-09-03】初一已授权 5 项 ECS 写操作之④：
 # - NODE_ENV: development → production（S-1b 断言要求生产必须 AUTH_MODE=prod）
-# - ENV_FILE 显式指定 .env：代码 server.ts:56 在 NODE_ENV=production 且未设 ENV_FILE 时
+# - ENV_FILE 显式指定 .env：代码 server.ts 在 NODE_ENV=production 且未设 ENV_FILE 时
 #   会静默加载 .env.pilot（本机不存在该文件 → dotenv no-op → 密钥全缺 → 服务挂）。
 #   显式指定消除全部歧义。
 # - AUTH_MODE=prod：与 .env 内值一致，双保险（env 注入优先级高于 dotenv，防 .env 被误改）。
-# 修改前原 unit 备份于 /etc/systemd/system/youfu-backend.service.bak.20260903
+#
+# 【P0-2 2026-11-04】部署链统一 Node22 + 编译产物：
+# - 原 PATH=/opt/node16/bin + ExecStart=/opt/node16/bin/node dist/server.js。
+#   Node16 已 EOL，且与本仓 tsc target/ESM 依赖不匹配。
+# - 现要求 ECS 安装 Node22 到 /opt/node22（与既有 /opt/node16 并列）。
+#   若实际路径不同，只改下面 PATH 与 ExecStart 两行，不要改启动命令形态。
+# - 上线前必须先在本机/CI 执行 `npm ci && npm run build`，再把 dist/ 一起发布；
+#   只更新 src 不重建 dist 会继续跑旧代码（这是原链最隐蔽的坑）。
+# - KillSignal=SIGTERM + TimeoutStopSec=15：配合 server.ts 的优雅停机（P0-8）。
+#   默认 SIGTERM 后 90s 才 SIGKILL，部署窗口会被无谓拉长；server 自带 10s 兜底强退。
 [Unit]
 Description=youfu Backend（优服家后端）
 After=network.target
@@ -14,13 +26,15 @@ After=network.target
 Type=simple
 User=root
 WorkingDirectory=/opt/youfu/backend
-Environment="PATH=/opt/node16/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin"
+Environment="PATH=/opt/node22/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin"
 Environment="NODE_ENV=production"
 Environment="ENV_FILE=/opt/youfu/backend/.env"
 Environment="AUTH_MODE=prod"
-ExecStart=/opt/node16/bin/node dist/server.js
+ExecStart=/opt/node22/bin/node dist/server.js
 Restart=always
 RestartSec=5
+KillSignal=SIGTERM
+TimeoutStopSec=15
 
 [Install]
 WantedBy=multi-user.target

@@ -34,6 +34,9 @@ import { DEFAULT_WORK_ORDER_DEF, doneStates, terminalStates, type WorkflowDef } 
 
 const ROOT = join(__dirname, '..', '..');
 const T = 't-timeout-filter';
+const DEPT_A = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+const DEPT_B = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+const DEPT_NONE = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
 const WO_ET = 'work_order';
 
 /** 取迁移文件里某张表的 CREATE TABLE 段（到 `\n);` 为止）：用真实建表口径，不手抄 DDL。 */
@@ -80,6 +83,11 @@ async function freshDb(): Promise<PGlite> {
   await db.exec(createTableBlock('001_init.sql', 'work_orders'));
   await db.exec(createTableBlock('001_init.sql', 'ticket_event'));
   await db.exec(createTableBlock('001_init.sql', 'worker'));
+  // 111/112：列表 LEFT JOIN dept 取责任部门名；本测试直跑 list，需补最小 dept 表。
+  await db.exec(`
+    CREATE TABLE dept (
+      id uuid PRIMARY KEY, tenant_id text NOT NULL, name text, is_default boolean NOT NULL DEFAULT false
+    );`);
   await db.exec(firstDoBlock('002_add_order_no.sql')); // order_no（NOT NULL + 租户内唯一）
   await db.exec(addColumnStatements('004_sla.sql', 'work_orders')); // sla_due_at 等
   await db.exec(createTableBlock('020_domain_event.sql', 'domain_event'));
@@ -88,6 +96,8 @@ async function freshDb(): Promise<PGlite> {
   await db.exec(createTableBlock('047_basic_data_consolidate.sql', 'workflow_def_history'));
   await db.exec(addColumnStatements('025_work_order_granularity.sql', 'work_orders'));
   await db.exec(addColumnStatements('028_phase_a.sql', 'work_orders'));
+  // 111：列表筛选已从旧 department 文本列切到 department_id
+  await db.exec('ALTER TABLE work_orders ADD COLUMN IF NOT EXISTS department_id uuid;');
   await db.exec(addColumnStatements('031_reporter_name.sql', 'work_orders'));
   await db.exec(addColumnStatements('074_work_order_milestone_timestamps.sql', 'work_orders'));
   await db.exec(UP_103); // 🔴 真跑迁移加 def_version，不是自己手写 ALTER
@@ -125,15 +135,15 @@ async function seedOrder(
   db: PGlite,
   id: string,
   status: string,
-  opts: { defVersion?: number; dueOffsetMin?: number; department?: string; createdAtMin?: number } = {},
+  opts: { defVersion?: number; dueOffsetMin?: number; departmentId?: string; createdAtMin?: number } = {},
 ): Promise<void> {
   const due = opts.dueOffsetMin;
   const dueSql = due === undefined ? 'NULL' : `now() + (${Number(due) || 0} || ' minutes')::interval`;
   const createdSql = `now() + (${Number(opts.createdAtMin) || 0} || ' minutes')::interval`;
   await db.query(
-    `INSERT INTO work_orders (id, tenant_id, business_type, status, order_no, def_version, sla_due_at, department, created_at)
+    `INSERT INTO work_orders (id, tenant_id, business_type, status, order_no, def_version, sla_due_at, department_id, created_at)
      VALUES ($1,$2,'repair',$3,$4,$5,${dueSql},$6,${createdSql})`,
-    [id, T, status, `NO-${id}`, opts.defVersion ?? 0, opts.department ?? null],
+    [id, T, status, `NO-${id}`, opts.defVersion ?? 0, opts.departmentId ?? null],
   );
 }
 
@@ -256,14 +266,14 @@ describe('① 单版本（修前修后行为一致）：timeoutOnly 回归基线
   it('参数占位符互不打架：timeoutOnly 与 department 等占位过滤同用时结果正确（$n 索引）', async () => {
     const db = await freshDb();
     await setLive(db, DEF_SINGLE, 1);
-    await seedOrder(db, 'wo-dept-a', 'assigned', { dueOffsetMin: -60, department: 'dept-a' });
-    await seedOrder(db, 'wo-dept-b', 'assigned', { dueOffsetMin: -60, department: 'dept-b' });
-    await seedOrder(db, 'wo-dept-b-done', 'completed', { dueOffsetMin: -60, department: 'dept-b' });
+    await seedOrder(db, 'wo-dept-a', 'assigned', { dueOffsetMin: -60, departmentId: DEPT_A });
+    await seedOrder(db, 'wo-dept-b', 'assigned', { dueOffsetMin: -60, departmentId: DEPT_B });
+    await seedOrder(db, 'wo-dept-b-done', 'completed', { dueOffsetMin: -60, departmentId: DEPT_B });
 
-    expect(await listTimeoutOnly(db, { department: 'dept-a' })).toEqual(['wo-dept-a']);
-    expect(await listTimeoutOnly(db, { department: 'dept-b' })).toEqual(['wo-dept-b']);
+    expect(await listTimeoutOnly(db, { departmentId: DEPT_A })).toEqual(['wo-dept-a']);
+    expect(await listTimeoutOnly(db, { departmentId: DEPT_B })).toEqual(['wo-dept-b']);
     // 占位符错位（比如把 tenant_id 的位置挤掉）会在这里表现为 SQL 报错或全表命中，两者都会红。
-    expect(await listTimeoutOnly(db, { department: 'dept-none' })).toEqual([]);
+    expect(await listTimeoutOnly(db, { departmentId: DEPT_NONE })).toEqual([]);
   });
 });
 

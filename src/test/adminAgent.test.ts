@@ -80,10 +80,10 @@ describe('toolsForRole（角色分层：配置角色全工具，其余仅只读�
 
 describe('sanitizeTicketQueryArgs（只读查询参数净化：白名单+钳位）', () => {
   it('合法参数全保留', () => {
-    const q = sanitizeTicketQueryArgs({ status: 'pending,processing', priority: 'urgent', department: '三号楼', today_only: true, limit: 5 })!;
+    const q = sanitizeTicketQueryArgs({ status: 'pending,processing', priority: 'urgent', department_id: '三号楼', today_only: true, limit: 5 })!;
     expect(q.status).toBe('pending,processing');
     expect(q.priority).toBe('urgent');
-    expect(q.department).toBe('三号楼');
+    expect(q.department_id).toBe('三号楼');
     expect(q.today_only).toBe(true);
     expect(q.limit).toBe(5);
   });

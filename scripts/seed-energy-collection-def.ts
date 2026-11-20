@@ -9,6 +9,10 @@
 //
 // 需先跑迁移 022_workflow_def.sql（建表）。
 import { withTenantClient } from '../src/db/pool.js';
+
+function withSystemTenantClient<T>(tenantId: string, fn: (client: any) => Promise<T>): Promise<T> {
+  return withTenantClient(tenantId, fn, { system: true });
+}
 import { saveWorkflowDef } from '../src/engine/workflowDef.js';
 import { ENERGY_COLLECTION_DEF, type WorkflowDef } from '../src/engine/themes.js';
 
@@ -20,7 +24,7 @@ const def: WorkflowDef = JSON.parse(JSON.stringify(ENERGY_COLLECTION_DEF));
 
 async function main() {
   const label = RESET ? '重置(内置镜像态)' : '内置镜像态(能源派单)';
-  await withTenantClient(TENANT, async (client) => {
+  await withSystemTenantClient(TENANT, async (client) => {
     // V3-D5：operator/reason 必填（原调用缺 operator，补齐留痕）。
     await saveWorkflowDef(client, TENANT, ENTITY, def, {
       operator: 'seed',

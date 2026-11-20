@@ -47,7 +47,11 @@ export async function claimWorkOrder(
   p: ClaimParams,
 ): Promise<{ ticket: unknown }> {
   const cur = await findOneForUpdate(client, tenantId, p.orderId);
-  if (!cur) throw new AppError('NOT_FOUND', 'work order not found', 404);
+  // 抢单动作的可见性作用域是「抢单池」（RLS: app_claim_hall=1 仅见未指派单）。
+  // 并发抢同一单时，后到的请求在赢家提交后已经看不到这行了——这不是「单不存在」，
+  // 而是「已离开抢单池」。按动作语义返回 409 CONFLICT，让客户端统一提示「手慢了」；
+  // 返回 404 会被小程序当成未知错误，且泄露「该单是否曾经存在」的差异。
+  if (!cur) throw new AppError('CONFLICT', 'work order is no longer available in claim pool', 409);
   // T1-B 批4：按**这张工单行**锁定的版本读（原为逐行无关的 live def，现移到此行取到之后）。
   //   理由：下方 claimableStates 是"这张单能不能被抢"的放行判定，:76 的 transition()
   //   读的是行上锁版本 ⇒ 两边不同版本就变成「抢单按钮在、抢了才 409/422」。
@@ -59,15 +63,16 @@ export async function claimWorkOrder(
   // P0 修复：token 的 userId 是 account_user.id（uuid），worker.id 是业务编码，
   // 必须经 worker.account_id 反查真实 worker.id（与存量端点口径一致）。
   const worker = await client.query(
-    'SELECT id, department FROM worker WHERE tenant_id=$2 AND (account_id=$1 OR id=$1) LIMIT 1',
+    'SELECT id, department_id FROM worker WHERE tenant_id=$2 AND (account_id=$1 OR id=$1) LIMIT 1',
     [p.workerId, tenantId],
   );
   if (worker.rowCount === 0) throw new AppError('NOT_FOUND', 'worker not found', 404);
   const realWorkerId = worker.rows[0].id;
-  const wDept = worker.rows[0].department;
-  const woDept = (cur as { department?: string }).department;
-  // 部门级抢单：工单与人员均有部门且不一致 → 驳回（跨部由调度/管理员另行处理）
-  if (woDept && wDept && woDept !== wDept) {
+  const wDept = worker.rows[0].department_id;
+  const woDept = (cur as { department_id?: string | null }).department_id;
+  const woSource = (cur as { department_source?: string | null }).department_source;
+  // 明确部门的单必须同部门认领；默认部门单是“待定归属”，认领后 late-bind 到认领人部门。
+  if (woSource !== 'default' && woDept && wDept && woDept !== wDept) {
     throw new AppError('FORBIDDEN', `worker department ${wDept} mismatch work order department ${woDept}`, 403);
   }
   // 认领边：客户 def 里从当前池态出发的 claim 事件边。目标态从边派生——
@@ -80,13 +85,17 @@ export async function claimWorkOrder(
   await transition(client, tenantId, p.orderId, claimEdge.to as WorkOrderStatus, {
     actor: 'worker',
     role: p.role,
-    fields: { assignee: realWorkerId, ...(p.fields ?? {}) },
+    // P0：assignee 必须由服务端最终决定。客户端 fields 先展开、服务端值后覆盖——
+    // 反过来写（原先的 { assignee, ...fields }）时，body 里带 assignee 就能把单塞给任意工人，
+    // 且路由层是 .passthrough()、department 校验用的是**真实认领人**的部门
+    // ⇒ 跨部门也能塞。其余客户端字段（claim_note 等）仍原样透传，不受影响。
+    fields: { ...(p.fields ?? {}), assignee: realWorkerId },
     autoFlow: false, // 人工认领，显式口径（不许被"带 assignee 必是人工"猜）
     eventLogType: 'claim', // 事件流类型不变（存量消费方照旧）
     eventOverride: 'claim', // 钉死走客户配的那条认领边（同 from→to 多条边时不漂移）
   });
   await insertNotification(client, {
-    tenantId, recipient: realWorkerId, type: 'claim', workOrderId: p.orderId,
+    tenantId, recipient: realWorkerId, recipientKind: 'worker', type: 'claim', workOrderId: p.orderId,
     title: '您已抢到工单', body: `工单 ${(cur as { order_no?: string }).order_no} 已由您认领`,
     payload: { order_no: (cur as { order_no?: string }).order_no, page: `pages/worker/task-detail/task-detail?id=${p.orderId}` },
   });

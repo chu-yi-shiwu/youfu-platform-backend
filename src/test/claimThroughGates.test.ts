@@ -59,10 +59,17 @@ CREATE TABLE worker (
   name       text NOT NULL,
   account_id text,
   department text,
+  department_id uuid,
   skill_tags text[] NOT NULL DEFAULT '{}',
   load       int NOT NULL DEFAULT 0,
   active     boolean NOT NULL DEFAULT true,
   created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE TABLE dept (
+  id uuid PRIMARY KEY,
+  tenant_id text NOT NULL,
+  name text,
+  is_default boolean NOT NULL DEFAULT false
 );
 CREATE TABLE work_orders (
   id            text PRIMARY KEY,
@@ -76,6 +83,9 @@ CREATE TABLE work_orders (
   contact       text,
   order_no      text,
   department    text,
+  department_id uuid,
+  department_source text,
+  created_by    text,
   status        text NOT NULL DEFAULT 'draft',
   assignee_id   text,
   auto_flow     boolean NOT NULL DEFAULT false,
@@ -253,6 +263,14 @@ function poolDef(claimEdge: Record<string, unknown> = {}) {
 }
 
 describe('抢单走客户配的门禁 —— 人走的每道门也都得守客户规矩（产品属性）', () => {
+  it('⑨ 抢单池里已不可见的单（被他人抢走/不存在）→ 409 CONFLICT，不再 404', async () => {
+    await seedDef(poolDef());
+    await seedWorkers();
+    await claimInTx(async () => {
+      await expect(claim('WO-not-in-pool')).rejects.toMatchObject({ code: 'CONFLICT', status: 409 });
+    });
+  });
+
   it('① 认领边的 sideEffects 必须执行：客户配 pause_sla，抢单后 SLA 暂停落库', async () => {
     await seedDef(poolDef({ sideEffects: ['pause_sla'] }));
     await seedWorkers();

@@ -17,7 +17,7 @@ export async function getAutoTune(tenantId: string): Promise<AutoTuneState> {
     );
     if (r.rowCount === 0) return { enabled: false, updatedAt: null };
     return { enabled: r.rows[0].auto_tune, updatedAt: r.rows[0].updated_at };
-  });
+  }, { system: true });
 }
 
 // 设置并持久化 AUTO_TUNE 开关（UPSERT）—— client 版（供权限守卫同事务使用）。
@@ -39,7 +39,7 @@ export async function setAutoTuneWithClient(
 
 // 兼容入口（自动开连接）。
 export async function setAutoTune(tenantId: string, enabled: boolean): Promise<AutoTuneState> {
-  return withTenantClient(tenantId, (client) => setAutoTuneWithClient(client, tenantId, enabled));
+  return withTenantClient(tenantId, (client) => setAutoTuneWithClient(client, tenantId, enabled), { system: true });
 }
 
 // 计算"自动改流程"是否实际生效（实时，无需重启）—— V2-F4（派单纵切 P0-10/11）后的
@@ -74,7 +74,7 @@ export async function getLlmEnabled(tenantId: string): Promise<boolean> {
     );
     if (r.rowCount === 0) return false;
     return r.rows[0].llm_enabled === 'true';
-  });
+  }, { system: true });
 }
 
 // I4 灰度总开关：控制「全部新 AI 能力」（工人端建议卡 /similar + 配置向导 AI 生成 /gen-config）。
@@ -84,7 +84,7 @@ export async function getLlmEnabled(tenantId: string): Promise<boolean> {
 //   先例见 isAutoTuneEffective(tenantId, client?)——权限守卫与读写需在同一事务内时走这条路。
 export async function getAiFeaturesEnabled(tenantId: string, client?: PoolClient): Promise<boolean> {
   if (client) return readAiFeaturesFlag(client, tenantId);
-  return withTenantClient(tenantId, (c) => readAiFeaturesFlag(c, tenantId));
+  return withTenantClient(tenantId, (c) => readAiFeaturesFlag(c, tenantId), { system: true });
 }
 
 // 读开关的单一 SQL 实现（client 版与自连版共用，避免两处 SQL 漂移）。
@@ -108,7 +108,7 @@ export async function setAiFeaturesEnabled(
     await writeAiFeaturesFlag(client, tenantId, enabled);
     return enabled;
   }
-  await withTenantClient(tenantId, (c) => writeAiFeaturesFlag(c, tenantId, enabled));
+  await withTenantClient(tenantId, (c) => writeAiFeaturesFlag(c, tenantId, enabled), { system: true });
   return enabled;
 }
 

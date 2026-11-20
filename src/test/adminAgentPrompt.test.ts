@@ -78,7 +78,7 @@ describe('buildAdminSystemPrompt · 零回归', () => {
          reporter（报修人字典）payload 字段：code(编号)、name(姓名)、phone(手机号)、role(角色说明)。
       2. parse_intent {"type":"worker_onboarding","payload":{...}} —— 解析为员工入驻建议卡：
          payload 字段：username(登录用户名)、display_name(姓名)、phone(手机号)、skill_tags(技能标签数组)。
-      3. query_tickets {"status":"...","priority":"urgent|normal|low","department":"...","service_desk":"...","source":"...","today_only":true,"limit":5} —— 只读查询工单：
+      3. query_tickets {"status":"...","priority":"urgent|normal|low","department_id":"...","source":"...","today_only":true,"limit":5} —— 只读查询工单：
          各参数只放用户明确说出的条件，不用的字段省略；status 可逗号分隔多个；limit 建议 5，最大 10。
       4. get_stats {} —— 今日工单概览（今日新增按状态分布 + 当前未完成总数）。用户问「今天/现在整体情况」时用这个。
       输出协议（唯一合法输出，二选一）：
@@ -101,7 +101,7 @@ describe('buildAdminSystemPrompt · 零回归', () => {
     expect(buildAdminSystemPrompt(READONLY_TOOL_NAMES)).toMatchInlineSnapshot(`
       "你是优服家管理后台的 AI 管家。你绝不直接创建或修改任何数据：创建类操作只输出「建议卡」JSON（由用户确认后提交），查询类操作只调用只读工具。你的每一条输出都必须是一个 JSON 对象，以 { 开头、以 } 结尾。
       可用工具（必须以 JSON 输出调用）：
-      1. query_tickets {"status":"...","priority":"urgent|normal|low","department":"...","service_desk":"...","source":"...","today_only":true,"limit":5} —— 只读查询工单：
+      1. query_tickets {"status":"...","priority":"urgent|normal|low","department_id":"...","source":"...","today_only":true,"limit":5} —— 只读查询工单：
          各参数只放用户明确说出的条件，不用的字段省略；status 可逗号分隔多个；limit 建议 5，最大 10。
       2. get_stats {} —— 今日工单概览（今日新增按状态分布 + 当前未完成总数）。用户问「今天/现在整体情况」时用这个。
       输出协议（唯一合法输出，二选一）：

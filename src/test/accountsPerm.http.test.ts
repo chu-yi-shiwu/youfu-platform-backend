@@ -227,7 +227,10 @@ describe('last-admin 防自锁（⑤⑥ G1 + ⑦契约 G2）', () => {
 describe('reset-password（⑧⑨ G8）', () => {
   it('⑧ 服务端随机 12 位临时密码 + once:true + UPDATE password_hash', async () => {
     h.scripted = [
-      { match: /SELECT id FROM account_user WHERE id=\$1/, rows: [{ id: TARGET }] },
+      // 2026-11-07：重置密码的目标查询补取 role（层级校验需要它）。
+      // fixture 同步带上 role，否则守卫拿到 undefined 会按最低层算——
+      // 这两条恰好走 admin 恒放行 / SELF_GUARD 先判，缺 role 也能绿，属于侥幸通过。
+      { match: /SELECT id, role FROM account_user WHERE id=\$1/, rows: [{ id: TARGET, role: 'operator' }] },
     ];
     const r = await call('POST', `/accounts/${TARGET}/reset-password`);
     expect(r.status).toBe(200);
@@ -241,7 +244,7 @@ describe('reset-password（⑧⑨ G8）', () => {
   });
 
   it('⑨ admin 重置自己密码 → 403 SELF_GUARD', async () => {
-    h.scripted = [{ match: /SELECT id FROM account_user WHERE id=\$1/, rows: [{ id: 'u-admin-1' }] }];
+    h.scripted = [{ match: /SELECT id, role FROM account_user WHERE id=\$1/, rows: [{ id: 'u-admin-1', role: 'admin' }] }];
     const r = await call('POST', '/accounts/u-admin-1/reset-password');
     expect(r.status).toBe(403);
     expect(r.body.code).toBe('SELF_GUARD');

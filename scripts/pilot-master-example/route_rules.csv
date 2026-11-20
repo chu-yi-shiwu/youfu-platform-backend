@@ -1,0 +1,5 @@
+name,priority,department_code,business_type,catalog_code,catalog_name_contains,location_name_contains,description_contains,source,enabled
+漏水归维修组,900,HOSP_WX,,,,,漏水,,true
+空调归维修组,900,HOSP_WX,,,,,空调,,true
+保洁归保洁组,900,HOSP_BJ,cleaning,,,,,,true
+安保归安保组,900,HOSP_AB,security,,,,,,true

@@ -15,11 +15,16 @@ const DEF_V1 = { initial: 'draft', states: ['draft', 'done', 'X'], transitions: 
 const DEF_LIVE = { initial: 'draft', states: ['draft', 'done'], transitions: [], config: { doneStates: ['done'] } };
 // 版本探针开关：默认关（其余用例走 live 单版本，行为不变），仅多版本口径用例打开。
 const versionProbeState = { enabled: false };
+// P0-7：公开报修日配额计数（走 withTenantClient 的 fakeClient，不再走裸 pool）。
+const quotaState = { publicReportCount: 0 };
 const fakeClient = {
   query: vi.fn(async (text: unknown) => {
     const sql = String(text);
     if (sql.includes('fault_category') && sql.includes('enabled = true')) {
       return { rows: [{ id: 'cat-1', name: '空调' }, { id: 'cat-2', name: '水电' }], rowCount: 2 };
+    }
+    if (sql.includes('count(*)::int AS c') && sql.includes("source = 'public_report'")) {
+      return { rows: [{ c: quotaState.publicReportCount }], rowCount: 1 };
     }
     if (versionProbeState.enabled) {
       // ① 探「当前在用版本」：工单行上锁着 v1（外加哨兵 0 = 走 live）
@@ -43,7 +48,6 @@ const poolQuery = vi.fn(async (text: unknown, params?: unknown[]) => {
     if (org === 't-nope') return { rows: [], rowCount: 0 };
     return { rows: [{ tenant_id: org, name: '测试机构', category: 'other', quota: null }], rowCount: 1 };
   }
-  if (sql.includes('count(*)::int AS c')) return { rows: [{ c: 0 }], rowCount: 1 }; // 配额默认未超
   return { rows: [], rowCount: 0 };
 });
 
@@ -181,10 +185,14 @@ describe('POST /public/repair-report（免登录报修主流程）', () => {
     expect(j2.view_token).toBe('tok-original'); // 必须回原 token，不能是新生成的
   });
 
-  it('⑤org 级每日配额超限 → 429 QUOTA_001', async () => {
-    // 覆盖两次调用：registry 校验 + 配额计数（Once 只盖一次，第二次会落到主实现 c=0）
+  it('⑤org 级每日配额超限 → 429 QUOTA_001（计数必须走租户连接，裸 pool 恒 0）', async () => {
+    // P0-7：work_orders 有 RLS，裸 pool.query 不设 app.tenant_id ⇒ 计数恒 0 ⇒ 配额失效。
+    // 现计数走 withTenantClient(fakeClient)。本用例同时钉死：
+    //   ① 超限返回 429；
+    //   ② 计数 SQL 不得再打到裸 pool（回归防线）。
+    quotaState.publicReportCount = 500;
+    poolQuery.mockClear();
     poolQuery.mockImplementation((async (text: unknown) => {
-      if (String(text).includes('count(*)::int AS c')) return { rows: [{ c: 500 }], rowCount: 1 };
       if (String(text).includes('tenant_registry'))
         return { rows: [{ tenant_id: 't-demo', name: '测试机构', category: 'other', quota: { repair_daily: 500 } }], rowCount: 1 };
       return { rows: [], rowCount: 0 };
@@ -193,6 +201,13 @@ describe('POST /public/repair-report（免登录报修主流程）', () => {
     expect(r.status).toBe(429);
     const j = (await r.json()) as any;
     expect(j.code).toBe('QUOTA_001');
+    // 裸 pool 绝不能承担 RLS 表计数（否则恒 0 = 配额形同虚设）
+    expect(poolQuery.mock.calls.some((c) => String(c[0]).includes('count(*)::int AS c'))).toBe(false);
+    // 计数确实发生了，且带租户参数
+    const q = fakeClient.query.mock.calls.find((c: any) => String(c[0]).includes("source = 'public_report'"));
+    expect(q).toBeTruthy();
+    expect(q![1]).toEqual(['t-demo']);
+    quotaState.publicReportCount = 0;
     poolQuery.mockImplementation(async (...a: unknown[]) => {
       const sql = String(a[0]);
       if (sql.includes('tenant_registry')) {
@@ -200,7 +215,6 @@ describe('POST /public/repair-report（免登录报修主流程）', () => {
         if (org === 't-nope') return { rows: [], rowCount: 0 };
         return { rows: [{ tenant_id: org, name: '测试机构', category: 'other', quota: null }], rowCount: 1 };
       }
-      if (sql.includes('count(*)::int AS c')) return { rows: [{ c: 0 }], rowCount: 1 };
       return { rows: [], rowCount: 0 };
     });
   });

@@ -126,7 +126,8 @@ describe('dataQuality.validateIntake', () => {
   });
 
   it('标题过短 / 超长 → 硬拒', () => {
-    expect(validateIntake({ title: 'ab' }).ok).toBe(false);
+    expect(validateIntake({ title: 'a' }).ok).toBe(false);
+    expect(validateIntake({ title: '空调' }).ok).toBe(true);
     expect(validateIntake({ title: 'x'.repeat(121) }).ok).toBe(false);
   });
 

@@ -14,7 +14,7 @@ const serverSrc = readFileSync(
 describe('server.ts 路由挂载冒烟（批次三 卡4）', () => {
   it('settlementRouter：import 与 app.use 挂载成对存在', () => {
     expect(serverSrc).toMatch(/import settlementRouter from '\.\/routes\/settlement\.js'/);
-    expect(serverSrc).toMatch(/app\.use\('\/api\/v1', settlementRouter\)/);
+    expect(serverSrc).toMatch(/app\.use\('\/api\/v1',\s*(?:requireModule\('[^']+'\),\s*)?settlementRouter\)/);
   });
 
   it('acceptanceRouter：import 与 app.use 挂载成对存在', () => {

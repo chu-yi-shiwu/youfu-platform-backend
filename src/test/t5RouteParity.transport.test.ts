@@ -234,13 +234,18 @@ function domainEventKinds(calls: CapturedQuery[]): string[] {
 }
 
 /** 从 TRANSPORT_DEF 里挑一条"admin 能走"的合法流转，避免把夹具写成硬编码状态。 */
-function legalTransition(from: string, role: string): { event: string; to: string } {
-  const t = (TRANSPORT_DEF as { transitions: Array<{ from: string; to: string; event: string; allowedRoles?: string[] }> })
+function legalTransition(from: string, role: string): { event: string; to: string; fields: Record<string, string> } {
+  const t = (TRANSPORT_DEF as { transitions: Array<{ from: string; to: string; event: string; allowedRoles?: string[]; requiredFields?: string[] }> })
     .transitions.find(
       (x) => x.from === from && (!x.allowedRoles || x.allowedRoles.length === 0 || x.allowedRoles.includes(role)),
     );
   if (!t) throw new Error(`[夹具] TRANSPORT_DEF 里找不到 ${role} 可从 ${from} 发起的流转，夹具需同步更新`);
-  return { event: t.event, to: t.to };
+  // 必填字段按真实客户端口径补齐：dispatch 用 assignee（H5）或 carrier 均可，exception 用 note。
+  const fields: Record<string, string> = {};
+  for (const f of t.requiredFields ?? []) {
+    fields[f] = f === 'assignee' || f === 'carrier' ? 'w-1' : '夹具备注';
+  }
+  return { event: t.event, to: t.to, fields };
 }
 
 async function post(url: string, body: unknown): Promise<{ status: number; body: any }> {
@@ -344,12 +349,12 @@ describe('T5/S6a-A 老路由行为快照（S2 前后必须一致）', () => {
 
   it('A4 transition：合法流转到目标态，非法流转 422', async () => {
     const from = 'pending';
-    const { event, to } = legalTransition(from, 'admin');
+    const { event, to, fields } = legalTransition(from, 'admin');
 
     const ok = makeClient({ orderStatus: from, carrier: 'w-1', workerId: 'w-1', bftStatus: from });
     h.client = ok.client;
     const appOk = await listen(appWith(transportRouter, '/transport'));
-    const legal = await post(`${appOk.url}/transport/orders/${ORDER_ID}/transition`, { event });
+    const legal = await post(`${appOk.url}/transport/orders/${ORDER_ID}/transition`, { event, ...fields });
     appOk.server.close();
     expect(legal.status, '合法流转应当 200（不 200 是端点/夹具问题）').toBe(200);
     expect(legal.body.item.status, `合法流转后状态必须是引擎算出的 ${to}`).toBe(applyEvent(TRANSPORT_DEF, from, event));

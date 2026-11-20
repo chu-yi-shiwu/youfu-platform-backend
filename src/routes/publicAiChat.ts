@@ -6,6 +6,7 @@
 //       会话数据 RLS 租户隔离（066）；建单写操作 consent 硬拒在 agent 工具内执行。
 import { Router } from 'express';
 import { z } from 'zod';
+import type { PoolClient } from 'pg';
 import crypto from 'node:crypto';
 import pool, { withTenantClient } from '../db/pool.js';
 import { AppError } from '../middleware/error.js';
@@ -14,6 +15,11 @@ import { createConversation, getConversation, listTurns } from '../repo/aiConver
 import { runAgentTurn, conversationAvailable } from '../services/conversationAgent.js';
 
 const router = Router();
+
+// 公开 AI 对话无 JWT，必须显式 system scope；不能靠隐式默认。
+function withPublicTenantClient<T>(tenantId: string, fn: (client: PoolClient) => Promise<T>): Promise<T> {
+  return withTenantClient(tenantId, fn, { system: true });
+}
 
 // 会话 id 合法性（R38-R2 F1：非 UUID 直落 PG 会 22P02 → 500，先校验诚实 404）
 export const CONVERSATION_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -50,13 +56,13 @@ router.post('/public/ai-chat', loginRateLimit(30), async (req, res, next) => {
     // 会话归属：带 conversation_id 则校验存在；否则新建（reporter_anon 绑定）
     let conversationId = b.conversation_id;
     if (conversationId) {
-      const conv = await withTenantClient(tenantId, (client) => getConversation(client, tenantId, conversationId!));
+      const conv = await withPublicTenantClient(tenantId, (client) => getConversation(client, tenantId, conversationId!));
       if (!conv) throw new AppError('NOT_FOUND', '会话不存在或已过期', 404);
       if (conv.reporter_anon && b.reporter_anon && conv.reporter_anon !== b.reporter_anon) {
         throw new AppError('FORBIDDEN', '会话归属校验失败', 403);
       }
     } else {
-      const conv = await withTenantClient(tenantId, (client) =>
+      const conv = await withPublicTenantClient(tenantId, (client) =>
         createConversation(client, tenantId, { reporterAnon: b.reporter_anon ?? crypto.randomUUID() }),
       );
       conversationId = conv.id;
@@ -99,14 +105,14 @@ router.get('/public/ai-chat/:id', loginRateLimit(30), async (req, res, next) => 
       return res.status(404).json({ ok: false, code: 'NOT_FOUND', message: '会话不存在' });
     }
     const tenantId = org;
-    const conv = await withTenantClient(tenantId, (client) => getConversation(client, tenantId, req.params.id));
+    const conv = await withPublicTenantClient(tenantId, (client) => getConversation(client, tenantId, req.params.id));
     if (!conv) return res.status(404).json({ ok: false, code: 'NOT_FOUND', message: '会话不存在' });
     const anon = String(req.query.anon || '').trim();
     // #942 R4 收紧：会话有归属 anon 时，请求缺 anon 也 403（原条件缺 anon 直接放行，纵深防御有洞）
     if (conv.reporter_anon && (!anon || conv.reporter_anon !== anon)) {
       return res.status(403).json({ ok: false, code: 'FORBIDDEN', message: '会话归属校验失败' });
     }
-    const turns = await withTenantClient(tenantId, (client) => listTurns(client, tenantId, req.params.id));
+    const turns = await withPublicTenantClient(tenantId, (client) => listTurns(client, tenantId, req.params.id));
     return res.json({ ok: true, code: 0, conversation_id: conv.id, status: conv.status, items: turns });
   } catch (e) { next(e); }
 });

@@ -11,13 +11,15 @@ import { z } from 'zod';
 import { randomUUID } from 'crypto';
 import { withTenantClient } from '../db/pool.js';
 import { AppError } from '../middleware/error.js';
-import { requireAssigneeOrConfig, requirePermission } from '../middleware/role.js';
+import { listPerms, requireAssigneeOrConfig, requirePermission } from '../middleware/role.js';
+import type { AuthLocals } from '../middleware/auth.js';
+import { resolveWorkerIds } from '../repo/workerIdentity.js';
 import { createLinkedWorkOrder } from '../services/linkedWorkOrder.js';
 import { emitDomainEvent } from '../db/eventBus.js';
 import { getWorkflowDefAtVersion, getWorkflowDefVersion } from '../engine/workflowDef.js';
-import { applyEvent, availableTransitions } from '../engine/stateMachine.js';
+import { availableTransitions, isTransitionAllowed } from '../engine/stateMachine.js';
 import { INSPECTION_DEF } from '../engine/themes.js';
-import { csvEscape } from '../services/csvUtil.js'; // R30-F7：统一 CSV 转义（含 R5-001 公式注入防护），删除本地重复 esc
+import { csvEscape, csvDateTime } from '../services/csvUtil.js'; // R30-F7：统一 CSV 转义（含 R5-001 公式注入防护），删除本地重复 esc
 import { createAlert } from './emergency.js';
 
 /**
@@ -30,17 +32,41 @@ async function transitionTask(
   tenantId: string,
   taskId: string,
   event: string,
-  extra: Record<string, unknown> = {},
-  actor = 'config_role',
+  extra: Record<string, unknown>,
+  actor: string,
+  auth: AuthLocals,
 ): Promise<any> {
-  const cur = await client.query(`SELECT * FROM inspection_task WHERE id = $1 AND tenant_id = $2`, [taskId, tenantId]);
+  const cur = await client.query(`SELECT * FROM inspection_task WHERE id = $1 AND tenant_id = $2 FOR UPDATE`, [taskId, tenantId]);
   if (cur.rowCount === 0) throw new AppError('NOT_FOUND', 'task not found', 404);
   const t = cur.rows[0];
   // T1-B 批1：在途单按建单时锁定的流程版本流转（def_version=0 表示未记录 ⇒ 走 live，与改前逐字节等价）。
   const def = await getWorkflowDefAtVersion(client, tenantId, 'inspection_task', t.def_version, INSPECTION_DEF);
-  const target = applyEvent(def, t.status, event);
-  if (!target) {
+  const tdef = def.transitions.find((x) => x.from === t.status && x.event === event) ?? null;
+  const target = tdef ? tdef.to : null;
+  if (!target || !tdef) {
     throw new AppError('BAD_STATE', `illegal transition ${t.status} --${event}-->`, 422);
+  }
+  // P0-4（2026-11-07）：消费 workflow_def 的 allowedRoles/allowedPerms/requiredFields。
+  //   改造前 transitionTask 只 applyEvent 拓扑：后台配的「取消只有管理员能点」「异常必须填说明」
+  //   在巡检写侧全部无效（前端按钮隐藏 ≠ 后端门禁）。判定内核与工单共用 isTransitionAllowed，
+  //   保持「allowedRoles ∪ allowedPerms」单一语义。
+  const needsPerms = Array.isArray(tdef.allowedPerms) && tdef.allowedPerms.length > 0;
+  const perms = needsPerms ? await listPerms(auth, client) : undefined;
+  if (!isTransitionAllowed(tdef, { role: auth.role, perms })) {
+    throw new AppError(
+      'FORBIDDEN',
+      `role ${auth.role ?? '(none)'} not allowed for ${t.status} --${event}-->`,
+      403,
+    );
+  }
+  if (tdef.requiredFields && tdef.requiredFields.length > 0) {
+    const fields = extra ?? {};
+    const missing = tdef.requiredFields.filter(
+      (f) => fields[f] === undefined || fields[f] === null || fields[f] === '',
+    );
+    if (missing.length > 0) {
+      throw new AppError('BAD_REQUEST', `missing required fields: ${missing.join(',')}`, 422);
+    }
   }
   // 防御纵深：仅允许白名单物理列被 SET，杜绝任意列名拼入 SQL（🔴① 修复）
   // 2026-11-01：加入 'assignee'——抢单池统一后，"认领"是一条真实流转边（pending--claim-->pending），
@@ -54,15 +80,56 @@ async function transitionTask(
     ...extraKeys.filter((k) => extra[k] === 'now()').map((k) => `${k} = now()`),
   ];
   const values = [taskId, tenantId, target, ...filteredKeys.map((k) => extra[k])];
+  // 并发防重（2026-11-14 深度探针）：两个「完成」并发请求都读到 in_progress 时，
+  // 仅靠上面的状态判断会同时通过（两次都 200，records/done_at 被覆盖）。
+  // 行锁 + 条件更新双保险：第二个事务拿到锁后 status 已变，UPDATE 命中 0 行 → 409。
+  values.push(t.status);
   const r = await client.query(
-    `UPDATE inspection_task SET ${assigns.join(', ')}, updated_at = now() WHERE id = $1 AND tenant_id = $2 RETURNING *`,
+    `UPDATE inspection_task SET ${assigns.join(', ')}, updated_at = now() WHERE id = $1 AND tenant_id = $2 AND status = $${values.length} RETURNING *`,
     values,
   );
+  if (r.rowCount === 0) {
+    throw new AppError('CONFLICT', 'task status changed concurrently, please refresh', 409);
+  }
   await emitDomainEvent(client, { tenantId, entityType: 'inspection_task', entityId: taskId, type: event, actor });
   return r.rows[0];
 }
 
+// 巡检异常 → 标准维修工单：唯一转换实现（异常端点与手动 convert 共用），禁止两套语义。
+// 根因：异常端点原先只建预警，文案却承诺转工单；现在同事务自动转单并返回 work_order_id。
+async function convertExceptionTask(client: any, tenantId: string, task: any, actor: string) {
+  const wo = await createLinkedWorkOrder(client, {
+    id: randomUUID(),
+    tenantId,
+    businessType: 'inspection',
+    catalog: 'inspection',
+    priority: 'normal',
+    title: `巡检异常(${task.title})`,
+    description: task.note ?? '',
+    location: undefined,
+    sourceType: 'inspection',
+    sourceId: task.id,
+  });
+  await client.query(`UPDATE inspection_task SET linked_wo_id = $2, updated_at = now() WHERE id = $1`, [task.id, wo.id]);
+  // 幂等重放不重复写 convert 事件；首次建单才留痕
+  if (wo.created !== false) {
+    await emitDomainEvent(client, {
+      tenantId,
+      entityType: 'inspection_task',
+      entityId: task.id,
+      type: 'convert',
+      actor,
+      payload: { work_order_id: wo.id },
+    });
+  }
+  return wo;
+}
+
+import { requireModuleWrites } from '../middleware/moduleGuard.js';
+
 const router = Router();
+router.use(requireModuleWrites('inspection', { allow: [/^\/tasks\/[^/]+\/(checkin|complete|records|exception|transition|claim|convert)$/] }));
+
 
 // 防伪 L1：haversine 球面距离（米）—— 签到坐标与点位基准坐标校验用
 function haversineM(lat1: number, lng1: number, lat2: number, lng2: number): number {
@@ -287,29 +354,49 @@ const taskSchema = z.object({
 
 router.get('/tasks', async (req, res, next) => {
   try {
-    const tenantId = res.locals.auth.tenantId;
-    const { status, point_id, type, scheduled_from, scheduled_to, plan_id, assignee } = req.query as Record<string, string>;
+    const auth = res.locals.auth as AuthLocals;
+    const tenantId = auth.tenantId;
+    const { status, point_id, type, scheduled_from, scheduled_to, plan_id, assignee, overdue } = req.query as Record<string, string>;
     const clauses = ['t.tenant_id = $1']; // 必须与下方 LEFT JOIN inspection_point p 共存：两表都有 tenant_id，未限定会触发 "column reference tenant_id is ambiguous" 500
     const params: unknown[] = [tenantId];
     const add = (sql: string, v: unknown) => {
       params.push(v);
       clauses.push(sql.replace(/\?/g, `$${params.length}`));
     };
+    // 逾期 = 未完成且有计划时间且已过计划时间（派生口径，不改状态机）
+    const OVERDUE_SQL = `t.status IN ('pending','in_progress') AND t.scheduled_at IS NOT NULL AND t.scheduled_at < now()`;
     if (status) add('status = ?', status);
+    if (overdue === '1') clauses.push(OVERDUE_SQL);
     if (point_id) add('point_id = ?', point_id);
     if (type) add('type = ?', type);
     if (plan_id) add('plan_id = ?', plan_id);
-    if (assignee) add('assignee = ?', assignee); // #583：worker 工作台按归属拉自己的巡检任务
+    // #583：worker 工作台按归属拉自己的巡检任务。
+    // P0-3（2026-11-07）：worker 的 assignee 参数只作提示，实际范围由服务端按档案集合强制收口
+    //   （否则传别人的 worker.id 就能枚举全租户任务）；非 worker 才接受显式过滤。
+    if (assignee && auth.role !== 'worker') add('assignee = ?', assignee);
     if (scheduled_from) add('scheduled_at >= ?', scheduled_from);
     if (scheduled_to) add('scheduled_at <= ?', scheduled_to);
-      const items = await withTenantClient(tenantId, (client) =>
-        client
-          .query(
-            `SELECT t.*, p.name AS point_name FROM inspection_task t LEFT JOIN inspection_point p ON p.id = t.point_id WHERE ${clauses.join(' AND ')} ORDER BY t.scheduled_at ASC NULLS LAST, t.created_at DESC`,
-            params,
-          )
-          .then((r) => r.rows),
-      );
+    const items = await withTenantClient(tenantId, async (client) => {
+      if (auth.role === 'worker') {
+        const mine = await resolveWorkerIds(client, tenantId, auth.userId);
+        if (mine.length === 0) throw new AppError('FORBIDDEN', 'worker profile not found', 403);
+        params.push(mine);
+        clauses.push(`t.assignee = ANY($${params.length}::text[])`);
+      } else {
+        // 读侧门禁：admin/operator/dispatcher/reviewer 需 inspect.view（worker 走本人过滤，不依赖配置）。
+        await requirePermission(auth, client, 'inspect.view');
+      }
+      return client
+        .query(
+          `SELECT t.*, p.name AS point_name,
+                  (${OVERDUE_SQL}) AS overdue
+             FROM inspection_task t LEFT JOIN inspection_point p ON p.id = t.point_id
+            WHERE ${clauses.join(' AND ')}
+            ORDER BY t.scheduled_at ASC NULLS LAST, t.created_at DESC`,
+          params,
+        )
+        .then((r) => r.rows);
+    });
     return res.json({ ok: true, code: 0, items });
   } catch (e) {
     next(e);
@@ -320,7 +407,8 @@ router.get('/tasks', async (req, res, next) => {
 // + 检查项快照(items_json) + 已填实测记录(records)。
 router.get('/tasks/:id', async (req, res, next) => {
   try {
-    const tenantId = res.locals.auth.tenantId;
+    const auth = res.locals.auth as AuthLocals;
+    const tenantId = auth.tenantId;
     const item = await withTenantClient(tenantId, async (client) => {
       const cur = await client.query(`SELECT t.*, p.name AS point_name FROM inspection_task t LEFT JOIN inspection_point p ON p.id = t.point_id WHERE t.id = $1 AND t.tenant_id = $2`, [
         req.params.id,
@@ -328,6 +416,19 @@ router.get('/tasks/:id', async (req, res, next) => {
       ]);
       if (cur.rowCount === 0) throw new AppError('NOT_FOUND', 'task not found', 404);
       const t = cur.rows[0];
+      // P0-3（2026-11-07）：详情读侧权限。
+      //   非 worker：需 inspect.view；worker：仅本人名下，或「未指派且仍可认领（pending）」的单
+      //   （抢单大厅卡片可点进详情，未认领前查看属预期路径；已指派给别人的单一律 403）。
+      if (auth.role === 'worker') {
+        const mine = await resolveWorkerIds(client, tenantId, auth.userId);
+        const owner = t.assignee == null ? '' : String(t.assignee).trim();
+        const claimable = owner === '' && t.status === 'pending';
+        if (!claimable && !mine.includes(owner)) {
+          throw new AppError('FORBIDDEN', 'inspection task is assigned to another worker', 403);
+        }
+      } else {
+        await requirePermission(auth, client, 'inspect.view');
+      }
       // T1-B 批1：详情返回的 available 必须与写侧用同一个版本化 def，否则前端按钮与后端校验不一致（R-1）。
       const def = await getWorkflowDefAtVersion(client, tenantId, 'inspection_task', t.def_version, INSPECTION_DEF);
       const available = availableTransitions(def, t.status);
@@ -376,6 +477,18 @@ router.post('/tasks', async (req, res, next) => {
   }
 });
 
+// 巡检定位策略（2026-11-14 方向 B）：租户级开关，存 system_config。
+//   off（默认，保持历史行为）| warn（必须上报定位，超 500m 标记疑似）| block（必须上报，超 500m 拒绝）
+// 点位上没有坐标时无法比对距离：只校验“有定位”，不硬造异常。
+async function getInspectionGeoPolicy(client: any, tenantId: string): Promise<'off' | 'warn' | 'block'> {
+  const r = await client.query(
+    `SELECT value FROM system_config WHERE tenant_id=$1 AND key='inspection_geo_policy' LIMIT 1`,
+    [tenantId],
+  );
+  const v = String(r.rows?.[0]?.value ?? '').trim();
+  return v === 'warn' || v === 'block' ? v : 'off';
+}
+
 router.post('/tasks/:id/checkin', async (req, res, next) => {
   try {
     const tenantId = res.locals.auth.tenantId;
@@ -396,6 +509,10 @@ router.post('/tasks/:id/checkin', async (req, res, next) => {
       await requireAssigneeOrConfig(client, res.locals.auth, cur.rows[0].assignee, 'inspection task');
       // 防伪 L1：签到坐标与点位基准坐标距离校验（haversine），>500m 标记疑似
       // 点位无坐标或未绑点位 → 不判（诚实：无法校验就不硬造异常）
+      const geoPolicy = await getInspectionGeoPolicy(client, tenantId);
+      if (geoPolicy !== 'off' && (b.geo_lat == null || b.geo_lng == null)) {
+        throw new AppError('GEO_REQUIRED', '该租户已开启巡检定位校验，签到必须携带定位', 422);
+      }
       let geoSuspect = false;
       let geoDistanceM: number | null = null;
       if (b.geo_lat != null && b.geo_lng != null && cur.rows[0].point_id) {
@@ -408,6 +525,9 @@ router.post('/tasks/:id/checkin', async (req, res, next) => {
           const d = haversineM(p.lat, p.lng, b.geo_lat, b.geo_lng);
           geoDistanceM = Math.round(d);
           geoSuspect = d > 500; // 500m 阈值（可后续租户化配置）
+          if (geoPolicy === 'block' && geoSuspect) {
+            throw new AppError('GEO_TOO_FAR', `签到位置距点位 ${geoDistanceM}m，超过 500m 限制`, 422);
+          }
         }
       }
       const updated = await transitionTask(client, tenantId, req.params.id, 'checkin', {
@@ -415,7 +535,7 @@ router.post('/tasks/:id/checkin', async (req, res, next) => {
         geo_lng: b.geo_lng ?? null,
         note: b.note ?? null,
         scan_tag: b.scan_tag ?? null,
-      }, res.locals.auth.userId ?? 'config_role');
+      }, res.locals.auth.userId ?? 'config_role', res.locals.auth);
       if (b.scan_tag || geoSuspect) {
         await client.query(
           `UPDATE inspection_task SET scan_meta = scan_meta || $1::jsonb WHERE id = $2 AND tenant_id = $3`,
@@ -465,7 +585,7 @@ router.post('/tasks/:id/complete', async (req, res, next) => {
       // 默认矩阵四角色均含此点 → 存量行为零变化；admin 恒放行）
       await requirePermission(res.locals.auth, client, 'inspect.execute');
       await requireAssigneeOrConfig(client, res.locals.auth, cur.rows[0].assignee, 'inspection task');
-      const task = await transitionTask(client, tenantId, req.params.id, 'complete', extra, res.locals.auth.userId ?? 'config_role');
+      const task = await transitionTask(client, tenantId, req.params.id, 'complete', extra, res.locals.auth.userId ?? 'config_role', res.locals.auth);
       if (b.records && b.records.length) {
         await upsertRecords(client, tenantId, req.params.id, b.records);
       }
@@ -550,7 +670,7 @@ router.post('/tasks/:id/exception', async (req, res, next) => {
       // 默认矩阵四角色均含此点 → 存量行为零变化；admin 恒放行）
       await requirePermission(res.locals.auth, client, 'inspect.execute');
       await requireAssigneeOrConfig(client, res.locals.auth, cur.rows[0].assignee, 'inspection task');
-      const row = await transitionTask(client, tenantId, req.params.id, 'exception', { note: b.note }, res.locals.auth.userId ?? 'config_role');
+      const row = await transitionTask(client, tenantId, req.params.id, 'exception', { note: b.note }, res.locals.auth.userId ?? 'config_role', res.locals.auth);
       // 预警深化：巡检异常自动生成 L1 预警，落入预警中心统一处理
       await createAlert(client, tenantId, {
         source_type: 'inspection',
@@ -559,9 +679,16 @@ router.post('/tasks/:id/exception', async (req, res, next) => {
         title: `巡检异常：${row.title}`,
         message: b.note,
       });
-      return row;
+      // 产品语义：巡检异常 = 预警 + 自动转标准维修工单，同一事务提交。
+      const workOrder = await convertExceptionTask(
+        client,
+        tenantId,
+        { ...row, note: row.note ?? b.note },
+        res.locals.auth.username ?? res.locals.auth.role ?? 'config_role',
+      );
+      return { item: row, work_order: workOrder };
     });
-    return res.json({ ok: true, code: 0, item });
+    return res.json({ ok: true, code: 0, ...item });
   } catch (e) {
     next(e);
   }
@@ -586,7 +713,7 @@ router.post('/tasks/:id/transition', async (req, res, next) => {
       // 默认矩阵四角色均含此点 → 存量行为零变化；admin 恒放行）
       await requirePermission(res.locals.auth, client, 'inspect.execute');
       await requireAssigneeOrConfig(client, res.locals.auth, cur.rows[0].assignee, 'inspection task');
-      return transitionTask(client, tenantId, req.params.id, event, extra, res.locals.auth.userId ?? 'config_role');
+      return transitionTask(client, tenantId, req.params.id, event, extra, res.locals.auth.userId ?? 'config_role', res.locals.auth);
     });
     return res.json({ ok: true, code: 0, item });
   } catch (e) {
@@ -632,6 +759,7 @@ router.post('/tasks/:id/claim', async (req, res, next) => {
         'claim',
         { assignee: w.rows[0].id },
         authUserId ?? 'config_role',
+        res.locals.auth,
       );
     });
     return res.json({ ok: true, code: 0, item });
@@ -700,6 +828,9 @@ async function createPlanOccurrence(
  * - 必须在 withTenantClient 内调用（已设 RLS 租户隔离）。
  */
 export async function runDuePlansForTenant(tenantId: string): Promise<number> {
+  // 2026-11-15 主站同步实测：调度器是系统任务，没有请求级 auth context。
+  // 不显式 system 时 withTenantClient 抛 MISSING_AUTH_CONTEXT，巡检计划每分钟 500 且永不生成。
+  // 这里与 SLA 调度器（slaScheduler.withSchedulerTenant）保持同一口径。
   return withTenantClient(tenantId, async (client) => {
     const due = await client.query(
       `SELECT id, name, point_ids, frequency, interval_n, next_run_at
@@ -723,7 +854,7 @@ export async function runDuePlansForTenant(tenantId: string): Promise<number> {
       ]);
     }
     return generated;
-  });
+  }, { system: true });
 }
 
 // 计划生成：批量为若干点位生成 pending 巡检单（纯函数便于单测）
@@ -785,21 +916,12 @@ router.post('/tasks/:id/convert', async (req, res, next) => {
       if (cur.rowCount === 0) throw new AppError('NOT_FOUND', 'task not found', 404);
       const t = cur.rows[0];
       if (t.status !== 'exception') throw new AppError('BAD_STATE', 'only exception task can convert', 409);
-      const wo = await createLinkedWorkOrder(client, {
-        id: randomUUID(),
+      return convertExceptionTask(
+        client,
         tenantId,
-        businessType: 'inspection',
-        catalog: 'inspection',
-        priority: 'normal',
-        title: `巡检异常(${t.title})`,
-        description: t.note ?? '',
-        location: undefined,
-        sourceType: 'inspection',
-        sourceId: t.id,
-      });
-      await client.query(`UPDATE inspection_task SET linked_wo_id = $2, updated_at = now() WHERE id = $1`, [t.id, wo.id]);
-      await emitDomainEvent(client, { tenantId, entityType: 'inspection_task', entityId: t.id, type: 'convert', actor: 'config_role', payload: { work_order_id: wo.id } });
-      return wo;
+        t,
+        res.locals.auth.username ?? res.locals.auth.role ?? 'config_role',
+      );
     });
     return res.json({ ok: true, code: 0, result });
   } catch (e) {
@@ -935,6 +1057,15 @@ router.get('/stats', async (req, res, next) => {
           [tenantId],
         )
         .then((r) => Number(r.rows[0].c));
+      // 逾期数（派生口径）：未完成且已过计划时间
+      const overdue = await client
+        .query(
+          `SELECT COUNT(*)::int AS c FROM inspection_task
+            WHERE tenant_id=$1 AND status IN ('pending','in_progress')
+              AND scheduled_at IS NOT NULL AND scheduled_at < now()`,
+          [tenantId],
+        )
+        .then((r) => Number(r.rows[0].c));
       const byPoint = await client
         .query(
           `SELECT p.name AS point_name, COUNT(*)::int AS c
@@ -968,6 +1099,7 @@ router.get('/stats', async (req, res, next) => {
         completion_rate: total ? Math.round((done / total) * 1000) / 10 : 0,
         exception_rate: total ? Math.round((exception / total) * 1000) / 10 : 0,
         today_count: today,
+        overdue,
         by_point_top: byPoint,
         // 按项合格率：巡检实测通过率（无实测则为 null，诚实不虚构）。
         item_pass_rate: totalItems ? Math.round((passedItems / totalItems) * 1000) / 10 : null,
@@ -989,9 +1121,11 @@ router.get('/export', async (req, res, next) => {
       await requirePermission(res.locals.auth, client, 'inspect.manage'); // R9-F1：导出属管理面，仅 admin/operator
       return client
         .query(
-          `SELECT t.id, t.title, t.type, t.status, t.assignee, p.name AS point_name,
+          `SELECT t.id, t.title, t.type, t.status, t.assignee, w.name AS assignee_name, p.name AS point_name,
                   t.scheduled_at, t.done_at, t.created_at, t.items_json
-           FROM inspection_task t LEFT JOIN inspection_point p ON p.id = t.point_id
+           FROM inspection_task t
+           LEFT JOIN inspection_point p ON p.id = t.point_id
+           LEFT JOIN worker w ON w.id = t.assignee AND w.tenant_id = t.tenant_id
            WHERE t.tenant_id=$1 ${month ? 'AND TO_CHAR(COALESCE(t.scheduled_at, t.created_at), \'YYYY-MM\') = $2' : ''}
            ORDER BY t.scheduled_at ASC NULLS LAST, t.created_at DESC`,
           month ? [tenantId, month] : [tenantId],
@@ -1000,21 +1134,23 @@ router.get('/export', async (req, res, next) => {
     });
     // R30-F7：删除本地 esc（缺 R5-001 公式注入防护），统一走 csvUtil.csvEscape；
     // Date 列由 GMT 字符串变为 ISO 格式（csvEscape 对对象 JSON.stringify），机器可读性更好。
-    const header = ['工单ID', '标题', '类型', '状态', '负责人', '点位', '计划时间', '完成时间', '创建时间', '检查项数量', '合格项数', '不合格项数'];
+    const header = ['任务标题', '类型', '状态', '负责人', '点位', '计划时间', '完成时间', '创建时间', '检查项数量', '合格项数', '不合格项数'];
+    const statusCn: Record<string, string> = {
+      pending: '待执行', in_progress: '进行中', done: '已完成', exception: '异常', converted: '已转单', cancelled: '已取消',
+    };
     const lines = rows.map((r: any) => {
       const items: any[] = Array.isArray(r.items_json) ? r.items_json : [];
       const passed = items.filter((x) => x.passed === true).length;
       const failed = items.filter((x) => x.passed === false).length;
       return [
-        r.id,
         r.title,
         r.type === 'free' ? '自由巡检' : '计划巡检',
-        r.status,
-        r.assignee ?? '',
+        statusCn[r.status] || r.status,
+        r.assignee_name ?? r.assignee ?? '',
         r.point_name ?? '',
-        r.scheduled_at ?? '',
-        r.done_at ?? '',
-        r.created_at ?? '',
+        csvDateTime(r.scheduled_at),
+        csvDateTime(r.done_at),
+        csvDateTime(r.created_at),
         items.length,
         passed,
         failed,

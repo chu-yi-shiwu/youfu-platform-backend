@@ -108,15 +108,18 @@ describe('F8 notifications/read：置已读必须限定本人收件身份集合'
   });
 
   it('F8-2 ids 路径：id = ANY 之外必须叠加 recipient = ANY（防按 id 置他人通知已读）', async () => {
+    const N1 = '11111111-1111-4111-8111-111111111111';
+    const N2 = '22222222-2222-4222-8222-222222222222';
     const calls = makeClient([
       workerProfileHandler(['W0001']),
-      { match: (t) => t.startsWith('UPDATE notification SET read = true'), reply: () => ({ rows: [{ id: 'n-1' }], rowCount: 1 }) },
+      { match: (t) => t.startsWith('UPDATE notification SET read = true'), reply: () => ({ rows: [{ id: N1 }], rowCount: 1 }) },
     ]);
-    const r = await post('/open/notifications/read', { ids: ['n-1', 'n-other'] });
+    const r = await post('/open/notifications/read', { ids: [N1, N2] });
     expect(r.status).toBe(200);
     const upd = calls.find((c) => c.text.startsWith('UPDATE notification SET read = true'));
     expect(upd).toBeTruthy();
-    expect(upd!.text).toContain('id = ANY($2::text[])');
+    // notification.id 是 uuid：必须按 uuid[] 比较，传 text[] 会在真库 500
+    expect(upd!.text).toContain('id = ANY($2::uuid[])');
     expect(upd!.text).toContain('recipient = ANY($3::text[])');
     // 第 3 参必须是本人身份集合（含 userId 与 worker.id）
     expect(upd!.params).toContainEqual(['u-1', 'W0001']);

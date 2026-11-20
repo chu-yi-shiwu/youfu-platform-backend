@@ -19,6 +19,7 @@ import path from 'node:path';
 import { verifyJwt, AUTH_MODE } from '../middleware/auth.js';
 import { isValidTenantDirName, UPLOAD_ROOT } from './upload.js';
 import { withTenantClient } from '../db/pool.js';
+import { mimeForUploadExt } from '../services/uploadPolicy.js';
 
 const router = Router();
 
@@ -29,20 +30,7 @@ const router = Router();
 //   ⇒ 浏览器 MediaRecorder 录的 webm 上传成功却永远读不回来（静默数据丢失）。
 //   ⇒ 以 schema 为准补齐本文件（不反向删 schema 的项）。amr 同时是微信 wx.uploadVoice 的原始格式
 //     （publicReportCreate.ts:54 兜底扩展名即 'amr'），故 amr 尤其不能缺。
-const MIME: Record<string, string> = {
-  jpg: 'image/jpeg',
-  jpeg: 'image/jpeg',
-  png: 'image/png',
-  gif: 'image/gif',
-  webp: 'image/webp',
-  pdf: 'application/pdf',
-  m4a: 'audio/mp4',
-  mp3: 'audio/mpeg',
-  wav: 'audio/wav',
-  ogg: 'audio/ogg',
-  webm: 'audio/webm',
-  amr: 'audio/amr',
-};
+
 
 /** R19-005：文件名严格白名单——仅允许 uuid 形态（hex+连字符）+ 已知扩展名，杜绝任何路径字符。 */
 export function isValidUploadFileName(file: string): boolean {
@@ -93,17 +81,24 @@ async function matchViewToken(tenant: string, file: string, token: string): Prom
   try {
     return await withTenantClient(tenant, async (client) => {
       const r = await client.query(
-        `SELECT ext->'attachments' AS att FROM work_orders WHERE ext->>'public_view_token' = $1`,
+        `SELECT ext->'attachments' AS att, ext->'photos' AS photos, ext->'voice' AS voice
+           FROM work_orders WHERE ext->>'public_view_token' = $1`,
         [token],
       );
-      const rows = r.rows as Array<{ att: Array<{ url?: string }> | null }>;
+      const rows = r.rows as Array<{
+        att: Array<{ url?: string }> | null;
+        photos: Array<{ url?: string }> | null;
+        voice: string[] | null;
+      }>;
       for (const row of rows) {
-        const atts = row.att;
-        if (!Array.isArray(atts)) continue;
-        if (atts.some((a) => typeof a.url === 'string' && a.url.endsWith(target))) return true;
+        if (Array.isArray(row.att) && row.att.some((a) => typeof a.url === 'string' && a.url.endsWith(target))) return true;
+        // 2026-11-10：现场反馈的照片/语音分别落 ext.photos / ext.voice，
+        // 原实现只认 ext.attachments，导致师傅上传成功但预览/播放 401。
+        if (Array.isArray(row.photos) && row.photos.some((p) => typeof p?.url === 'string' && p.url.endsWith(target))) return true;
+        if (Array.isArray(row.voice) && row.voice.some((v) => typeof v === 'string' && v.endsWith(target))) return true;
       }
       return false;
-    });
+    }, { system: true });
   } catch {
     // DB/租户异常统一按"不匹配"处理，fail-closed。
     return false;
@@ -145,7 +140,7 @@ async function serveUpload(req: Request, res: Response): Promise<Response | void
   }
 
   const ext = file.slice(file.lastIndexOf('.') + 1).toLowerCase();
-  const mime = MIME[ext] ?? 'application/octet-stream';
+  const mime = mimeForUploadExt(ext);
   res.setHeader('Content-Type', mime);
   res.setHeader('Content-Disposition', `inline; filename="${file}"`);
   res.setHeader('X-Content-Type-Options', 'nosniff');

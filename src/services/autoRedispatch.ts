@@ -37,6 +37,7 @@ import { pickWorker, resolveDispatch, getActiveRules, type WorkerRow } from '../
 import { resolveNeed } from '../engine/dispatch/needResolver.js';
 import { StatsModelBackend, type ModelBackend } from '../engine/model/ModelBackend.js';
 import { transition } from '../repo/ticket.js';
+import { withTenantScope } from '../db/scope.js';
 import { insertNotification } from './notify.js';
 import { safeParseJsonb } from '../util/jsonb.js';
 import type { WorkOrderStatus } from '../engine/stateMachine.js';
@@ -81,6 +82,8 @@ export interface AutoRedispatchRow {
   priority?: string | null;
   catalog?: string | null;
   status: string;
+  department_id?: string | null;
+  department_source?: string | null;
   def_version?: number | string | null;
   /**
    * 回派次数存在 `work_orders.ext` jsonb 里（零 DDL，沿用本项目约定）。
@@ -387,7 +390,7 @@ async function performRedispatch(
   }
 
   // ⑦ 候选池：与 workOrder.ts:142 逐字同一条 SQL；排除集在此生效（规则链路与兜底链路同口径）
-  const w = await client.query('SELECT id, skill_tags, load, active FROM worker WHERE tenant_id = $1', [tenantId]);
+  const w = await client.query('SELECT id, skill_tags, load, active, department_id FROM worker WHERE tenant_id = $1', [tenantId]);
   const workerRows: WorkerRow[] = w.rows.map((x: any) => ({ ...x, skill_tags: safeParseJsonb(x.skill_tags) ?? [] }));
   const pool = workerRows.filter((x) => !excludeSet.has(x.id));
 
@@ -403,6 +406,9 @@ async function performRedispatch(
     },
     client,
   );
+  const dispatchDepartmentId =
+    row.department_source === 'default' ? null : (row.department_id ?? null);
+  const dispatchNeed = { ...needPayload, department_id: dispatchDepartmentId };
   const rules = await getActiveRules(client, tenantId);
   const modelParams = await client.query<{ params: any }>(
     'SELECT params FROM model_state WHERE tenant_id = $1 AND model_key = $2',
@@ -410,8 +416,13 @@ async function performRedispatch(
   );
   const loadedParams = safeParseJsonb(modelParams.rows[0]?.params) ?? undefined;
   const model: ModelBackend = new StatsModelBackend(loadedParams);
-  const resolved = resolveDispatch(pool, rules, needPayload as any, model);
-  const picked = resolved ? resolved.worker : pickWorker(pool, { skillTags: needPayload.skill_tags ?? undefined });
+  const resolved = resolveDispatch(pool, rules, dispatchNeed as any, model);
+  const picked = resolved
+    ? resolved.worker
+    : pickWorker(pool, {
+        skillTags: needPayload.skill_tags ?? undefined,
+        departmentId: dispatchDepartmentId,
+      });
 
   if (!picked) {
     // 🔴 L3 / D-1：真没人 ⇒ 不派、不关单、原地挂着 + 升级喊人
@@ -429,20 +440,24 @@ async function performRedispatch(
 
   // ⑨ 回派走 transition() 主通道（与 F4 自动派单:213-220 完全同口径）：
   //    拓扑 / requiredFields / sideEffects / 自动审核一个不跳；只跳过人类角色/权限门禁。
-  await transition(client, tenantId, row.id, target as WorkOrderStatus, {
-    actor: 'auto_dispatch',
-    fields: { assignee: picked.id },
-    autoFlow: true,
-    systemAuto: true,
-    eventLogType: 'assign',
-    eventOverride: edge?.event,
-    payloadExtra: {
-      redispatch: true,
-      relaxed_level: resolved ? 0 : 1,
-      exclude_worker_ids: excludeWorkerIds,
-      from_assignee: row.assignee_id,
-    },
-  });
+  // 回派是系统动作：assignee 改成别人。只在赋值语句期间切 system，
+  // 避免 PostgreSQL UPDATE 新行再被 SELECT 策略拦下。
+  await withTenantScope(client, 'system', () =>
+    transition(client, tenantId, row.id, target as WorkOrderStatus, {
+      actor: 'auto_dispatch',
+      fields: { assignee: picked.id },
+      autoFlow: true,
+      systemAuto: true,
+      eventLogType: 'assign',
+      eventOverride: edge?.event,
+      payloadExtra: {
+        redispatch: true,
+        relaxed_level: resolved ? 0 : 1,
+        exclude_worker_ids: excludeWorkerIds,
+        from_assignee: row.assignee_id,
+      },
+    }),
+  );
   // ⑩ 计数递增（jsonb，零 DDL）：只在**回派成功**时 +1
   await client.query(
     `UPDATE work_orders SET ext = COALESCE(ext, '{}'::jsonb) || jsonb_build_object('redispatch_count', $1::int) WHERE id = $2 AND tenant_id = $3`,

@@ -20,7 +20,7 @@ import crypto from 'node:crypto';
 import pool, { withTenantClient } from '../db/pool.js';
 import { AppError } from '../middleware/error.js';
 // ROLES 已不再直接引用：下拉改走 ASSIGNABLE_BUILTIN_ROLES（退场角色不可新建/分配）。
-import { PERM_DEFS, PERMS, DEFAULT_PERM_MATRIX, canAssignRole, requirePermission, ROLE_CODE_RE, ASSIGNABLE_BUILTIN_ROLES, RETIRED_ROLES, isRetiredRole, permBase, assertEntityTypeScope, type Role, type Perm } from '../middleware/role.js';
+import { PERM_DEFS, PERMS, DEFAULT_PERM_MATRIX, canAssignRole, canOperateAccount, canResetPasswordOf, requirePermission, ROLE_CODE_RE, ASSIGNABLE_BUILTIN_ROLES, RETIRED_ROLES, isRetiredRole, permBase, assertEntityTypeScope, type Role, type Perm } from '../middleware/role.js';
 // T3/S5：实例级权限的 entityType 名单校验复用 `/flow/entities` 的同一份来源
 // （内置主题 ∪ 租户 workflow_def 已配置），**不另造第二套名单**。
 import { listEntityTypes } from './businessFlow.js';
@@ -152,8 +152,27 @@ router.put('/accounts/roles/:role/permissions', async (req, res, next) => {
     if (illegal.length > 0) {
       throw new AppError('BAD_PERM', `非法权限点：${illegal.join('、')}（可用清单见 GET /accounts/roles/perm-catalog）`, 400);
     }
+    // P0 提权链收口（2026-11）：权限矩阵是提权链的**起点**，必须比「能管账号」更严。
+    // ② 不能改层级高于自己的角色。必须排在下面「admin 恒不可改」之前：
+    //    operator 打 admin 矩阵的主意要报「无权」（403），而不是「参数非法」（400）——
+    //    400 会让人以为请求写错了，实际是越权。
+    if (!canOperateAccount(auth.role, role)) {
+      throw new AppError('FORBIDDEN', '无权修改该角色的权限矩阵（角色层级高于调用者）', 403);
+    }
     if (role === 'admin') {
       throw new AppError('BAD_PARAM', 'admin 权限不可修改（恒全放行）', 400);
+    }
+    // ① 不能改自己所属角色的矩阵：否则「有 role.manage」就等价于「能给自己加任何权限」
+    //    （含 workflow.approve / ticket.manage），权限矩阵退化成自提权按钮。
+    //    放在 admin 检查之后是有意的：admin 改 admin 走上面那条 400（恒不可改，比 403 更硬），
+    //    本条的适用面就是非 admin 的自助提权。
+    if (role === auth.role) {
+      throw new AppError('FORBIDDEN', '不能修改自己所属角色的权限矩阵', 403);
+    }
+    // ③ role.manage 是账号域全权，只能由 admin 授予：否则 operator 可把它写进 worker 角色，
+    //    提权链就从「一次性」变成「可复制」（再造一个持 role.manage 的账号）。
+    if (auth.role !== 'admin' && body.perms.some((p) => permBase(p) === 'role.manage')) {
+      throw new AppError('FORBIDDEN', '只有管理员可以授予 role.manage（账号管理权不可下放）', 403);
     }
     await withTenantClient(auth.tenantId, async (client) => {
       await requirePermission(auth, client, 'role.manage');
@@ -404,8 +423,12 @@ router.post('/accounts', async (req, res, next) => {
     const tenantId = auth.tenantId;
     const b = accountCreateSchema.parse(req.body);
     // R15-005 修复：角色分配门禁——operator 不得铸造 admin 或越级分配。
+    // P0（2026-11-07）：必须按**落库后的实际角色**判定，不能只在 b.role 显式传入时判定。
+    //   省略 role 时落库值默认 'operator'，旧写法 `if (b.role && ...)` 会让 worker/自定义角色
+    //   在拿到 role.manage 后直接建出 operator（提权旁路）。
     const callerRole = auth.role as Role;
-    if (b.role && !canAssignRole(callerRole, b.role)) {
+    const targetRole = (b.role ?? 'operator') as Role;
+    if (!canAssignRole(callerRole, targetRole)) {
       throw new AppError('FORBIDDEN', '无权分配该角色（不可越级或授予 admin）', 403);
     }
     const item = await withTenantClient(tenantId, async (client) => {
@@ -427,14 +450,14 @@ router.post('/accounts', async (req, res, next) => {
       const r = await client.query(
         `INSERT INTO account_user (tenant_id, username, password_hash, display_name, role, active)
          VALUES ($1,$2,$3,$4,$5,true) RETURNING ${COLS}`,
-        [tenantId, b.username, hashPassword(b.password), b.display_name ?? null, b.role ?? 'operator'],
+        [tenantId, b.username, hashPassword(b.password), b.display_name ?? null, targetRole],
       );
       return toPublic(r.rows[0]);
     });
     // F5 audit：建号（只记 username/role，不记密码）
     await audit(auth.username ?? 'unknown', 'account.create', (item as { id?: string })?.id ?? null, tenantId, {
       username: b.username,
-      role: b.role ?? 'operator',
+      role: targetRole,
     });
     return res.status(201).json({ ok: true, code: 0, item });
   } catch (e) {
@@ -468,6 +491,12 @@ router.put('/accounts/:id', async (req, res, next) => {
       beforeRow = target;
       const roleChange = b.role !== undefined && b.role !== target.role;
       const isSelf = String(req.params.id) === String(auth.userId);
+      // P0：目标账号的**当前**角色不得高于调用者（防 operator 降级/停用 admin）。
+      // 必须排在 canAssignRole 之前：canAssignRole 只看"新角色能不能分配"，
+      // 「把 admin 改成 operator」的新角色更低、它一路放行——这正是已确认的提权链第三条。
+      if (!canOperateAccount(callerRole, target.role)) {
+        throw new AppError('FORBIDDEN', '无权操作该账号（目标角色层级高于调用者）', 403);
+      }
       // canAssignRole（R15-005）：角色变更先过越级/铸 admin 门禁（设计稿状态机 C 层）
       if (roleChange && !canAssignRole(callerRole, b.role as Role)) {
         throw new AppError('FORBIDDEN', '无权分配该角色（不可越级或授予 admin）', 403);
@@ -540,10 +569,18 @@ router.post('/accounts/:id/reset-password', async (req, res, next) => {
     const temp = generateTempPassword();
     await withTenantClient(tenantId, async (client) => {
       await requirePermission(auth, client, 'role.manage');
-      const cur = await client.query(`SELECT id FROM account_user WHERE id=$1 AND tenant_id=$2`, [req.params.id, tenantId]);
+      // P0：必须取 role 一并校验层级。重置密码＝直接拿到该账号的登录能力，
+      // 是三条提权链里最短的一条（operator 重置 admin 密码 → 以 admin 登录），
+      // 所以这里不是"顺手加个字段"，而是本端点唯一的越权闸门。
+      const cur = await client.query(`SELECT id, role FROM account_user WHERE id=$1 AND tenant_id=$2`, [req.params.id, tenantId]);
       if (cur.rowCount === 0) throw new AppError('NOT_FOUND', 'account not found', 404);
       if (String(req.params.id) === String(auth.userId)) {
         throw new AppError('SELF_GUARD', '不能重置自己的密码——请使用「修改密码」功能', 403);
+      }
+      if (!canResetPasswordOf(auth.role, cur.rows[0].role)) {
+        // 严格小于：同层也不允许（operator 不得重置 reviewer/operator 的密码）。
+        // 否则「重置密码 → 以对方身份登录」会绕过自审自批禁令等按 username 校验的控制。
+        throw new AppError('FORBIDDEN', '无权重置该账号密码（只能重置下级账号，同层请由管理员操作）', 403);
       }
       await client.query(
         `UPDATE account_user SET password_hash=$1, updated_at=now() WHERE id=$2 AND tenant_id=$3`,
@@ -573,6 +610,12 @@ router.delete('/accounts/:id', async (req, res, next) => {
       deleteTarget = { role: target.role, active: target.active };
       if (String(req.params.id) === String(auth.userId)) {
         throw new AppError('SELF_GUARD', '不能删除自己的账号——请由其他管理员操作', 403);
+      }
+      // P0：同 PUT——目标账号当前角色不得高于调用者（防 operator 删 admin）。
+      // 排在 last-admin 之前：last-admin 只在"仅剩 1 个 admin"时生效，
+      // 有 ≥2 个管理员时它形同虚设，删 admin 这条越权链正是从那里穿过去的。
+      if (!canOperateAccount(auth.role, target.role)) {
+        throw new AppError('FORBIDDEN', '无权操作该账号（目标角色层级高于调用者）', 403);
       }
       if (target.role === 'admin' && target.active) {
         // G2 同口径：FOR UPDATE 事务化行锁

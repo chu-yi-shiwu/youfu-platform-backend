@@ -165,3 +165,18 @@ describe('resolveAutoRuleEdge', () => {
     expect(resolveAutoRuleEdge(RICH_WORK_ORDER_DEF, { fromState: 'nope', event: 'approve' })).toBeNull();
   });
 });
+
+
+describe('listAutoRules 事务错误边界（P1-4）', () => {
+  it('缺表 42P01 → 空规则集（兼容未迁移）', async () => {
+    const { listAutoRules } = await import('../repo/autoRule.js');
+    const client = { query: async () => { throw Object.assign(new Error('relation missing'), { code: '42P01' }); } } as any;
+    await expect(listAutoRules(client, 't1', 'work_order')).resolves.toEqual([]);
+  });
+
+  it('其它错误必须抛出，不能吞掉导致事务假成功', async () => {
+    const { listAutoRules } = await import('../repo/autoRule.js');
+    const client = { query: async () => { throw Object.assign(new Error('permission denied'), { code: '42501' }); } } as any;
+    await expect(listAutoRules(client, 't1', 'work_order')).rejects.toThrow('permission denied');
+  });
+});

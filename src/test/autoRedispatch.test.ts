@@ -64,6 +64,7 @@ function workerRows(extra: any[] = []) {
 
 function redispatchHandler(opts: { workerRows?: any[]; adminRows?: any[] } = {}): QueryFn {
   return async (text: string, params?: any[]) => {
+    if (text.includes('SELECT department_id FROM worker WHERE id')) return { rows: [{ department_id: null }], rowCount: 1 };
     if (text.includes('FROM worker WHERE tenant_id')) return { rows: opts.workerRows ?? [] };
     if (text.includes('FROM dispatch_rule WHERE')) return { rows: [] };
     // 富 13 态模板（生产可达：pilot/phasea_seed.sql:28 的 def 含 pending_dispatch）
@@ -233,7 +234,7 @@ describe('洞①：工人退回自动回派', () => {
     expect(evt?.text).toContain("'assign'");
     expect(evt?.params?.[4]).toBe('auto_dispatch');
     // 走主通道 ⇒ 必过 assignee 存在性校验（:269-277）
-    expect(calls.find((c) => c.text.includes('SELECT 1 FROM worker WHERE'))).toBeTruthy();
+    expect(calls.find((c) => c.text.includes('SELECT department_id FROM worker WHERE'))).toBeTruthy();
   });
 
   // —— R8：D-2 硬约束 —— 任何分支都不许自动关单 ——

@@ -4,6 +4,7 @@
 // 安全：loginRateLimit 限流 + D3 质量硬拒 + org 白名单。
 import { Router } from 'express';
 import { z } from 'zod';
+import type { PoolClient } from 'pg';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -20,8 +21,15 @@ import { createPublicRepairReport } from '../services/publicReportCreate.js';
 import { getDefsAcrossAllVersions, unionStates } from '../engine/workflowDef.js';
 import { DEFAULT_WORK_ORDER_DEF, doneStates } from '../engine/stateMachine.js';
 import { emitDomainEvent } from '../db/eventBus.js';
+import { decodeBase64Strict } from '../util/base64.js';
 
 const router = Router();
+
+// 公开报修全部是 system scope：没有登录 JWT，但必须显式声明，
+// 不能靠 withTenantClient 的隐式默认（那是 fail-open）。
+function withPublicTenantClient<T>(tenantId: string, fn: (client: PoolClient) => Promise<T>): Promise<T> {
+  return withTenantClient(tenantId, fn, { system: true });
+}
 
 // 合规脱敏钩子（与 #355 SMS_GATEWAY 同一诚实降级模式）：
 // 若配置了 MEDIA_MASK_URL（人脸/车牌打码服务），图片上传时 best-effort 调用打码；
@@ -118,10 +126,15 @@ router.post('/public/repair-report', loginRateLimit(20), async (req, res, next) 
     const viewToken = crypto.randomBytes(24).toString('hex');
 
     // org 级每日配额（防跨机构灌单）
+    // P0-7（2026-11-07）：work_orders 启用了 RLS，裸 pool.query 不设置 app.tenant_id →
+    //   app_tenant_id() 返回 '' → 计数恒为 0 → 配额实际失效（可无限灌单）。
+    //   必须走 withTenantClient 注入租户上下文，与同文件其它查询一致。
     const dailyLimit = Number(tr.rows[0].quota?.repair_daily) || 500;
-    const cnt = await pool.query(
-      `SELECT count(*)::int AS c FROM work_orders WHERE tenant_id = $1 AND source = 'public_report' AND created_at > now() - interval '1 day'`,
-      [tenantId],
+    const cnt = await withPublicTenantClient(tenantId, (client) =>
+      client.query(
+        `SELECT count(*)::int AS c FROM work_orders WHERE tenant_id = $1 AND source = 'public_report' AND created_at > now() - interval '1 day'`,
+        [tenantId],
+      ),
     );
     if (cnt.rows[0].c >= dailyLimit) {
       return res.status(429).json({ ok: false, code: 'QUOTA_001', message: '该机构今日报修量已达上限，请稍后再试' });
@@ -186,14 +199,19 @@ router.get('/public/repair-status', loginRateLimit(30), async (req, res, next) =
       return res.status(422).json({ ok: false, code: 'VALIDATION_001', message: '参数不完整' });
     }
     // 单号查询 + 电话后4位可选校验（填了则匹配 contact 尾号，进一步防他查）
-    const conds = ['tenant_id = $1', 'order_no = $2'];
+    const conds = [
+      'tenant_id = $1',
+      'order_no = $2',
+      // 2026-11-11 安全审计：公开状态查询只面向公开报修单，不暴露后台/内部工单。
+      "(source = 'public_report' OR ext->>'source_channel' = 'public_report')",
+    ];
     const params: unknown[] = [org, orderNo];
     if (phoneLast4) {
       if (!/^\d{4}$/.test(phoneLast4)) return res.status(422).json({ ok: false, code: 'VALIDATION_001', message: '电话后4位格式不正确' });
       params.push(phoneLast4);
       conds.push(`right(contact, 4) = $${params.length}`);
     }
-    const r = await withTenantClient(org, (client) =>
+    const r = await withPublicTenantClient(org, (client) =>
       client.query(
         `SELECT order_no, status, title, location, created_at, updated_at
          FROM work_orders WHERE ${conds.join(' AND ')} LIMIT 1`,
@@ -236,7 +254,10 @@ router.post('/public/upload', loginRateLimit(20), async (req, res, next) => {
     }
     const ext = CTYPE_EXT[body.contentType];
     if (!ext) return res.status(415).json({ ok: false, code: 'BAD_TYPE', message: '仅支持图片/音频（jpg/png/gif/webp/pdf/m4a/mp3/wav/ogg/webm/amr）' });
-    const buf = Buffer.from(body.base64, 'base64');
+    const buf = decodeBase64Strict(body.base64);
+    if (!buf || buf.length === 0) {
+      return res.status(400).json({ ok: false, code: 'BAD_PARAM', message: 'invalid base64' });
+    }
     const isAudio = isAudioCType(body.contentType);
     const maxBytes = isAudio ? 20 * 1024 * 1024 : 5 * 1024 * 1024;
     if (buf.length > maxBytes) return res.status(413).json({ ok: false, code: 'TOO_LARGE', message: isAudio ? '录音超过 20MB 上限' : '图片超过 5MB 上限' });
@@ -262,7 +283,7 @@ router.get('/public/fault-categories', loginRateLimit(30), async (req, res, next
     // 与 repair-report 一致——仅 active 机构可读分类（防枚举）
     const tr = await pool.query(`SELECT 1 FROM tenant_registry WHERE tenant_id = $1 AND status = 'active'`, [org]);
     if (tr.rowCount === 0) return res.json({ ok: true, code: 0, items: [] });
-    const r = await withTenantClient(org, (client) =>
+    const r = await withPublicTenantClient(org, (client) =>
       client.query(
         `SELECT id, name FROM fault_category WHERE tenant_id = $1 AND enabled = true ORDER BY sort, name LIMIT 200`,
         [org],
@@ -305,7 +326,7 @@ router.post('/public/infer', loginRateLimit(30), async (req, res, next) => {
     let llm: Awaited<ReturnType<typeof llmInferCategory>> = null;
     if (await getLlmEnabled(org)) {
       const catNames = (
-        await withTenantClient(org, (client) =>
+        await withPublicTenantClient(org, (client) =>
           client.query<{ name: string }>(
             `SELECT name FROM fault_category WHERE tenant_id = $1 AND enabled = true`,
             [org],
@@ -315,7 +336,7 @@ router.post('/public/infer', loginRateLimit(30), async (req, res, next) => {
       llm = await llmInferCategory(desc, catNames);
     }
 
-    const result = await withTenantClient(org, async (client) => {
+    const result = await withPublicTenantClient(org, async (client) => {
       // LLM 优先（租户已授权 + 有 KEY），失败回退规则引擎
       let source: 'llm' | 'rule' = 'rule';
       let categoryName: string | null = null;
@@ -388,17 +409,22 @@ router.get('/public/my-reports', loginRateLimit(30), async (req, res, next) => {
     const tokens = raw.split(',').map((t) => t.trim()).filter(Boolean).slice(0, 100);
     // R29-F3：tokens 路径（view_token 可被分享给第三方，如发给维修工）不返回 reporter_phone 明文，防分享越权泄露；
     // phone 路径（本人已通过 (phone, order_no) 配对证明所有权）保留明文作找回凭据，前端 maskPhone 脱敏展示。
+    // 2026-11-11 安全审计：所有工单都生成 public_view_token 用于媒体读取（小程序 <image>/<audio> 不能带 Authorization）。
+    // 但公开「我的报修」只能返回公开报修单，不能把后台建的内部工单详情凭 token 暴露到公网。
     const isTokenPath = tokens.length > 0;
     let sql: string;
     let params: unknown[];
     if (tokens.length > 0) {
       sql = `SELECT order_no, status, title, description, location, created_at, ext
-             FROM work_orders WHERE tenant_id = $1 AND ext->>'public_view_token' = ANY($2::text[])
+             FROM work_orders
+             WHERE tenant_id = $1
+               AND ext->>'public_view_token' = ANY($2::text[])
+               AND (source = 'public_report' OR ext->>'source_channel' = 'public_report')
              ORDER BY created_at DESC LIMIT 200`;
       params = [org, tokens];
     } else if (phone && orderNo) {
       // ⑤ 安全找回：先验证 (phone, order_no) 配对存在（所有权证明）；不存在则静默返回空，不暴露该手机是否有报修
-      const proof = await withTenantClient(org, (client) =>
+      const proof = await withPublicTenantClient(org, (client) =>
         client.query(
           `SELECT 1 FROM work_orders WHERE tenant_id = $1 AND order_no = $2 AND (ext->>'reporter_phone' = $3 OR contact = $3) LIMIT 1`,
           [org, orderNo, phone],
@@ -413,7 +439,7 @@ router.get('/public/my-reports', loginRateLimit(30), async (req, res, next) => {
       return res.status(422).json({ ok: false, code: 'VALIDATION_001', message: '缺少查询凭证（token 或 手机号+工单号）' });
     }
 
-    const r = await withTenantClient(org, (client) => client.query(sql, params));
+    const r = await withPublicTenantClient(org, (client) => client.query(sql, params));
     const items = r.rows.map((row: any) => {
       const ext = row.ext || {};
       const filled = ext.filled || {};
@@ -460,7 +486,7 @@ router.patch('/public/report-correct', loginRateLimit(20), async (req, res, next
     const b = correctSchema.parse(req.body);
     const tr = await pool.query(`SELECT 1 FROM tenant_registry WHERE tenant_id = $1 AND status = 'active'`, [b.org]);
     if (tr.rowCount === 0) return res.status(404).json({ ok: false, code: 'ORG_404', message: '机构不存在或未启用' });
-    const result = await withTenantClient(b.org, async (client) => {
+    const result = await withPublicTenantClient(b.org, async (client) => {
       const cur = await client.query(
         `SELECT id, ext FROM work_orders WHERE tenant_id = $1 AND ext->>'public_view_token' = $2 LIMIT 1`,
         [b.org, b.token],
@@ -504,7 +530,7 @@ router.get('/public/dict/lookup', loginRateLimit(30), async (req, res, next) => 
     // 仅 active 机构可查
     const tr = await pool.query(`SELECT 1 FROM tenant_registry WHERE tenant_id = $1 AND status = 'active'`, [org]);
     if (tr.rowCount === 0) return res.json({ ok: true, code: 0, found: false, reason: 'org_inactive' });
-    const result = await withTenantClient(org, async (client) => {
+    const result = await withPublicTenantClient(org, async (client) => {
       // 查位置（按 code 唯一）
       let location: { id: string; code: string; name: string; category: string | null; default_reporter_id: string | null } | null = null;
       if (locCode) {
@@ -668,7 +694,7 @@ router.get('/public/service-status', loginRateLimit(30), async (req, res, next) 
     );
     if (tr.rowCount === 0) return res.status(404).json({ ok: false, code: 'ORG_404', message: '机构不存在或未启用' });
     const tenantId = org;
-    const data = await withTenantClient(tenantId, async (client) => {
+    const data = await withPublicTenantClient(tenantId, async (client) => {
       // T1-B：这是「先按状态集合拼 SQL 过滤条件、再去查行」的**包含判定** —— 此刻手上还没有
       // 具体行，只能按「租户当前所有在用版本」求口径。只读 live 一份 ⇒ 锁着旧版本、状态是旧版
       // 完成态的老单被 WHERE 排除在外 ⇒ **今日完成数少报**；而本端点是免登录对外公示入口，
@@ -723,7 +749,7 @@ router.post('/public/feedback', loginRateLimit(20), async (req, res, next) => {
       [b.org],
     );
     if (tr.rowCount === 0) return res.status(404).json({ ok: false, code: 'ORG_404', message: '机构不存在或未启用' });
-    const item = await withTenantClient(b.org, async (client) => {
+    const item = await withPublicTenantClient(b.org, async (client) => {
       const r = await client.query(
         `INSERT INTO feedback (tenant_id, type, content, rating, channel, status, created_by)
          VALUES ($1,'opinion',$2,$3,'mobile','new',$4) RETURNING id, created_at`,

@@ -11,7 +11,7 @@ import { withTenantClient } from '../db/pool.js';
 import { AppError } from '../middleware/error.js';
 import { getDefsAcrossAllVersions, unionStates } from '../engine/workflowDef.js';
 import { activeStates, DEFAULT_WORK_ORDER_DEF } from '../engine/stateMachine.js';
-import { requirePermission, canAssignRole, type Role } from '../middleware/role.js';
+import { requirePermission, requireAnyPermission, canAssignRole, type Role } from '../middleware/role.js';
 import { hashPassword } from '../account.js';
 import { generateAdminPassword } from '../repo/tenantProvision.js';
 
@@ -23,6 +23,7 @@ const workerSchema = z.object({
   skill_tags: z.array(z.string()).optional(),
   load: z.number().int().nonnegative().optional(),
   active: z.boolean().optional(),
+  department_id: z.string().uuid().optional(),
   // AL-001 修复（2026-09-04 对齐审查）：046 已建 worker.account_id 列+唯一索引，me/summary 按
   // 它反查工人（读路径在用），但本 schema 此前未暴露该字段——新建 worker 账号后无 API 关联
   // 档案，工作台 me/summary 404，只能 DB 手工 UPDATE。补齐读写透传（uuid，可选）。
@@ -43,11 +44,16 @@ router.get('/workers', async (req, res, next) => {
     if (name) add('name ILIKE ?', `%${name}%`);
     if (skill) add('? = ANY(skill_tags)', skill);
     if (active === '0' || active === '1') add('active = ?', active === '1');
-    const items = await withTenantClient(tenantId, (client) =>
-      client
-        .query(`SELECT * FROM worker WHERE ${clauses.join(' AND ')} ORDER BY created_at DESC`, params)
-        .then((r) => r.rows),
-    );
+    const items = await withTenantClient(tenantId, async (client) => {
+      // 人员档案含手机号/账号关联，属于管理面数据；worker 不应枚举全租户人员。
+      // 派单/排班页面用 ticket.manage 或 dispatch.override 才可读（2026-11-11 安全审计修复）。
+      await requireAnyPermission(res.locals.auth, client, ['ticket.manage', 'dispatch.override']);
+      const r = await client.query(
+        `SELECT * FROM worker WHERE ${clauses.join(' AND ')} ORDER BY created_at DESC`,
+        params,
+      );
+      return r.rows;
+    });
     return res.json({ ok: true, code: 0, items });
   } catch (e) {
     next(e);
@@ -58,17 +64,29 @@ router.get('/workers', async (req, res, next) => {
 router.get('/workers/:id', async (req, res, next) => {
   try {
     const tenantId = res.locals.auth.tenantId;
-    const item = await withTenantClient(tenantId, (client) =>
-      client
+    const item = await withTenantClient(tenantId, async (client) => {
+      await requireAnyPermission(res.locals.auth, client, ['ticket.manage', 'dispatch.override']);
+      return client
         .query(`SELECT * FROM worker WHERE id=$1 AND tenant_id=$2`, [req.params.id, tenantId])
-        .then((r) => r.rows[0] ?? null),
-    );
+        .then((r) => r.rows[0] ?? null);
+    });
     if (!item) throw new AppError('NOT_FOUND', 'worker not found', 404);
     return res.json({ ok: true, code: 0, item });
   } catch (e) {
     next(e);
   }
 });
+
+async function assertWorkerAccount(client: any, tenantId: string, accountId: string): Promise<void> {
+  const r = await client.query(
+    `SELECT role FROM account_user WHERE tenant_id = $1 AND id = $2 LIMIT 1`,
+    [tenantId, accountId],
+  );
+  if (r.rowCount === 0) throw new AppError('BAD_PARAM', 'account_id 不存在', 422);
+  if (r.rows[0].role !== 'worker') {
+    throw new AppError('BAD_PARAM', '只能把 worker 档案绑定到 worker 角色账号', 422);
+  }
+}
 
 // ============ 新建人员 ============
 router.post('/workers', async (req, res, next) => {
@@ -77,11 +95,12 @@ router.post('/workers', async (req, res, next) => {
     const b = workerSchema.parse(req.body);
     const item = await withTenantClient(tenantId, async (client) => {
       await requirePermission(res.locals.auth, client, 'worker.manage');
+      if (b.account_id) await assertWorkerAccount(client, tenantId, b.account_id);
       return client
         .query(
-          `INSERT INTO worker (id, tenant_id, name, skill_tags, load, active, account_id)
-           VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *`,
-          [b.id, tenantId, b.name, b.skill_tags ?? [], b.load ?? 0, b.active ?? true, b.account_id ?? null],
+          `INSERT INTO worker (id, tenant_id, name, skill_tags, load, active, account_id, department_id)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
+          [b.id, tenantId, b.name, b.skill_tags ?? [], b.load ?? 0, b.active ?? true, b.account_id ?? null, b.department_id ?? null],
         )
         .then((r) => r.rows[0]);
     });
@@ -98,6 +117,7 @@ router.put('/workers/:id', async (req, res, next) => {
     const b = workerSchema.partial().parse(req.body);
     const item = await withTenantClient(tenantId, async (client) => {
       await requirePermission(res.locals.auth, client, 'worker.manage');
+      if (b.account_id) await assertWorkerAccount(client, tenantId, b.account_id);
       const cur = await client.query(`SELECT * FROM worker WHERE id=$1 AND tenant_id=$2`, [req.params.id, tenantId]);
       if (cur.rowCount === 0) throw new AppError('NOT_FOUND', 'worker not found', 404);
       const sets: string[] = [];
@@ -110,6 +130,7 @@ router.put('/workers/:id', async (req, res, next) => {
       if (b.skill_tags !== undefined) set('skill_tags', b.skill_tags);
       if (b.load !== undefined) set('load', b.load);
       if (b.active !== undefined) set('active', b.active);
+      if (b.department_id !== undefined) set('department_id', b.department_id);
       if (b.account_id !== undefined) set('account_id', b.account_id); // AL-001：档案↔账号关联可 API 维护
       if (sets.length === 0) return cur.rows[0];
       const r = await client.query(
@@ -168,6 +189,7 @@ const withAccountSchema = z.object({
   display_name: z.string().min(1),
   phone: z.string().regex(/^1\d{10}$/).optional(),
   skill_tags: z.array(z.string()).optional(),
+  department_id: z.string().uuid().optional(),
   worker_id: z.string().min(1).optional(),
 });
 
@@ -218,9 +240,9 @@ router.post('/workers/with-account', async (req, res, next) => {
       const account = acc.rows[0];
       // ③ 建业务档案（phone 直写 worker.phone 列，057 迁移已建）
       const w = await client.query(
-        `INSERT INTO worker (id, tenant_id, name, skill_tags, load, active, phone, account_id)
-         VALUES ($1,$2,$3,$4,0,true,$5,$6) RETURNING *`,
-        [workerId, tenantId, b.display_name, b.skill_tags ?? [], b.phone ?? null, account.id],
+        `INSERT INTO worker (id, tenant_id, name, skill_tags, load, active, phone, account_id, department_id)
+         VALUES ($1,$2,$3,$4,0,true,$5,$6,$7) RETURNING *`,
+        [workerId, tenantId, b.display_name, b.skill_tags ?? [], b.phone ?? null, account.id, b.department_id ?? null],
       );
       return { worker: w.rows[0] as Record<string, unknown>, account: account as Record<string, unknown> };
     });

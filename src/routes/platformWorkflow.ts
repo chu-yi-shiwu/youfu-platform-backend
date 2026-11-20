@@ -13,7 +13,13 @@
 //   唯一差异：① 不走租户侧归属闸门（本就是平台身份）；② 不走 requirePermission（平台 token 无租户角色）。
 import { Router } from 'express';
 import { z } from 'zod';
+import type { PoolClient } from 'pg';
 import { withTenantClient } from '../db/pool.js';
+
+// 平台管理端没有租户 JWT，显式 system scope。
+function withSystemTenantClient<T>(tenantId: string, fn: (client: PoolClient) => Promise<T>): Promise<T> {
+  return withTenantClient(tenantId, fn, { system: true });
+}
 import { AppError } from '../middleware/error.js';
 import { platformAdminAuth } from '../middleware/platformAuth.js';
 import { recordPlatformAudit } from '../repo/platformAudit.js';
@@ -79,7 +85,7 @@ router.get('/tenants/:id/workflow-def/:entityType', async (req, res, next) => {
     const tenantId = (req.params.id || '').trim();
     const { entityType } = req.params;
     assertEntityType(entityType);
-    const def = await withTenantClient(tenantId, (client) => getWorkflowDef(client, tenantId, entityType));
+    const def = await withSystemTenantClient(tenantId, (client) => getWorkflowDef(client, tenantId, entityType));
     return res.json({ ok: true, code: 0, tenantId, entityType, def });
   } catch (e) { next(e); }
 });
@@ -92,7 +98,7 @@ router.put('/tenants/:id/workflow-def/:entityType', async (req, res, next) => {
     assertEntityType(entityType);
     const b = defSchema.parse(req.body);
     const actor = actorOf(res);
-    const { rev } = await withTenantClient(tenantId, (client) =>
+    const { rev } = await withSystemTenantClient(tenantId, (client) =>
       upsertWorkflowDefDraft(client, tenantId, entityType, mergeDef(b), {
         operator: actor, note: b.note, baseRev: b.base_rev,
       }),
@@ -111,11 +117,11 @@ router.post('/tenants/:id/workflow-def/:entityType/submit', async (req, res, nex
     const actor = actorOf(res);
     // 099 起可有多份在途草稿：平台运维代客提交同样需要能指定哪一份（不传时仅一份草稿才提交）
     const b = z.object({ change_id: z.number().int().positive().optional() }).parse(req.body ?? {});
-    const submitted = await withTenantClient(tenantId, (client) =>
+    const submitted = await withSystemTenantClient(tenantId, (client) =>
       submitWorkflowDefChange(client, tenantId, entityType, { submittedBy: actor, changeId: b.change_id }),
     );
     if (!submitted) {
-      const existing = await withTenantClient(tenantId, (client) =>
+      const existing = await withSystemTenantClient(tenantId, (client) =>
         getWorkflowDefChange(client, tenantId, entityType),
       );
       if (!existing) throw new AppError('NO_DRAFT', `no in-flight change for ${entityType}`, 404);
@@ -137,7 +143,7 @@ router.post('/tenants/:id/workflow-def/:entityType/approve', async (req, res, ne
     assertEntityType(entityType);
     const b = z.object({ confirm_inflight_loss: z.literal(true).optional() }).parse(req.body ?? {});
     const actor = actorOf(res);
-    await withTenantClient(tenantId, async (client) => {
+    await withSystemTenantClient(tenantId, async (client) => {
       const change = await getWorkflowDefChange(client, tenantId, entityType);
       if (!change) throw new AppError('NO_DRAFT', `no in-flight change for ${entityType}`, 404);
       if (change.status !== 'submitted') {
@@ -165,11 +171,11 @@ router.post('/tenants/:id/workflow-def/:entityType/reject', async (req, res, nex
     assertEntityType(entityType);
     const b = z.object({ comment: z.string().min(1) }).parse(req.body ?? {});
     const actor = actorOf(res);
-    const rejected = await withTenantClient(tenantId, (client) =>
+    const rejected = await withSystemTenantClient(tenantId, (client) =>
       rejectWorkflowDefChange(client, tenantId, entityType, b.comment),
     );
     if (!rejected) {
-      const existing = await withTenantClient(tenantId, (client) =>
+      const existing = await withSystemTenantClient(tenantId, (client) =>
         getWorkflowDefChange(client, tenantId, entityType),
       );
       if (!existing) throw new AppError('NO_DRAFT', `no in-flight change for ${entityType}`, 404);
@@ -184,7 +190,7 @@ router.post('/tenants/:id/workflow-def/:entityType/reject', async (req, res, nex
 router.get('/tenants/:id/workflow-def-pending', async (req, res, next) => {
   try {
     const tenantId = (req.params.id || '').trim();
-    const items = await withTenantClient(tenantId, (client) =>
+    const items = await withSystemTenantClient(tenantId, (client) =>
       listSubmittedWorkflowDefChanges(client, tenantId),
     );
     return res.json({ ok: true, code: 0, tenantId, items });

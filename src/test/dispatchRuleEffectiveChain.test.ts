@@ -73,7 +73,11 @@ CREATE TABLE worker (
   skill_tags text[] NOT NULL DEFAULT '{}',
   load       int NOT NULL DEFAULT 0,
   active     boolean NOT NULL DEFAULT true,
+  department_id uuid,
   created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE TABLE dept (
+  id uuid PRIMARY KEY, tenant_id text NOT NULL, name text, is_default boolean NOT NULL DEFAULT false
 );
 CREATE TABLE work_orders (
   id            text PRIMARY KEY,
@@ -87,6 +91,8 @@ CREATE TABLE work_orders (
   contact       text,
   status        text NOT NULL DEFAULT 'draft',
   assignee_id   text,
+  department_id uuid,
+  department_source text,
   auto_flow     boolean NOT NULL DEFAULT false,
   assets        jsonb NOT NULL DEFAULT '[]'::jsonb,
   created_at    timestamptz NOT NULL DEFAULT now(),

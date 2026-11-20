@@ -4,6 +4,10 @@
 //   SEED_ADMIN_PWD=xxx SEED_OPERATOR_PWD=yyy npm run seed:accounts
 import { hashPassword, withTenantClient } from '../src/account.js';
 
+function withSystemTenantClient<T>(tenantId: string, fn: (client: any) => Promise<T>): Promise<T> {
+  return withTenantClient(tenantId, fn, { system: true });
+}
+
 const TENANT = process.env.SEED_TENANT ?? 't-verification';
 const demo = [
   {
@@ -22,7 +26,7 @@ const demo = [
 
 async function main() {
   for (const u of demo) {
-    await withTenantClient(TENANT, async (client) => {
+    await withSystemTenantClient(TENANT, async (client) => {
       await client.query(
         `INSERT INTO account_user (tenant_id, username, password_hash, display_name, role, active)
          VALUES ($1, $2, $3, $4, $5, true)

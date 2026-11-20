@@ -11,8 +11,13 @@ import { pickAutoRule, TERMINAL_STATES } from '../engine/autoRules.js'; // 地�
 import { listEnabledAutoRules } from '../repo/autoRule.js';
 import { emitDomainEvent } from '../db/eventBus.js';
 import { embedText, embeddingConfigured, embeddingModel } from '../services/llm.js';
+import { enqueueEmbedding } from '../services/embeddingQueue.js';
+import { getAiFeaturesEnabled } from './tenantSettings.js';
 import { recordShadowSuggestions, resolveDispatchShadow } from '../services/k2Shadow.js';
 import { withTenantClient } from '../db/pool.js';
+import { getAuthContext } from '../db/authContext.js';
+import { resolveDepartment } from './departmentResolver.js';
+import { buildWorkOrderWhere } from './workOrderWhere.js';
 
 export interface CreateDto {
   id: string;
@@ -31,8 +36,7 @@ export interface CreateDto {
   // UOne 颗粒度维度（取之所长）
   source?: string;        // 工单来源: wechat/backend/phone
   faultType?: string;     // 故障类型
-  serviceDesk?: string;   // 所属服务台
-  department?: string;    // 归属部门（部门级抢单维度）
+  departmentId?: string;  // 责任部门 dept.id（必填，自动解析）
   ext?: Record<string, unknown>; // 工单模板动态字段
   idempotencyKey?: string;
 }
@@ -55,8 +59,10 @@ export interface WorkOrderRow {
   assets: unknown;
   source?: string;
   fault_type?: string | null;
-  service_desk?: string | null;
-  department?: string | null;
+  department_id?: string | null;
+  department_source?: string | null;
+  department_name?: string | null;
+  created_by?: string | null;
   satisfaction_score?: number | null;
   ext?: unknown;
   // T1-B 批4：建单时锁定的流程定义版本号（103 迁移加的列）。0 = 未记录（存量行/租户无 definition）
@@ -110,48 +116,96 @@ export async function createWithIdem(
   //   版本号是**写入时的事实**，读 def 再推版本会随后续保存漂移。
   //   status 仍为硬编码字面量 'draft'（E4/E6：不碰无关变量）。
   const defVersion = await getWorkflowDefVersion(client, dto.tenantId, 'work_order');
+  // P1-5：建单状态必须写该租户锁定版本的 initial，不能永远硬编码 draft。
+  // def_version=0 表示未登记/兼容旧库，沿用 draft；>0 时按锁定版本解析并校验。
+  let initialStatus = 'draft';
+  if (defVersion > 0) {
+    const def = await getWorkflowDefAtVersion(client, dto.tenantId, 'work_order', defVersion, DEFAULT_WORK_ORDER_DEF);
+    if (!def.initial || !isKnownState(def, def.initial)) {
+      throw new AppError('BAD_REQUEST', `workflow initial state invalid: ${def.initial ?? '(empty)'}`, 422);
+    }
+    initialStatus = def.initial;
+  }
+  // 责任部门：显式 > 路由规则 > 默认部门。必填但不靠运营逐单选。
+  const dept = await resolveDepartment(client, dto.tenantId, {
+    departmentId: dto.departmentId,
+    catalog: dto.catalog,
+    location: dto.location,
+    description: dto.description,
+    businessType: dto.businessType,
+    assets: dto.assets,
+    contact: dto.contact,
+    reporterName: dto.reporterName,
+    source: dto.source,
+  });
+  const ext = {
+    ...(dto.ext ?? {}),
+    // 2026-11-11：所有工单都生成公开查看 token，不只公开报修单。
+    // 原因：小程序 <image>/<audio> 不能带 Authorization，只能靠 ?token=；
+    // PC/后台建的工单没有 token 时，师傅上传的照片/录音上传成功但预览/播放 401。
+    // token 仍是 48 位随机值，不可枚举；仅随 ext 下发给有单可见权限的人。
+    public_view_token:
+      (dto.ext && typeof dto.ext.public_view_token === 'string' && dto.ext.public_view_token) ||
+      randomBytes(24).toString('hex'),
+    department_resolution: dept.signals,
+    ...(dept.ruleId ? { department_rule_id: dept.ruleId } : {}),
+  };
+  // RLS：创建人可见自己刚建的单（INSERT ... RETURNING 也受 SELECT 策略影响）。
+  // 系统/公开任务没有 userId → null，由 system scope 兜底。
+  const createdBy = getAuthContext()?.userId ?? null;
   const ins = await client.query<WorkOrderRow>(
     `INSERT INTO work_orders
-       (id, tenant_id, order_no, business_type, catalog, priority, location, title, description, contact, reporter_name, assets, status, source, fault_type, service_desk, department, ext, def_version)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'draft',$13,$14,$15,$16,$17,$18)
-     RETURNING *`,
+       (id, tenant_id, order_no, business_type, catalog, priority, location, title, description, contact, reporter_name, assets, status, source, fault_type, department_id, department_source, ext, created_by, def_version)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$20,$13,$14,$15,$16,$17,$18,$19)
+     RETURNING work_orders.*,
+       (SELECT d.name FROM dept d
+         WHERE d.tenant_id = work_orders.tenant_id AND d.id = work_orders.department_id) AS department_name`,
     [
       dto.id, dto.tenantId, orderNo, dto.businessType, dto.catalog ?? null, dto.priority ?? 'normal',
       dto.location ?? null, dto.title ?? null, dto.description ?? null, dto.contact ?? null,
       dto.reporterName ?? null,
       JSON.stringify(dto.assets ?? []),
-      dto.source ?? 'backend', dto.faultType ?? null, dto.serviceDesk ?? null, dto.department ?? null,
-      JSON.stringify(dto.ext ?? {}),
+      dto.source ?? 'backend', dto.faultType ?? null,
+      dept.departmentId, dept.source,
+      JSON.stringify(ext),
+      createdBy,
       defVersion,
+      initialStatus,
     ],
   );
   // （幂等键已在上方抢键分支写入，无需重复插入；无 idempotencyKey 时不写键，保持原语义）
   await client.query(
     `INSERT INTO ticket_event (tenant_id, work_order_id, type, from_status, to_status, actor)
-     VALUES ($1,$2,'create',NULL,'draft','system')`,
-    [dto.tenantId, dto.id],
+     VALUES ($1,$2,'create',NULL,$3,'system')`,
+    [dto.tenantId, dto.id, initialStatus],
   );
   await emitDomainEvent(client, { tenantId: dto.tenantId, entityType: 'work_order', entityId: dto.id, type: 'create', actor: 'system' });
 
-  // K2（有 embedding key 时）：报修单创建即异步嵌入向量库（best-effort，不阻塞创建响应，失败仅告警）。
-  // 走到此处必为新建（幂等命中已在上方提前 return），故直接嵌入。
+  // K2（有 embedding key 且租户开启 AI 能力时）：后台有界队列写入向量库。
+  // 2026-11-15 根因修复：
+  //   - 遵守租户 ai_features_enabled（默认关闭），不再仅凭全局 key 就为所有租户跑嵌入；
+  //   - 通过有界队列（2 并发 / 上限 200）执行，避免高并发建单时无限外部请求拖慢事件循环；
+  //   - 仍为 best-effort：不阻塞响应，失败仅告警。
   const emb = [dto.title, dto.description, dto.businessType, dto.catalog, dto.faultType, dto.location]
     .filter(Boolean).join(' ').slice(0, 8000);
   if (embeddingConfigured() && emb.trim()) {
-    embedText(emb, dto.tenantId)
-      .then((vec) => {
-        if (!vec) return;
-        return withTenantClient(dto.tenantId, async (client) => {
-          await client.query(
-            `SELECT upsert_case_embedding($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
-            [dto.tenantId, 'work_order', String(dto.id), dto.businessType || dto.catalog || '', dto.priority ?? 'normal', emb, vec, embeddingModel(), vec.length],
-          );
-          // K2 影子模式（R34）：同一向量只读建议——category/dispatch 影子行，绝不参与业务决策。
-          // best-effort：失败走外层 catch 仅告警。
-          await recordShadowSuggestions(client, dto.tenantId, String(dto.id), vec, dto.businessType || dto.catalog || '');
+    void getAiFeaturesEnabled(dto.tenantId, client)
+      .then((aiEnabled) => {
+        if (!aiEnabled) return;
+        enqueueEmbedding(async () => {
+          const vec = await embedText(emb, dto.tenantId);
+          if (!vec) return;
+          await withTenantClient(dto.tenantId, async (c) => {
+            await c.query(
+              `SELECT upsert_case_embedding($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+              [dto.tenantId, 'work_order', String(dto.id), dto.businessType || dto.catalog || '', dto.priority ?? 'normal', emb, vec, embeddingModel(), vec.length],
+            );
+            // K2 影子模式（R34）：同一向量只读建议——category/dispatch 影子行，绝不参与业务决策。
+            await recordShadowSuggestions(c, dto.tenantId, String(dto.id), vec, dto.businessType || dto.catalog || '');
+          }, { system: true });
         });
       })
-      .catch((e) => console.warn('[embed work_order] fail:', (e as Error).message));
+      .catch((e) => console.warn('[embed work_order] gate/queue fail:', (e as Error).message));
   }
 
   return { row: ins.rows[0], created: true };
@@ -192,19 +246,30 @@ export async function transition(
   // payloadExtra（F8 2026-10-19）：并入 ticket_event / domain_event 的 payload（纯加法，缺省不传
   //   与原逐字一致）。落大厅的失配原因（reason）即由此携带——stats 的 claim_hall_reasons
   //   按 payload->>'reason' 聚合，走主通道后口径必须保住。冲突时以 payloadExtra 为准。
-  opts?: { actor?: string; role?: string; perms?: readonly string[]; fields?: Record<string, unknown>; eventOverride?: string; auto?: boolean; systemAuto?: boolean; autoFlow?: boolean; eventLogType?: string; payloadExtra?: Record<string, unknown> },
+  // actorWorkerIds（P0-4 2026-11-04）：当前操作人的 worker 档案 id 集合。仅路由层在
+  //   role==='worker' 时传入；传入即启用「只能流转本人名下工单、不得改派」守卫。
+  //   非 worker 调用方不传 ⇒ 存量行为逐字不变；抢单/自动派单/系统规则不经过本守卫。
+  opts?: { actor?: string; role?: string; perms?: readonly string[]; fields?: Record<string, unknown>; eventOverride?: string; auto?: boolean; systemAuto?: boolean; autoFlow?: boolean; eventLogType?: string; payloadExtra?: Record<string, unknown>; actorWorkerIds?: readonly string[]; requireReporterUserId?: string },
 ): Promise<TransitionResult> {
   // 行锁：并发流转同一工单时串行化（A 提交释放锁后 B 才拿到锁，此时 cur.status 为最新），
   // 同时让下方"首次进入触发态"判定基于锁内权威快照，杜绝 READ COMMITTED 下双触发增量学习。
   const cur = await findOneForUpdate(client, tenantId, id);
   if (!cur) throw new AppError('NOT_FOUND', 'work order not found', 404);
+  // P1-6：评价必须由报修人本人发起；created_by 是该单唯一稳定账号身份。
+  // 公共报修没有账号绑定（created_by 为空）时不允许后台代评，避免满意度失去独立主体语义。
+  if (opts?.requireReporterUserId) {
+    const reporter = cur.created_by ?? null;
+    if (!reporter || reporter !== opts.requireReporterUserId) {
+      throw new AppError('REPORTER_ONLY', '只有报修人本人可以评价该工单', 403);
+    }
+  }
   // T-①：状态合法性由 workflow_def（可配置状态机）校验，不再写死固定字典。
   // T1-B 批4（核心）：在途单按建单时锁定的流程版本流转 —— 租户改流程只对改完之后新建的单生效，
   //   老单照它创建那天那一版走。cur 来自 findOneForUpdate（SELECT *）⇒ def_version 天然在位，
   //   无需拓宽 SELECT。def_version = 0（存量行）⇒ 降级按 live def 走，与改前逐字节等价。
   //   🔴 改这一处即覆盖下游全部判定：边匹配、必填校验、角色门禁、activeStates(load 结算)、
   //   tryAutoAdvance 传入的 def 全都跟着同一个 def —— 不许再单独改它们（总则 E6）。
-  const def = await getWorkflowDefAtVersion(client, tenantId, 'work_order', Number(cur.def_version) || 0, DEFAULT_WORK_ORDER_DEF);
+  const def = await getWorkflowDefAtVersion(client, tenantId, 'work_order', Number(cur.def_version) || 0, DEFAULT_WORK_ORDER_DEF, true);
   if (!isKnownState(def, cur.status) || !isKnownState(def, to)) {
     throw new AppError('CONFLICT', `unknown state: from=${cur.status} to=${to}`, 422);
   }
@@ -252,6 +317,25 @@ export async function transition(
   }
   // A+ 必填校验：缺失任一 requiredFields → 422
   const fields = opts?.fields ?? {};
+  // P0-4（2026-11-04）：工人流转归属守卫。
+  // 背景：通用 transition 端点此前只做状态机/角色门禁，任意 worker 只要知道工单 id
+  //   就能把**别人的工单**完成/退回/挂起（角色门禁里 worker 是允许角色）。
+  // 口径（仅当路由层显式传入 actorWorkerIds 时启用，即 role==='worker'）：
+  //   ① 当前 assignee_id 必须属于本人档案集合（空集合/未派单 → 403）；
+  //   ② 工人不得通过 fields.assignee 改派（同值幂等允许，不改变归属）。
+  // 为什么不限制 operator：operator 是运营（tenant scope），不是师傅；
+  //   其名下工单归属由角色权限 + URL 显式 assignee 过滤约束；抢单走独立 /claim 服务，不经过本守卫。
+  if (opts?.actorWorkerIds) {
+    const mine = opts.actorWorkerIds;
+    const owner = cur.assignee_id;
+    if (!owner || !mine.includes(owner)) {
+      throw new AppError('FORBIDDEN', '仅可操作分派给本人名下的工单', 403);
+    }
+    const requestedAssignee = typeof fields.assignee === 'string' ? fields.assignee : '';
+    if (requestedAssignee && requestedAssignee !== owner) {
+      throw new AppError('FORBIDDEN', '工人不可改派工单', 403);
+    }
+  }
   if (tdef.requiredFields && tdef.requiredFields.length > 0) {
     const missing = tdef.requiredFields.filter(
       (f) => fields[f] === undefined || fields[f] === null || fields[f] === '',
@@ -266,13 +350,21 @@ export async function transition(
   // assignee_id，工单派给"幽灵工人"永无人接。调用方契约（已全量排查）：assignee 一律为 worker.id ——
   //   routes/workOrder.ts 通用 transition 端点（dispatch/forward/claim-hall 派单，客户端传 worker id）；
   //   services/acceptance.ts（fields={} 不带 assignee）；抢单/自动派单/联动单为旁路 UPDATE 不走本函数。
+  let nextDepartmentId = cur.department_id ?? null;
+  let nextDepartmentSource = cur.department_source ?? null;
   if (assignee) {
-    const w = await client.query(
-      'SELECT 1 FROM worker WHERE id = $1 AND tenant_id = $2 AND active = true',
+    const w = await client.query<{ department_id: string | null }>(
+      'SELECT department_id FROM worker WHERE id = $1 AND tenant_id = $2 AND active = true',
       [assignee, tenantId],
     );
     if (w.rowCount === 0) {
       throw new AppError('BAD_PARAM', `assignee 不存在或未启用: ${assignee}`, 422);
+    }
+    // 默认部门/历史无归属：派给谁就落到谁的部门（late-bind）。
+    // 明确部门（explicit/rule/manual）保持原归属，跨部门需先走“改部门”。
+    if ((!nextDepartmentSource || nextDepartmentSource === 'default') && w.rows[0].department_id) {
+      nextDepartmentId = w.rows[0].department_id;
+      nextDepartmentSource = 'assignee';
     }
   }
   // 074 里程碑回填（2026-09-06）：按目标状态回填对应生命周期时间列（映射单一事实源在
@@ -286,9 +378,29 @@ export async function transition(
     opts?.autoFlow === true ? ', auto_flow = true'
     : opts?.autoFlow === false ? ', auto_flow = false'
     : assignee ? ', auto_flow = false' : '';
+  const updParams: unknown[] = assignee ? [to, id, tenantId, assignee] : [to, id, tenantId];
+  let deptSql = '';
+  if (nextDepartmentId) {
+    updParams.push(nextDepartmentId);
+    deptSql += `, department_id = $${updParams.length}`;
+  }
+  if (nextDepartmentSource) {
+    updParams.push(nextDepartmentSource);
+    deptSql += `, department_source = $${updParams.length}`;
+  }
+  // 113 约束：evaluated 必须有 satisfaction_score。评分必须与 status 在同一条 UPDATE
+  // 落库，否则先写 evaluated、后写 score 会被 CHECK 当场拒绝（2026-11-08 pilot 实锤）。
+  const score = typeof fields.satisfaction_score === 'number' ? fields.satisfaction_score : null;
+  let scoreSql = '';
+  if (score !== null) {
+    updParams.push(score);
+    scoreSql = `, satisfaction_score = $${updParams.length}`;
+  }
   const upd = await client.query<WorkOrderRow>(
-    `UPDATE work_orders SET status = $1, updated_at = now()${assignee ? ', assignee_id = $4' : ''}${autoFlowSql}${milestoneCol ? `, ${milestoneCol} = now()` : ''} WHERE id = $2 AND tenant_id = $3 RETURNING *`,
-    assignee ? [to, id, tenantId, assignee] : [to, id, tenantId],
+    `UPDATE work_orders SET status = $1, updated_at = now()${assignee ? ', assignee_id = $4' : ''}${deptSql}${scoreSql}${autoFlowSql}${milestoneCol ? `, ${milestoneCol} = now()` : ''} WHERE id = $2 AND tenant_id = $3 RETURNING work_orders.*,
+       (SELECT d.name FROM dept d
+         WHERE d.tenant_id = work_orders.tenant_id AND d.id = work_orders.department_id) AS department_name`,
+    updParams,
   );
   // R32 load 对称回收（2026-08-31 拆雷三件套①）：transition 是工单流转唯一写路径，
   // 在此做 worker.load 的净变化结算，修复「load 只增不减」断链（评估报告三条业务断链之一）。
@@ -345,7 +457,19 @@ export async function transition(
   if (se.includes('pause_sla')) {
     await client.query('UPDATE work_orders SET sla_paused_at = now() WHERE id = $1 AND tenant_id = $2', [id, tenantId]);
   } else if (se.includes('resume_sla')) {
-    await client.query('UPDATE work_orders SET sla_paused_at = NULL WHERE id = $1 AND tenant_id = $2', [id, tenantId]);
+    // P1-3：暂停期间不计 SLA。恢复时把实际暂停时长顺延到 due_at，再清空暂停点。
+    // 多次暂停/恢复按每次实际暂停时长累计顺延；sla_due_at 为空的单保持为空。
+    await client.query(
+      `UPDATE work_orders
+          SET sla_due_at = CASE
+                WHEN sla_paused_at IS NOT NULL AND sla_due_at IS NOT NULL
+                  THEN sla_due_at + (now() - sla_paused_at)
+                ELSE sla_due_at
+              END,
+              sla_paused_at = NULL
+        WHERE id = $1 AND tenant_id = $2`,
+      [id, tenantId],
+    );
   }
   if (se.some((x) => x.startsWith('notify_'))) {
     await emitDomainEvent(client, {
@@ -387,10 +511,27 @@ async function tryAutoAdvance(
   // ④ 单级：本身就是自动推进 → 不再连锁
   if (opts?.auto) return null;
   let rules: Awaited<ReturnType<typeof listEnabledAutoRules>>;
+  // 可选自动规则读取用 SAVEPOINT 隔离：只回滚规则段，不能让 SQL 错误把整个工单事务打成 aborted。
+  // 真实调用均在 withTenantClient 事务内；PGlite/直连测试可能不在事务块，此时跳过保护但失败仍只跳过自动规则。
+  const sp = 'auto_rule_load';
+  let inSavepoint = false;
+  try {
+    await client.query(`SAVEPOINT ${sp}`);
+    inSavepoint = true;
+  } catch {
+    inSavepoint = false;
+  }
   try {
     rules = await listEnabledAutoRules(client, tenantId, 'work_order');
-  } catch {
-    return null; // ① 表缺失（094 未应用）→ 零自动行为，绝不影响存量流转
+    if (inSavepoint) {
+      await client.query(`RELEASE SAVEPOINT ${sp}`).catch(() => undefined);
+    }
+  } catch (e) {
+    if (inSavepoint) {
+      await client.query(`ROLLBACK TO SAVEPOINT ${sp}`).catch(() => undefined);
+    }
+    console.warn('[autoRule] load failed, auto-advance skipped', (e as Error)?.message);
+    return null;
   }
   if (rules.length === 0) return null;
 
@@ -434,11 +575,13 @@ export async function findOne(
   id: string,
 ): Promise<WorkOrderRow | null> {
   // 决策 #7：LEFT JOIN worker 下发承接人姓名（assignee_name）；无承接人/档案缺失 → null，不丢行。
+  // 111：LEFT JOIN dept 下发责任部门名，前端无需再靠字典兜底。
   // JOIN 条件带 tenant_id，防跨租户脏数据串名。
   const r = await client.query<WorkOrderRow>(
-    `SELECT wo.*, w.name AS assignee_name
+    `SELECT wo.*, w.name AS assignee_name, d.name AS department_name
        FROM work_orders wo
        LEFT JOIN worker w ON w.id = wo.assignee_id AND w.tenant_id = wo.tenant_id
+       LEFT JOIN dept d ON d.id = wo.department_id AND d.tenant_id = wo.tenant_id
       WHERE wo.id = $1 AND wo.tenant_id = $2`,
     [id, tenantId],
   );
@@ -462,8 +605,8 @@ export async function list(
   client: PoolClient,
   tenantId: string,
   // 批次三纯加法：unsettledOnly（可选）——过滤"未被任何结算单占用"的工单（结算页建单数据源）。
-  // 决策 #8 纯加法：department/priority/source/service_desk 四个可选精确匹配过滤（语义同 status/assignee）；
-  // 全部不传时行为与旧版完全一致（零回归）。
+  // 业务筛选：status/assignee/department_id/priority/source/business_type 等。
+  // 行可见性不在这里（由 RLS 兜底）。
   filter: {
     status?: WorkOrderStatus;
     // E-8 QA P3-1（双档案）：支持 string[]——师傅角色多 worker 档案时按集合（ANY）过滤；
@@ -472,10 +615,10 @@ export async function list(
     limit?: number;
     offset?: number;
     unsettledOnly?: boolean;
-    department?: string;
+    departmentId?: string;
+    departmentUnassigned?: boolean;
     priority?: string;
     source?: string;
-    service_desk?: string;
     // P1（TicketList 按"陪检"一键圈单）纯加法：business_type 精确匹配过滤（语义同 department/priority），
     // 不传行为与旧版完全一致（零回归）。
     businessType?: string;
@@ -497,64 +640,7 @@ export async function list(
     timeoutOnly?: boolean;
   },
 ): Promise<{ items: WorkOrderRow[]; total: number }> {
-  const conds = ['wo.tenant_id = $1'];
-  const params: unknown[] = [tenantId];
-  if (filter.status) {
-    // 批次三④：支持逗号分隔多态过滤（如 'completed,closed,evaluated'，结算向导数据源）；
-    // 单值时 = ANY(['x']) 与原 status = $n 语义等价，既有调用方零影响。
-    const statuses = filter.status.split(',').map((s) => s.trim()).filter(Boolean);
-    params.push(statuses);
-    conds.push(`wo.status = ANY($${params.length}::text[])`);
-  }
-  if (filter.assignee) {
-    // E-8 QA P3-1（双档案）：数组 → ANY 精确集合匹配；单值保持 = 等值匹配（既有调用方零回归）。
-    if (Array.isArray(filter.assignee)) {
-      params.push(filter.assignee);
-      conds.push(`wo.assignee_id = ANY($${params.length}::text[])`);
-    } else {
-      params.push(filter.assignee);
-      conds.push(`wo.assignee_id = $${params.length}`);
-    }
-  }
-  if (filter.department) {
-    params.push(filter.department);
-    conds.push(`wo.department = $${params.length}`);
-  }
-  if (filter.priority) {
-    params.push(filter.priority);
-    conds.push(`wo.priority = $${params.length}`);
-  }
-  if (filter.source) {
-    params.push(filter.source);
-    conds.push(`wo.source = $${params.length}`);
-  }
-  if (filter.service_desk) {
-    params.push(filter.service_desk);
-    conds.push(`wo.service_desk = $${params.length}`);
-  }
-  // P1 纯加法：business_type 精确匹配（escort/repair/transport_task...），不传不拼条件
-  if (filter.businessType) {
-    params.push(filter.businessType);
-    conds.push(`wo.business_type = $${params.length}`);
-  }
-  // 一单终身一结算：settlement_item 以 UNIQUE(work_order_id) 占用，NOT EXISTS 即"未结算"
-  if (filter.unsettledOnly) {
-    conds.push('NOT EXISTS (SELECT 1 FROM settlement_item si WHERE si.work_order_id = wo.id)');
-  }
-  // 智能体批次一纯加法：createdSince（AI 管家「今天」语义），不传不拼条件
-  if (filter.createdSince) {
-    params.push(filter.createdSince);
-    conds.push(`wo.created_at >= $${params.length}`);
-  }
-  // 工作台下钻（#949 续）纯加法三参：不传不拼条件，旧行为零变化。
-  // autoFlow：自动流转单（工作台"自动派单"卡下钻）。
-  if (filter.autoFlow) {
-    conds.push('wo.auto_flow = true');
-  }
-  // todayOnly：当日创建单；created_at::date = CURRENT_DATE 与 /open/me/summary today_new 同口径。
-  if (filter.todayOnly) {
-    conds.push('wo.created_at::date = CURRENT_DATE');
-  }
+  const { conds, params } = buildWorkOrderWhere(tenantId, filter);
   // timeoutOnly：超时且未闭环。排除集=doneStates(def)+terminalStates(def)（SLA 扫描同口径，
   // 复用 slaScheduler.ts:43 的 slaExclude 派生方式），def 按 tenant 动态取 → 租户自定义工作流
   // 扩展终态自动纳入排除，不写死枚举。
@@ -604,11 +690,13 @@ export async function list(
   const limit = Math.min(Math.max(1, Math.floor(Number(filter.limit) || 20)), 200);
   const offset = Math.max(0, Math.min(Math.floor(Number(filter.offset) || 0), 10000));
   // 决策 #7：LEFT JOIN worker 下发承接人姓名（assignee_name），无承接人 → null。
+  // 111：LEFT JOIN dept 下发责任部门名（department_name）。
   // JOIN 条件带 tenant_id 防跨租户串名；SELECT wo.* 保持全部既有列不丢。
   const listR = await client.query<WorkOrderRow>(
-    `SELECT wo.*, w.name AS assignee_name
+    `SELECT wo.*, w.name AS assignee_name, d.name AS department_name
        FROM work_orders wo
        LEFT JOIN worker w ON w.id = wo.assignee_id AND w.tenant_id = wo.tenant_id
+       LEFT JOIN dept d ON d.id = wo.department_id AND d.tenant_id = wo.tenant_id
       WHERE ${where} ORDER BY wo.created_at DESC LIMIT ${limit} OFFSET ${offset}`,
     params,
   );

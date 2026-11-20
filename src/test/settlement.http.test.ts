@@ -41,6 +41,8 @@ function makeClient(handlers: Handler[], opts?: { strict?: boolean }) {
       for (const hd of handlers) {
         if (hd.match(text)) return hd.reply(text, params ?? []);
       }
+      // per-row settlement needs a default workflow def; keep it as a fallback so test-specific defs win.
+      if (text.includes('SELECT def FROM workflow_def')) return { rows: [], rowCount: 0 };
       misses.push(text);
       if (opts?.strict) throw new Error(`[mock] 未命中 handler 的 SQL：${text}`);
       return { rows: [], rowCount: 1 };

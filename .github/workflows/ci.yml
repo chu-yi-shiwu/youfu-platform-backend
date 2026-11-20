@@ -21,5 +21,23 @@ jobs:
       - name: Install deps
         run: npm ci
 
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Build
+        run: npm run build
+
+      - name: Release manifest
+        run: npm run manifest
+
+      - name: Upload release artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: youfu-release-${{ github.sha }}
+          path: |
+            dist
+            release-manifest.json
+          retention-days: 30
+
       - name: C3 发布闸门（全量：SQL 扫描 + 迁移幂等 + vitest）
         run: npx tsx scripts/releaseGate.ts --force-vitest

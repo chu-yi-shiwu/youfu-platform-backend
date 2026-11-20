@@ -7,6 +7,8 @@ import dotenv from 'dotenv';
 import { authMiddleware, refreshAuthMode, verifyJwt, AUTH_MODE } from './middleware/auth.js';
 import { apiGuardMiddleware } from './middleware/apiGuard.js';// RV-001：未知 /api 路径先 404 再鉴权
 import { errorMiddleware } from './middleware/error.js';
+import { requestShapeMiddleware } from './middleware/requestShape.js';// 2026-11-14：重复查询参数 / NUL 字节边界拒绝
+import { accessLogMiddleware } from './middleware/accessLog.js';// P0-12：结构化访问日志（request_id 贯穿）
 import publicReportRouter from './routes/publicReport.js';// P1 需求侧：public 免登录报修（挂 auth 之前）
 import publicAiChatRouter from './routes/publicAiChat.js';// L3 对话管家：public 免登录 AI 对话（挂 auth 之前，R36）
 import wechatRouter from './routes/wechat.js';// ③ 微信 JSSDK 公开签名端点（挂 auth 之前）
@@ -16,6 +18,9 @@ import authRouter from './routes/auth.js';
 import inviteRouter from './routes/invite.js';// 八件增量 BE-1：邀请码域（admin 生成/列表/作废 + 公开 redeem 激活）
 import adminQrcodeRouter from './routes/adminQrcode.js';// 八件增量 BE-2：admin 机构级贴码（org 取登录租户上下文）
 import configRouter from './routes/config.js';
+import departmentRoutesRouter from './routes/departmentRoutes.js';
+import moduleAuthRouter from './routes/moduleAuth.js';
+import { requireModule } from './middleware/moduleGuard.js';// 部门路由规则（部门自动识别配置面）
 import templateContributionsRouter from './routes/templateContributions.js';// UGC 模板贡献（租户侧）
 import inspectionRouter from './routes/inspection.js';
 import { flushWechatDeliveries } from './services/notify.js'; // R31-Q1：响应后补投递 deferred wechat
@@ -27,7 +32,7 @@ import feedbackRouter from './routes/feedback.js';
 import monitorRouter from './routes/monitor.js';
 import materialRouter from './routes/material.js';
 import assetRouter from './routes/asset.js';
-import serviceDeskRouter from './routes/serviceDesk.js';
+
 import statsRouter from './routes/stats.js';
 import optimizeRouter from './routes/optimize.js';
 import processMiningRouter from './routes/processMining.js';
@@ -56,11 +61,12 @@ import openApiRouter from './routes/openApi.js';// E0_open 开放 API（app_key 
 import metaRouter from './routes/meta.js';// #938 展示标签字典（公开端点，挂 auth 之前）
 import intakeOptionsRouter from './routes/intakeOptions.js';// FE Intake 申报页配置聚合（租户级，挂 auth 之后）
 import metaTenantLabelRouter from './routes/metaTenantLabel.js';// R1-B：租户覆盖字典**写**端点（必须挂 auth 之后，写侧要 res.locals.auth.tenantId）
-import { startInspectionScheduler } from './scheduler/inspectionScheduler.js';// G3 真 cron 调度
-import { startSlaScheduler } from './scheduler/slaScheduler.js';// 拆雷三件套②：SLA 定时扫描+升级通知
-import { startTemplateEffectsScheduler } from './scheduler/templateEffectScheduler.js';// E2 效果回写 cron
-import { startModelTrainScheduler } from './scheduler/modelTrainScheduler.js';// 数据飞轮：每日 03:00 全量重训
+import { startInspectionScheduler, stopInspectionScheduler } from './scheduler/inspectionScheduler.js';// G3 真 cron 调度
+import { startSlaScheduler, stopSlaScheduler } from './scheduler/slaScheduler.js';// 拆雷三件套②：SLA 定时扫描+升级通知
+import { startTemplateEffectsScheduler, stopTemplateEffectsScheduler } from './scheduler/templateEffectScheduler.js';// E2 效果回写 cron
+import { startModelTrainScheduler, stopModelTrainScheduler } from './scheduler/modelTrainScheduler.js';// 数据飞轮：每日 03:00 全量重训
 import { verifyRoleWhitelist } from './services/roleWhitelist.js';// 070 角色白名单启动自检（架构评审 R1）
+import pool from './db/pool.js';// P0-8：/health/ready 探 DB + 优雅停机释放连接池
 
 // 试点/生产：用 ENV_FILE 指定环境文件（默认 .env，production 下默认 .env.pilot），
 // 同一份代码可同时跑 dev / pilot，无需改代码。
@@ -89,10 +95,24 @@ const app = express();
 // 导致限流/审计按伪造 IP 维度失效（R1-004 观察项的根因之一）。固定 1 跳 = 仅采信
 // Nginx 追加的那一跳，客户端自带的 XFF 伪造段被忽略。恒定生效，去掉环境开关以防误配漏开。
 app.set('trust proxy', 1);
+// 【2026-11-08 试点实锤】API 不允许浏览器缓存 / ETag 304：
+//   Express 默认给 JSON 响应打 ETag，浏览器二次打开会带 If-None-Match 收到 304；
+//   axios 默认 validateStatus 只认 2xx，304 被当成失败 → 工作台/列表数据变「—」。
+//   业务数据本来就要求实时，API 统一 no-store，并关闭全局 ETag 生成。
+app.set('etag', false);
+app.use('/api/', (_req, res, next) => {
+  res.setHeader('Cache-Control', 'no-store');
+  // 安全基线：API 响应一律禁止 MIME 嗅探（与 /uploads 的 nosniff 同口径）。
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  next();
+});
+// P0-12（2026-11-07）：结构化访问日志。放在 body parser 之前，保证「JSON 解析失败 400」
+// 也有 request_id 与耗时；健康探针在中间件内部跳过。
+app.use(accessLogMiddleware);
 // B0：放宽 JSON body 上限到 10MB（base64 上传图片可能较大）；其余路由均为小 JSON，无影响。
 // T303a：verify 钩子捕获原始字节 → /energy/webhook/dispatch 对 raw body 做 HMAC 验签
 //（JSON 重序列化不稳定，签名域必须是原始字节；仅捕获不改动解析行为）。
-app.use(express.json({ limit: '10mb', verify: (req: any, _res, buf) => { req.rawBody = buf; } }));
+app.use(express.json({ limit: '30mb', verify: (req: any, _res, buf) => { req.rawBody = buf; } }));
 
 // S-4 显式 CORS 策略：仅放行配置的来源（默认生产域名），禁用通配 *，凭据跨域拒绝。
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS ?? 'https://youfu.banerz.cn')
@@ -128,9 +148,23 @@ function requireDashboardAuth(req: import('express').Request, res: import('expre
   return next();
 }
 
-// 健康检查（不含 DB，永远 200）
+// 健康检查（不含 DB，永远 200）—— liveness 语义：进程活着就算 up。
+// 注意：它**不**代表能服务业务请求。DB 挂掉时本端点仍 200，因此不能作为唯一探针。
 app.get('/health', (_req, res) => {
   res.json({ ok: true, status: 'up' });
+});
+
+// 就绪检查（P0-8，2026-11-04）—— readiness 语义：DB 可用才 200，否则 503。
+// 修复「DB 已不可用，负载均衡/编排器仍把流量打进来」的假健康问题。
+// 连接池 connectionTimeoutMillis=3000，DB 不可达时最多 3s 内失败，不会拖住探针。
+app.get('/health/ready', async (_req, res) => {
+  try {
+    await pool.query('SELECT 1');
+    res.json({ ok: true, status: 'ready', db: 'up' });
+  } catch (e) {
+    console.error('[health] readiness failed:', (e as Error).message);
+    res.status(503).json({ ok: false, status: 'unready', db: 'down' });
+  }
 });
 
 // R31-Q1：响应完成后补投递 deferred wechat 通知（insertNotification fan-out 入队的）。
@@ -141,6 +175,12 @@ app.use((req, res, next) => {
   });
   next();
 });
+
+// 请求形状守卫（2026-11-14 深度探针）：重复/嵌套查询参数与 NUL 字节统一 400。
+// 必须在**所有** /api 业务路由（含免登录 public/platform/open-api）之前：
+// public 路由同样会把 req.query 当标量用（`org` 重复会造成数组直达租户校验）。
+// 位置在 health 之后：健康探针不受 body/query 形状逻辑影响。
+app.use('/api', requestShapeMiddleware);
 
 // 城市级平台层（E_min）：挂在租户 authMiddleware 之前（G1 平台上下文独立，
 // 平台管理员与租户账号两套体系互不干扰；登录公开，其余 platformAdminAuth 保护）。
@@ -171,6 +211,8 @@ app.use('/api/v1', metaRouter);
 // 静态首页与 SPA 路由（试点模式公开可访问，无需鉴权）。
 // RV-001 修复：apiGuard 先于鉴权——未知 API 路径直接 JSON 404（语义正确），
 // 已知路径才进入鉴权（fail-closed 401 语义只留给真实存在的受保护路径）。
+// RV-001 修复：apiGuard 先于鉴权——未知 API 路径直接 JSON 404（语义正确），
+// 已知路径才进入鉴权（fail-closed 401 语义只留给真实存在的受保护路径）。
 app.use('/api', apiGuardMiddleware);
 app.use('/api', authMiddleware);
 
@@ -181,6 +223,8 @@ app.use('/api/v1', authRouter);
 app.use('/api/v1', inviteRouter);// 八件增量 BE-1：/invites（admin）+ /invites/redeem（公开豁免）
 app.use('/api/v1', adminQrcodeRouter);// 八件增量 BE-2：/admin/mp-qrcode（admin，机构级贴码）
 app.use('/api/v1', configRouter);
+app.use('/api/v1', departmentRoutesRouter);
+app.use('/api/v1', moduleAuthRouter);
 app.use('/api/v1', templateContributionsRouter); // UGC 模板贡献（租户侧，requireConfigRole）
 app.use('/api/v1/inspection', inspectionRouter);
 app.use('/api/v1/patrol', patrolRouter);
@@ -192,11 +236,10 @@ app.use('/api/v1/feedback', feedbackRouter);
 app.use('/api/v1/monitor', monitorRouter);
 app.use('/api/v1', materialRouter);
 app.use('/api/v1', assetRouter);
-app.use('/api/v1', serviceDeskRouter);
 app.use('/api/v1', statsRouter);
 app.use('/api/v1', optimizeRouter);
-app.use('/api/v1', processMiningRouter);
-app.use('/api/v1', autoTuneRouter);
+app.use('/api/v1', requireModule('analytics'), processMiningRouter);
+app.use('/api/v1', requireModule('optimize'), autoTuneRouter);
 // ② 主数据补全：人员 / 商品目录 / 账号 三类 CRUD（dev 默认 admin 可写）
 app.use('/api/v1', workerRouter);
 app.use('/api/v1', catalogRouter);
@@ -211,15 +254,15 @@ app.use('/api/v1', intakeOptionsRouter);// FE Intake 申报页配置聚合（租
 // 免鉴权挂载点（GET /meta/labels，FE/mp 启动即拉）在 auth 之前，挂那里恒 401。
 app.use('/api/v1', metaTenantLabelRouter);
 app.use('/api/v1', adminAiChatRouter);// 管理对话：POST /admin/ai-chat（Bearer JWT + admin/operator）
-app.use('/api/v1', equipmentRouter);// P4 设备管理（设备 / 设备类型 / 设备厂商，主数据 CRUD，对齐 UOne C 族）
+app.use('/api/v1', requireModule('equipment'), equipmentRouter);// P4 设备管理（设备 / 设备类型 / 设备厂商，主数据 CRUD，对齐 UOne C 族）
 app.use('/api/v1/flow', businessFlowRouter);
 app.use('/api/v1/ai', aiPreviewRouter);
 app.use('/api/v1/llm', llmUsageRouter);
 // B0 文件上传（H5 拍照落库）：挂在 /api/v1，自动过 authMiddleware 获得租户隔离。
 app.use('/api/v1', uploadRouter);
 // 注册制批次三 卡4：结算三凭证 + 专用验收端点（均挂 /api/v1，JWT 鉴权 + RLS 租户隔离）。
-app.use('/api/v1', settlementRouter);
-app.use('/api/v1', acceptanceRouter);
+app.use('/api/v1', requireModule('settlement'), settlementRouter);
+app.use('/api/v1', acceptanceRouter);// 移动端验收执行，不走模块门禁
 
 // R19-005：以鉴权路由取代零鉴权 express.static（详见 routes/uploads.ts）。
 // 须注册在 SPA 兜底正则之前，否则 /uploads/* 会被 index.html 兜底吞掉；URL 形态保持不变。
@@ -280,7 +323,7 @@ if (process.env.SERVE_STATIC === '1') {
 
 const PORT = Number(process.env.PORT ?? 4001);
 // 容器环境必须监听 0.0.0.0，否则 CloudRun 无法路由进来
-app.listen(PORT, '0.0.0.0', async () => {
+const server = app.listen(PORT, '0.0.0.0', async () => {
   console.log(`youfu-backend-m1 listening on 0.0.0.0:${PORT}`);
   // 070 角色白名单启动自检（架构评审 R1）：role_permission CHECK 未放行全部 6 角色 →
   // 拒绝启动（否则新租户开通第④步写权限行必 23514 → 开通事务整体回滚）。
@@ -301,3 +344,38 @@ app.listen(PORT, '0.0.0.0', async () => {
   // 数据飞轮：每日 03:00 低峰全量重训（model_state 持续更新，AUTO_TUNE 受控不写回）。
   startModelTrainScheduler();
 });
+
+// P0-8（2026-11-04）：优雅停机。
+// 此前 SIGTERM 默认直接杀进程：正在处理的请求被截断、scheduler 可能在退出过程中再开事务、
+// 连接池不释放。systemd 每次部署/重启都会触发。
+// 顺序：停 scheduler（不再产生新任务）→ 停止接新连接 → 等在途请求 → 释放连接池 → 退出。
+let shuttingDown = false;
+async function gracefulShutdown(signal: string): Promise<void> {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`[shutdown] received ${signal}; draining...`);
+  // 兜底：10s 内没退干净就强制退出，避免 systemd 等到 TimeoutStopSec 才 SIGKILL。
+  const force = setTimeout(() => {
+    console.error('[shutdown] drain timeout (10s); forcing exit');
+    process.exit(1);
+  }, 10_000);
+  force.unref();
+  stopInspectionScheduler();
+  stopSlaScheduler();
+  stopTemplateEffectsScheduler();
+  stopModelTrainScheduler();
+  const closed = new Promise<void>((resolve) => server.close(() => resolve()));
+  // Node 18+：关闭空闲 keep-alive 连接，避免 close() 被闲置连接拖住。
+  server.closeIdleConnections?.();
+  await closed;
+  try {
+    await pool.end();
+  } catch (e) {
+    console.error('[shutdown] pool.end failed:', (e as Error).message);
+  }
+  clearTimeout(force);
+  console.log('[shutdown] complete');
+  process.exit(0);
+}
+process.on('SIGTERM', () => { void gracefulShutdown('SIGTERM'); });
+process.on('SIGINT', () => { void gracefulShutdown('SIGINT'); });

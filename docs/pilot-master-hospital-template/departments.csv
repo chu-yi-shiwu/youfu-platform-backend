@@ -1,0 +1,6 @@
+name,code,remark,is_default
+总务科,ZW,默认部门,true
+维修组,WX,水电/空调/门窗/电梯/网络维修,false
+保洁组,BJ,病区与公共区域保洁,false
+安保组,AB,门禁与夜间巡查,false
+被服组,BF,被服收发与洗涤,false

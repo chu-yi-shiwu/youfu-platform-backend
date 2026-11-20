@@ -20,7 +20,7 @@ import type { PoolClient } from 'pg';
 import { withTenantClient } from '../db/pool.js';
 import { AppError } from '../middleware/error.js';
 import type { AuthLocals } from '../middleware/auth.js';
-import { requireAssigneeOrConfig, requirePermission } from '../middleware/role.js';
+import { listPerms, requireAssigneeOrConfig, requirePermission } from '../middleware/role.js';
 import { emitDomainEvent } from '../db/eventBus.js';
 import { getWorkflowDefAtVersion, getWorkflowDefVersion } from '../engine/workflowDef.js';
 import { activeStates, applyEvent, availableTransitions } from '../engine/stateMachine.js';
@@ -87,9 +87,9 @@ export async function transitionOrder(
   role?: string,
   // 洞②：系统身份通道——与 `repo/ticket.ts` 的 `transition()` 的 `systemAuto` **同款、同命名、同语义**，
   //   不自创第二套说法（两套说法 = 两套口径，迟早漂移）。
-  opts?: { systemAuto?: boolean },
+  opts?: { systemAuto?: boolean; perms?: readonly string[] },
 ): Promise<any> {
-  const cur = await client.query(`SELECT * FROM transport_order WHERE id = $1 AND tenant_id = $2`, [orderId, tenantId]);
+  const cur = await client.query(`SELECT * FROM transport_order WHERE id = $1 AND tenant_id = $2 FOR UPDATE`, [orderId, tenantId]);
   if (cur.rowCount === 0) throw new AppError('NOT_FOUND', 'order not found', 404);
   const t = cur.rows[0];
   // T1-B 批2：在途单按建单时锁定的流程版本流转（def_version=0 表示未记录 ⇒ 走 live，与改前逐字节等价）。
@@ -110,8 +110,35 @@ export async function transitionOrder(
   // 必填、副作用一个不跳**——下面三行代码一行没动。
   const tdef = (def.transitions ?? []).find((x: any) => x.from === t.status && x.event === event);
   if (!opts?.systemAuto) {
-    if (tdef?.allowedRoles && tdef.allowedRoles.length > 0 && !(role && tdef.allowedRoles.includes(role))) {
-      throw new AppError('FORBIDDEN', `role ${role ?? 'unknown'} not allowed to ${event} transport order`, 403);
+    // 门禁 = allowedRoles ∪ allowedPerms（与工单/巡检/通用 flow 同口径）。
+    // allowedRoles 为空 = 不限制角色；allowedPerms 为空 = 不限制权限点。
+    // 两者都配置时，任一命中即放行；两者都为空 = 默认开放边。
+    const allowedRoles = (tdef?.allowedRoles ?? []) as string[];
+    const allowedPerms = (tdef?.allowedPerms ?? []) as string[];
+    const hasRoles = allowedRoles.length > 0;
+    const hasPerms = allowedPerms.length > 0;
+    if (hasRoles || hasPerms) {
+      const roleOk = hasRoles && !!(role && allowedRoles.includes(role));
+      const permOk = hasPerms && (opts?.perms ?? []).some((p) => allowedPerms.includes(p));
+      if (!roleOk && !permOk) {
+        throw new AppError('FORBIDDEN', `role/permission not allowed to ${event} transport order`, 403);
+      }
+    }
+  }
+  // 运送线必填校验（与工单/巡检同口径）：def 里声明 requiredFields 就必须有值。
+  // 字段归一化：dispatch 的 def 用 assignee，但运送落库列是 carrier；exception 的 note
+  // 由路由放进 track.note。两者都映射后再判，避免“配了必填却永远不生效”。
+  const required = tdef?.requiredFields ?? [];
+  if (required.length > 0) {
+    const provided: Record<string, unknown> = { ...extra };
+    if (track.note !== undefined) provided.note = track.note;
+    if (track.photo !== undefined) provided.photo = track.photo;
+    if (provided.assignee == null && extra.carrier != null) provided.assignee = extra.carrier;
+    const missing = required.filter(
+      (f: string) => provided[f] === undefined || provided[f] === null || provided[f] === '',
+    );
+    if (missing.length > 0) {
+      throw new AppError('BAD_REQUEST', `missing required fields: ${missing.join(',')}`, 422);
     }
   }
   const { parameterized: filteredKeys, nowCols } = filterTransportExtraCols(extra);
@@ -121,10 +148,16 @@ export async function transitionOrder(
     ...nowCols.map((k) => `${k} = now()`),
   ];
   const values = [orderId, tenantId, target, ...filteredKeys.map((k) => extra[k])];
+  // 并发防重（2026-11-14 深度探针）：与巡检/巡更同根因——并发流转都读到旧状态会双成功。
+  // 行锁 + 条件更新：第二个事务读到新状态后 applyEvent 已拒绝；极端交错下 UPDATE 也会命中 0 行。
+  values.push(t.status);
   const r = await client.query(
-    `UPDATE transport_order SET ${assigns.join(', ')}, updated_at = now() WHERE id = $1 AND tenant_id = $2 RETURNING *`,
+    `UPDATE transport_order SET ${assigns.join(', ')}, updated_at = now() WHERE id = $1 AND tenant_id = $2 AND status = $${values.length} RETURNING *`,
     values,
   );
+  if (r.rowCount === 0) {
+    throw new AppError('CONFLICT', 'order status changed concurrently, please refresh', 409);
+  }
   const row = r.rows[0];
   // ── worker.load 净结算（与 `repo/ticket.ts:305-315` **同口径**，不自创第二套）──────────
   // 为什么必须有这一段：派单选人是 least_load（`engine/dispatch.ts:47` 按 load 升序取第一个），
@@ -160,7 +193,11 @@ export async function transitionOrder(
   return row;
 }
 
+import { requireModuleWrites } from '../middleware/moduleGuard.js';
+
 const router = Router();
+router.use(requireModuleWrites('transport', { only: [/^\/orders/], allow: [/^\/orders\/[^/]+\/(tracks|transition|claim)$/] }));
+
 
 // ============ 运送订单 ============
 /**
@@ -490,7 +527,10 @@ router.post('/orders/:id/transition', async (req, res, next) => {
     if (fields.photo) track.photo = String(fields.photo); // 取件/签收照片凭证（防造假）
     if (event === 'dispatch') {
       extra.depart_at = 'now()';
-      if (fields.carrier) extra.carrier = String(fields.carrier);
+      // H5 通用流转按 def.requiredFields 提交的是 assignee；运送单落库列是 carrier。
+      // 两个字段都接受，统一落到 carrier，避免“必填了 assignee 但车/人列为空”。
+      const carrier = fields.carrier ?? fields.assignee;
+      if (carrier) extra.carrier = String(carrier);
     }
     if (event === 'complete') {
       extra.arrive_at = 'now()';
@@ -499,7 +539,9 @@ router.post('/orders/:id/transition', async (req, res, next) => {
     const item = await withTenantClient(tenantId, async (client) => {
       // #583 归属守卫：worker 仅可流转自己的运送单
       await loadOwnedOrder(client, tenantId, req.params.id, res.locals.auth, 'transport order');
-      return transitionOrder(client, tenantId, req.params.id, event, extra, track, res.locals.auth.userId ?? 'config_role', res.locals.auth.role);
+      // 角色 ∪ 权限点门禁：allowedPerms 需要在与 role_permission 同一事务内读取。
+      const perms = await listPerms(res.locals.auth, client);
+      return transitionOrder(client, tenantId, req.params.id, event, extra, track, res.locals.auth.userId ?? 'config_role', res.locals.auth.role, { perms });
     });
     return res.json({ ok: true, code: 0, item });
   } catch (e) {
@@ -543,7 +585,7 @@ router.post('/orders/:id/claim', async (req, res, next) => {
         authUserId ?? 'config_role',
         res.locals.auth.role,
       );
-    });
+    }, { claimHall: true });
     return res.json({ ok: true, code: 0, item });
   } catch (e) {
     next(e);

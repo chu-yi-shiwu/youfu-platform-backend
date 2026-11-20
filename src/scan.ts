@@ -143,7 +143,12 @@ export function parseScanCode(raw: string): { kind: ScanKind; key: string } | nu
   if (!trimmed) return null;
   const norm = trimmed.toUpperCase();
   if (norm.startsWith("CAT-")) return { kind: "catalog", key: norm.slice(4) };
+  // 2026-11-17：资产模块二维码统一 AST-<asset_no>；兼容旧 ASSET-<asset_no> 与 ASSET:<uuid>。
   if (norm.startsWith("AST-")) return { kind: "asset", key: norm.slice(4) };
+  if (norm.startsWith("ASSET:")) return { kind: "asset", key: norm.slice(6) };
+  // 兼容旧二维码 ASSET-<asset_no> 与“直接扫资产编号”：资产号本身以 ASSET- 开头，
+  // 保留完整 token，由查询层同时尝试原值与去掉一层 ASSET- 的值，避免把编号截断。
+  if (norm.startsWith("ASSET-")) return { kind: "asset", key: norm };
   return null;
 }
 
@@ -157,6 +162,8 @@ export type AssetQueryFn = (
 
 // 默认查询：按租户查 asset_catalog / asset_registry（RLS 经 withTenantClient 生效）
 async function defaultDbQuery(tenantId: string, kind: ScanKind, key: string): Promise<AssetQueryRow | undefined> {
+  // 扫码解析只读 asset_registry/asset_catalog，不涉及工单行；公开报修也会调用，
+  // 没有 JWT context，显式 system 保持原行为。
   return withTenantClient(tenantId, async (client) => {
     if (kind === "catalog") {
       const r = await client.query<AssetQueryRow>(
@@ -166,13 +173,22 @@ async function defaultDbQuery(tenantId: string, kind: ScanKind, key: string): Pr
       );
       return r.rows[0];
     }
-    const r = await client.query<AssetQueryRow & { catalog_code: string }>(
-      `SELECT label, catalog_code, skill_tags FROM asset_registry
-       WHERE tenant_id = $1 AND UPPER(asset_code) = UPPER($2)`,
+    const r = await client.query<AssetQueryRow & { catalog_code: string | null }>(
+      `SELECT name AS label, NULL::text AS catalog_code, ARRAY[]::text[] AS skill_tags
+         FROM asset
+        WHERE tenant_id = $1
+          AND (
+                id::text = $2
+                OR UPPER(asset_no) = UPPER($2)
+                OR UPPER(qr_code) = UPPER($2)
+                -- 旧码 ASSET-<asset_no>：资产号自身以 ASSET- 开头，需再剥一层前缀匹配
+                OR UPPER(asset_no) = UPPER(CASE WHEN $2 LIKE 'ASSET-%' THEN substr($2, 7) ELSE $2 END)
+              )
+        LIMIT 1`,
       [tenantId, key],
     );
     return r.rows[0];
-  });
+  }, { system: true });
 }
 
 /**
@@ -202,17 +218,18 @@ export async function resolveScanFromDb(
     return { asset: { qr: code, resolved: false, note: `资产台账未登记：${parsed.key}（可手动选择目录）` } };
   }
 
-  const catCode = (parsed.kind === "catalog" ? parsed.key : row.catalog_code!).toLowerCase();
+  const rawCat = parsed.kind === "catalog" ? parsed.key : row.catalog_code;
+  const catCode = rawCat ? rawCat.toLowerCase() : undefined;
   return {
     asset: {
       qr: code,
       resolved: true,
       note: parsed.kind === "catalog" ? "已识别为业务目录" : "已识别为资产并关联目录",
       kind: parsed.kind,
-      catalog: catCode,
+      ...(catCode ? { catalog: catCode } : {}),
       label: row.label,
       skill_tags: row.skill_tags,
     },
-    suggested: { kind: parsed.kind, catalog: catCode, template: CATALOG_TO_TEMPLATE[catCode] },
+    ...(catCode ? { suggested: { kind: parsed.kind, catalog: catCode, template: CATALOG_TO_TEMPLATE[catCode] } } : {}),
   };
 }

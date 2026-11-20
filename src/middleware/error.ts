@@ -91,6 +91,13 @@ export function pgErrorToAppError(err: unknown): AppError | null {
       // not_null_violation：必填列缺失。pg 的 column 字段带列名，文案带上便于定位。
       return new AppError('BAD_PARAM', `缺少必填字段${pg.column ? `（${pg.column}）` : ''}`, 400);
     default:
+      // SQLSTATE class 22 = data exception（22007 非法日期、22008 日期越界、22021 非法字符、
+      // 22001 字符串超长…）全部由**客户端传入的数据**触发，不是服务端故障。
+      // 此前只映射 22P02，其余落到 500：`scheduled_at: "not-a-date"` 这类输入直接 500。
+      // 统一按 400 返回（与 22P02 同口径）——「用户输入永不制造 5xx」成为共享层不变式。
+      if (typeof pg.code === 'string' && pg.code.startsWith('22')) {
+        return new AppError('BAD_PARAM', '请求数据格式不正确（日期/数值/字符编码非法或不支持）', 400);
+      }
       return null;
   }
 }
@@ -117,6 +124,8 @@ export function errorMiddleware(err: unknown, _req: Request, res: Response, _nex
   if (pgMapped) {
     return res.status(pgMapped.status).json({ ok: false, code: pgMapped.code, message: pgMapped.message });
   }
-  console.error('[unhandled]', err);
+  // P0-12：500 日志带 request_id / method / path，便于与访问日志和用户报障一一对应。
+  const requestId = typeof res.locals?.requestId === 'string' ? res.locals.requestId : undefined;
+  console.error('[unhandled]', requestId ? `request_id=${requestId}` : 'request_id=-', `${_req.method} ${_req.path}`, err);
   return res.status(500).json({ ok: false, code: 'INTERNAL', message: 'internal error' });
 }

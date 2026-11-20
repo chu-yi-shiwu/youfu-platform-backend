@@ -1,0 +1,10 @@
+name,priority,department_code,business_type,catalog_code,catalog_name_contains,location_name_contains,description_contains,source,enabled
+漏水归维修组,900,WX,,,,,漏水,,true
+电路归维修组,900,WX,,,,,电路,,true
+空调归维修组,900,WX,,,,,空调,,true
+电梯归维修组,900,WX,,,,,电梯,,true
+门窗归维修组,900,WX,,,,,门窗,,true
+网络归维修组,900,WX,,,,,网络,,true
+保洁归保洁组,900,BJ,cleaning,,,,,,true
+安保归安保组,900,AB,security,,,,,,true
+被服归被服组,900,BF,laundry,,,,,,true

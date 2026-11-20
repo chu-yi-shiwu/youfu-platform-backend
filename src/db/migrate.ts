@@ -7,12 +7,13 @@
 // youfu_app 运行时将是安全的空操作（no-op）。新增 DDL 迁移请在 ECS 上以 postgres 身份应用：
 //   sudo -u postgres psql -d youfu -v ON_ERROR_STOP=1 -f <迁移文件>
 // 或执行仓库内 scripts/migrate-as-owner.sh（自动跳过已记录项）。
-import { readFileSync, readdirSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { Pool } from 'pg';
 import 'dotenv/config';
 import { stripPsqlMeta } from './psqlMeta.js';
+import { assertNoUnrecognizedSqlFiles, listMigrationFiles } from './migrationFiles.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const migrationsDir = join(__dirname, '..', '..');
@@ -36,9 +37,10 @@ async function main() {
     const appliedRes = await pool.query('SELECT name FROM _migrations');
     const applied = new Set(appliedRes.rows.map((r: any) => r.name));
 
-    const migrationFiles = readdirSync(migrationsDir)
-      .filter((f) => /^\d+_.*\.sql$/.test(f))
-      .sort();
+    // P0-1：严格命名 + fail-closed。根目录出现不符合命名的 .sql 时拒绝启动，
+    // 避免「文件在仓根但永远不会被自动执行」的静默漏迁移（053b/053c 事故根因）。
+    assertNoUnrecognizedSqlFiles(migrationsDir);
+    const migrationFiles = listMigrationFiles(migrationsDir);
 
     // R25-005：检测重复的数字前缀（如 037_xxx.sql 与 037_yyy.sql 同号兄弟迁移），仅作告警，
     // 不改文件名——重命名已部署迁移会因 _migrations 按文件名追踪而重复执行，有破坏风险。

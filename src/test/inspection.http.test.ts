@@ -28,6 +28,7 @@ let snapshotRows: any[] = [{ id: 'u1', name: '温度', type: 'number', standard_
 let recordsRows: any[] = [];
 let snapItems: any[] = [];
 let duePlans: any[] = [];
+let geoPolicy = ''; // '' = off（未配置）
 
 const fakeClient = {
   query: vi.fn(async (text: unknown, params?: unknown[]) => {
@@ -54,6 +55,8 @@ const fakeClient = {
       return taskFound ? { rows: [{ assignee: taskRow.assignee, point_id: taskRow.point_id }], rowCount: 1 } : { rows: [], rowCount: 0 };
     if (sql.includes('WHERE t.id = $1 AND t.tenant_id = $2')) return taskFound ? { rows: [taskRow], rowCount: 1 } : { rows: [], rowCount: 0 };
     if (sql.includes('SELECT * FROM inspection_task WHERE id = $1 AND tenant_id = $2')) return taskFound ? { rows: [taskRow], rowCount: 1 } : { rows: [], rowCount: 0 };
+    if (sql.includes("key='inspection_geo_policy'")) return { rows: geoPolicy ? [{ value: geoPolicy }] : [], rowCount: geoPolicy ? 1 : 0 };
+    if (sql.includes("status IN ('pending','in_progress')") && sql.includes('scheduled_at < now()')) return { rows: [{ c: 3 }], rowCount: 1 };
     if (sql.includes('DATE(COALESCE(scheduled_at, created_at)) = CURRENT_DATE')) return { rows: [{ c: 1 }], rowCount: 1 };
     if (sql.includes('GROUP BY p.name ORDER BY c DESC LIMIT 5')) return { rows: [{ point_name: '东门', c: 2 }], rowCount: 1 };
     if (sql.includes('FROM inspection_task t LEFT JOIN inspection_point p')) return { rows: [taskRow], rowCount: 1 };
@@ -145,7 +148,7 @@ beforeEach(() => {
   pointCoordRows = [{ lat: 30.0, lng: 110.0 }];
   workerRows = []; permRows = [];
   snapshotRows = [{ id: 'u1', name: '温度', type: 'number', standard_value: '5', unit: '℃', category: '环境' }];
-  recordsRows = []; snapItems = []; duePlans = [];
+  recordsRows = []; snapItems = []; duePlans = []; geoPolicy = '';
   fakeClient.query.mockClear();
   emitDomainEvent.mockClear();
   createLinkedWorkOrder.mockClear();
@@ -221,6 +224,14 @@ describe('inspection.ts · 巡检单 CRUD 与列表', () => {
     expect(params).toEqual([TENANT, 'pending', 'w-9', '2026-09-01']);
   });
 
+  it('⑦b overdue=1 → 追加派生逾期条件（不改状态机）', async () => {
+    const r = await req('GET', '/api/v1/inspection/tasks?overdue=1');
+    expect(r.status).toBe(200);
+    const s = String(fakeClient.query.mock.calls[0][0]);
+    expect(s).toContain("t.status IN ('pending','in_progress')");
+    expect(s).toContain('t.scheduled_at < now()');
+  });
+
   it('⑧GET /tasks/:id 详情：available 由引擎拓扑派生（pending → checkin/cancel，无 complete）+ records 叠加快照', async () => {
     taskRow.items_json = [{ item_id: 'u1', name: '温度', type: 'number', standard_value: '5', unit: '℃', category: '环境', actual_value: null, passed: null, photo: null, remark: null }];
     recordsRows = [{ item_id: 'u1', actual_value: '7.2', passed: false, photo: 'p-1', remark: '偏高' }];
@@ -278,6 +289,25 @@ describe('inspection.ts · 流转引擎（checkin/complete/exception/transition/
     expect(((await r.json()) as any).item.status).toBe('in_progress');
   });
 
+  it('⑫b 定位策略 warn：未带定位 → 422 GEO_REQUIRED；block：超 500m → 422 GEO_TOO_FAR 且不流转', async () => {
+    geoPolicy = 'warn';
+    let r = await req('POST', '/api/v1/inspection/tasks/it-1/checkin', {});
+    expect(r.status).toBe(422);
+    expect(((await r.json()) as any).code).toBe('GEO_REQUIRED');
+
+    geoPolicy = 'block';
+    r = await req('POST', '/api/v1/inspection/tasks/it-1/checkin', { geo_lat: 31.0, geo_lng: 111.0 });
+    expect(r.status).toBe(422);
+    expect(((await r.json()) as any).code).toBe('GEO_TOO_FAR');
+    expect(calls().some((s) => s.includes('UPDATE inspection_task SET'))).toBe(false);
+  });
+
+  it('⑫c 定位策略 off（默认）：不带定位仍按历史行为放行', async () => {
+    geoPolicy = '';
+    const r = await req('POST', '/api/v1/inspection/tasks/it-1/checkin', {});
+    expect(r.status).toBe(200);
+  });
+
   it('⑬complete 于 pending → 422 BAD_STATE（引擎拒绝，不是硬编码 400）', async () => {
     const r = await req('POST', '/api/v1/inspection/tasks/it-1/complete', { note: '提前完成' });
     expect(r.status).toBe(422);
@@ -311,10 +341,15 @@ describe('inspection.ts · 流转引擎（checkin/complete/exception/transition/
     updatedRow = { ...taskRow, status: 'exception', title: '配电房日检' };
     const r = await req('POST', '/api/v1/inspection/tasks/it-1/exception', { note: '异响' });
     expect(r.status).toBe(200);
+    const body = (await r.json()) as any;
     const alert = (createAlert as ReturnType<typeof vi.fn>).mock.calls[0]?.[2] as any;
     expect(alert.source_type).toBe('inspection');
     expect(alert.level).toBe('L1');
     expect(alert.title).toContain('配电房日检');
+    // P0-1：异常必须同事务真正转标准工单，不能只建预警
+    expect(body.work_order?.id).toBe('wo-l1');
+    expect(createLinkedWorkOrder).toHaveBeenCalledTimes(1);
+    expect(calls().some((x: string) => x.includes('SET linked_wo_id'))).toBe(true);
   });
 
   it('⑯transition：缺 event → 400；白名单外列被丢弃（防列名注入）；cancel 合法流转', async () => {
@@ -395,6 +430,7 @@ describe('inspection.ts · 统计与导出', () => {
     expect(s.total).toBe(6);
     expect(s.completion_rate).toBe(50);
     expect(s.exception_rate).toBe(16.7);
+    expect(s.overdue).toBe(3); // 未完成且已过计划时间（派生口径）
     expect(s.item_pass_rate).toBeNull(); // itemAgg 回 0 行聚合 → 不虚构
   });
 
@@ -535,5 +571,52 @@ describe('T1-B 批1 · inspection_task 在途单锁版本', () => {
       expect(params.length).toBe(7);
       expect(params[6]).toBe(3);
     }
+  });
+});
+
+describe('P0-3/P0-4 · 巡检读侧与流转门禁（2026-11-07）', () => {
+  beforeEach(() => {
+    authRole = 'worker';
+    authMode = 'prod';
+    permRows = [{ perm: 'inspect.execute' }];
+    workerRows = [{ id: 'w-1' }];
+  });
+
+  it('worker GET /tasks 传别人的 assignee 也只能拿到自己名下（服务端强制集合）', async () => {
+    fakeClient.query.mockClear();
+    const r = await req('GET', '/api/v1/inspection/tasks?assignee=w-9');
+    expect(r.status).toBe(200);
+    const q = fakeClient.query.mock.calls.find((c: any) => String(c[0]).includes('FROM inspection_task t LEFT JOIN'));
+    expect(String(q?.[0])).toContain('t.assignee = ANY($2::text[])');
+    expect(q?.[1]).toEqual([TENANT, ['w-1']]);
+  });
+
+  it('worker GET /tasks/:id 看别人名下的单 → 403', async () => {
+    taskRow.assignee = 'w-9';
+    taskRow.status = 'in_progress';
+    const r = await req('GET', '/api/v1/inspection/tasks/it-1');
+    expect(r.status).toBe(403);
+  });
+
+  it('worker GET /tasks/:id 未指派 pending 可查看（抢单大厅详情入口）', async () => {
+    taskRow.assignee = null;
+    taskRow.status = 'pending';
+    const r = await req('GET', '/api/v1/inspection/tasks/it-1');
+    expect(r.status).toBe(200);
+  });
+
+  it('worker 对 cancel 边（admin/operator）→ 403，即使持有 inspect.execute 且是归属人', async () => {
+    taskRow.assignee = 'w-1';
+    taskRow.status = 'pending';
+    updatedRow = { ...taskRow, status: 'cancelled' };
+    const r = await req('POST', '/api/v1/inspection/tasks/it-1/transition', { event: 'cancel' });
+    expect(r.status).toBe(403);
+  });
+
+  it('exception 缺 note → 422（requiredFields 真正生效）', async () => {
+    taskRow.assignee = 'w-1';
+    taskRow.status = 'in_progress';
+    const r = await req('POST', '/api/v1/inspection/tasks/it-1/transition', { event: 'exception' });
+    expect(r.status).toBe(422);
   });
 });

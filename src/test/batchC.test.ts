@@ -35,7 +35,9 @@ describe('summarizeLinkedOrders（资产历史只读聚合）', () => {
     ];
     const out = summarizeLinkedOrders(rows);
     expect(out).toHaveLength(2);
-    expect(out[0]).toEqual({ order_id: 'a', order_no: 'WO-1', business_type: 'repair', status: 'assigned', created_at: '2026-01-01' });
+    // 2026-11-17：契约同时保留 id 与 order_id（前端 rowKey=id，既有消费方读 order_id）。
+    expect(out[0]).toEqual({ id: 'a', order_id: 'a', order_no: 'WO-1', business_type: 'repair', status: 'assigned', created_at: '2026-01-01', updated_at: null, completed_at: null });
+    expect(out[1].id).toBe(out[1].order_id);
   });
 });
 

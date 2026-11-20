@@ -33,6 +33,8 @@ export interface AccountUser {
   active: boolean;
   wx_openid?: string | null; // v5.0 P0：微信 openid（绑定后非空，toPublic 只暴露 wx_bound）
   phone?: string | null; // 账号权限一期（082 迁移）：档案手机号，可空
+  /** 115：JWT 版本号；角色/启用状态/密码变化时由 DB 触发器自增 */
+  token_version?: number;
 }
 
 export interface AccountUserPublic {
@@ -61,9 +63,13 @@ function toPublic(u: AccountUser): AccountUserPublic {
 
 // ---- 密码哈希（scrypt） ----
 
+const SCRYPT_OPTS = { N: 16384, r: 8, p: 1, maxmem: 64 * 1024 * 1024 } as const;
+
 export function hashPassword(password: string): string {
   const salt = crypto.randomBytes(16);
-  const hash = crypto.scryptSync(password, salt, 64);
+  // 显式参数 + 64MB 上限：默认 maxmem=32MB 与 scrypt(N=16384,r=8) 的内存需求贴边，
+  // 并发/内存紧张时会偶发 OpenSSL "Deriving bits failed"。参数不变，已有密码哈希仍可验证。
+  const hash = crypto.scryptSync(password, salt, 64, SCRYPT_OPTS);
   return `scrypt$${salt.toString('hex')}$${hash.toString('hex')}`;
 }
 
@@ -73,7 +79,7 @@ export function verifyPassword(password: string, stored: string): boolean {
   const salt = Buffer.from(parts[1], 'hex');
   const expected = Buffer.from(parts[2], 'hex');
   if (salt.length === 0 || expected.length === 0) return false;
-  const actual = crypto.scryptSync(password, salt, expected.length);
+  const actual = crypto.scryptSync(password, salt, expected.length, SCRYPT_OPTS);
   if (actual.length !== expected.length) return false;
   return crypto.timingSafeEqual(actual, expected);
 }
@@ -83,13 +89,21 @@ export function verifyPassword(password: string, stored: string): boolean {
 const DEFAULT_TTL_SECONDS = 60 * 60 * 24; // 24h
 
 export function signLoginToken(
-  user: { sub: string; tid: string; role: AccountRole; username: string },
+  user: { sub: string; tid: string; role: AccountRole; username: string; tokenVersion?: number },
   secret: string,
 ): string {
   const ttl = Number(process.env.JWT_TTL_SECONDS ?? DEFAULT_TTL_SECONDS);
   const exp = Math.floor(Date.now() / 1000) + (Number.isFinite(ttl) && ttl > 0 ? ttl : DEFAULT_TTL_SECONDS);
   return signJwt(
-    { sub: user.sub, tid: user.tid, role: user.role, username: user.username, exp },
+    {
+      sub: user.sub,
+      tid: user.tid,
+      role: user.role,
+      username: user.username,
+      // 115：旧调用方不传 tv 时保持兼容（鉴权端只在新 token 带 tv 时回查）
+      ...(typeof user.tokenVersion === 'number' ? { tv: user.tokenVersion } : {}),
+      exp,
+    },
     secret,
   );
 }
@@ -121,7 +135,7 @@ export async function createUser(
   const r = await client.query<AccountUser>(
     `INSERT INTO account_user (tenant_id, username, password_hash, display_name, role, active)
      VALUES ($1, $2, $3, $4, $5, true)
-     RETURNING id, tenant_id, username, display_name, role, active`,
+     RETURNING id, tenant_id, username, display_name, role, active, token_version`,
     [tenantId, input.username, hashPassword(input.password), input.display_name ?? null, role],
   );
   return r.rows[0];
@@ -133,7 +147,7 @@ export async function findUserByUsername(
   username: string,
 ): Promise<AccountUser | undefined> {
   const r = await client.query<AccountUser>(
-    `SELECT id, tenant_id, username, password_hash, display_name, role, active, wx_openid, phone
+    `SELECT id, tenant_id, username, password_hash, display_name, role, active, wx_openid, phone, token_version
      FROM account_user WHERE tenant_id = $1 AND username = $2`,
     [tenantId, username],
   );

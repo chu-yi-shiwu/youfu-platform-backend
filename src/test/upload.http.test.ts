@@ -117,12 +117,16 @@ describe('POST /api/v1/upload（base64 上传落盘）', () => {
     expect(j.code).toBe('BAD_PARAM');
   });
 
-  it('④解码后 0 字节 → 413 TOO_LARGE（truthy base64 但空内容；空串本身走 ③ BAD_PARAM）', async () => {
+  it('④非法 base64 → 400 BAD_PARAM（不再宽松解码落盘坏文件）', async () => {
     authTenant = 't-verification';
     const r = await post('/api/v1/upload', { base64: '====', filename: 'a.jpg' });
-    expect(r.status).toBe(413);
+    expect(r.status).toBe(400);
     const j = (await r.json()) as any;
-    expect(j.code).toBe('TOO_LARGE');
+    expect(j.code).toBe('BAD_PARAM');
+
+    const r2 = await post('/api/v1/upload', { base64: '!!!!notbase64!!!!', filename: 'a.jpg' });
+    expect(r2.status).toBe(400);
+    expect(((await r2.json()) as any).code).toBe('BAD_PARAM');
   });
 
   it('⑤超 5MB → 413 TOO_LARGE', async () => {

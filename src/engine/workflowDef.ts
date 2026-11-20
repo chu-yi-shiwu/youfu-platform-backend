@@ -673,6 +673,7 @@ async function resolveLockedDef(
   version: number,
   fallback: WorkflowDef,
   liveVersion: number,
+  strict = false,
 ): Promise<WorkflowDef> {
   const live = () => getWorkflowDefOrDefault(client, tenantId, entityType, fallback);
   // 锁的就是当前 live 版本：live 版本本身**不在 history 里**（saveWorkflowDef 只在被覆盖
@@ -680,6 +681,9 @@ async function resolveLockedDef(
   if (liveVersion === version) return live();
   const snap = await getWorkflowDefHistoryVersion(client, tenantId, entityType, version);
   if (snap) return withMechanismStates(entityType, normalizeDef(snap));
+  if (strict) {
+    throw new AppError('WORKFLOW_DEF_VERSION_MISSING', `workflow definition version ${version} not found for ${tenantId}/${entityType}`, 409);
+  }
   // 🔴 刻意不抛：见 getWorkflowDefAtVersion 的 JSDoc。
   console.warn(
     '[workflowDef] def_version 指向的历史版本不存在，降级到 live def',
@@ -724,12 +728,13 @@ export async function getWorkflowDefAtVersion(
   entityType: string,
   version: number,
   fallback: WorkflowDef,
+  strict = false,
 ): Promise<WorkflowDef> {
   if (!version || version <= 0) {
     return getWorkflowDefOrDefault(client, tenantId, entityType, fallback);
   }
   const liveVersion = await getWorkflowDefVersion(client, tenantId, entityType);
-  return resolveLockedDef(client, tenantId, entityType, version, fallback, liveVersion);
+  return resolveLockedDef(client, tenantId, entityType, version, fallback, liveVersion, strict);
 }
 
 /**
@@ -752,6 +757,7 @@ export async function getDefsForVersions(
   entityType: string,
   rows: Array<{ def_version?: number | null }>,
   fallback: WorkflowDef,
+  strict = false,
 ): Promise<Map<number, WorkflowDef>> {
   const versions = new Set<number>();
   for (const r of rows) {
@@ -766,7 +772,7 @@ export async function getDefsForVersions(
       v,
       v <= 0
         ? await getWorkflowDefOrDefault(client, tenantId, entityType, fallback)
-        : await resolveLockedDef(client, tenantId, entityType, v, fallback, liveVersion),
+        : await resolveLockedDef(client, tenantId, entityType, v, fallback, liveVersion, strict),
     );
   }
   return out;

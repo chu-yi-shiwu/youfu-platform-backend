@@ -124,6 +124,8 @@ async function call(
 function volunteerHandlers(permGranted: string[]): Handler[] {
   return [
     permRows(permGranted),
+    // 自助签到归属查询：默认非本人（本文件只验证“无 volunteer.audit 的 worker 不能替他人签到”）
+    { match: (t) => t.includes('SELECT 1 FROM worker'), reply: () => ({ rows: [], rowCount: 0 }) },
     // POST /activities：INSERT RETURNING *（成功建活动）
     { match: (t) => t.includes('INSERT INTO volunteer_activity'), reply: () => ({ rows: [{ id: 'act-new', title: '导诊志愿', status: 'open' }], rowCount: 1 }) },
     // PUT /activities/:id/status：UPDATE RETURNING
@@ -179,7 +181,7 @@ describe('service_desk 仅授 volunteer.audit（现场执行细分授权）', ()
 
   it('④ 读端点（stats/people/records）→ 403（audit 不含 view）', async () => {
     h.client = makeClient(volunteerHandlers(['volunteer.audit'])).client;
-    for (const p of ['/volunteer/stats', '/volunteer/people', '/volunteer/activities/act-1/records']) {
+    for (const p of ['/volunteer/stats', '/volunteer/stats/overview', '/volunteer/people', '/volunteer/activities/act-1/records']) {
       const r = await call('GET', p, { role: 'service_desk' });
       expect(r.status, `GET ${p} 期望 403，实际 ${r.status}`).toBe(403);
     }
@@ -208,7 +210,7 @@ describe('service_desk 仅授 volunteer.audit（现场执行细分授权）', ()
 describe('仅授 volunteer.view（只读授权：reviewer 时长监督场景）', () => {
   it('① GET stats / people / records → 200', async () => {
     h.client = makeClient(volunteerHandlers(['volunteer.view'])).client;
-    for (const p of ['/volunteer/stats', '/volunteer/people', '/volunteer/activities/act-1/records']) {
+    for (const p of ['/volunteer/stats', '/volunteer/stats/overview', '/volunteer/people', '/volunteer/activities/act-1/records']) {
       const r = await call('GET', p, { role: 'reviewer' });
       expect(r.status, `GET ${p} 期望 200，实际 ${r.status}`).toBe(200);
       expect(r.body.ok).toBe(true);
@@ -261,6 +263,51 @@ describe('无 role_permission 覆盖行 → 默认矩阵（存量租户零回归
     h.client = makeClient(volunteerHandlers([])).client;
     const r = await call('GET', '/volunteer/stats', { role: null });
     expect(r.status).toBe(403);
+  });
+
+  // 2026-11-14 漏洞回归（根因）：worker 本人曾可绕过扫码直接点「签到」。
+  // 负控制：即使归属查询命中本人，也必须 403 SCAN_REQUIRED，且不得产生签到 UPDATE。
+  it('④ worker 本人直接点签到 → 403 SCAN_REQUIRED，只能扫码（无签到 UPDATE）', async () => {
+    const handlers: Handler[] = [
+      permRows([]),
+      // 归属查询：故意返回「是本人」，证明限制不是靠归属没匹配上。
+      { match: (t) => t.includes('SELECT 1 FROM worker'), reply: () => ({ rows: [{ '?column?': 1 }], rowCount: 1 }) },
+      {
+        match: (t) => t.includes('SELECT * FROM volunteer_record WHERE id = $1'),
+        reply: () => ({ rows: [{ id: 'rec-1', activity_id: 'act-1', user_name: '张三', status: 'registered' }], rowCount: 1 }),
+      },
+    ];
+    const mk = makeClient(handlers);
+    h.client = mk.client;
+    const r = await call('POST', '/volunteer/records/rec-1/checkin', { role: 'worker' });
+    expect(r.status).toBe(403);
+    expect(r.body.code).toBe('SCAN_REQUIRED');
+    expect(String(r.body.message)).toContain('签到码');
+    expect(mk.calls.some((c) => c.text.includes("SET status = 'checked_in'"))).toBe(false);
+  });
+
+  it('⑤ worker 扫码签到（checkin-by-code）仍 200（本人自助唯一合法通道不回退）', async () => {
+    const handlers: Handler[] = [
+      permRows([]),
+      { match: (t) => t.includes('SELECT id,name FROM worker'), reply: () => ({ rows: [{ id: 'w-1', name: '张三' }], rowCount: 1 }) },
+      {
+        match: (t) => t.includes('checkin_code=$2'),
+        reply: () => ({
+          rows: [{ id: 'act-1', status: 'open', start_at: null, end_at: null, checkin_code: 'ABC123' }],
+          rowCount: 1,
+        }),
+      },
+      {
+        match: (t) => t.includes('activity_id=$2 AND user_name=$3'),
+        reply: () => ({ rows: [{ id: 'rec-1', status: 'registered' }], rowCount: 1 }),
+      },
+      { match: (t) => t.includes("SET status='checked_in'"), reply: () => ({ rows: [{ id: 'rec-1', status: 'checked_in' }], rowCount: 1 }) },
+      { match: (t) => t.includes('INSERT INTO domain_event'), reply: () => ({ rows: [], rowCount: 1 }) },
+    ];
+    h.client = makeClient(handlers).client;
+    const r = await call('POST', '/volunteer/checkin-by-code', { role: 'worker', body: { code: 'ABC123' } });
+    expect(r.status, `期望 200，实际 ${r.status} ${JSON.stringify(r.body)}`).toBe(200);
+    expect(r.body.ok).toBe(true);
   });
 });
 

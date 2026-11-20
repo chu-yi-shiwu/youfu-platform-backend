@@ -3,6 +3,8 @@ dist/
 *.log
 .env
 .env.*
+# 环境变量模板必须入库（仅占位符，无真实密钥）
+!.env.example
 .DS_Store
 coverage/
 .wing/
@@ -55,3 +57,10 @@ tsconfig.tsbuildinfo
 
 # vitest 缓存重定向目录（Windows TEMP 目录偶发 EPERM 导致漏跑用例时的 workaround）
 .vitest-cache/
+
+# 发布清单由 CI/构建生成，作为 artifact 上传，不入源码库
+release-manifest.json
+release-baseline.json
+
+# 真实院方主数据（含联系人手机号 / 员工手机号），禁止入库；仅保留模板目录
+docs/pilot-master-hospital-real-*/

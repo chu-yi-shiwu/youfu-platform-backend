@@ -143,6 +143,35 @@ export async function provisionNewTenantContent(
     [input.tenantId, typeof wfDef === 'string' ? wfDef : JSON.stringify(wfDef), input.actor ?? 'tenant-provision'],
   );
 
+  // ⓪ 默认部门（2026-11-14 深度探针）：
+  //   新租户开通后若没有默认部门，`resolveDepartment` 会以 DEPARTMENT_UNRESOLVED 422
+  //   拒绝**所有建单/报修**——客户首次登录即不可用。开通动作必须给出一个可用落点，
+  //   后续由租户在部门管理里改名/改归属，而不是让第一条报修直接失败。
+  const hasDefaultDept = await client.query(
+    `SELECT id FROM dept WHERE tenant_id = $1 AND is_default = true LIMIT 1`,
+    [input.tenantId],
+  );
+  if ((hasDefaultDept.rowCount ?? 0) === 0) {
+    const anyDept = await client.query(
+      `SELECT id FROM dept WHERE tenant_id = $1 ORDER BY created_at ASC LIMIT 1`,
+      [input.tenantId],
+    );
+    if ((anyDept.rowCount ?? 0) === 0) {
+      // 注意：dept 表没有 (tenant_id, code) 唯一约束，不能写 ON CONFLICT —— 且此处已确认
+      // 该租户零部门，直接 INSERT 即可（2026-11-14 实测：ON CONFLICT 触发 42P10 → 开通 500）。
+      await client.query(
+        `INSERT INTO dept (tenant_id, name, code, is_default, enabled)
+         VALUES ($1, '默认部门', 'DEFAULT', true, true)`,
+        [input.tenantId],
+      );
+    } else {
+      await client.query(
+        `UPDATE dept SET is_default = true WHERE tenant_id = $1 AND id = $2`,
+        [input.tenantId, anyDept.rows[0].id],
+      );
+    }
+  }
+
   // ③ 机构管理员账号
   //   审查修复（架构🟡12 · 注释诚实）：本条 INSERT **没有** ON CONFLICT——
   //   一旦同租户同名账号已存在（重跑/重试/手工补过账号），UNIQUE(tenant_id, username) 会抛 23505，

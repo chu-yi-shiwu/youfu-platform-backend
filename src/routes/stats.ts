@@ -4,6 +4,8 @@
 import { Router } from 'express';
 import { withTenantClient } from '../db/pool.js';
 import { processMetrics, workerLoadDrift } from '../repo/stats.js';
+import { workbenchStats } from '../repo/workbenchStats.js';
+import { AppError } from '../middleware/error.js';
 import { qualityReport } from '../services/dataQuality.js';
 import { getDefsAcrossAllVersions, intersectStates } from '../engine/workflowDef.js';
 import { doneStates, DEFAULT_WORK_ORDER_DEF } from '../engine/stateMachine.js';
@@ -111,6 +113,44 @@ router.get('/stats/overdue', async (req, res, next) => {
 // load 是派单负载均衡的**唯一输入**，历史上出现过与真实在身单长期背离（存量脏数据）。
 // 这里只**读**不写：把每位工人的「系统记的在身数 vs 真实在身单数」摆出来，
 // 让失真可见、可复核。校正（写库）不在本端点职责内，须人工批准另做。
+// GET /stats/workbench —— 工作台统一统计（列表/卡片同一 scope）
+router.get('/stats/workbench', async (req, res, next) => {
+  try {
+    const qstr = (k: string): string | undefined => {
+      const v = req.query[k];
+      return typeof v === 'string' && v ? v : undefined;
+    };
+    const bucket = qstr('bucket');
+    const status = qstr('status');
+    if (bucket && status) {
+      throw new AppError('BAD_PARAM', 'bucket 与 status 互斥，不能同时传', 400);
+    }
+    const departmentId = qstr('department_id') ?? qstr('department');
+    const departmentUnassigned =
+      req.query.department_unassigned === '1' || req.query.department_unassigned === 'true';
+    if (departmentId && departmentUnassigned) {
+      throw new AppError('BAD_PARAM', 'department_id 与 department_unassigned 互斥，不能同时传', 400);
+    }
+
+    const tenantId = res.locals.auth.tenantId;
+    const stats = await withTenantClient(tenantId, async (client) => {
+      await requirePermission(res.locals.auth, client, 'dashboard.view');
+      return workbenchStats(client, tenantId, {
+        bucket,
+        status,
+        departmentId,
+        departmentUnassigned,
+        priority: qstr('priority'),
+        source: qstr('source'),
+        businessType: qstr('business_type'),
+      });
+    });
+    return res.json({ ok: true, code: 0, ...stats });
+  } catch (e) {
+    next(e);
+  }
+});
+
 router.get('/stats/worker-load-drift', async (req, res, next) => {
   try {
     const tenantId = res.locals.auth.tenantId;

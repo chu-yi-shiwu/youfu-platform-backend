@@ -109,7 +109,7 @@ export async function backfillTenant(
       [tenantId, args.statuses],
     );
     return r.rows as Array<{ id: string; order_no: string | null; status: string }>;
-  });
+  }, { system: true });
 
   const picked = args.limit ? candidates.slice(0, args.limit) : candidates;
   report.candidates = picked.length;
@@ -122,7 +122,7 @@ export async function backfillTenant(
     try {
       const r = await withTenantClient(tenantId, (client) =>
         createSettlementDraft(client, tenantId, [wo.id], BACKFILL_OPERATOR),
-      );
+      { system: true });
       if (r.ok && r.settlement) {
         report.created += 1;
         log(`[backfill]   + ${wo.order_no ?? wo.id} → ${r.settlement.settlement_no}（total=${r.settlement.total}）`);

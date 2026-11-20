@@ -1,0 +1,7 @@
+id,name,department_code,skill_tags,phone,active
+W1001,张师傅,HOSP_WX,"repair,plumbing",13800000001,true
+W1002,李师傅,HOSP_WX,"repair,electric",13800000002,true
+W1003,王师傅,HOSP_WX,"repair,hvac",13800000003,true
+W1004,赵师傅,HOSP_WX,"repair,network",13800000004,true
+W1005,陈保洁,HOSP_BJ,cleaning,13800000005,true
+W1006,周安保,HOSP_AB,security,13800000006,true

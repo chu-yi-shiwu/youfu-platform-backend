@@ -76,3 +76,11 @@ export function startModelTrainScheduler(): void {
   }, TICK_MS);
   console.log(`[model-train] scheduler started (daily ${TRAIN_HOUR}:00)`);
 }
+
+/** P0-8：优雅停机时停止轮询（幂等；已停止再调用不报错）。 */
+export function stopModelTrainScheduler(): void {
+  if (timer) {
+    clearInterval(timer);
+    timer = null;
+  }
+}

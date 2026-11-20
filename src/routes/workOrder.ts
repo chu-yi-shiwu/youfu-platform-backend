@@ -7,13 +7,18 @@ import { Router } from 'express';
 import { z } from 'zod';
 import type { PoolClient } from 'pg';
 import { withTenantClient } from '../db/pool.js';
+import { withTenantScope } from '../db/scope.js';
 import { createWithIdem, transition, list, findOne, findOneForUpdate } from '../repo/ticket.js';
+import { resolveWorkerIds } from '../repo/workerIdentity.js';
+import { notificationOrphanGuardSql } from '../repo/notificationVisibility.js';
 import { ticketStats } from '../repo/stats.js';
 import { pickWorker, resolveDispatch, getActiveRules } from '../engine/dispatch.js';
 import { resolveNeed } from '../engine/dispatch/needResolver.js';
 import { AppError } from '../middleware/error.js';
-import { requirePermission, requireAnyPermission, assertOpsRole } from '../middleware/role.js';
+import { requirePermission, requireAnyPermission, assertOpsRole, hasPerm } from '../middleware/role.js';
+import { isSelfScope } from '../middleware/dataScope.js';
 import { resolveScanFromDb } from '../scan.js';
+import { resolveWorkbenchBuckets } from '../engine/workbenchBuckets.js';
 import { setSlaDueAtWithMinutes } from '../engine/sla.js';
 import { loadSlaPolicy, pickSlaPolicy, resolveSlaMinutesWithPolicy } from '../engine/slaPolicy.js';
 import { runSlaScanForTenant } from '../scheduler/slaScheduler.js';
@@ -52,70 +57,6 @@ import { autoRedispatchAfterReturn } from '../services/autoRedispatch.js'; // �
 const router = Router();
 
 /**
- * 决策 #5（服务台租户开关）：读取租户级「必须指定服务台」开关。
- * 键名 ticket_require_service_desk（system_config，key-value，零 DDL）；缺行/非 'true' = 关（默认宽松）。
- * 开启后：直接建单路径（POST /open/work_order）不带 service_desk → 422 SERVICE_DESK_REQUIRED。
- * ⚠️ 原「来电弹屏代申告（routes/serviceDesk.ts POST /tickets）天然带 deskId，豁免该校验」
- *   一句随该端点 2026-10-28 下线**删除**：代申告已不存在，服务台建单入口只剩
- *   /open/work_order 显式带 service_desk 这一条，无需也不该再有豁免分支。
- */
-export const TICKET_REQUIRE_SERVICE_DESK_KEY = 'ticket_require_service_desk';
-
-async function isTicketRequireServiceDesk(client: PoolClient, tenantId: string): Promise<boolean> {
-  const r = await client.query<{ value: string | null }>(
-    'SELECT value FROM system_config WHERE tenant_id = $1 AND key = $2',
-    [tenantId, TICKET_REQUIRE_SERVICE_DESK_KEY],
-  );
-  return r.rows[0]?.value === 'true';
-}
-
-/**
- * 反查「当前登录身份」对应的 worker.id（业务编码）。
- * 生产实测事实（team-lead 2026-09-xx，务必按此实现，别按 uuid 猜）：
- *   - worker.id = text、worker.account_id = text、work_orders.assignee_id = text；
- *     只有 account_user.id 是 uuid → 参数一律按 text 传，**绝不加 ::uuid 强转**（PG 会报 operator 不存在）；
- *   - 存量数据 account_id 有脏值：有的工人 account_id 存的是自己的 worker.id，有的存的是真实账号 id
- *     → 双路匹配 (account_id=$1 OR id=$1)，缺一即出现"查不到档案"的假阴性。
- * 返回 null = 查不到档案 → 调用方一律 **降级放行**（console.warn + 按现状放行），
- * 不可拒绝、不可过滤：一线工人的可用性优先于收口（否则脏数据直接让接单页全空）。
- */
-async function resolveWorkerIds(
-  client: PoolClient,
-  tenantId: string,
-  authUserId: string | undefined,
-): Promise<string[]> {
-  const uid = authUserId ?? '';
-  if (!uid) return [];
-  // E-8 QA P3-1（双档案漏判）：LIMIT 2 → LIMIT 10 并返回【全部】命中行——同人挂多条
-  // worker 档案（脏数据）时，只读 rows[0] 会漏掉第二条，导致可见性/归属判断漏匹配。
-  // 调用方（列表 scopedAssignee / 详情归属校验 / SELF_ACCEPT 守卫）一律按集合判定。
-  // 防御：rowCount 异常（undefined/null）或 rows 空时按"查不到"降级（空数组），
-  // 绝不让降级路径本身变成 500（降级纪律：一线可用性优先）。
-  const r = await client.query<{ id: string }>(
-    'SELECT id FROM worker WHERE tenant_id=$2 AND (account_id=$1 OR id=$1) LIMIT 10',
-    [uid, tenantId],
-  );
-  if (r.rowCount === 0 || r.rows.length === 0) return [];
-  if (r.rows.length > 1) {
-    // 多命中：同一身份挂了多份档案（脏数据）。告警并全部返回（由调用方按集合判定），运维按日志清洗。
-    console.warn('[workOrder] worker 档案多命中，全部返回按集合判定（account_id/id 重复关联，需清洗）', {
-      tenantId, authUserId: uid, ids: r.rows.map((x) => x.id),
-    });
-  }
-  return r.rows.map((x) => x.id);
-}
-
-/**
- * P2-2（初一拍板）：师傅分派机制 = 派了才可见。
- * 师傅角色 = worker + operator（operator 即生产 8 试点的小程序师傅身份）。
- * 工单列表/详情一律按分派关系过滤：只看 assignee = 本人 的单，未分派单
- * （assignee_id IS NULL）全不可见——未分派工单的唯一可见面是抢单大厅
- * /open/claim-hall（8 operator 试点的抢单行为保留，见可见性矩阵 docs）。
- * 档案查不到时沿用既定降级纪律（warn + 放行，一线可用性优先）。
- */
-const MASTER_ROLES: readonly string[] = ['worker', 'operator'];
-
-/**
  * 建单后自动派单（2026-08-29 从 POST /open/work_order handler 抽取为共享函数）：
  * 修复「公开报修单卡 draft、无派单、无通知、小程序通知点不开」的断链——公开报修与后台建单
  * 同一引擎待遇：SLA 起算 → dispatch_rule 匹配（降级 least_load）→ 流转 assigned + worker load+1
@@ -125,7 +66,7 @@ const MASTER_ROLES: readonly string[] = ['worker', 'operator'];
 export async function autoDispatchAfterCreate(
   client: PoolClient,
   tenantId: string,
-  row: { id: string; order_no: string },
+  row: { id: string; order_no: string; department_id?: string | null; department_source?: string | null },
   need: { business_type: string; skill_tags?: string[] | null; priority?: string | null; catalog?: string | null },
 ): Promise<{ autoFlow: boolean; assignee: string | null; reason: string; dispatchTarget: string }> {
   // P4：建单即起算 SLA（draft 态即计时，符合"建单进入 SLA 计时"）。
@@ -144,7 +85,7 @@ export async function autoDispatchAfterCreate(
   const sla = setSlaDueAtWithMinutes(slaMinutes);
   await client.query('UPDATE work_orders SET sla_minutes = $1, sla_due_at = $2 WHERE id = $3', [sla.slaMinutes, sla.dueAt, row.id]);
   // 自动派单：优先按 dispatch_rule 配置匹配；无命中降级 least_load 兜底（保持 M1-M3 已验证行为）
-  const workers = await client.query('SELECT id, skill_tags, load, active FROM worker WHERE tenant_id = $1', [tenantId]);
+  const workers = await client.query('SELECT id, skill_tags, load, active, department_id FROM worker WHERE tenant_id = $1', [tenantId]);
   const workerRows = workers.rows.map((w: any) => ({ ...w, skill_tags: safeParseJsonb(w.skill_tags) ?? [] }));
   // 需求走解析器链（engine/dispatch/needResolver.ts），不再在路由里写死"技能只能由调用方传"：
   // 调用方显式传了 → 以显式为准；没传 → 由目录/故障分类上配的技能派生（运营可配，用户零感知）。
@@ -160,6 +101,10 @@ export async function autoDispatchAfterCreate(
     },
     client,
   );
+  // 默认部门是“待定归属”，不是派单范围：不按部门过滤，选中后再 late-bind 到师傅部门。
+  // 明确部门（explicit/rule/manual）才做硬过滤；机动人员（department_id 为空）仍可参与。
+  const dispatchDepartmentId = row.department_source === 'default' ? null : (row.department_id ?? null);
+  const dispatchNeed = { ...needPayload, department_id: dispatchDepartmentId };
   const rules = await getActiveRules(client, tenantId);
   // ④⑤ 模数共振：读 workflow_def 决定本租户自动派发的目标态（resolveDispatchTarget：
   //   autoRoutes 优先 → 初态首条非终态转移 → 都没有则 422，绝不硬编码回退 'assigned'——
@@ -195,7 +140,7 @@ export async function autoDispatchAfterCreate(
   );
   const loadedParams = safeParseJsonb(modelParams.rows[0]?.params) ?? undefined;
   const model: ModelBackend = new StatsModelBackend(loadedParams);
-  const resolved = resolveDispatch(workerRows, rules, needPayload, model);
+  const resolved = resolveDispatch(workerRows, rules, dispatchNeed, model);
   // 洞③-2a（修「假中」）：兜底必须与 :196 **同一份口径**，用派生后的 needPayload.skill_tags，
   //   而不是调用方的原始 need.skill_tags。
   //   改前的问题链：resolveNeed 把目录/故障分类上配的技能派生进 needPayload.skill_tags，
@@ -203,7 +148,12 @@ export async function autoDispatchAfterCreate(
   //   ⇒ 传给 pickWorker 的 required=[] ⇒ dispatch.ts:43-45 的 [].every() 恒真
   //   ⇒ **只要有 1 名在岗工人就必中**，命中率的 71%~85% 是这么来的（数字好看，单派错人）。
   //   初一裁决 D-3：修假中，要真数字不要好看数字 ⇒ 派不中就老实落抢单大厅。
-  const picked = resolved ? resolved.worker : pickWorker(workerRows, { skillTags: needPayload.skill_tags ?? undefined });
+  const picked = resolved
+    ? resolved.worker
+    : pickWorker(workerRows, {
+        skillTags: needPayload.skill_tags ?? undefined,
+        departmentId: dispatchDepartmentId,
+      });
   let autoFlow = false;
   let assignee: string | null = null;
   let reason = 'manual claim required';
@@ -222,14 +172,18 @@ export async function autoDispatchAfterCreate(
     //   的 submit 边带 allowedRoles=['admin','operator']，F4 首版即 403，见
     //   src/test/dispatchSystemActor.test.ts）。与 tryAutoAdvance 的 systemAuto 同源头：
     //   配置须客户显式启用，系统执行只跳过人类门禁；拓扑/必填/副作用/自动审核一个不跳。
-    await transition(client, tenantId, row.id, dispatchTarget as WorkOrderStatus, {
-      actor: 'auto_dispatch',
-      fields: { assignee: picked.id },
-      autoFlow: true,
-      systemAuto: true,
-      eventLogType: 'assign', // 事件流保持 assign 类型（publicReport 平均响应时长按它聚合）
-      eventOverride: dispatchEdge?.event,
-    });
+    // 自动派单是系统动作：assignee 会改成别人。PostgreSQL UPDATE 新行还要过 SELECT 策略，
+    // 所以只在这条赋值语句期间切 system；不把整个请求升级成 system。
+    await withTenantScope(client, 'system', () =>
+      transition(client, tenantId, row.id, dispatchTarget as WorkOrderStatus, {
+        actor: 'auto_dispatch',
+        fields: { assignee: picked.id },
+        autoFlow: true,
+        systemAuto: true,
+        eventLogType: 'assign', // 事件流保持 assign 类型（publicReport 平均响应时长按它聚合）
+        eventOverride: dispatchEdge?.event,
+      }),
+    );
     // A5 派单通知：落库通知被派单人（sms/push 为 stub，诚实未真实发送）。
     // transition() 不发通知（人工流转的通知由各端点负责），系统派单的 fan-out 保留在此。
     await insertNotification(client, {
@@ -399,8 +353,8 @@ const createSchema = z.object({
   // UOne 颗粒度维度（取之所长）
   source: z.enum(['wechat', 'backend', 'phone']).optional(),
   fault_type: z.string().optional(),
-  service_desk: z.string().optional(),
-  department: z.string().optional(),
+  department: z.string().optional(), // 旧字段兼容：值按 department_id 处理
+  department_id: z.string().uuid().optional(),
   ext: z.record(z.string(), z.unknown()).optional(),
 });
 
@@ -426,7 +380,10 @@ export function toCreateRes(row: any, autoFlow: boolean, assignee: string | null
   return {
     ok: true, code: 0, id: row.id, order_no: row.order_no, status: row.status, auto_flow: autoFlow, assignee, reason,
     source: row.source ?? 'backend', fault_type: row.fault_type ?? null,
-    service_desk: row.service_desk ?? null, department: row.department ?? null, ext: row.ext ?? {},
+    department_id: row.department_id ?? null,
+    department_source: row.department_source ?? null,
+    department_name: row.department_name ?? null,
+    ext: row.ext ?? {},
   };
 }
 
@@ -460,11 +417,6 @@ router.post('/open/work_order', async (req, res, next) => {
       // ticket.manage 的其余管理面（流转配置等）对 worker 仍 403，无权限放大。
       // C 端公开报修走 /public/report（publicReportRouter，免登录），不受本门禁影响。
       await requireAnyPermission(res.locals.auth, client, ['intake.create', 'ticket.manage']);
-      // 决策 #5：租户级「必须指定服务台」开关（默认关=宽松，缺服务台完全合法；铁律：报修人零门槛）。
-      // 仅约束直接建单路径；幂等重放同样要求带 service_desk（语义一致，补上后重放即命中幂等返回原单）。
-      if (!body.service_desk && (await isTicketRequireServiceDesk(client, tenantId))) {
-        throw new AppError('SERVICE_DESK_REQUIRED', '该租户已开启「必须指定服务台」，请先选择服务台后再提交', 422);
-      }
       const { row, created } = await createWithIdem(client, {
         id: body.id,
         tenantId,
@@ -479,15 +431,16 @@ router.post('/open/work_order', async (req, res, next) => {
         assets: body.assets,
         source: body.source,
         faultType: body.fault_type,
-        serviceDesk: body.service_desk,
-        department: body.department,
+        departmentId: body.department_id ?? body.department,
         ext: body.ext,
           idempotencyKey: idem,
         });
         // R9-001 修复：幂等重放（created=false）必须短路返回已存在工单，
         // 绝不能再跑派单 / 改状态 / 加 worker load —— 否则同键重试会重置在途工单并虚增负载。
         if (!created) {
-          const final = await findOne(client, tenantId, row.id);
+          // 幂等重放：工单可能已自动派给别人，worker 的 self RLS 看不到；
+          // 响应读取必须切 system，否则重试会 500（2026-11-10 实锤）。
+          const final = await withTenantScope(client, 'system', () => findOne(client, tenantId, row.id));
           return {
             final,
             autoFlow: final?.auto_flow ?? false,
@@ -504,7 +457,9 @@ router.post('/open/work_order', async (req, res, next) => {
         priority: body.priority,
         catalog: body.catalog,
       });
-      const final = await findOne(client, tenantId, row.id);
+      // 自动派单可能把单派给别人，worker 的 self RLS 看不到自己刚建的单；
+      // 这里读的是“本次创建的工单”用于响应，切 system 只影响这一条读取。
+      const final = await withTenantScope(client, 'system', () => findOne(client, tenantId, row.id));
       return { final, autoFlow: dispatch.autoFlow, assignee: dispatch.assignee, reason: dispatch.reason, created, dispatchTarget: dispatch.dispatchTarget };
     });
     // P5 Webhook：主事务提交后 fire-and-forget 投递事件（失败不阻断主流程）
@@ -530,18 +485,31 @@ router.post('/open/work_order/:id/transition', async (req, res, next) => {
     const { to, score, via: _ignoredVia, ...rest } = transitionSchema.parse(req.body);
     void _ignoredVia;
     const role = res.locals.auth.role;
+    // 评分只能走受 zod 校验的 score（0-5）；passthrough 的 satisfaction_score 一律丢弃，
+    // 防止绕过 min/max 直接写库（113 CHECK 会拒，但那是 500 而不是 422）。
+    delete rest.satisfaction_score;
     // 必填字段透传（含满意度评分映射），供 transition() 做 A+ 必填校验
     const fields: Record<string, unknown> = { ...rest };
     if (typeof score === 'number') fields.satisfaction_score = score;
     let learnError: string | null = null;
     let settleError: string | null = null; // E-9：自动结算失败标记（SAVEPOINT 隔离后透出，不阻断评价）
     const row = await withTenantClient(tenantId, async (client) => {
+      // P0-4（2026-11-04）：worker 只能流转本人名下工单。
+      // 身份解析与 /open/notifications/read 同口径：account_id 或 worker.id 任一命中，
+      // 返回**全部**档案 id（同人多档案脏数据不漏判）。非 worker 不解析、不传参 ⇒ 行为不变。
+      const actorWorkerIds =
+        isSelfScope(role)
+          ? await resolveWorkerIds(client, tenantId, res.locals.auth.userId)
+          : undefined;
       const r = await transition(client, tenantId, req.params.id, to as WorkOrderStatus, {
         actor: role ?? 'system',
+        // 评价分数出现即视为“本人评价”动作；不允许管理员/工人代评。
+        requireReporterUserId: typeof score === 'number' ? res.locals.auth.userId : undefined,
         role,
         // 地基第二步：allowedPerms 门禁由 transition() 内部惰性取权限点（仅声明 allowedPerms
         // 的转移才查库），调用方无需透传——存量路径零额外查询、零行为变化。
         fields,
+        actorWorkerIds,
       });
       // 审查修复（架构🔴1）：本端点**不加** ticket.manage 权限点——
       //   ① 流转已由引擎的 tdef.allowedRoles 门禁把关（src/repo/ticket.ts transition()），
@@ -574,6 +542,7 @@ router.post('/open/work_order/:id/transition', async (req, res, next) => {
           await insertNotification(client, {
             tenantId,
             recipient: newAssignee,
+            recipientKind: 'worker',
             type: r.transition.event === 'forward' ? 'forward' : 'dispatch',
             workOrderId: req.params.id,
             title: '工单已改派给您',
@@ -595,18 +564,44 @@ router.post('/open/work_order/:id/transition', async (req, res, next) => {
       //   老单按旧流程走到"已评价"，若新流程里该态不再算评价完成 ⇒ **满意度评分不回写**。
       const evaluatedSet = unionStates(woDefs.map(evaluatedStates));
       // 评价完成回写满意度评分（UOne 满意度颗粒度）
-      if (evaluatedSet.includes(to) && typeof score === 'number') {
-        await client.query(
-          'UPDATE work_orders SET satisfaction_score = $1 WHERE id = $2 AND tenant_id = $3',
-          [score, req.params.id, tenantId],
-        );
-      }
+      // 🔴 113 起评分已在 transition() 的同一条 UPDATE 内落库（满足 evaluated 分数约束），
+      //    此处不再二次 UPDATE；保留 evaluatedSet 仅供结算/学习判定。
       // E-9 BUG-004：评价流转自动生成结算草稿（draft，待 admin 确认）。
       // SAVEPOINT 隔离——结算故障不拖垮评价流转；幂等（已有明细则跳过）；失败经 settle_error 透出。
       if (evaluatedSet.includes(to)) {
         // created_by 固定留痕 'auto:evaluated'（与人工 POST /settlements 的 username 留痕相区分，FE 据此打「自动生成」标记）
         const settleStep = await runAutoSettleStep(client, tenantId, req.params.id);
         settleError = settleStep.settleError;
+      }
+      // 资产维修状态回写（2026-11-14；2026-11-17 扩展取消/关闭）：
+      // 完成 ⇒ 恢复 in_use；取消/关闭 ⇒ 若没有其它活跃关联工单，也恢复 in_use。
+      // 口径：仅 linked_order_ids 命中本单且资产仍为 repairing 的才动；并用活跃工单集合防并行维修误恢复。
+      const woDoneSet = unionStates(woDefs.map(doneStates));
+      const isDone = woDoneSet.includes(to);
+      const isTerminal = isDone || to === 'cancelled' || to === 'closed';
+      if (isTerminal) {
+        const woActiveSet = unionStates(woDefs.map(activeStates));
+        const restored = await client.query(
+          `UPDATE asset SET status='in_use', updated_at=now()
+            WHERE tenant_id=$1 AND status='repairing' AND $2::uuid = ANY(linked_order_ids)
+              AND NOT EXISTS (
+                SELECT 1 FROM work_orders w
+                 WHERE w.tenant_id=$1 AND w.id = ANY(linked_order_ids::text[])
+                   AND w.id <> $2::text AND w.status = ANY($3::text[])
+              )
+            RETURNING id`,
+          [tenantId, req.params.id, woActiveSet],
+        );
+        for (const a of restored.rows as Array<{ id: string }>) {
+          await emitDomainEvent(client, {
+            tenantId,
+            entityType: 'asset',
+            entityId: a.id,
+            type: isDone ? 'asset_repair_done' : 'asset_repair_cancelled',
+            actor: 'system',
+            payload: { work_order_id: req.params.id, to_status: to },
+          });
+        }
       }
       return r;
     });
@@ -630,11 +625,18 @@ router.get('/open/work_orders', async (req, res, next) => {
       const v = req.query[k];
       return typeof v === 'string' && v ? v : undefined;
     };
-    const department = qstr('department');
+    const departmentId = qstr('department_id') ?? qstr('department');
+    const departmentUnassigned = req.query.department_unassigned === '1' || req.query.department_unassigned === 'true';
+    const bucket = qstr('bucket');
+    if (bucket && status) {
+      throw new AppError('BAD_PARAM', 'bucket 与 status 互斥，不能同时传', 400);
+    }
+    if (departmentId && departmentUnassigned) {
+      throw new AppError('BAD_PARAM', 'department_id 与 department_unassigned 互斥，不能同时传', 400);
+    }
     const priority = qstr('priority');
     const source = qstr('source');
-    const serviceDesk = qstr('service_desk');
-    // P1（服务台按"陪检"一键圈单）：business_type 精确匹配过滤（不传=不过滤，零回归）
+    // P1：business_type 精确匹配过滤（不传=不过滤，零回归）
     const businessType = qstr('business_type');
     // P-3：limit/offset 强制上限，防止调用方拉取整表（DoS 面）。
     const limit = Math.min(Math.max(1, Math.floor(Number(req.query.limit) || 20)), 200);
@@ -648,30 +650,37 @@ router.get('/open/work_orders', async (req, res, next) => {
     const autoFlow = req.query.auto_flow === '1' || req.query.auto_flow === 'true';
     const todayOnly = req.query.today === '1' || req.query.today === 'true';
     const timeoutOnly = req.query.timeout === '1' || req.query.timeout === 'true';
-    // 审查修复（架构🔴1 缩范围版 · worker 数据可见性）+ P2-2（派了才可见）：
-    // 师傅角色（worker/operator）强制只看分派给自己名下的单——未分派单在工单列表
-    // 全不可见（唯一可见面=抢单大厅）。刻意不加 ticket.manage 权限点（师傅默认
-    // 矩阵没有，加了会让小程序接单页全空）。
-    // JWT sub=account_user.id → 经 worker.account_id 反查真实 worker.id（业务编码）。
+    // 行级可见性由 work_orders RLS 兜底（110_principal_rls.sql）：
+    //   worker → 本人 / 自己创建且未分派；operator/admin/reviewer → 全租户。
+    // 路由不再写 MASTER_ROLES，也不再“查不到档案就放行全量”。
     const data = await withTenantClient(tenantId, async (client) => {
-      // E-8 QA P3-1：师傅角色 scope 现为集合（string[] → repo ANY），类型随其放宽
-      let scopedAssignee: string | string[] | undefined = assignee;
-      if (res.locals.auth.role && MASTER_ROLES.includes(res.locals.auth.role)) {
-        const myWorkerIds = await resolveWorkerIds(client, tenantId, res.locals.auth.userId);
-        if (myWorkerIds.length > 0) {
-          // E-8 QA P3-1：多档案按集合过滤（list 的 assignee 支持 string[] → ANY），覆盖显式传入的 assignee（防越权看别人的单）
-          scopedAssignee = myWorkerIds;
+      // bucket 下钻：用与 /stats/workbench 同一个桶映射转成状态集合。
+      let effectiveStatus = status as string | undefined;
+      if (bucket) {
+        const def = await getWorkflowDef(client, tenantId, 'work_order');
+        const map = resolveWorkbenchBuckets(def);
+        if (bucket === 'other') {
+          const known = new Set<string>([
+            ...map.pending, ...map.hall, ...map.active, ...map.done, ...map.cancelled,
+          ]);
+          const r = await client.query<{ status: string }>(
+            `SELECT DISTINCT status FROM work_orders WHERE tenant_id = $1`,
+            [tenantId],
+          );
+          const other = r.rows.map((x) => x.status).filter((s) => !known.has(s));
+          effectiveStatus = other.length ? other.join(',') : '__none__';
         } else {
-          // 档案查不到（account_id 脏值/为空的老数据）→ 降级放行并告警：宁可漏，不能让一线干不了活。
-          console.warn('[workOrder.list] master profile not found, 降级放行全量（不可阻断一线作业）', {
-            tenantId, userId: res.locals.auth.userId, role: res.locals.auth.role,
-          });
+          const statuses = (map as Record<string, string[]>)[bucket];
+          if (!statuses) throw new AppError('BAD_PARAM', `unknown bucket: ${bucket}`, 400);
+          effectiveStatus = statuses.length ? statuses.join(',') : '__none__';
         }
       }
       return list(client, tenantId, {
-        status, limit, offset, assignee: scopedAssignee, unsettledOnly: unsettled,
+        status: effectiveStatus as WorkOrderStatus | undefined,
+        limit, offset, assignee, unsettledOnly: unsettled,
         // 决策 #8：四参透传（不传 = 不过滤，零回归）
-        department, priority, source, service_desk: serviceDesk,
+        departmentId, departmentUnassigned,
+        priority, source,
         // P1：business_type 透传（不传 = 不过滤，零回归）
         businessType,
         // 工作台下钻（#949 续）：三参透传（不传 = 不过滤，零回归）
@@ -747,26 +756,9 @@ router.get('/open/work_order/:id', async (req, res, next) => {
   try {
     const tenantId = res.locals.auth.tenantId;
     const result = await withTenantClient(tenantId, async (client) => {
+      // RLS 已按请求 scope 过滤：worker 查别人单返回 null → 404，不再需要端点守卫。
       const ticketRow = await findOne(client, tenantId, req.params.id);
       if (!ticketRow) return null;
-      // 审查修复（架构🔴1 缩范围版 · worker 数据可见性）+ P2-2（派了才可见）：
-      // 师傅角色（worker/operator）只能看分派给自己名下的单详情——未分派单
-      // （assignee_id IS NULL）同样 403 不可见（与列表同口径，唯一可见面=抢单大厅）。
-      // 反查不到档案时降级放行（不可阻断一线作业）。
-      if (res.locals.auth.role && MASTER_ROLES.includes(res.locals.auth.role)) {
-        const myWorkerIds = await resolveWorkerIds(client, tenantId, res.locals.auth.userId);
-        if (myWorkerIds.length > 0) {
-          // E-8 QA P3-1：多档案任一命中即放行（旧逻辑只比 rows[0]，第二条档案名下的单会误 403）。
-          // assignee_id 为 null（未分派）同样 403：includes(null) 前先收窄。
-          if (ticketRow.assignee_id === null || !myWorkerIds.includes(ticketRow.assignee_id)) {
-            throw new AppError('FORBIDDEN', '仅可查看分派给本人名下的工单（未分派工单请到抢单大厅）', 403);
-          }
-        } else {
-          console.warn('[workOrder.detail] master profile not found, 降级放行（不可阻断一线作业）', {
-            tenantId, userId: res.locals.auth.userId, role: res.locals.auth.role,
-          });
-        }
-      }
       // 与列表接口对齐：补充 code（业务工单号）= order_no，供 SPA 详情页展示（DEF-2 修复一致性）。
       const ticket = { ...ticketRow, code: ticketRow.order_no };
       // T1-B 批4：详情 available 必须与写侧用同一个版本化 def，否则按钮与实际校验不一致
@@ -788,7 +780,17 @@ router.get('/open/work_order/:id', async (req, res, next) => {
           [tenantId, req.params.id],
         )
         .then((r) => r.rows);
-      return { ticket, available, events };
+      // 工单 → 资产互通：以 asset.linked_order_ids 为唯一事实源，不新增重复的外键列。
+      const asset = await client
+        .query(
+          `SELECT id, asset_no, name, location, status
+             FROM asset
+            WHERE tenant_id=$1 AND $2::uuid = ANY(linked_order_ids)
+            LIMIT 1`,
+          [tenantId, req.params.id],
+        )
+        .then((r) => r.rows[0] ?? null);
+      return { ticket, available, events, asset };
     });
     if (!result) return res.status(404).json({ ok: false, code: 'NOT_FOUND', message: 'work order not found' });
     return res.json({ ok: true, code: 0, ...result });
@@ -858,30 +860,50 @@ router.post('/open/work_order/:id/voice', async (req, res, next) => {
   }
 });
 
-// GET /api/v1/open/notifications —— 通知列表（?recipient= 过滤；缺省=租户全部）
+// GET /api/v1/open/notifications —— 通知列表（?recipient= 可选过滤；缺省=本人收件箱）
 // 审查修复：合并原 454(recipient 版) 与 585(全量版) 重复注册——Express 先注册先匹配，585 版永不生效。
+// P0-3（2026-11-04）：原缺省路径返回**全租户** in_app 通知，任意登录账号可读取他人消息。
+//   现与 /open/notifications/read 同口径：当前身份集合 = auth.userId ∪ resolveWorkerIds，
+//   ?recipient= 只允许是集合内身份（否则 403）；身份解析不出 → 422，绝不降级为全租户。
 // in_app 落库即可达；sms/push 为 stub 未真发，诚实标注。
 router.get('/open/notifications', async (req, res, next) => {
   try {
-    const tenantId = res.locals.auth.tenantId;
-    const recipient = (req.query.recipient as string) || '';
+    const auth = res.locals.auth;
+    const tenantId = auth.tenantId;
+    const recipient = typeof req.query.recipient === 'string' ? req.query.recipient.trim() : '';
     // 收件箱仅展示用户可见的站内信（in_app）。sms/push/wechat 为投递凭证（delivery receipt），
     // 已随 fan-out 在 dispatchNotification 落库，但不计入用户消息列表/未读数，避免每条派单出现重复条目。
-    const conds = ['n.tenant_id = $1', "n.channel = 'in_app'"];
-    const params: unknown[] = [tenantId];
-    if (recipient) { params.push(recipient); conds.push(`n.recipient = $${params.length}`); }
-    // 孤儿通知过滤（2026-08-29 bug 修复）：测试/清理路径删单不级联删通知时，
-    // 通知指向已删工单 → 小程序点击进详情 404「打不开」。列表只展示工单仍存在的通知。
-    conds.push(`EXISTS (SELECT 1 FROM work_orders wo WHERE wo.id = n.work_order_id)`);
-    const rows = await withTenantClient(tenantId, (client) =>
-      client
+    const rows = await withTenantClient(tenantId, async (client) => {
+      // 本人身份集合（recipient 可能是 worker.id 或 account_user.id，双路并集）。
+      const identity = new Set<string>([auth.userId || '']);
+      for (const wid of await resolveWorkerIds(client, tenantId, auth.userId)) identity.add(wid);
+      identity.delete('');
+      if (identity.size === 0) {
+        throw new AppError('IDENTITY_UNRESOLVED', '无法解析当前账号收件身份，拒绝读取通知', 422);
+      }
+      if (recipient && !identity.has(recipient)) {
+        throw new AppError('FORBIDDEN', '只能查看本人收件箱', 403);
+      }
+      const recipients = Array.from(identity);
+      const conds = ['n.tenant_id = $1', "n.channel = 'in_app'", 'n.recipient = ANY($2::text[])'];
+      const params: unknown[] = [tenantId, recipients];
+      if (recipient) {
+        params.push(recipient);
+        conds.push(`n.recipient = $${params.length}`);
+      }
+      // 孤儿通知过滤（2026-08-29 bug 修复）：测试/清理路径删单不级联删通知时，
+      // 通知指向已删工单 → 小程序点击进详情 404「打不开」。列表只展示单仍存在的通知。
+      // P0-6（2026-11-07）：运送单通知借位存放 work_order_id，按 payload.entity_type 分流；
+      //   单一事实源见 repo/notificationVisibility.ts（含跨租户对齐说明）。
+      conds.push(notificationOrphanGuardSql());
+      return client
         .query(
           `SELECT n.id, n.recipient, n.recipient_kind, n.type, n.title, n.body, n.channel, n.delivered, n.read, n.work_order_id, n.payload, n.created_at
            FROM notification n WHERE ${conds.join(' AND ')} ORDER BY n.created_at DESC LIMIT 100`,
           params,
         )
-        .then((r) => r.rows),
-    );
+        .then((r) => r.rows);
+    });
     return res.json({ ok: true, code: 0, items: rows });
   } catch (e) {
     next(e);
@@ -899,7 +921,7 @@ router.post('/open/notifications/read', async (req, res, next) => {
   try {
     const auth = res.locals.auth;
     const tenantId = auth.tenantId;
-    const body = z.object({ ids: z.array(z.string()).optional() }).parse(req.body ?? {});
+    const body = z.object({ ids: z.array(z.string().uuid()).optional() }).parse(req.body ?? {});
     const result = await withTenantClient(tenantId, async (client) => {
       // 本人身份集合（recipient 可能是 worker.id 或 account_user.id，双路并集）
       const identity = new Set<string>([auth.userId || '']);
@@ -912,7 +934,7 @@ router.post('/open/notifications/read', async (req, res, next) => {
       if (body.ids && body.ids.length > 0) {
         const r = await client.query(
           `UPDATE notification SET read = true
-           WHERE tenant_id = $1 AND id = ANY($2::text[]) AND recipient = ANY($3::text[]) AND read = false
+           WHERE tenant_id = $1 AND id = ANY($2::uuid[]) AND recipient = ANY($3::text[]) AND read = false
            RETURNING id`,
           [tenantId, body.ids, recipients],
         );
@@ -937,9 +959,9 @@ router.post('/open/notifications/read', async (req, res, next) => {
 router.post('/open/notify/selftest', async (req, res, next) => {
   try {
     const tenantId = res.locals.auth.tenantId;
-    // 审查修复（QA🟡7）：自检会真实调用微信订阅消息接口（消耗接口配额）——
-    // 原实现零门禁，任意登录账号可无限触发。与 /sla/scan 同走运维角色门禁。
-    assertOpsRole(res.locals.auth);
+    // 自检会真实调用微信订阅消息接口（消耗接口配额）——
+    // 运维角色保留门禁；worker 是自检的实际使用者，只允许对自己的档案发起。
+    if (res.locals.auth.role !== 'worker') assertOpsRole(res.locals.auth);
     const accountId = res.locals.auth.userId || '';
     // 解析当前登录工人（account_id 或 worker.id 任一匹配，兼容两种 userId 语义）
     const workerId = await withTenantClient(tenantId, (client) =>
@@ -973,15 +995,10 @@ router.post('/open/notify/selftest', async (req, res, next) => {
 
 // PATCH /api/v1/open/work_order/:id/ext —— P0 字段级配置：合并自定义字段值到 ext（租户隔离）
 // 用于把业务流程配置的自定义字段（config.fields）在工单/业务流表单上填写后落库。
-// 审查修复（横切⑤⑥ F2）三件套：
-//   ① 权限守卫：ticket.manage（FE TicketDetail 管理端唯一调用方，worker/mp 零调用）；
-//   ② 白名单：patch 键 ⊆ 租户 workflow_def(work_order).config.fields 键集（与 FE TicketDetail
-//      数据源同源，FE :213 即按该数组渲染自定义字段表单）——防止任意登录角色借本端点
-//      篡改 ext 任意键；租户未配置 fields 时按"无可改字段"拒绝非空 patch；
-//   ③ 保留键硬拒：public_view_token / attachments / voice（uploads.ts 依赖 ext.attachments
-//      做公开查看鉴权，public_view_token 是凭证本体，voice 有专属端点）即使出现在白名单
-//      也 403 拒绝；
-//   + audit 留痕：ticket_event(type='ext_patch') 记录变更键与前后值，actor 取登录账号名。
+// 权限（2026-11-10 放宽，窄口）：ticket.manage 可改全部白名单字段；
+//   工单承接人（worker 且 assignee_id 命中本人档案）只允许改 feedback_note（现场备注）。
+// 白名单：patch 键 ⊆ 租户 workflow_def(work_order).config.fields 键集 + 内置 feedback_note。
+//   保留键 public_view_token / attachments / voice 仍硬拒（uploads.ts / 专属端点依赖）。
 const extPatchSchema = z.object({ patch: z.record(z.string(), z.unknown()) });
 const EXT_RESERVED_KEYS: readonly string[] = ['public_view_token', 'attachments', 'voice'];
 router.patch('/open/work_order/:id/ext', async (req, res, next) => {
@@ -995,21 +1012,42 @@ router.patch('/open/work_order/:id/ext', async (req, res, next) => {
       throw new AppError('EXT_RESERVED_KEY', `保留键不可经本端点修改: ${reservedHit.join(', ')}`, 403);
     }
     const result = await withTenantClient(tenantId, async (client) => {
-      await requirePermission(auth, client, 'ticket.manage');
+      const row = await findOneForUpdate(client, tenantId, req.params.id);
+      if (!row) return null;
+
+      // 窄口：承接人只改现场备注；管理面仍走 ticket.manage。
+      const isWorkerNoteOnly =
+        auth.role === 'worker' &&
+        patchKeys.length > 0 &&
+        patchKeys.every((k) => k === 'feedback_note');
+      let workerOwnsTicket = false;
+      if (isWorkerNoteOnly) {
+        const workerIds = await resolveWorkerIds(client, tenantId, auth.userId);
+        workerOwnsTicket = !!row.assignee_id && workerIds.includes(row.assignee_id);
+      }
+      const canManage = await hasPerm(auth, client, 'ticket.manage');
+      if (!canManage && !workerOwnsTicket) {
+        throw new AppError('FORBIDDEN', 'permission denied: ticket.manage', 403);
+      }
+
       // 白名单口径：与 FE TicketDetail 同源——租户 workflow_def(work_order).config.fields 键集
+      // + 内置 feedback_note（mini program 现场备注字段）。
       const def = await getWorkflowDef(client, tenantId, 'work_order');
       const rawFields = def.config?.fields;
-      const allowed = Array.isArray(rawFields)
+      const configuredKeys = Array.isArray(rawFields)
         ? rawFields
             .map((f: unknown) => (f && typeof f === 'object' && 'key' in (f as Record<string, unknown>) ? String((f as Record<string, unknown>).key) : ''))
             .filter((k) => k !== '')
         : [];
+      const allowed = [...configuredKeys, 'feedback_note'];
       const illegal = patchKeys.filter((k) => !allowed.includes(k));
       if (illegal.length > 0) {
         throw new AppError('EXT_FIELD_NOT_ALLOWED', `字段不在流程自定义字段白名单内: ${illegal.join(', ')}`, 422);
       }
-      const row = await findOneForUpdate(client, tenantId, req.params.id);
-      if (!row) return null;
+      if ('feedback_note' in patch && (typeof patch.feedback_note !== 'string' || patch.feedback_note.length > 2000)) {
+        throw new AppError('BAD_PARAM', 'feedback_note 必须是不超过 2000 字的字符串', 422);
+      }
+
       const ext: Record<string, unknown> = row.ext && typeof row.ext === 'object' ? { ...row.ext } : {};
       const before: Record<string, unknown> = {};
       for (const k of patchKeys) before[k] = ext[k] ?? null;
@@ -1041,13 +1079,98 @@ router.patch('/open/work_order/:id/ext', async (req, res, next) => {
 // DataScreen.tsx:144 / Statistics.tsx:55（MainLayout.tsx:109,125-126 三页菜单本就按
 // dashboard.view 过滤，挂墙与 FE 既有口径完全对齐）+ mp overview.js:33 / report.js:45
 // 两个 admin 页。worker/未登录端点层零调用 → 挂墙零回归。
+// POST /api/v1/open/work_order/:id/urge —— 报修人/管理员催办（2026-11-14 方向 C）
+// 口径：
+//   - 仅活跃态可催办（完成/取消等终态 409）；
+//   - 发起人 = 建单人本人，或持 ticket.manage 的管理角色；
+//   - 同人同单 30 分钟限一次（ticket_event 结构性防重），避免重复轰炸处理人；
+//   - 通知在身处理人；无处理人时通知租户管理员。
+router.post('/open/work_order/:id/urge', async (req, res, next) => {
+  try {
+    const auth = res.locals.auth;
+    const tenantId = auth.tenantId;
+    const result = await withTenantClient(tenantId, async (client) => {
+      const cur = await client.query(
+        `SELECT id, order_no, status, assignee_id, created_by, title FROM work_orders WHERE id=$1 AND tenant_id=$2`,
+        [req.params.id, tenantId],
+      );
+      if (cur.rowCount === 0) throw new AppError('NOT_FOUND', 'work order not found', 404);
+      const order = cur.rows[0];
+      const defs = await getDefsAcrossAllVersions(client, tenantId, 'work_order', 'work_orders', DEFAULT_WORK_ORDER_DEF);
+      const activeSet = unionStates(defs.map(activeStates));
+      if (!activeSet.includes(order.status)) {
+        throw new AppError('BAD_STATE', '当前状态不可催办（工单已结束/已取消）', 409);
+      }
+      const isCreator = order.created_by && String(order.created_by) === String(auth.userId ?? '');
+      if (!isCreator) await requirePermission(auth, client, 'ticket.manage');
+      const actor = auth.username ?? auth.role ?? 'user';
+      const recent = await client.query(
+        `SELECT 1 FROM ticket_event
+          WHERE tenant_id=$1 AND work_order_id=$2 AND type='urge' AND actor=$3
+            AND created_at > now() - interval '30 minutes' LIMIT 1`,
+        [tenantId, req.params.id, actor],
+      );
+      if ((recent.rowCount ?? 0) > 0) {
+        throw new AppError('URGE_TOO_FREQUENT', '催办过于频繁，请 30 分钟后再试', 429);
+      }
+      await client.query(
+        `INSERT INTO ticket_event (tenant_id, work_order_id, type, from_status, to_status, actor, payload)
+         VALUES ($1,$2,'urge',$3,$3,$4,$5)`,
+        [tenantId, req.params.id, order.status, actor, JSON.stringify({ by: actor })],
+      );
+      await emitDomainEvent(client, {
+        tenantId, entityType: 'work_order', entityId: req.params.id, type: 'urge', actor,
+        payload: { order_no: order.order_no },
+      });
+      const title = '工单催办提醒';
+      const body = `工单 ${order.order_no}（${order.title ?? ''}）已被 ${actor} 催办，请尽快处理`;
+      if (order.assignee_id) {
+        await insertNotification(client, {
+          tenantId, recipient: order.assignee_id, recipientKind: 'worker', type: 'urge',
+          workOrderId: req.params.id, title, body,
+          payload: { order_no: order.order_no, page: `pages/worker/task-detail/task-detail?id=${req.params.id}` },
+        });
+      } else {
+        const admins = await client.query(`SELECT id FROM account_user WHERE tenant_id=$1 AND role='admin' AND active=true`, [tenantId]);
+        for (const a of admins.rows as Array<{ id: string }>) {
+          await insertNotification(client, {
+            tenantId, recipient: a.id, recipientKind: 'account', type: 'urge',
+            workOrderId: req.params.id, title, body,
+            payload: { order_no: order.order_no, page: `tickets/${req.params.id}` },
+          });
+        }
+      }
+      return { order_no: order.order_no };
+    });
+    return res.json({ ok: true, code: 0, urged: true, ...result });
+  } catch (e) {
+    next(e);
+  }
+});
+
 router.get('/stats', async (req, res, next) => {
   try {
     const tenantId = res.locals.auth.tenantId;
     const stats = await withTenantClient(tenantId, async (client) => {
       // 与 :814 asset.scan 同款范式：requirePermission 在 withTenantClient 内调用（租户级覆盖生效）
       await requirePermission(res.locals.auth, client, 'dashboard.view');
-      return ticketStats(client, tenantId);
+      const base = await ticketStats(client, tenantId);
+      // 2026-11-14（方向 C）：分布口径收敛到后端聚合，前端不再拉 1000 条自己算。
+      const byCatalog = await client.query(
+        `SELECT COALESCE(NULLIF(catalog,''),'未分类') AS key, COUNT(*)::int AS count
+           FROM work_orders WHERE tenant_id=$1 GROUP BY 1 ORDER BY count DESC`,
+        [tenantId],
+      );
+      const bySource = await client.query(
+        `SELECT COALESCE(NULLIF(source,''),'未知') AS key, COUNT(*)::int AS count
+           FROM work_orders WHERE tenant_id=$1 GROUP BY 1 ORDER BY count DESC`,
+        [tenantId],
+      );
+      return {
+        ...base,
+        catalog_distribution: byCatalog.rows,
+        source_distribution: bySource.rows,
+      };
     });
     return res.json({ ok: true, code: 0, ...stats });
   } catch (e) {
@@ -1097,40 +1220,83 @@ router.post('/sla/scan', async (req, res, next) => {
   }
 });
 
-// POST /api/v1/open/work_order/:id/transpond —— 转台（把工单从一个服务台转移到另一个服务台）
-// 门禁：dispatch.override（RBAC 默认矩阵 admin/operator/dispatcher 有，worker 无）。
-router.post('/open/work_order/:id/transpond', async (req, res, next) => {
+// POST /api/v1/open/work_order/:id/change-department —— 改部门（服务台转台的替代）
+// 门禁：dispatch.override。只改 department_id，不自动改状态/处理人。
+router.post('/open/work_order/:id/change-department', async (req, res, next) => {
   try {
     const auth = res.locals.auth;
     const tenantId = auth.tenantId;
-    const b = z.object({ deskId: z.string().min(1), reason: z.string().optional() }).parse(req.body);
+    const b = z
+      .object({ department_id: z.string().uuid(), reason: z.string().optional() })
+      .parse(req.body);
     const ticket = await withTenantClient(tenantId, async (client) => {
       await requirePermission(auth, client, 'dispatch.override');
-      const desk = await client.query('SELECT id, name FROM service_desk WHERE id=$1 AND tenant_id=$2', [b.deskId, tenantId]);
-      if (desk.rowCount === 0) throw new AppError('NOT_FOUND', 'target service desk not found', 404);
+      const dept = await client.query<{ id: string; name: string }>(
+        'SELECT id, name FROM dept WHERE id=$1 AND tenant_id=$2',
+        [b.department_id, tenantId],
+      );
+      if (dept.rowCount === 0) throw new AppError('NOT_FOUND', 'target department not found', 404);
       const cur = await findOneForUpdate(client, tenantId, req.params.id);
       if (!cur) throw new AppError('NOT_FOUND', 'work order not found', 404);
+
+      // 已派单且处理人不属于目标部门 → 先改派，避免“人在这科、单在那科”。
+      if (cur.assignee_id) {
+        const w = await client.query<{ department_id: string | null }>(
+          'SELECT department_id FROM worker WHERE id=$1 AND tenant_id=$2',
+          [cur.assignee_id, tenantId],
+        );
+        const wDept = w.rows[0]?.department_id ?? null;
+        if (wDept && wDept !== b.department_id) {
+          throw new AppError('CONFLICT', '当前处理人不属于目标部门，请先改派后再改部门', 409);
+        }
+      }
+
       await client.query(
-        'UPDATE work_orders SET service_desk=$1, updated_at=now() WHERE id=$2 AND tenant_id=$3',
-        [b.deskId, req.params.id, tenantId],
+        'UPDATE work_orders SET department_id=$1, department_source=$2, updated_at=now() WHERE id=$3 AND tenant_id=$4',
+        [b.department_id, 'manual', req.params.id, tenantId],
       );
       await client.query(
         `INSERT INTO ticket_event (tenant_id, work_order_id, type, from_status, to_status, actor, payload)
-         VALUES ($1,$2,'transpond',$3,$3,'system',$4)`,
-        [tenantId, req.params.id, cur.status, JSON.stringify({ from_desk: cur.service_desk, to_desk: b.deskId, reason: b.reason ?? null })],
+         VALUES ($1,$2,'change_department',$3,$3,'system',$4)`,
+        [
+          tenantId,
+          req.params.id,
+          cur.status,
+          JSON.stringify({
+            from_department_id: cur.department_id ?? null,
+            to_department_id: b.department_id,
+            to_department_name: dept.rows[0].name,
+            reason: b.reason ?? null,
+          }),
+        ],
       );
-      await emitDomainEvent(client, { tenantId, entityType: 'work_order', entityId: req.params.id, type: 'transpond', actor: 'system', payload: { from_desk: cur.service_desk, to_desk: b.deskId } });
-      // A5 转台通知：通知目标服务台（desk 级）+ 现任处理人
-      await insertNotification(client, {
-        tenantId, recipient: b.deskId, recipientKind: 'desk', type: 'transpond', workOrderId: req.params.id,
-        title: '工单已转入本服务台', body: `工单 ${cur.order_no} 已转入服务台 ${desk.rows[0].name}`,
-        payload: { order_no: cur.order_no, from_desk: cur.service_desk, to_desk: b.deskId },
+      await emitDomainEvent(client, {
+        tenantId,
+        entityType: 'work_order',
+        entityId: req.params.id,
+        type: 'change_department',
+        actor: 'system',
+        payload: {
+          from_department_id: cur.department_id ?? null,
+          to_department_id: b.department_id,
+          to_department_name: dept.rows[0].name,
+        },
       });
       if (cur.assignee_id) {
         await insertNotification(client, {
-          tenantId, recipient: cur.assignee_id, type: 'transpond', workOrderId: req.params.id,
-          title: '工单已转台', body: `工单 ${cur.order_no} 已转至服务台 ${desk.rows[0].name}`,
-          payload: { order_no: cur.order_no, from_desk: cur.service_desk, to_desk: b.deskId, page: `pages/worker/task-detail/task-detail?id=${req.params.id}` },
+          tenantId,
+          recipient: cur.assignee_id,
+          recipientKind: 'worker',
+          type: 'change_department',
+          workOrderId: req.params.id,
+          title: '工单责任部门已变更',
+          body: `工单 ${cur.order_no} 已转至 ${dept.rows[0].name}`,
+          payload: {
+            order_no: cur.order_no,
+            from_department_id: cur.department_id ?? null,
+            to_department_id: b.department_id,
+            page: `pages/worker/task-detail/task-detail?id=${req.params.id}`,
+          },
         });
       }
       return findOne(client, tenantId, req.params.id);
@@ -1145,7 +1311,7 @@ router.post('/open/work_order/:id/transpond', async (req, res, next) => {
 router.get('/open/claim-hall', async (req, res, next) => {
   try {
     const tenantId = res.locals.auth.tenantId;
-    const department = req.query.department as string | undefined;
+    const department = (req.query.department_id ?? req.query.department) as string | undefined;
     const { items, defs, insRows, trRows } = await withTenantClient(tenantId, async (client) => {
       // F10：池态不再写死 ('claim_hall','pending_dispatch')——与认领端点守卫共用
       //   claimableStates(def)（写在代码里的名单换成"能 claim 的态即池"的派生），
@@ -1174,11 +1340,15 @@ router.get('/open/claim-hall', async (req, res, next) => {
       //   2026-11-01：不再整段 return —— 巡检/运送两区与本池无关，工单区空不代表它们也空。
       let r: { rows: any[] } = { rows: [] };
       if (poolSet.length > 0) {
-        const conds = ['tenant_id=$1', 'status = ANY($2::text[])'];
+        const conds = ['wo.tenant_id=$1', 'wo.status = ANY($2::text[])'];
         const params: unknown[] = [tenantId, poolSet];
-        if (department) { params.push(department); conds.push(`department = $${params.length}`); }
+        if (department) { params.push(department); conds.push(`wo.department_id = $${params.length}`); }
         r = await client.query(
-          `SELECT * FROM work_orders WHERE ${conds.join(' AND ')} ORDER BY created_at ASC LIMIT 500`,
+          `SELECT wo.*, d.name AS department_name
+             FROM work_orders wo
+             LEFT JOIN dept d ON d.id = wo.department_id AND d.tenant_id = wo.tenant_id
+            WHERE ${conds.join(' AND ')}
+            ORDER BY wo.created_at ASC LIMIT 500`,
           params,
         );
       }
@@ -1219,7 +1389,7 @@ router.get('/open/claim-hall', async (req, res, next) => {
           ).rows
         : [];
       return { items: r.rows, defs, insRows, trRows };
-    });
+    }, { claimHall: true });
     const out = items.map((it: any) => ({
       ...it,
       code: it.order_no,
@@ -1288,7 +1458,7 @@ router.post('/open/work_order/:id/claim', async (req, res, next) => {
     const { workerId: _w, department: _d, ...fields } = b;
     const ticket = await withTenantClient(tenantId, (client) =>
       claimWorkOrder(client, tenantId, { orderId: req.params.id, workerId, role, fields }),
-    );
+    { claimHall: true });
     return res.json({ ok: true, code: 0, ticket });
   } catch (e) {
     next(e);
