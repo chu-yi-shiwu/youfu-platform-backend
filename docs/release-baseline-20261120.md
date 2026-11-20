@@ -110,7 +110,23 @@ node scripts/release-baseline.mjs --frontend ..\youfu_frontend_dev
 
 r2 额外修复：`router.use(guard)` 未限定路径会把后续所有请求一起拦截（例如关闭 configuration 误伤 `/departments`、`/inventory/consume`）。现所有 guard 已限定到自身 router 前缀，并有跨 router 回归测试。
 
-## 7. 约束
+## 7. r3 公共报修本人评价
+
+| 项 | 值 |
+| --- | --- |
+| 后端 r3 commit | `cae38ef1aa431426ace80c6f8e2b4381a5b27471` |
+| 后端 r3 tag | `release-20261120-public-eval` |
+| CI run | `44766744187`，success |
+| artifact | `youfu-release-cae38ef1aa431426ace80c6f8e2b4381a5b27471`，635,872 bytes |
+| release ID | `20261120T160604-cae38ef1aa43` |
+| 服务器 current | `/opt/youfu/releases/20261120T160604-cae38ef1aa43` |
+| 公共评价 live 审计 | 5 / 5 PASS |
+| 主站/pilot 资产审计 | 38 / 38 PASS |
+| 模块审计 | 17 / 17 PASS |
+
+公共报修评价复用 `view_token`，不新增表；流转副作用与通用端点共用 `finalizeTransitionSideEffects()`。小程序代码已改，需按微信开发者工具流程上传发布。
+
+## 8. 约束
 
 - `release-manifest.json` / `release-baseline.json` 是可复现发布 artifact，不进入源码库；
 - `release-baseline.mjs` 默认 fail-closed：commit 缺失或工作树不干净直接退出 1；
