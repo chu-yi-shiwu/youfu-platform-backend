@@ -21,17 +21,38 @@ export interface DepartmentModuleItem extends ModuleItem {
   effective: boolean;
 }
 
+/**
+ * 模块表尚未应用迁移（42P01）时按“默认全开”降级。
+ * 模块是管理面能力开关，不是安全边界；不能因为未跑 127 迁移把登录/业务接口打成 500。
+ * 其他数据库错误仍原样抛出，避免掩盖真实故障。
+ */
+function isMissingModuleTable(e: unknown): boolean {
+  const err = e as { code?: string; message?: string } | null;
+  if (err?.code === '42P01') return true;
+  return /relation "(tenant_module|department_module)" does not exist/i.test(err?.message ?? '');
+}
+
 async function tenantModuleMap(client: PoolClient, tenantId: string): Promise<Map<string, boolean>> {
-  const r = await client.query(`SELECT module_key, enabled FROM tenant_module WHERE tenant_id=$1`, [tenantId]);
-  return new Map(r.rows.map((row: { module_key: string; enabled: boolean }) => [row.module_key, row.enabled]));
+  try {
+    const r = await client.query(`SELECT module_key, enabled FROM tenant_module WHERE tenant_id=$1`, [tenantId]);
+    return new Map(r.rows.map((row: { module_key: string; enabled: boolean }) => [row.module_key, row.enabled]));
+  } catch (e) {
+    if (isMissingModuleTable(e)) return new Map();
+    throw e;
+  }
 }
 
 async function departmentModuleMap(client: PoolClient, tenantId: string, departmentId: string): Promise<Map<string, boolean>> {
-  const r = await client.query(
-    `SELECT module_key, enabled FROM department_module WHERE tenant_id=$1 AND department_id=$2`,
-    [tenantId, departmentId],
-  );
-  return new Map(r.rows.map((row: { module_key: string; enabled: boolean }) => [row.module_key, row.enabled]));
+  try {
+    const r = await client.query(
+      `SELECT module_key, enabled FROM department_module WHERE tenant_id=$1 AND department_id=$2`,
+      [tenantId, departmentId],
+    );
+    return new Map(r.rows.map((row: { module_key: string; enabled: boolean }) => [row.module_key, row.enabled]));
+  } catch (e) {
+    if (isMissingModuleTable(e)) return new Map();
+    throw e;
+  }
 }
 
 export async function tenantModules(client: PoolClient, tenantId: string): Promise<ModuleItem[]> {
@@ -63,11 +84,17 @@ export async function userDepartmentId(
   userId: string | undefined,
 ): Promise<string | null> {
   if (!userId) return null;
-  const r = await client.query(
-    `SELECT department_id FROM worker WHERE tenant_id=$1 AND account_id=$2::text AND department_id IS NOT NULL LIMIT 1`,
-    [tenantId, userId],
-  );
-  return (r.rows[0]?.department_id as string | undefined) ?? null;
+  try {
+    const r = await client.query(
+      `SELECT department_id FROM worker WHERE tenant_id=$1 AND account_id=$2::text AND department_id IS NOT NULL LIMIT 1`,
+      [tenantId, userId],
+    );
+    return (r.rows[0]?.department_id as string | undefined) ?? null;
+  } catch {
+    // 旧库/裁剪测试库可能没有 worker.account_id / department_id；按“无部门”处理，
+    // 模块授权只收紧管理面，不能因此把 /auth/me 或业务请求打成 500。
+    return null;
+  }
 }
 
 /**

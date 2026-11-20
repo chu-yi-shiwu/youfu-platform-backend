@@ -20,7 +20,11 @@ import { AppError } from '../middleware/error.js';
 //   src/middleware/role.ts，所有调用点一律直接从那里引（不再有中间 re-export 层）。
 import { assertAdmin, requirePermission } from '../middleware/role.js';
 
+import { requireModuleWrites } from '../middleware/moduleGuard.js';
+
 const router = Router();
+router.use(requireModuleWrites('configuration'));
+
 
 // ============ dispatch_rule ============
 const ruleSchema = z.object({

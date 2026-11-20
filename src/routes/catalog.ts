@@ -11,7 +11,11 @@ import { withTenantClient } from '../db/pool.js';
 import { AppError } from '../middleware/error.js';
 import { requirePermission } from '../middleware/role.js';
 
+import { requireModuleWrites } from '../middleware/moduleGuard.js';
+
 const router = Router();
+router.use(requireModuleWrites('foundation'));
+
 
 const catalogSchema = z.object({
   code: z.string().min(1),

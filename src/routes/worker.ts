@@ -15,7 +15,11 @@ import { requirePermission, requireAnyPermission, canAssignRole, type Role } fro
 import { hashPassword } from '../account.js';
 import { generateAdminPassword } from '../repo/tenantProvision.js';
 
+import { requireModuleWrites } from '../middleware/moduleGuard.js';
+
 const router = Router();
+router.use(requireModuleWrites('foundation'));
+
 
 const workerSchema = z.object({
   id: z.string().min(1),

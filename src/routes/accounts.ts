@@ -38,7 +38,11 @@ import { isBuiltinRole, isRoleUsable, listAllRoles } from '../repo/roleDef.js'; 
  */
 const roleCodeField = z.string().regex(ROLE_CODE_RE, 'invalid role code').optional();
 
+import { requireModuleWrites } from '../middleware/moduleGuard.js';
+
 const router = Router();
+router.use(requireModuleWrites('system'));
+
 
 // ---- 审计（横切⑤⑥ F5：append-only platform_audit；失败不阻断主流程，invite.ts 同口径） ----
 // 覆盖五类权限/账号变更：角色权限覆盖、建号、改号（角色/停用/档案）、重置密码、删号。

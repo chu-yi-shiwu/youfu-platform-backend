@@ -75,6 +75,14 @@ h.client = {
 };
 
 import moduleAuthRouter from '../routes/moduleAuth.js';
+import basicDataRouter from '../routes/basicData.js';
+import configRouter from '../routes/config.js';
+import accountsRouter from '../routes/accounts.js';
+import feedbackRouter from '../routes/feedback.js';
+import workerRouter from '../routes/worker.js';
+import catalogRouter from '../routes/catalog.js';
+import faultCategoryRouter from '../routes/faultCategory.js';
+import departmentRoutesRouter from '../routes/departmentRoutes.js';
 import { requireModule, requireModuleWrites } from '../middleware/moduleGuard.js';
 import { userModuleKeys } from '../modules/service.js';
 
@@ -99,6 +107,14 @@ function appFor(): express.Express {
     next();
   });
   app.use('/api/v1', moduleAuthRouter);
+  app.use('/api/v1', basicDataRouter);
+  app.use('/api/v1', configRouter);
+  app.use('/api/v1', accountsRouter);
+  app.use('/api/v1', feedbackRouter);
+  app.use('/api/v1', workerRouter);
+  app.use('/api/v1', catalogRouter);
+  app.use('/api/v1', faultCategoryRouter);
+  app.use('/api/v1', departmentRoutesRouter);
   app.use(errorMiddleware);
   return app;
 }
@@ -271,6 +287,54 @@ describe('模块授权', () => {
       body: JSON.stringify({ role: 'worker' }),
     });
     expect(r.status).toBe(404);
+  });
+});
+
+describe('管理面写端点模块门禁接线', () => {
+  async function expectDisabled(method: string, path: string, moduleKey: string): Promise<void> {
+    auth = { ...auth, authMode: 'prod', role: 'admin', userId: ADMIN };
+    h.tenant.set(moduleKey, false);
+    const r = await fetch(base + path, {
+      method,
+      headers: { 'content-type': 'application/json' },
+      body: method === 'GET' ? undefined : '{}',
+    });
+    expect(r.status, `${method} ${path}`).toBe(403);
+    expect(((await r.json()) as { code: string }).code).toBe('MODULE_DISABLED');
+  }
+
+  it('基础数据写端点在 foundation 关闭时 403', async () => {
+    await expectDisabled('POST', '/api/v1/basic-data/dept', 'foundation');
+  });
+
+  it('业务规则写端点在 configuration 关闭时 403', async () => {
+    await expectDisabled('POST', '/api/v1/config/dispatch-rules', 'configuration');
+  });
+
+  it('账号/角色写端点在 system 关闭时 403', async () => {
+    await expectDisabled('POST', '/api/v1/accounts', 'system');
+  });
+
+  it('需求反馈写端点在 feedback 关闭时 403', async () => {
+    await expectDisabled('POST', '/api/v1/feedback/x/reply', 'feedback');
+  });
+
+  it('人员/目录/故障分类写端点在 foundation 关闭时 403', async () => {
+    await expectDisabled('POST', '/api/v1/workers', 'foundation');
+    await expectDisabled('POST', '/api/v1/product-catalog', 'foundation');
+    await expectDisabled('POST', '/api/v1/fault-categories', 'foundation');
+  });
+
+  it('部门路由规则/默认部门写端点按 configuration/foundation 分别拦截', async () => {
+    await expectDisabled('POST', '/api/v1/department-route-rules', 'configuration');
+    await expectDisabled('PUT', `/api/v1/departments/${DEPT}/default`, 'foundation');
+  });
+
+  it('读端点不受写门禁影响（GET 放行）', async () => {
+    auth = { ...auth, authMode: 'prod', role: 'admin', userId: ADMIN };
+    h.tenant.set('foundation', false);
+    const r = await fetch(`${base}/api/v1/basic-data/dept`);
+    expect(r.status).not.toBe(403);
   });
 });
 

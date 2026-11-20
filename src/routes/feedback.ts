@@ -10,7 +10,11 @@ import { requirePermission } from '../middleware/role.js';
 import { emitDomainEvent } from '../db/eventBus.js';
 import { csvHeader, csvRowLine, csvDateTime, type CsvField } from '../services/csvUtil.js';
 
+import { requireModuleWrites } from '../middleware/moduleGuard.js';
+
 const router = Router();
+router.use(requireModuleWrites('feedback'));
+
 
 const submitSchema = z.object({
   type: z.enum(['satisfaction', 'opinion']).default('opinion'),

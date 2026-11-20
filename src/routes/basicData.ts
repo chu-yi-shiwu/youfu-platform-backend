@@ -9,7 +9,11 @@ import { AppError } from '../middleware/error.js';
 import { requirePermission } from '../middleware/role.js';
 import { parseCsv, csvHeader, csvRowLine, csvHeaderMap, csvParseRow, csvBool, csvDateOnly, type CsvField } from '../services/csvUtil.js';
 
+import { requireModuleWrites } from '../middleware/moduleGuard.js';
+
 const router = Router();
+router.use(requireModuleWrites('foundation'));
+
 
 /**
  * CSV 单次导入的数据行硬上限（QA🟡9）。

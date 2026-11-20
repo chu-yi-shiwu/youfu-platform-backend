@@ -10,7 +10,12 @@ import { withTenantClient } from '../db/pool.js';
 import { requirePermission } from '../middleware/role.js';
 import { AppError } from '../middleware/error.js';
 
+import { requireModuleWrites } from '../middleware/moduleGuard.js';
+
 const router = Router();
+router.use(requireModuleWrites('configuration', { only: [/^\/department-route-rules/] }));
+router.use(requireModuleWrites('foundation', { only: [/^\/departments\/[^/]+\/default$/] }));
+
 
 // 与 departmentResolver 的 MatchContext 对齐；strict 拒绝未知键，避免"配了但永不命中"。
 const matchSchema = z.object({
