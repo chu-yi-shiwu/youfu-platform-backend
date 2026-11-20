@@ -23,7 +23,7 @@ import { assertAdmin, requirePermission } from '../middleware/role.js';
 import { requireModuleWrites } from '../middleware/moduleGuard.js';
 
 const router = Router();
-router.use(requireModuleWrites('configuration'));
+router.use('/config', requireModuleWrites('configuration'));
 
 
 // ============ dispatch_rule ============

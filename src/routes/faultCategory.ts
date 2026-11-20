@@ -13,7 +13,7 @@ import { requirePermission } from '../middleware/role.js';
 import { requireModuleWrites } from '../middleware/moduleGuard.js';
 
 const router = Router();
-router.use(requireModuleWrites('foundation'));
+router.use('/fault-categories', requireModuleWrites('foundation'));
 
 
 const schema = z.object({

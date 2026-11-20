@@ -18,7 +18,7 @@ import { generateAdminPassword } from '../repo/tenantProvision.js';
 import { requireModuleWrites } from '../middleware/moduleGuard.js';
 
 const router = Router();
-router.use(requireModuleWrites('foundation'));
+router.use('/workers', requireModuleWrites('foundation'));
 
 
 const workerSchema = z.object({

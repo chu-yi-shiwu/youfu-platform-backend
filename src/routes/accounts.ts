@@ -41,7 +41,7 @@ const roleCodeField = z.string().regex(ROLE_CODE_RE, 'invalid role code').option
 import { requireModuleWrites } from '../middleware/moduleGuard.js';
 
 const router = Router();
-router.use(requireModuleWrites('system'));
+router.use('/accounts', requireModuleWrites('system'));
 
 
 // ---- 审计（横切⑤⑥ F5：append-only platform_audit；失败不阻断主流程，invite.ts 同口径） ----

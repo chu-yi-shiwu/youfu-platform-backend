@@ -336,6 +336,20 @@ describe('管理面写端点模块门禁接线', () => {
     const r = await fetch(`${base}/api/v1/basic-data/dept`);
     expect(r.status).not.toBe(403);
   });
+
+  it('模块门禁不越界：configuration/system 关闭不拦截 basic-data 写', async () => {
+    auth = { ...auth, authMode: 'prod', role: 'admin', userId: ADMIN };
+    h.tenant.set('configuration', false);
+    h.tenant.set('system', false);
+    const r = await fetch(`${base}/api/v1/basic-data/dept`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name: '测试部门' }),
+    });
+    if (r.status === 403) {
+      expect(((await r.json()) as { code: string }).code).not.toBe('MODULE_DISABLED');
+    }
+  });
 });
 
 describe('有效模块与执行豁免', () => {

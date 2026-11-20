@@ -144,18 +144,41 @@ async function main() {
   const assetDept = deptModules.body?.items?.find((m) => m.key === 'asset');
   check('部门可见租户上限（资产已关闭且不可再开）', deptModules.status === 200 && assetDept?.tenant_enabled === false && assetDept?.effective === false);
 
+  // 设置中心写门禁：foundation/configuration/system 关闭后，写端点 403；读端点保留。
+  const disableSettings = await request('PUT', '/tenant/modules', {
+    modules: [
+      { key: 'foundation', enabled: false },
+      { key: 'configuration', enabled: false },
+      { key: 'system', enabled: false },
+    ],
+  }, admin);
+  check('租户关闭基础数据/业务规则/系统管理模块', disableSettings.status === 200
+    && ['foundation', 'configuration', 'system'].every((k) => disableSettings.body.items.find((m) => m.key === k)?.enabled === false));
+
+  const deptWrite = await request('POST', '/basic-data/dept', { name: '不应落库' }, admin);
+  check('基础数据写被 403 MODULE_DISABLED', deptWrite.status === 403 && deptWrite.body?.code === 'MODULE_DISABLED');
+  const deptRead = await request('GET', '/basic-data/dept', undefined, admin);
+  check('基础数据读保留（移动端字典不受影响）', deptRead.status === 200);
+  const ruleWrite = await request('POST', '/config/dispatch-rules', { name: 'x', match: {}, strategy: {} }, admin);
+  check('业务规则写被 403 MODULE_DISABLED', ruleWrite.status === 403 && ruleWrite.body?.code === 'MODULE_DISABLED');
+  const accountWrite = await request('POST', '/accounts', { username: 'x', password: 'xxxxxx' }, admin);
+  check('账号写被 403 MODULE_DISABLED', accountWrite.status === 403 && accountWrite.body?.code === 'MODULE_DISABLED');
+
   const disableMaterial = await request('PUT', `/departments/${deptA}/modules`, { modules: [{ key: 'material', enabled: false }] }, deptadmin);
-  check('部门管理员关闭本部门耗材模块', disableMaterial.status === 200 && disableMaterial.body.items.find((m) => m.key === 'material')?.effective === false);
+  check('部门管理员关闭本部门耗材模块', disableMaterial.status === 200 && disableMaterial.body.items.find((m) => m.key === 'material')?.effective === false,
+    `status=${disableMaterial.status} code=${disableMaterial.body?.code ?? ''} msg=${disableMaterial.body?.message ?? ''}`);
 
   const modMember = await request('GET', '/auth/me', undefined, member);
   const modOutsider = await request('GET', '/auth/me', undefined, outsider);
   const modAdmin = await request('GET', '/auth/me', undefined, admin);
-  check('A 部成员同时受租户+部门收紧', modMember.status === 200 && !modMember.body.modules.includes('asset') && !modMember.body.modules.includes('material'));
+  check('A 部成员同时受租户+部门收紧', modMember.status === 200 && !modMember.body.modules.includes('asset') && !modMember.body.modules.includes('material'),
+    `status=${modMember.status} modules=${Array.isArray(modMember.body?.modules) ? modMember.body.modules.join(',') : 'n/a'}`);
   check('B 部成员只受租户收紧（部门隔离）', modOutsider.status === 200 && !modOutsider.body.modules.includes('asset') && modOutsider.body.modules.includes('material'));
   check('租户管理员忽略部门收紧（仍受租户上限）', modAdmin.status === 200 && !modAdmin.body.modules.includes('asset') && modAdmin.body.modules.includes('material'));
 
   const assignSelf = await request('PUT', `/departments/${deptA}/members/${accounts.mod_member}/role`, { role: 'worker' }, deptadmin);
-  check('部门管理员分配已有低权角色', assignSelf.status === 200 && assignSelf.body.item?.role === 'worker');
+  check('部门管理员分配已有低权角色', assignSelf.status === 200 && assignSelf.body.item?.role === 'worker',
+    `status=${assignSelf.status} code=${assignSelf.body?.code ?? ''} msg=${assignSelf.body?.message ?? ''}`);
 
   const assignAdmin = await request('PUT', `/departments/${deptA}/members/${accounts.mod_member}/role`, { role: 'admin' }, deptadmin);
   check('部门管理员不能分配 admin', assignAdmin.status === 403);
@@ -168,7 +191,7 @@ async function main() {
 
   // 耗材模块已在 A 部关闭：领料（个人任务执行）必须放行到业务校验；仓库入库（管理写）必须被模块门禁拦截。
   const consume = await request('POST', '/inventory/consume', {}, memberAfterRole);
-  check('模块关闭时个人领料不被模块门禁拦截', consume.status === 400, `status=${consume.status} code=${consume.body?.code ?? ''}`);
+  check('模块关闭时个人领料不被模块门禁拦截', consume.status === 400, `status=${consume.status} code=${consume.body?.code ?? ''} msg=${consume.body?.message ?? ''}`);
   const inventoryIn = await request('POST', '/inventory/in', { material_id: '11111111-1111-4111-8111-111111111111', qty: 1 }, memberAfterRole);
   check('模块关闭时仓库管理写被 403 MODULE_DISABLED', inventoryIn.status === 403 && inventoryIn.body?.code === 'MODULE_DISABLED');
 

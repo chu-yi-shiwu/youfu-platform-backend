@@ -13,7 +13,7 @@ import { csvHeader, csvRowLine, csvDateTime, type CsvField } from '../services/c
 import { requireModuleWrites } from '../middleware/moduleGuard.js';
 
 const router = Router();
-router.use(requireModuleWrites('feedback'));
+router.use('/feedback', requireModuleWrites('feedback'));
 
 
 const submitSchema = z.object({

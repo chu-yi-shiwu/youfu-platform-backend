@@ -12,7 +12,7 @@ import { parseCsv, csvHeader, csvRowLine, csvHeaderMap, csvParseRow, csvBool, cs
 import { requireModuleWrites } from '../middleware/moduleGuard.js';
 
 const router = Router();
-router.use(requireModuleWrites('foundation'));
+router.use('/basic-data', requireModuleWrites('foundation'));
 
 
 /**
