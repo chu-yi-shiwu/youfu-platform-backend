@@ -126,7 +126,24 @@ r2 额外修复：`router.use(guard)` 未限定路径会把后续所有请求一
 
 公共报修评价复用 `view_token`，不新增表；流转副作用与通用端点共用 `finalizeTransitionSideEffects()`。小程序代码已改，需按微信开发者工具流程上传发布。
 
-## 8. 约束
+## 8. r4 工程闭环
+
+| 项 | 值 |
+| --- | --- |
+| 后端 commit | `235598f15884539d1fdcc0d2bd0e465eb2c08a05` |
+| 前端 commit | `00519766fec0f5e7425f5b2ce219a1e0189113ca` |
+| tag | 两端均 `release-20261121-r4` |
+| backend CI | run `44770156839`，success |
+| frontend CI | workflow 已加入；仓库 API 返回 404，无法在线核验，本地等价门禁全绿 |
+| release ID | `20261120T164124-235598f15884` |
+| 服务器 current | `/opt/youfu/releases/20261120T164124-235598f15884` |
+| 前端 lint | 0 warning |
+| 前端测试 | 269 / 269 |
+| 小程序 pilot | 5.9.28 已上传开发版本；manifest digest `66ce6192f766...` |
+
+r4 前端改动为 lint 清理与 CI 接入，无运行时行为变化；前端 dist 已重新部署并验证主站/ pilot 页面 200。小程序 5.9.28 需在微信后台手动点「设为体验版」后再由体验成员验收。
+
+## 9. 约束
 
 - `release-manifest.json` / `release-baseline.json` 是可复现发布 artifact，不进入源码库；
 - `release-baseline.mjs` 默认 fail-closed：commit 缺失或工作树不干净直接退出 1；
