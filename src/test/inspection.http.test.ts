@@ -51,8 +51,8 @@ const fakeClient = {
     if (sql.includes('SELECT perm FROM role_permission')) return { rows: permRows, rowCount: permRows.length };
     if (sql.includes('SELECT id FROM worker WHERE')) return { rows: workerRows, rowCount: workerRows.length };
     // —— 巡检单 inspection_task ——（细节分支优先）
-    if (sql.includes('SELECT assignee, point_id FROM inspection_task') || sql.includes('SELECT assignee FROM inspection_task') || sql.includes('SELECT id, assignee FROM inspection_task'))
-      return taskFound ? { rows: [{ assignee: taskRow.assignee, point_id: taskRow.point_id }], rowCount: 1 } : { rows: [], rowCount: 0 };
+    if (sql.includes('SELECT assignee, point_id FROM inspection_task') || sql.includes('SELECT assignee FROM inspection_task') || sql.includes('SELECT id, assignee FROM inspection_task') || sql.includes('SELECT id, assignee, status FROM inspection_task'))
+      return taskFound ? { rows: [{ assignee: taskRow.assignee, point_id: taskRow.point_id, status: taskRow.status }], rowCount: 1 } : { rows: [], rowCount: 0 };
     if (sql.includes('WHERE t.id = $1 AND t.tenant_id = $2')) return taskFound ? { rows: [taskRow], rowCount: 1 } : { rows: [], rowCount: 0 };
     if (sql.includes('SELECT * FROM inspection_task WHERE id = $1 AND tenant_id = $2')) return taskFound ? { rows: [taskRow], rowCount: 1 } : { rows: [], rowCount: 0 };
     if (sql.includes("key='inspection_geo_policy'")) return { rows: geoPolicy ? [{ value: geoPolicy }] : [], rowCount: geoPolicy ? 1 : 0 };
@@ -306,6 +306,17 @@ describe('inspection.ts · 流转引擎（checkin/complete/exception/transition/
     geoPolicy = '';
     const r = await req('POST', '/api/v1/inspection/tasks/it-1/checkin', {});
     expect(r.status).toBe(200);
+  });
+
+  it('已完成巡检单再 POST /records → 409 TASK_CLOSED，不写记录', async () => {
+    taskRow.status = 'done';
+    fakeClient.query.mockClear();
+    const r = await req('POST', '/api/v1/inspection/tasks/it-1/records', {
+      records: [{ item_id: U1, passed: true }],
+    });
+    expect(r.status).toBe(409);
+    expect(((await r.json()) as any).code).toBe('TASK_CLOSED');
+    expect(calls().some((s) => s.includes('INSERT INTO inspection_record'))).toBe(false);
   });
 
   it('⑬complete 于 pending → 422 BAD_STATE（引擎拒绝，不是硬编码 400）', async () => {

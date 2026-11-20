@@ -169,6 +169,10 @@ describe('工人端统计口径：流程派生的状态集真的进了 SQL（GET
     // 参数化仍在（防御有人把 ANY($n) 换回字面量拼接）
     expect(sql!.text).toContain('ANY($3::text[])');
     expect(sql!.text).toContain('ANY($4::text[])');
+    // 今日完成必须按 completed_at 的本地日界，不得拿累计 done_count 冒充。
+    expect(sql!.text).toContain('AS today_done');
+    expect(sql!.text).toContain("completed_at AT TIME ZONE 'Asia/Shanghai'");
+    expect(sql!.text).toContain("now() AT TIME ZONE 'Asia/Shanghai'");
   });
 
   it('⑤ 在办/已完成两列的参数来自流程派生（客户改完成态名即生效）', async () => {

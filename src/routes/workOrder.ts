@@ -1549,7 +1549,14 @@ router.get('/open/me/summary', async (req, res, next) => {
         `SELECT
            COUNT(*) FILTER (WHERE status = ANY($3::text[])) AS active_count,
            COUNT(*) FILTER (WHERE status = ANY($4::text[])) AS done_count,
-           COUNT(*) FILTER (WHERE created_at::date = CURRENT_DATE) AS today_new
+           COUNT(*) FILTER (
+             WHERE status = ANY($4::text[])
+               AND completed_at IS NOT NULL
+               AND (completed_at AT TIME ZONE 'Asia/Shanghai')::date = (now() AT TIME ZONE 'Asia/Shanghai')::date
+           ) AS today_done,
+           COUNT(*) FILTER (
+             WHERE (created_at AT TIME ZONE 'Asia/Shanghai')::date = (now() AT TIME ZONE 'Asia/Shanghai')::date
+           ) AS today_new
          FROM work_orders WHERE tenant_id=$1 AND assignee_id=$2`,
         [tenantId, workerId, activeSet, doneSet],
       );

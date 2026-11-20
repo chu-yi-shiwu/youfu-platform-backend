@@ -639,8 +639,12 @@ router.post('/tasks/:id/records', async (req, res, next) => {
       })
       .parse(req.body);
     const out = await withTenantClient(tenantId, async (client) => {
-      const cur = await client.query(`SELECT id, assignee FROM inspection_task WHERE id=$1 AND tenant_id=$2`, [req.params.id, tenantId]);
+      const cur = await client.query(`SELECT id, assignee, status FROM inspection_task WHERE id=$1 AND tenant_id=$2`, [req.params.id, tenantId]);
       if (cur.rowCount === 0) throw new AppError('NOT_FOUND', 'task not found', 404);
+      // 已完成/异常/取消是终态：检查结果不可再改，必须重新开单而不是改历史。
+      if (!['pending', 'in_progress'].includes(String(cur.rows[0].status))) {
+        throw new AppError('TASK_CLOSED', '巡检单已结束，不能修改检查结果', 409);
+      }
       // #583 归属守卫
       // R35 接线：巡检执行纳入 inspect.execute 权限点（租户级 role_permission 覆盖自此生效；
       // 默认矩阵四角色均含此点 → 存量行为零变化；admin 恒放行）
