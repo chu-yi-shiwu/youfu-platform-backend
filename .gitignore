@@ -24,7 +24,7 @@ put_auth.json
 mk_auth_payload.js
 backfill_shadow.mjs
 retrain_now.mjs
-a1_dispatch_rules.sql
+/a1_dispatch_rules.sql
 tools/coverageAudit.mjs
 tools/routeContract.mjs
 _coverage_stale/
