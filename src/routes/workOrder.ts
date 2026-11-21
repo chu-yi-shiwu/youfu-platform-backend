@@ -416,7 +416,7 @@ export async function finalizeTransitionSideEffects(
     const woActiveSet = unionStates(woDefs.map(activeStates));
     const restored = await client.query(
       `UPDATE asset SET status='in_use', updated_at=now()
-        WHERE tenant_id=$1 AND status='repairing' AND $2::uuid = ANY(linked_order_ids)
+        WHERE tenant_id=$1 AND status='repairing' AND $2::text = ANY(linked_order_ids::text[])
           AND NOT EXISTS (
             SELECT 1 FROM work_orders w
              WHERE w.tenant_id=$1 AND w.id = ANY(linked_order_ids::text[])
@@ -810,11 +810,13 @@ const handleWorkOrderDetail: RequestHandler = async (req, res, next) => {
         )
         .then((r) => r.rows);
       // 工单 → 资产互通：以 asset.linked_order_ids 为唯一事实源，不新增重复的外键列。
+      // 工单 ID 是 text（陪检单存在 escort-* 非 UUID），linked_order_ids 是 uuid[]；
+      // 统一按 text 比较，避免非 UUID 工单详情被 ::uuid 强转打成 400。
       const asset = await client
         .query(
           `SELECT id, asset_no, name, location, status
              FROM asset
-            WHERE tenant_id=$1 AND $2::uuid = ANY(linked_order_ids)
+            WHERE tenant_id=$1 AND $2::text = ANY(linked_order_ids::text[])
             LIMIT 1`,
           [tenantId, req.params.id],
         )
