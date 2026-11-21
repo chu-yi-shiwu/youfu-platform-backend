@@ -187,16 +187,26 @@ PASS 四类任务 active=4 done=12 today_done=4 today_new=8
 
 | 项 | 结果 |
 | --- | --- |
-| 后端全量 | **220 文件 / 2616 用例通过** |
+| 后端全量 | **220 文件 / 2617 用例通过** |
 | 安全检查 | `youfu_safe_timestamptz('bad') IS NULL` 为 true |
 | 约束负控制 | 非法 `submitted_at` 插入被 CHECK 拒绝 |
 | 索引核验 | 三个索引在主站/pilot 均存在 |
 | live 四类统计 | 复跑 PASS，`active=4`、`done=12`、`today_done=4`、`today_new=8` |
 
+### 6.3 运送完成时间与多档案审计（r9）
+
+- 运送完成时间从 HTTP 路由分支收口到 `transitionOrder`：
+  - 任何路径进入 `done` 都补 `sign_at/arrive_at`；
+  - 适配器/脚本直接调用内核也不能漏完成时间。
+- 多 worker 档案问题不在统计层硬改：
+  - 任务列表和工作台列表仍有单 ID 查询，只改统计会造成新的不一致；
+  - 新增只读审计 `scripts/audit-duplicate-workers.mjs`，主站/pilot 当前均为 **PASS**；
+  - 如发现重复档案，先清洗数据，再统一列表查询范围。
+
 ## 7. 发布
 
 - 后端已部署主站 / pilot，readiness 均 `ready`、`db=up`；
-- 后端 r8 release ID：`20261121T053546-b0e028200085`；
+- 后端 r9 release ID：`20261121T062503-799eef5bc541`；
 - 数据库迁移：`128_task_stats_indexes_and_energy_time.sql` 已应用主站/pilot；
 - pilot 小程序 **5.9.32** 已上传开发版本，预览码 `preview_qr_v5932.png`；
 - pilot release manifest digest：`7d089ba7fd053575da7789822894b47d238614345376ae8993c6aa1a6e6f463a`；

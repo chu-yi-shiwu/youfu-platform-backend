@@ -214,7 +214,29 @@ r8 优化：
 - 自定义工单完成态补 `completed_at`，避免今日完成回退 `updated_at`；
 - 工作台增加四类任务拆分，并支持点分类进入对应筛选。
 
-## 13. 约束
+## 13. r9 运送完成时间收口与多档案审计
+
+| 项 | 值 |
+| --- | --- |
+| 后端代码 commit | `799eef5bc541fed337ff2a60d0e2d650f6bcd0a8` |
+| tag | `release-20261121-r9` |
+| backend CI | run `44875433421`，success |
+| artifact | `youfu-release-799eef5bc541fed337ff2a60d0e2d650f6bcd0a8`，624 KB |
+| artifact sha256 | `fae5d97e90f4acccea86044e82b22aaf7dbd76398e908db0857e654910ecc040` |
+| migrations | 135 |
+| release ID | `20261121T062503-799eef5bc541` |
+| 服务器 current | `/opt/youfu/releases/20261121T062503-799eef5bc541` |
+| 后端全量 | 220 文件 / 2617 用例 |
+| 小程序 pilot | 5.9.32；manifest digest `7d089ba7fd05...` |
+| 小程序主站 | commit `b9e14a0`；40 / 40 通过 |
+| live 四类统计 | 复跑 PASS，`active=4`、`done=12`、`today_done=4`、`today_new=8` |
+| 重复 worker 档案审计 | 主站 PASS、pilot PASS |
+
+r9 收口：
+- 运送完成时间从 HTTP 路由分支移入 `transitionOrder` 内核，任何路径进入 `done` 都写 `sign_at/arrive_at`；
+- 新增 `scripts/audit-duplicate-workers.mjs` 只读审计，先监测同一账号多条 worker 档案，不在统计层做半套对齐。
+
+## 14. 约束
 
 - `release-manifest.json` / `release-baseline.json` 是可复现发布 artifact，不进入源码库；
 - `release-baseline.mjs` 默认 fail-closed：commit 缺失或工作树不干净直接退出 1；
