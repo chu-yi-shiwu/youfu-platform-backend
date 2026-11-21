@@ -8,7 +8,7 @@
 | 后端 CI | run `44927019738`，success |
 | 主站前端 | 已部署，index asset `assets/index-CYAhwecN.js` |
 | PC pilot 前端 | 已部署，index asset `assets/index-Dx2eg-Dm.js` |
-| H5 | 已部署，index asset `assets/index-BfMCWmSp.js`；worker/admin 双契约 |
+| H5 | 已部署，index asset `assets/index-CWohyopO.js`；commit `130bb2b`；worker/admin 双契约 |
 | pilot 小程序 | 5.9.35 开发版；manifest digest `da6a309a0572...`；44 / 44 |
 | 主站小程序 | 5.9.36 开发版；manifest digest `2b86ca7366b8...`；42 / 42 |
 | live 边界烟测 | uat 租户 PASS，测后清理；真实租户只读复核 PASS |

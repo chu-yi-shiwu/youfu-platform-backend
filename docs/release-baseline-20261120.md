@@ -366,7 +366,7 @@ r11.2 修复：
 | release ID | `20261121T165348-0188b3516f62` |
 | 服务器 current | `/opt/youfu/releases/20261121T165348-0188b3516f62` |
 | 后端全量 | 223 文件 / 2637 用例 |
-| 前端 H5 | commit `c0f02de`；asset `assets/index-BfMCWmSp.js` |
+| 前端 H5 | commit `130bb2b`，tag `release-20261122-h5-routing`；asset `assets/index-CWohyopO.js` |
 | 小程序主站 | 5.9.36 开发版不变 |
 | live 角色边界 | admin 200 / admin 走 open 403 / worker open 200 / worker admin 403 / worker events 403 / worker dispatch-recommend 403 / escort detail 200 |
 
