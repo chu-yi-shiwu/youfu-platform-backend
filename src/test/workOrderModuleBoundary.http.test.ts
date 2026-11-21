@@ -115,6 +115,26 @@ describe('work_order 模块边界', () => {
     expect(r.status).toBe(404);
   });
 
+  it('模块关闭：worker 执行建单 /open/work_order 不被模块门禁误伤', async () => {
+    h.role = 'worker';
+    h.userId = 'w-1';
+    h.moduleEnabled = false;
+    const r = await fetch(`${base}/open/work_order`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        id: 'wo-boundary-create',
+        business_type: 'escort',
+        title: 'UAT boundary escort',
+        location: 'UAT',
+        contact: '13800000000',
+      }),
+    });
+    // 该用例只守模块边界：不能 404（路由被删）或 403 MODULE_DISABLED（被模块误伤）。
+    expect(r.status).not.toBe(404);
+    expect(r.status).not.toBe(403);
+  });
+
   it('共享执行路由只允许 worker：admin 走 /open/work_orders 403', async () => {
     h.role = 'admin';
     const r = await fetch(`${base}/open/work_orders`);

@@ -17,6 +17,7 @@ describe('work_order 模块路由边界', () => {
 
   it('共享执行路由必须带 requireWorkerExecution，不能靠角色分支绕过', () => {
     for (const route of [
+      "router.post('/open/work_order', requireWorkerExecution",
       "router.get('/open/work_orders', requireWorkerExecution",
       "router.post('/open/work_order/:id/transition', requireWorkerExecution",
       "router.get('/open/work_order/:id', requireWorkerExecution",
@@ -37,7 +38,6 @@ describe('work_order 模块路由边界', () => {
 
   it('管理端点不得继续注册在 /open 下', () => {
     for (const route of [
-      "router.post('/open/work_order',",
       "router.get('/open/work_order/available',",
       "router.get('/open/work_order/:id/events',",
       "router.post('/open/work_order/:id/urge',",

@@ -14924,6 +14924,28 @@
           }
         }
       }
+    },
+    "/api/v1/open/work_order": {
+      "post": {
+        "tags": [
+          "workOrder"
+        ],
+        "summary": "Worker execution create (escort/intake)",
+        "description": "Worker-only execution contract; not gated by work_order module. Management create uses /admin/work-orders.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "HTTP 201"
+          },
+          "200": {
+            "description": "HTTP 200"
+          }
+        }
+      }
     }
   },
   "components": {

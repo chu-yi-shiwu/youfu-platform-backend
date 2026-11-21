@@ -1,7 +1,8 @@
-// 工单路由：4 接口，response 严格对齐 05_frontend/src/services/workOrder.ts。
-//  - POST /api/v1/open/work_order        (创建 + 自动派单)
-//  - POST /api/v1/open/work_order/:id/transition
-//  - GET  /api/v1/open/work_orders
+// 工单路由：管理面 /admin/work-orders/*（模块门禁）与执行面 /open/*（仅 worker）双契约。
+//  - POST /api/v1/admin/work-orders        (管理端创建 + 自动派单)
+//  - POST /api/v1/open/work_order          (worker 执行建单：陪检/代报修)
+//  - POST /api/v1/admin/work-orders/:id/transition / POST /api/v1/open/work_order/:id/transition
+//  - GET  /api/v1/admin/work-orders        / GET /api/v1/open/work_orders
 //  - POST /api/v1/scan                    (M3 真实解析：目录/资产码识别)
 import { Router, type RequestHandler } from 'express';
 import { z } from 'zod';
@@ -538,6 +539,9 @@ const handleCreateWorkOrder: RequestHandler = async (req, res, next) => {
     next(e);
   }
 };
+// 执行面建单：worker 陪检/代报修等移动执行场景，不得被 work_order 模块门禁误伤。
+router.post('/open/work_order', requireWorkerExecution, handleCreateWorkOrder);
+// 管理面建单：PC/员工管理端，受 work_order 模块门禁。
 router.post('/admin/work-orders', handleCreateWorkOrder);
 
 // POST /api/v1/open/work_order/:id/transition
@@ -1206,7 +1210,7 @@ router.post('/scan', async (req, res, next) => {
   }
 });
 
-// POST /api/v1/sla/scan —— P4 SLA 守护：扫本租户超时单，标记升级并 emit sla_escalated 事件
+// POST /api/v1/admin/work-orders/ops/sla-scan —— P4 SLA 守护：扫本租户超时单，标记升级并 emit sla_escalated 事件
 // 拆雷三件套②（2026-08-31）：扫描实现抽到 src/scheduler/slaScheduler.ts 的 runSlaScanForTenant，
 // 本端点与进程内 cron 共用同一实现；命中同时落通知（在身 assignee + 租户管理员），契约不变。
 const handleSlaScan: RequestHandler = async (req, res, next) => {
@@ -1479,7 +1483,7 @@ const handleClaimWorkOrder: RequestHandler = async (req, res, next) => {
 router.post('/open/work_order/:id/claim', requireWorkerExecution, handleClaimWorkOrder);
 router.post('/admin/work-orders/:id/claim', handleClaimWorkOrder);
 
-// GET /api/v1/open/dispatch-recommend —— 派单智能推荐（DMR 可解释呈现，dispatcher 端）。
+// GET /api/v1/admin/work-orders/dispatch/recommend —— 派单智能推荐（DMR 可解释呈现，dispatcher 端）。
 // 当前工人（token 身份）今日工作台统计见下方 /open/me/summary。
 // 只读推荐：基于 技能匹配 + 当前负载 的确定性评分，不写回任何配置（AUTO_TUNE 无关）。
 // 诚实口径：无 worker 级满意度数据 → 理由不编造满意度；技能匹配 = 分类名/码与 worker.skill_tags 子串包含（≥2 字符）。
