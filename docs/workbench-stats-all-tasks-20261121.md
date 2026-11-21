@@ -203,6 +203,37 @@ PASS 四类任务 active=4 done=12 today_done=4 today_new=8
   - 新增只读审计 `scripts/audit-duplicate-workers.mjs`，主站/pilot 当前均为 **PASS**；
   - 如发现重复档案，先清洗数据，再统一列表查询范围。
 
+### 6.4 工作台对账脚本
+
+新增只读脚本：
+
+```text
+scripts/audit-workbench-stats.mjs
+npm run audit:workbench-stats
+```
+
+逻辑：
+
+- 自动选出租户内任务最多的 active worker；
+- 用真实 worker JWT 调 `/open/me/summary`；
+- 从数据库按“小程序用户可见规则”独立计算四类任务；
+- 比对 `active_count / done_count / today_done / today_new`；
+- 任何差异或未知状态直接非 0 退出。
+
+实测：
+
+```text
+main  t-verification  worker=1b8fec45...  PASS
+pilot zixing-hospital worker=HQ016       PASS
+```
+
+主站 `t-verification` 结果：
+
+```text
+API {"active_count":4,"done_count":2,"today_done":0,"today_new":0}
+DB  {"active_count":4,"done_count":2,"today_done":0,"today_new":0}
+```
+
 ## 7. 发布
 
 - 后端已部署主站 / pilot，readiness 均 `ready`、`db=up`；
