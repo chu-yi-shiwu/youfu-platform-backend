@@ -293,6 +293,33 @@ r11 live 边界证据（模块只在 uat 开关，真实 pilot 只读）：
 - 模块开启：admin 列表 200、claim-hall 200、补照片进入 handler（无单 404，不是 403）。
 - 真实租户只读复核：主站 `t-verification`、pilot `zixing-hospital` 均为 admin 列表 200 / admin 走 open 403 / worker open 200；未切换真实租户模块开关。
 
+### 15.1 r11.1 修正：worker 执行建单保留 /open
+
+r11 初版把 `POST /open/work_order` 一并迁走，worker 陪检/代报修建单会 404。r11.1 修正为双契约：
+worker 执行建单走 `/open/work_order` 且仅 worker；管理建单走 `/admin/work-orders` 且受模块门禁；两者共用同一 handler。
+
+| 项 | 值 |
+| --- | --- |
+| 后端代码 commit | `6dc7b234adf64f9b157f7c6326e048b8436458c9` |
+| 发布 commit（含文档） | `0a22c9f75682e9246d093128de38653d02d35a36` |
+| tag | `release-20261121-r11.1` |
+| backend CI | run `44908319483`，success |
+| artifact | `youfu-release-0a22c9f75682e9246d093128de38653d02d35a36`，639,571 bytes |
+| artifact zip sha256 | `6bbfbdfd8e1f496760655cb31343c5398265b5bfb05a38f96689c9a8e1db539c` |
+| 本地构建 dist | 153 文件；sha256 `eacc0b71b8f4d09e8a6b4265dbca1fb5d69b713ce244c2b5633b051773cf7bdb` |
+| release ID | `20261121T132002-0a22c9f75682` |
+| 服务器 current | `/opt/youfu/releases/20261121T132002-0a22c9f75682` |
+| 小程序 pilot | 5.9.35；manifest digest `da6a309a0572...`；44 / 44 通过 |
+| 小程序主站 | commit `21311d8`；42 / 42 通过 |
+| live 边界烟测 | worker 在模块关闭的 uat 租户建单 201；admin open 仍 403；真实租户只读复核 PASS |
+
+r11.1 live 证据（uat 租户测后删除，行数归零）：
+- 模块关闭：admin `/admin/work-orders` 403 `MODULE_DISABLED`；
+- 模块关闭：worker `POST /open/work_order` 201（陪检/代报修不被模块误伤）；
+- 模块关闭：worker `GET /open/work_orders` 200；
+- admin 访问 `/open/work_orders` 403 `worker execution endpoint`；
+- 模块开启：admin 列表 200、claim-hall 200、补照片 404（进入 handler，不是 403）。
+
 ## 16. 约束
 
 - `release-manifest.json` / `release-baseline.json` 是可复现发布 artifact，不进入源码库；
