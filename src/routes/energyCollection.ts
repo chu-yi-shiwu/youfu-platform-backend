@@ -369,7 +369,9 @@ const StatusUpdateBody = z
   .object({
     task_ref: z.string().min(8).max(64),
     status: z.literal('submitted'), // 能源侧当前唯一可回流事件（form 回填完成）
-    submitted_at: z.string().max(40).optional(),
+    // 工作台“今日完成”直接把这个字段当完成时间用，必须是可解析的时间；
+    // 缺失时后端补 now()，避免后续 reviewed/archived 改 updated_at 后把完成日挪到今天。
+    submitted_at: z.string().max(40).refine((v) => !Number.isNaN(Date.parse(v)), 'invalid submitted_at').optional(),
     record_ref: z.string().max(64).nullable().optional(), // 能源库 youfu_form_submission.id 溯源
   })
   .strict();
@@ -401,8 +403,10 @@ router.post('/energy/webhook/status-update', async (req: any, res: any, next: an
         return { replay: true as const, item: { ...row, available: availableTransitions(def, row.status) } };
       }
 
-      const extra: Record<string, unknown> = { submitted_by: 'energy-platform' };
-      if (b.submitted_at !== undefined) extra.submitted_at = b.submitted_at;
+      const extra: Record<string, unknown> = {
+        submitted_by: 'energy-platform',
+        submitted_at: b.submitted_at ?? 'now()',
+      };
       if (b.record_ref !== undefined) extra.record_ref = b.record_ref;
       const updated = await transitionEntity(client, tenantId, {
         table: 'business_flow_tasks',

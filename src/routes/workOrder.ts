@@ -45,8 +45,9 @@ import { INSPECTION_DEF, TRANSPORT_DEF } from '../engine/themes.js';
 import {
   DEFAULT_WORK_ORDER_DEF,
   availableTransitions, learningTriggerStates, shouldTriggerLearning,
-  resolveDispatchTarget, activeStates, doneStates, claimableStates, evaluatedStates,
+  resolveDispatchTarget, activeStates, doneStates, terminalStates, claimableStates, evaluatedStates,
 } from '../engine/stateMachine.js';
+import { fetchMeTaskStats } from '../repo/meTaskStats.js';
 import { safeParseJsonb } from '../util/jsonb.js';
 import { validateIntake } from '../services/dataQuality.js';
 import { buildRecommend } from '../services/dispatchRecommend.js';
@@ -1537,30 +1538,28 @@ router.get('/open/me/summary', async (req, res, next) => {
       const workerDefs = await getDefsAcrossAllVersions(client, tenantId, 'work_order', 'work_orders', DEFAULT_WORK_ORDER_DEF);
       const poolSet = intersectStates(workerDefs.map(claimableStates));
       const doneSet = unionStates(workerDefs.map(doneStates));
+      // done_count 是“累计完成/已结束”口径，必须包含已取消等全部终态；
+      // today_done 只认成功完成态，两个集合不能混用。
+      const terminalSet = unionStates(workerDefs.map(terminalStates));
+      const allTerminalSet = Array.from(new Set([...doneSet, ...terminalSet]));
       // ⚠️ 修错记录：初版 activeSet 只剔除了 poolSet，没剔除 doneSet。
       //   单版本下 activeStates 与 doneStates 由构造保证互斥（stateMachine.ts:308-313），
       //   但**并集取自不同版本** ⇒ 存在 X 在 v1 是活跃态、在 v2 被声明为完成态的情况，
       //   于是 X 同时进 activeSet 和 doneSet ⇒ 同一张单既算在办又算已完成 ⇒ 在办+已完成 > 总数。
-      //   ⇒ doneSet 优先：算过完成就不再算在办。由 statusVocabDerived.test.ts ⑥ 守卫。
+      //   ⇒ 终态优先：算过完成/结束就不再算在办。由 statusVocabDerived.test.ts ⑥ 守卫。
       const activeSet = unionStates(workerDefs.map(activeStates)).filter(
-        (s) => !poolSet.includes(s) && !doneSet.includes(s),
+        (s) => !poolSet.includes(s) && !allTerminalSet.includes(s),
       );
-      const stats = await client.query(
-        `SELECT
-           COUNT(*) FILTER (WHERE status = ANY($3::text[])) AS active_count,
-           COUNT(*) FILTER (WHERE status = ANY($4::text[])) AS done_count,
-           COUNT(*) FILTER (
-             WHERE status = ANY($4::text[])
-               AND completed_at IS NOT NULL
-               AND (completed_at AT TIME ZONE 'Asia/Shanghai')::date = (now() AT TIME ZONE 'Asia/Shanghai')::date
-           ) AS today_done,
-           COUNT(*) FILTER (
-             WHERE (created_at AT TIME ZONE 'Asia/Shanghai')::date = (now() AT TIME ZONE 'Asia/Shanghai')::date
-           ) AS today_new
-         FROM work_orders WHERE tenant_id=$1 AND assignee_id=$2`,
-        [tenantId, workerId, activeSet, doneSet],
-      );
-      return { worker: w.rows[0], stats: stats.rows[0] };
+      const taskStats = await fetchMeTaskStats(client, tenantId, workerId, {
+        active: activeSet,
+        success: doneSet,
+        terminal: allTerminalSet,
+      });
+      return {
+        worker: w.rows[0],
+        stats: taskStats.total,
+        stats_by_type: taskStats.by_type,
+      };
     });
     if (!s) throw new AppError('NOT_FOUND', 'worker profile not found', 404);
     return res.json({ ok: true, code: 0, ...s });

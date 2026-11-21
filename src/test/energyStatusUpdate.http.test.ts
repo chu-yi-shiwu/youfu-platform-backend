@@ -181,7 +181,19 @@ describe('POST /energy/webhook/status-update —— T303b G4 状态回流', () =
     expect(b.item.status).toBe('submitted');
     expect(b.item.data.record_ref).toBe('42');
     expect(b.item.data.submitted_by).toBe('energy-platform');
+    // 工作台按这个字段算今日完成，必须原样落库，不能被 updated_at 顶替。
+    expect(typeof b.item.data.submitted_at).toBe('string');
+    expect(Number.isNaN(Date.parse(b.item.data.submitted_at))).toBe(false);
     void row;
+  });
+
+  it('S02b 非法 submitted_at → 422，不写入一个无法用于日界统计的完成时间', async () => {
+    seedTask('t303b-s02b-ref-0001', 'dispatched');
+    const r = await signedFetch('/api/v1/energy/webhook/status-update', {
+      ...payloadOf('t303b-s02b-ref-0001'),
+      submitted_at: 'not-a-time',
+    });
+    expect(r.status).toBe(422);
   });
 
   it('S03 同状态重复回调 → 200 idempotent_replay（不 422），状态不再变化', async () => {

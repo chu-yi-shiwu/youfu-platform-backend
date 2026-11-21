@@ -1,4 +1,11 @@
-// 隔离租户校验 /open/me/summary 的 today_done：今天完成 1、3 天前完成 1。
+// 隔离租户校验 /open/me/summary：四类任务全覆盖 + 今日完成只按业务完成时间算本地日。
+//
+// 每个类型造 4 条：
+//   - 1 条在办（created_at=今天）
+//   - 1 条今天成功完成（created_at=今天）
+//   - 1 条 3 天前成功完成，但 updated_at 被改成今天（负控制：不能拿 updated_at 算完成日）
+//   - 1 条 3 天前已取消/异常，但 updated_at 也被改成今天（负控制：终态不能计入 today_done）
+// 预期：active=4，done=12，today_done=4，today_new=8。
 import fs from 'node:fs';
 import http from 'node:http';
 import crypto from 'node:crypto';
@@ -69,11 +76,108 @@ COMMIT;`;
   } catch (e) { console.error('[stats-audit] cleanup failed', e.message); }
 }
 
+async function insertWorkOrderDef() {
+  // 默认 4 态模板没有 cancelled；这里显式给验收租户一个含取消边的 def，
+  // 才能验证 done_count 是“全部终态”、today_done 只认成功完成态。
+  const def = {
+    initial: 'draft',
+    states: ['draft', 'assigned', 'processing', 'completed', 'cancelled'],
+    transitions: [
+      { from: 'draft', to: 'assigned', event: 'assign' },
+      { from: 'assigned', to: 'processing', event: 'start' },
+      { from: 'processing', to: 'completed', event: 'complete' },
+      { from: 'processing', to: 'cancelled', event: 'cancel' },
+    ],
+    config: { doneStates: ['completed'] },
+  };
+  await db.query(
+    `INSERT INTO workflow_def (tenant_id, entity_type, def, version) VALUES ($1,'work_order',$2::jsonb,1)`,
+    [TENANT, JSON.stringify(def)],
+  );
+}
+
+async function insertWorkOrders(workerId, deptId) {
+  const cols = '(id, tenant_id, order_no, status, assignee_id, department_id, title, business_type, priority, source, created_at, updated_at, completed_at, def_version)';
+  await db.query(
+    `INSERT INTO work_orders ${cols} VALUES
+       ($1,$2,$3,'processing',$4,$5,'维修在办','repair','normal','public_report',now() - interval '1 hour',now(),NULL,1),
+       ($6,$2,$7,'completed',$4,$5,'维修今天完成','repair','normal','public_report',now() - interval '1 hour',now(),now(),1),
+       ($8,$2,$9,'completed',$4,$5,'维修三天前完成','repair','normal','public_report',now() - interval '5 days',now(),now() - interval '3 days',1),
+       ($10,$2,$11,'cancelled',$4,$5,'维修已取消','repair','normal','public_report',now() - interval '5 days',now(),NULL,1)`,
+    [
+      crypto.randomUUID(), TENANT, `WO-${RUN}-ACTIVE`, workerId, deptId,
+      crypto.randomUUID(), `WO-${RUN}-TODAY`,
+      crypto.randomUUID(), `WO-${RUN}-OLD`,
+      crypto.randomUUID(), `WO-${RUN}-CANCEL`,
+    ],
+  );
+}
+
+async function insertInspectionTasks(workerId) {
+  const cols = '(id, tenant_id, title, assignee, status, created_at, updated_at, done_at)';
+  await db.query(
+    `INSERT INTO inspection_task ${cols} VALUES
+       ($1,$2,'巡检在办',$3,'pending',now() - interval '1 hour',now(),NULL),
+       ($4,$2,'巡检今天完成',$3,'done',now() - interval '1 hour',now(),now()),
+       ($5,$2,'巡检三天前完成',$3,'done',now() - interval '5 days',now(),now() - interval '3 days'),
+       ($6,$2,'巡检异常',$3,'exception',now() - interval '5 days',now(),NULL)`,
+    [
+      crypto.randomUUID(), TENANT, workerId,
+      crypto.randomUUID(), crypto.randomUUID(), crypto.randomUUID(),
+    ],
+  );
+}
+
+async function insertTransportOrders(workerId) {
+  const cols = '(id, tenant_id, code, item_name, carrier, status, created_at, updated_at, arrive_at, sign_at)';
+  await db.query(
+    `INSERT INTO transport_order ${cols} VALUES
+       ($1,$2,$3,'运送在办',$4,'assigned',now() - interval '1 hour',now(),NULL,NULL),
+       ($5,$2,$6,'运送今天完成',$4,'done',now() - interval '1 hour',now(),now(),now()),
+       ($7,$2,$8,'运送三天前完成',$4,'done',now() - interval '5 days',now(),now() - interval '3 days',now() - interval '3 days'),
+       ($9,$2,$10,'运送已取消',$4,'cancelled',now() - interval '5 days',now(),NULL,NULL)`,
+    [
+      crypto.randomUUID(), TENANT, `TR-${RUN}-ACTIVE`, workerId,
+      crypto.randomUUID(), `TR-${RUN}-TODAY`,
+      crypto.randomUUID(), `TR-${RUN}-OLD`,
+      crypto.randomUUID(), `TR-${RUN}-CANCEL`,
+    ],
+  );
+}
+
+async function insertEnergyTasks(workerId) {
+  const workerRef = `youfu:${workerId}`;
+  const insert = `INSERT INTO business_flow_tasks
+      (id, tenant_id, entity_type, title, status, data, assignee, created_at, updated_at)
+    VALUES ($1,$2,'energy_collection',$3,$4,$5::jsonb,$6,$7,$8)`;
+  const rows = [
+    ['能耗在办', 'dispatched', { worker_ref: workerRef, task_ref: `${RUN}-EN-ACTIVE` }, hourAgo(), now(0)],
+    ['能耗今天提交', 'submitted', { worker_ref: workerRef, task_ref: `${RUN}-EN-TODAY`, submitted_at: iso(0) }, hourAgo(), now(0)],
+    ['能耗三天前归档', 'archived', { worker_ref: workerRef, task_ref: `${RUN}-EN-OLD`, submitted_at: iso(-3) }, now(-5), now(0)],
+    ['能耗已取消', 'cancelled', { worker_ref: workerRef, task_ref: `${RUN}-EN-CANCEL` }, now(-5), now(0)],
+  ];
+  for (const [title, status, data, created, updated] of rows) {
+    await db.query(insert, [crypto.randomUUID(), TENANT, title, status, JSON.stringify(data), workerId, created, updated]);
+  }
+}
+
+function iso(days) {
+  return new Date(Date.now() + days * 86400000).toISOString();
+}
+
+function now(days) {
+  return new Date(Date.now() + days * 86400000).toISOString();
+}
+
+function hourAgo() {
+  return new Date(Date.now() - 3600000).toISOString();
+}
+
 async function main() {
   await db.connect();
   await db.query('BEGIN');
   await db.query(`SELECT set_config('app.tenant_id',$1,true), set_config('app.scope','system',true)`, [TENANT]);
-  await db.query(`INSERT INTO tenant_registry (tenant_id,name,status,category) VALUES ($1,'今日完成验收租户','active','other')`, [TENANT]);
+  await db.query(`INSERT INTO tenant_registry (tenant_id,name,status,category) VALUES ($1,'四类任务统计验收租户','active','other')`, [TENANT]);
   const dept = await db.query(`INSERT INTO dept (tenant_id,name,code,is_default,enabled) VALUES ($1,'统计验收科','STAT',true,true) RETURNING id`, [TENANT]);
   const acc = await db.query(
     `INSERT INTO account_user (tenant_id,username,password_hash,display_name,role,active)
@@ -86,27 +190,33 @@ async function main() {
      VALUES ($1,$2,'统计师傅','{}'::text[],0,true,$1,$3)`,
     [workerId, TENANT, dept.rows[0].id],
   );
-  const orderCols = `(id, tenant_id, order_no, status, assignee_id, department_id, title, business_type, priority, source, created_at, updated_at, completed_at)`;
-  await db.query(
-    `INSERT INTO work_orders ${orderCols}
-     VALUES ($1,$2,'STAT-TODAY','completed',$3,$4,'今天完成','repair','normal','public_report',now() - interval '2 days',now(),now())`,
-    [crypto.randomUUID(), TENANT, workerId, dept.rows[0].id],
-  );
-  await db.query(
-    `INSERT INTO work_orders ${orderCols}
-     VALUES ($1,$2,'STAT-OLD','completed',$3,$4,'三天前完成','repair','normal','public_report',now() - interval '5 days',now() - interval '3 days',now() - interval '3 days')`,
-    [crypto.randomUUID(), TENANT, workerId, dept.rows[0].id],
-  );
+  await insertWorkOrderDef();
+  await insertWorkOrders(workerId, dept.rows[0].id);
+  await insertInspectionTasks(workerId);
+  await insertTransportOrders(workerId);
+  await insertEnergyTasks(workerId);
   await db.query('COMMIT');
 
   const login = await req('POST', '/auth/login', { username: 'stats_worker', password: PASS, tenant: TENANT, channel: 'mp' });
   if (login.status !== 200 || !login.body?.token) throw new Error(`login ${login.status} ${JSON.stringify(login.body).slice(0, 200)}`);
   const summary = await req('GET', '/open/me/summary', undefined, login.body.token);
-  if (summary.status !== 200) throw new Error(`summary ${summary.status}`);
+  if (summary.status !== 200) throw new Error(`summary ${summary.status} ${JSON.stringify(summary.body).slice(0, 300)}`);
   const s = summary.body.stats;
-  console.log('API', JSON.stringify({ done: s.done_count, today_done: s.today_done, today_new: s.today_new }));
-  const ok = Number(s.done_count) === 2 && Number(s.today_done) === 1;
-  console.log(ok ? 'PASS today_done=1, done_count=2' : 'FAIL unexpected stats');
+  const by = summary.body.stats_by_type || {};
+  console.log('API total', JSON.stringify(s));
+  for (const key of ['work_order', 'inspection_task', 'transport_task', 'energy_task']) {
+    console.log('API', key, JSON.stringify(by[key]));
+  }
+
+  const expectedType = { active_count: 1, done_count: 3, today_done: 1, today_new: 2 };
+  const expectedTotal = { active_count: 4, done_count: 12, today_done: 4, today_new: 8 };
+  const check = (actual, expected) =>
+    Object.keys(expected).every((k) => Number(actual?.[k]) === expected[k]);
+  let ok = check(s, expectedTotal);
+  for (const key of ['work_order', 'inspection_task', 'transport_task', 'energy_task']) {
+    if (!check(by[key], expectedType)) ok = false;
+  }
+  console.log(ok ? 'PASS 四类任务 active=4 done=12 today_done=4 today_new=8' : 'FAIL unexpected stats');
   await cleanup();
   await db.end();
   process.exit(ok ? 0 : 1);
