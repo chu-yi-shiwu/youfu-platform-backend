@@ -4,14 +4,16 @@
 
 | 项 | 状态 |
 | --- | --- |
-| 后端发布 | r11.1，当前 `/opt/youfu/releases/20261121T132002-0a22c9f75682` |
-| 后端 CI | run `44908319483`，success |
+| 后端发布 | r11.2，当前 `/opt/youfu/releases/20261121T145813-369ed77327a8` |
+| 后端 CI | run `44916642257`，success |
 | 主站前端 | 已部署，index asset `assets/index-CYAhwecN.js` |
 | PC pilot 前端 | 已部署，index asset `assets/index-Dx2eg-Dm.js` |
 | H5 | 已部署，index asset `assets/index-B5gsG1LV.js` |
 | pilot 小程序 | 5.9.35 开发版；manifest digest `da6a309a0572...`；44 / 44 |
 | 主站小程序 | 5.9.36 开发版；manifest digest `2b86ca7366b8...`；42 / 42 |
 | live 边界烟测 | uat 租户 PASS，测后清理；真实租户只读复核 PASS |
+| 生产租户迁移 | `zixing-hospital` 已迁移到主库（75 表 / 463 行，媒体 6 文件） |
+| 主库生产租户口径 | workbench audit PASS：active=1 done=6 today_done=1 today_new=0；重复 worker PASS |
 | 工作台统计/重复 worker | 主站 + pilot PASS |
 
 ## 2. 上线阻塞项
