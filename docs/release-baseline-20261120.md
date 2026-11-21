@@ -260,7 +260,39 @@ r10 机制修复：
 - 移动端工单执行端点不受影响；
 - 新增路由边界静态回归，防止 `/stats` 回到共享路由。
 
-## 15. 约束
+## 15. r11 work_order 管理面/执行面拆分
+
+| 项 | 值 |
+| --- | --- |
+| 后端代码 commit | `94c4872f4be068cc998f4719765f12a37a6e1dc8` |
+| tag | `release-20261121-r11` |
+| backend CI | run `44906562140`，success |
+| artifact | `youfu-release-94c4872f4be068cc998f4719765f12a37a6e1dc8`，639,451 bytes |
+| artifact zip sha256 | `bac963783fa07f132c221638d5b6b670dee077ffc90c8b6423ba4b7bfaf331ac` |
+| 本地构建 dist | 153 文件；sha256 `1819ec8c333d45ad93fc95c49511a16e7d36b3a54fd9fc4a50970054159d3dec` |
+| migrations | 135 |
+| release ID | `20261121T130550-94c4872f4be0` |
+| 服务器 current | `/opt/youfu/releases/20261121T130550-94c4872f4be0` |
+| 后端全量 | 222 文件 / 2632 用例 |
+| 前端代码 commit | `824bee8`；H5 构建 commit `d6d3aae`，tag `release-20261121-r11`；36 文件 / 269 用例 |
+| 小程序 pilot | 5.9.34；manifest digest `73e9e8bede17...`；44 / 44 通过 |
+| 小程序主站 | commit `a8ecad4` + `777f9ec`；42 / 42 通过 |
+| live 边界烟测 | `uat-r11-boundary` 临时租户，测后删除，行数归零 |
+
+r11 机制修复：
+- 管理端点统一迁到 `/admin/work-orders/*`，由 `requireModule('work_order')` 单点门禁；
+- 执行端点继续走 `/open/*`，统一挂 `requireWorkerExecution`，非 worker 不能借共享路由绕过模块；
+- 管理/执行共用同一份 handler，不复制实现；管理端补照片/语音新增 admin 契约；
+- `/sla/scan` 归入 admin 后，删除 `apiGuard` 中失效的 `sla` 首段白名单；
+- OpenAPI 新增 14 个 admin 路径，移除 7 个旧 open 管理路径；路由边界新增静态与 HTTP 负控制。
+
+r11 live 边界证据（模块只在 uat 开关，真实 pilot 只读）：
+- 模块关闭：admin `/admin/work-orders` 403 `MODULE_DISABLED`；
+- 模块关闭：worker `/open/work_orders` 200，`/open/me/summary` 不被模块门禁拦截；
+- admin 访问 `/open/work_orders` 始终 403 `worker execution endpoint`；
+- 模块开启：admin 列表 200、claim-hall 200、补照片进入 handler（无单 404，不是 403）。
+
+## 16. 约束
 
 - `release-manifest.json` / `release-baseline.json` 是可复现发布 artifact，不进入源码库；
 - `release-baseline.mjs` 默认 fail-closed：commit 缺失或工作树不干净直接退出 1；
