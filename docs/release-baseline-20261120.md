@@ -227,8 +227,8 @@ r8 优化：
 | release ID | `20261121T062503-799eef5bc541` |
 | 服务器 current | `/opt/youfu/releases/20261121T062503-799eef5bc541` |
 | 后端全量 | 220 文件 / 2617 用例 |
-| 小程序 pilot | 5.9.32；manifest digest `7d089ba7fd05...` |
-| 小程序主站 | commit `b9e14a0`；40 / 40 通过 |
+| 小程序 pilot | 5.9.33；manifest digest `dc793a2a47d3...` |
+| 小程序主站 | commit `aaaa8b0`；42 / 42 通过 |
 | live 四类统计 | 复跑 PASS，`active=4`、`done=12`、`today_done=4`、`today_new=8` |
 | 重复 worker 档案审计 | 主站 PASS、pilot PASS |
 

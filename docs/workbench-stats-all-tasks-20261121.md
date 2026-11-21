@@ -121,8 +121,8 @@
 | 项 | 结果 |
 | --- | --- |
 | 后端全量 | **220 文件 / 2614 用例通过** |
-| 小程序 pilot | **40 / 40 通过** + 绑定自检 |
-| 小程序主站 | **39 / 39 通过** + 绑定自检 |
+| 小程序 pilot | **43 / 43 通过** + 绑定自检 |
+| 小程序主站 | **42 / 42 通过** + 绑定自检 |
 
 ### 5.3 live 隔离租户
 
@@ -252,11 +252,33 @@ npm run release-gate:live
 
 默认 `npm run release-gate` 不依赖真实租户，保持离线可跑；只有带 `--live-audit` 时才要求 `AUDIT_TENANT`。pilot 发布把 `API_BASE` 换成 `http://127.0.0.1:4101/api/v1`、`AUDIT_TENANT=zixing-hospital`。
 
+### 6.6 机构解析与 operator 通知入口
+
+- 新增小程序共享层 `utils/org.js`：
+  - `youfu_mp_org` 缓存
+  - 登录态 `tenant_id`
+  - 兼容 `tenant`
+  - `DEFAULT_ORG`
+- 统一替换剩余 `user.tenant` 读取：
+  - operator 代登记
+  - 运送执行页
+  - 工单详情
+  - 现场反馈
+  - AI 对话
+  - 报表页
+  - 我的报修 / 手机找回
+- operator 工作台新增：
+  - 未绑定微信时显示「绑定」入口；
+  - 已绑定但需要订阅时显示「开启通知」；
+  - 绑定成功后立即请求一次性订阅授权。
+
+这修的是同一根因的剩余入口：登录用户字段是 `tenant_id`，不是 `tenant`。
+
 ## 7. 发布
 
 - 后端已部署主站 / pilot，readiness 均 `ready`、`db=up`；
 - 后端 r9 release ID：`20261121T062503-799eef5bc541`；
 - 数据库迁移：`128_task_stats_indexes_and_energy_time.sql` 已应用主站/pilot；
-- pilot 小程序 **5.9.32** 已上传开发版本，预览码 `preview_qr_v5932.png`；
-- pilot release manifest digest：`7d089ba7fd053575da7789822894b47d238614345376ae8993c6aa1a6e6f463a`；
-- 主站小程序 commit `b9e14a0`，生产上传需产品确认后执行。
+- pilot 小程序 **5.9.33** 已上传开发版本，预览码 `preview_qr_v5933.png`；
+- pilot release manifest digest：`dc793a2a47d3219664a2518087d006b8033f522880d8b4e006f024cea58ae433`；
+- 主站小程序 commit `aaaa8b0`，生产上传需产品确认后执行。
