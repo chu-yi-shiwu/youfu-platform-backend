@@ -320,6 +320,38 @@ r11.1 live 证据（uat 租户测后删除，行数归零）：
 - admin 访问 `/open/work_orders` 403 `worker execution endpoint`；
 - 模块开启：admin 列表 200、claim-hall 200、补照片 404（进入 handler，不是 403）。
 
+## 15.2 r11.2：生产租户迁移 + 非 UUID 工单详情修复
+
+| 项 | 值 |
+| --- | --- |
+| 后端代码 commit | `369ed77327a8629934fddcba5c05b350b252c98b` |
+| tag | `release-20261121-r11.2` |
+| backend CI | run `44916642257`，success |
+| artifact | `youfu-release-369ed77327a8629934fddcba5c05b350b252c98b`，639,651 bytes |
+| artifact zip sha256 | `3f72f32a78da59e5309524cc05d08f4b1d56616d264889362deb56d09ef7406f` |
+| 本地构建 dist | 153 文件；sha256 `b74614cc0b1d4413dc84e273fad07bf543cfec03d75b8540075b80c13abf3df7` |
+| migrations | 135 |
+| release ID | `20261121T145813-369ed77327a8` |
+| 服务器 current | `/opt/youfu/releases/20261121T145813-369ed77327a8` |
+| 后端全量 | 223 文件 / 2635 用例 |
+| 前端 | commit `1e683af`，dist 未变 |
+| 小程序主站 | 5.9.36 开发版；manifest digest `2b86ca7366b8...` |
+| 小程序 pilot | 5.9.35 开发版；manifest digest `da6a309a0572...` |
+
+r11.2 修复：
+- 工单 ID 是 text（陪检单存在 `escort-*` 非 UUID），`asset.linked_order_ids` 是 `uuid[]`；
+- 详情关联资产、完成/取消时恢复资产状态两处 SQL 不再 `$2::uuid` 强转，统一按 text 比较；
+- 新增 PGlite 负控制：`escort-*` 按 uuid 强转必报错，按 text 比较安全返回空；
+- live 验证：主库 `zixing-hospital` 的 `escort-mwp7t1tm-o6gun4` 详情 200。
+
+生产租户迁移（同一发布窗口完成）：
+- `youfu_pilot.zixing-hospital` → `youfu.zixing-hospital`；
+- 75 张业务表、463 行；跳过 AI/推理日志/幂等缓存 10 张表；
+- 校验 tenant=1、dept=1、accounts=3、workers=16、workOrders=6；业务外键 10 项全 0 异常；
+- 6 个媒体文件复制到主库 uploads，sha256 一致；
+- 主库 API 烟测：admin 列表 200 total=6、stats/workbench 200、worker 列表 200、me/summary 200；
+- pilot 仍是当前写入源；最终切换前需冻结写入并用 `--replace` 重放一次。
+
 ## 16. 约束
 
 - `release-manifest.json` / `release-baseline.json` 是可复现发布 artifact，不进入源码库；

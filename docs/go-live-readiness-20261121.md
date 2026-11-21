@@ -16,14 +16,26 @@
 
 ## 2. 上线阻塞项
 
-### 2.1 正式生产租户未确定
+### 2.1 正式生产租户已迁移到主库，待最终切换
 
-- 主库 `youfu` 当前只有验证/演示租户：`t-verification`、`t-phasea`、probe 租户；没有正式医院生产租户。
-- Pilot 库 `youfu_pilot` 有真实医院 `zixing-hospital`（资兴市人民医院）。
-- 需要产品/运维决策：
-  1. 把 `zixing-hospital` 数据迁移到主库并作为正式生产租户；或
-  2. 明确 pilot 环境就是正式生产环境，完成命名、容量、备份、监控、权限的正式化。
-- 未决策前，“正式应用”没有明确的生产数据落点。
+产品已确定采用“迁移到主库正式租户”。2026-11-21 已完成一次受控迁移：
+
+- 源：`youfu_pilot` / `zixing-hospital`（资兴市人民医院）
+- 目标：`youfu` / `zixing-hospital`
+- 搬迁 75 张业务表、463 行；跳过 AI/推理日志/幂等缓存 10 张表
+- 关键校验：tenant=1、dept=1、accounts=3、workers=16、workOrders=6
+- 业务外键校验 10 项全部 0 异常
+- 6 个媒体文件已复制到 `/opt/youfu/uploads/zixing-hospital`，sha256 一致
+- 处理了 `t-verification` 与生产租户重复 openid：清除测试租户重复绑定，回滚 SQL 存在迁移备份目录
+- 主库 API 烟测：admin 列表 200（total=6）、`/stats/workbench` 200、worker 列表 200、`/open/me/summary` 200
+- 发现并修复陪检单 `escort-*` 非 UUID 详情 400：资产关联查询改为 text 比较，r11.2 已部署，详情 200
+
+尚未完成的是**最终切换**：
+
+1. 冻结 pilot 写入；
+2. 用 `--replace` 对主库做最后一次增量重放（迁移脚本已支持）；
+3. 将主站 5.9.36 设为体验版/提交审核；
+4. 确认 pilot 只读或下线，避免双写。
 
 ### 2.2 主站小程序仍是旧生产包
 
@@ -38,11 +50,11 @@
 
 | 租户 | 账号数 | 已绑定微信 | 师傅档案 |
 | --- | --- | --- | --- |
-| `t-verification` | 24 | 2 | 12 |
-| `zixing-hospital` | 3 | 1 | 16 |
+| `t-verification` | 24 | 1 | 12 |
+| `zixing-hospital`（主库） | 3 | 1 | 16 |
 | `t-phasea` | 6 | 0 | 4 |
 
-Pilot 关键角色绑定：admin 0/1、operator 0/1、worker 1/1。管理员/运营未绑定，管理侧通知无法真实送达。
+主库生产租户关键角色绑定：admin 0/1、operator 0/1、worker 1/1。管理员/运营未绑定，管理侧通知无法真实送达。`t-verification` 原 2 个绑定中 1 个与生产 worker 是同一 openid，迁移时已清除测试租户重复绑定。
 
 通知投递审计（`notification`）：
 
@@ -59,12 +71,13 @@ Pilot 关键角色绑定：admin 0/1、operator 0/1、worker 1/1。管理员/运
 
 - 前端 CI 在线状态无法匿名确认（私有仓库 API 404）；本地 36 文件 / 269 用例、typecheck、lint、build 均通过。
 - 本次后端部署使用同 commit 本地构建；CI artifact 已生成并记录 digest，但未直接下载 artifact 部署。若制度要求“artifact 即部署物”，需补下载/重放。
-- 主站小程序 release manifest 已补；pilot/main 上传记录、二维码、digest 需归档到 release 目录。
-- 正式上线前做一次回滚演练：切 `releases/current`、恢复备份 dist、重启、健康检查。
+- 主站小程序 release manifest 已补；pilot/main 上传记录、二维码、digest 已归档到 release 目录。
+- 迁移前已备份 `youfu` / `youfu_pilot`（`/opt/youfu/backups/migration-20261121T224914`）。
+- 正式上线前做一次回滚演练：切 `releases/current`、恢复备份 dist、重启、健康检查；数据回滚优先恢复迁移前数据库备份。
 
 ## 3. 上线顺序建议
 
-1. 决策正式生产租户与环境（主库迁移或 pilot 正式化）。
+1. 冻结 pilot 写入，执行最后一次 `--replace` 增量重放并复核。
 2. 完成关键角色微信绑定/订阅，验证真实通知回执。
 3. 主站 5.9.36 设体验版，完成最终真机验收；确认 pilot/主站包保留策略。
 4. 主站 5.9.36 提交微信审核并发布。
