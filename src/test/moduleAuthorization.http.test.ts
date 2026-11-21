@@ -83,6 +83,7 @@ import workerRouter from '../routes/worker.js';
 import catalogRouter from '../routes/catalog.js';
 import faultCategoryRouter from '../routes/faultCategory.js';
 import departmentRoutesRouter from '../routes/departmentRoutes.js';
+import statsRouter from '../routes/stats.js';
 import { requireModule, requireModuleWrites } from '../middleware/moduleGuard.js';
 import { userModuleKeys } from '../modules/service.js';
 
@@ -115,6 +116,7 @@ function appFor(): express.Express {
   app.use('/api/v1', catalogRouter);
   app.use('/api/v1', faultCategoryRouter);
   app.use('/api/v1', departmentRoutesRouter);
+  app.use('/api/v1', statsRouter); // statsRouter 自身挂 analytics 门禁
   app.use(errorMiddleware);
   return app;
 }
@@ -335,6 +337,19 @@ describe('管理面写端点模块门禁接线', () => {
     h.tenant.set('foundation', false);
     const r = await fetch(`${base}/api/v1/basic-data/dept`);
     expect(r.status).not.toBe(403);
+  });
+
+  it('analytics 管理面：模块关闭 403 MODULE_DISABLED，开启 200', async () => {
+    auth = { ...auth, authMode: 'prod', role: 'admin', userId: ADMIN };
+    h.rolePerms.set('admin', ['dashboard.view']);
+    h.tenant.set('analytics', false);
+    const off = await fetch(`${base}/api/v1/stats/by-catalog`);
+    expect(off.status, 'analytics 关闭必须拒绝管理面').toBe(403);
+    expect(((await off.json()) as { code: string }).code).toBe('MODULE_DISABLED');
+
+    h.tenant.set('analytics', true);
+    const on = await fetch(`${base}/api/v1/stats/by-catalog`);
+    expect(on.status, 'analytics 开启后管理面恢复').toBe(200);
   });
 
   it('模块门禁不越界：configuration/system 关闭不拦截 basic-data 写', async () => {

@@ -44,7 +44,7 @@ vi.mock('../db/pool.js', () => ({
 }));
 
 import { authMiddleware, signJwt, __setAuthModeForTest, __clearTenantStatusCacheForTest } from '../middleware/auth.js';
-import workOrderRouter from '../routes/workOrder.js';
+import statsRouter from '../routes/stats.js';
 
 const T = 't-stats-perm';
 let server: Server;
@@ -99,7 +99,7 @@ beforeAll(async () => {
   app = express();
   app.use(express.json());
   app.use('/api', authMiddleware); // 与生产 server.ts:169-170 同序（apiGuard 对 /stats 无影响，省略）
-  app.use('/api/v1', workOrderRouter); // 与生产 server.ts:173 挂载一致
+  app.use('/api/v1', statsRouter); // /stats 已归并到 statsRouter，与 server.ts 的 analytics 管理面一致
   app.use(errorMiddleware);
   await new Promise<void>((resolve) => {
     server = app.listen(0, '127.0.0.1', () => {

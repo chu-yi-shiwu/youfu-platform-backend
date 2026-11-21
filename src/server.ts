@@ -236,7 +236,7 @@ app.use('/api/v1/feedback', feedbackRouter);
 app.use('/api/v1/monitor', monitorRouter);
 app.use('/api/v1', materialRouter);
 app.use('/api/v1', assetRouter);
-app.use('/api/v1', statsRouter);
+app.use('/api/v1', statsRouter); // statsRouter 内部统一挂 requireModule('analytics')
 app.use('/api/v1', optimizeRouter);
 app.use('/api/v1', requireModule('analytics'), processMiningRouter);
 app.use('/api/v1', requireModule('optimize'), autoTuneRouter);

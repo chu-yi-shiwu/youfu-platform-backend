@@ -11,7 +11,6 @@ import { withTenantScope } from '../db/scope.js';
 import { createWithIdem, transition, list, findOne, findOneForUpdate } from '../repo/ticket.js';
 import { resolveWorkerIds } from '../repo/workerIdentity.js';
 import { notificationOrphanGuardSql } from '../repo/notificationVisibility.js';
-import { ticketStats } from '../repo/stats.js';
 import { pickWorker, resolveDispatch, getActiveRules } from '../engine/dispatch.js';
 import { resolveNeed } from '../engine/dispatch/needResolver.js';
 import { AppError } from '../middleware/error.js';
@@ -1154,35 +1153,8 @@ router.post('/open/work_order/:id/urge', async (req, res, next) => {
   }
 });
 
-router.get('/stats', async (req, res, next) => {
-  try {
-    const tenantId = res.locals.auth.tenantId;
-    const stats = await withTenantClient(tenantId, async (client) => {
-      // 与 :814 asset.scan 同款范式：requirePermission 在 withTenantClient 内调用（租户级覆盖生效）
-      await requirePermission(res.locals.auth, client, 'dashboard.view');
-      const base = await ticketStats(client, tenantId);
-      // 2026-11-14（方向 C）：分布口径收敛到后端聚合，前端不再拉 1000 条自己算。
-      const byCatalog = await client.query(
-        `SELECT COALESCE(NULLIF(catalog,''),'未分类') AS key, COUNT(*)::int AS count
-           FROM work_orders WHERE tenant_id=$1 GROUP BY 1 ORDER BY count DESC`,
-        [tenantId],
-      );
-      const bySource = await client.query(
-        `SELECT COALESCE(NULLIF(source,''),'未知') AS key, COUNT(*)::int AS count
-           FROM work_orders WHERE tenant_id=$1 GROUP BY 1 ORDER BY count DESC`,
-        [tenantId],
-      );
-      return {
-        ...base,
-        catalog_distribution: byCatalog.rows,
-        source_distribution: bySource.rows,
-      };
-    });
-    return res.json({ ok: true, code: 0, ...stats });
-  } catch (e) {
-    next(e);
-  }
-});
+// GET /stats 已迁移到 routes/stats.ts，由 server.ts 统一挂 requireModule('analytics')。
+// 不要再在共享 workOrderRouter 里注册第二份，否则模块关闭时共享路由仍可访问。
 
 // POST /api/v1/scan —— M3 真实解析：目录码/资产码识别（替代前端 MSW 写死 mock）
 // 生产化②：优先查库（asset_catalog/asset_registry），DB 权威、查不到诚实 unresolved。

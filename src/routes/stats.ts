@@ -3,19 +3,54 @@
 // 诚实口径：满意度数据后端暂无，大屏不显示或标注"待满意度模块接入"，禁止编造（见 repo/stats.ts）。
 import { Router } from 'express';
 import { withTenantClient } from '../db/pool.js';
-import { processMetrics, workerLoadDrift } from '../repo/stats.js';
+import { processMetrics, ticketStats, workerLoadDrift } from '../repo/stats.js';
 import { workbenchStats } from '../repo/workbenchStats.js';
 import { AppError } from '../middleware/error.js';
 import { qualityReport } from '../services/dataQuality.js';
 import { getDefsAcrossAllVersions, intersectStates } from '../engine/workflowDef.js';
 import { doneStates, DEFAULT_WORK_ORDER_DEF } from '../engine/stateMachine.js';
 import { requirePermission } from '../middleware/role.js';
+import { requireModule } from '../middleware/moduleGuard.js';
 
 const router = Router();
 
-// GET /stats 死路由已删除（P1-4）：与 workOrder.ts 的 GET /stats 双注册，
-// 按挂载序（server.ts:152 workOrderRouter 先于 :168 statsRouter）workOrder 版生效，此处原为永久死代码。
-// 本文件的 /stats/by-catalog、/stats/process、/stats/data-quality、/stats/overdue 为独有端点，保持不变。
+// analytics 是这一整组路由的模块边界：门禁放在 router 自身，任何挂载方都不会漏挂。
+// 移动端不使用 /stats*，因此这里可以整组强隔离；work_order 共享端点不在本文件。
+router.use(requireModule('analytics'));
+
+// GET /stats —— analytics 模块唯一入口。
+// 历史原因它曾同时注册在 workOrderRouter 和 statsRouter；workOrder 先挂载导致
+// 模块关闭时仍能从共享路由访问。现在归并到 statsRouter，并由 server.ts 统一挂
+// requireModule('analytics')，不再保留第二份。
+router.get('/stats', async (req, res, next) => {
+  try {
+    const tenantId = res.locals.auth.tenantId;
+    const stats = await withTenantClient(tenantId, async (client) => {
+      await requirePermission(res.locals.auth, client, 'dashboard.view');
+      const base = await ticketStats(client, tenantId);
+      const byCatalog = await client.query(
+        `SELECT COALESCE(NULLIF(catalog,''),'未分类') AS key, COUNT(*)::int AS count
+           FROM work_orders WHERE tenant_id=$1 GROUP BY 1 ORDER BY count DESC`,
+        [tenantId],
+      );
+      const bySource = await client.query(
+        `SELECT COALESCE(NULLIF(source,''),'未知') AS key, COUNT(*)::int AS count
+           FROM work_orders WHERE tenant_id=$1 GROUP BY 1 ORDER BY count DESC`,
+        [tenantId],
+      );
+      return {
+        ...base,
+        catalog_distribution: byCatalog.rows,
+        source_distribution: bySource.rows,
+      };
+    });
+    return res.json({ ok: true, code: 0, ...stats });
+  } catch (e) {
+    next(e);
+  }
+});
+
+// 以下 /stats/by-catalog、/stats/process、/stats/data-quality、/stats/overdue 均为 analytics 管理端点。
 
 // 审查修复（横切⑤⑥ F1）：原四端点零守卫——任意登录角色（含 worker）可拉全租户报表聚合
 // （工单分布/过程度量/数据质量/超时预警）。统一挂 dashboard.view，与 workOrder.ts GET /stats
