@@ -191,7 +191,29 @@ r6 把工作台统计从仅 `work_orders` 扩展到维修/巡检/运送/能耗�
 
 r7 复审修复：巡检通用 `/transition` 进入 `done` 时强制写 `done_at`；补齐能耗/运送状态中文标签；工作台“累计完成”改为“累计完成/结束”，明确 `done_count` 包含取消/异常终态。
 
-## 12. 约束
+## 12. r8 统计索引与完成时间加固
+
+| 项 | 值 |
+| --- | --- |
+| 后端代码 commit | `b0e02820008566b307819f1647e564c1320c36d0` |
+| tag | `release-20261121-r8` |
+| backend CI | run `44871608101`，success |
+| artifact | `youfu-release-b0e02820008566b307819f1647e564c1320c36d0`，624 KB |
+| artifact sha256 | `6d172516589871ca015df7767263734bda97ece86c747c2ce99adfda1e6c34ad` |
+| migrations | 135（新增 128） |
+| release ID | `20261121T053546-b0e028200085` |
+| 服务器 current | `/opt/youfu/releases/20261121T053546-b0e028200085` |
+| 后端全量 | 220 文件 / 2616 用例 |
+| 小程序 pilot | 5.9.31；manifest digest `61efecc6c8ae...` |
+| 小程序主站 | commit `e8ea961`；39 / 39 通过 |
+| live 四类统计 | 复跑 PASS，`active=4`、`done=12`、`today_done=4`、`today_new=8` |
+
+r8 优化：
+- 工作台统计查询补巡检/能耗 worker 索引；
+- 能耗 `submitted_at` 增加安全时间转换、历史清洗与 CHECK 约束；
+- 自定义工单完成态补 `completed_at`，避免今日完成回退 `updated_at`。
+
+## 13. 约束
 
 - `release-manifest.json` / `release-baseline.json` 是可复现发布 artifact，不进入源码库；
 - `release-baseline.mjs` 默认 fail-closed：commit 缺失或工作树不干净直接退出 1；

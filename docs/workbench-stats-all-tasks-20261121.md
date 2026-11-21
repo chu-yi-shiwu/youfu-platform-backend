@@ -160,16 +160,42 @@ PASS 四类任务 active=4 done=12 today_done=4 today_new=8
 3. **“累计完成”实际包含取消/异常**  
    `done_count` 是全部终态口径，已把工作台文案改为“累计完成/结束”，避免把取消单说成完成单。
 
-### 仍建议后续优化（非本轮阻塞）
+### 6.1 三项优化已落地（r8）
 
-- `inspection_task(tenant_id, assignee)`、`business_flow_tasks(tenant_id, entity_type, assignee)`、`business_flow_tasks(data->>'worker_ref')` 目前数据量小未加索引；量上来前建议补索引。
-- 若历史能耗任务存在非法 `data.submitted_at`，`::timestamptz` 会让整个 summary 500；当前主站/pilot 数据已核验合法，后续接入新租户前建议加一次清洗/约束。
-- 维修工单若使用租户自定义的“完成态”且不是 `completed/closed/evaluated`，`completed_at` 可能为空，今日完成会回退到 `updated_at`；建议后续在工单流转里对自定义完成态也补写 `completed_at`。
+1. **统计索引**  
+   `128_task_stats_indexes_and_energy_time.sql` 新增：
+   - `inspection_task(tenant_id, assignee, status)`
+   - `business_flow_tasks(tenant_id, entity_type, assignee)`
+   - `business_flow_tasks(tenant_id, (data->>'worker_ref')) WHERE entity_type='energy_collection'`
+
+2. **能耗历史时间清洗与约束**  
+   - 新增 `youfu_safe_timestamptz(text)`：非法时间返回 `NULL`，不再让 summary 500；
+   - 终态能耗任务缺失/非法 `submitted_at` 一次性冻结到 `updated_at`；
+   - 新增 CHECK 约束 `business_flow_tasks_energy_submitted_at_chk`，阻止新的非法值；
+   - `/open/me/summary` 的能耗完成时间改用安全函数。
+
+3. **自定义工单完成态补 `completed_at`**  
+   `ticket.ts` 对没有里程碑映射、但属于 `doneStates(def)` 的目标状态补：
+   ```sql
+   completed_at = COALESCE(completed_at, now())
+   ```
+   不会覆盖 `closed/evaluated` 前已经写入的首次完成时间。
+
+### 6.2 优化验证
+
+| 项 | 结果 |
+| --- | --- |
+| 后端全量 | **220 文件 / 2616 用例通过** |
+| 安全检查 | `youfu_safe_timestamptz('bad') IS NULL` 为 true |
+| 约束负控制 | 非法 `submitted_at` 插入被 CHECK 拒绝 |
+| 索引核验 | 三个索引在主站/pilot 均存在 |
+| live 四类统计 | 复跑 PASS，`active=4`、`done=12`、`today_done=4`、`today_new=8` |
 
 ## 7. 发布
 
 - 后端已部署主站 / pilot，readiness 均 `ready`、`db=up`；
-- 后端 r7 release ID：`20261121T051753-6fc099900538`；
+- 后端 r8 release ID：`20261121T053546-b0e028200085`；
+- 数据库迁移：`128_task_stats_indexes_and_energy_time.sql` 已应用主站/pilot；
 - pilot 小程序 **5.9.31** 已上传开发版本，预览码 `preview_qr_v5931.png`；
 - pilot release manifest digest：`61efecc6c8ae5d465e930a54506b3e720bc039aa2c154b3328c372eb37199f53`；
 - 主站小程序 commit `e8ea961`，生产上传需产品确认后执行。
