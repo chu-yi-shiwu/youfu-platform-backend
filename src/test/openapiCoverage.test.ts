@@ -121,7 +121,7 @@ describe('M-3 OpenAPI 覆盖机器门（docs/openapi.json vs 代码扫描）', (
     expect(spec.paths['/api/v1/public/scan'].get.security).toEqual([]);
     expect(spec.paths['/api/v1/wechat/jssdk-config'].get.security).toEqual([]);
     // 租户业务端点默认 bearerAuth
-    expect(spec.paths['/api/v1/open/work_order'].post.security).toEqual([{ bearerAuth: [] }]);
+    expect(spec.paths['/api/v1/admin/work-orders'].post.security).toEqual([{ bearerAuth: [] }]);
     // 开放 API 走 app_key 双因子
     expect(spec.paths['/api/v1/open-api/tenants/summary'].get.security).toEqual([{ openApiKey: [] }, { openApiSecret: [] }]);
   });

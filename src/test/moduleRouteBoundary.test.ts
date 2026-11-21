@@ -10,6 +10,45 @@ const ROOT = join(__dirname, '..', '..');
 const workOrder = readFileSync(join(ROOT, 'src', 'routes', 'workOrder.ts'), 'utf8');
 const stats = readFileSync(join(ROOT, 'src', 'routes', 'stats.ts'), 'utf8');
 
+describe('work_order 模块路由边界', () => {
+  it('管理面 /admin/work-orders 统一挂 work_order 模块门禁', () => {
+    expect(workOrder).toContain("router.use('/admin/work-orders', requireModule('work_order'))");
+  });
+
+  it('共享执行路由必须带 requireWorkerExecution，不能靠角色分支绕过', () => {
+    for (const route of [
+      "router.get('/open/work_orders', requireWorkerExecution",
+      "router.post('/open/work_order/:id/transition', requireWorkerExecution",
+      "router.get('/open/work_order/:id', requireWorkerExecution",
+      "router.post('/open/work_order/:id/claim', requireWorkerExecution",
+      "router.get('/open/claim-hall', requireWorkerExecution",
+      "router.patch('/open/work_order/:id/ext', requireWorkerExecution",
+    ]) {
+      expect(workOrder).toContain(route);
+    }
+  });
+
+  it('管理面补照片/语音与执行面共用 handler，但注册在 /admin 契约下', () => {
+    expect(workOrder).toContain("router.post('/admin/work-orders/:id/photos', handleWorkOrderPhotos)");
+    expect(workOrder).toContain("router.post('/admin/work-orders/:id/voice', handleWorkOrderVoice)");
+    expect(workOrder).toContain("router.post('/open/work_order/:id/photos', requireWorkerExecution, handleWorkOrderPhotos)");
+    expect(workOrder).toContain("router.post('/open/work_order/:id/voice', requireWorkerExecution, handleWorkOrderVoice)");
+  });
+
+  it('管理端点不得继续注册在 /open 下', () => {
+    for (const route of [
+      "router.post('/open/work_order',",
+      "router.get('/open/work_order/available',",
+      "router.get('/open/work_order/:id/events',",
+      "router.post('/open/work_order/:id/urge',",
+      "router.post('/open/work_order/:id/change-department',",
+      "router.get('/open/dispatch-recommend',",
+    ]) {
+      expect(workOrder).not.toContain(route);
+    }
+  });
+});
+
 describe('analytics 模块路由边界', () => {
   it('共享 workOrderRouter 不再注册 /stats', () => {
     expect(workOrder).not.toMatch(/router\.get\(\s*['"]\/stats['"]/);

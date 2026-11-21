@@ -120,7 +120,7 @@ afterAll(async () => {
 });
 
 const postTransition = async (body: Record<string, unknown>) => {
-  const r = await fetch(`${baseUrl}/open/work_order/${WO}/transition`, {
+  const r = await fetch(`${baseUrl}/admin/work-orders/${WO}/transition`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(body),

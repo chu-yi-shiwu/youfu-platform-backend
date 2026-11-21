@@ -3125,70 +3125,6 @@
         }
       }
     },
-    "/api/v1/open/work_order": {
-      "post": {
-        "tags": [
-          "workOrder"
-        ],
-        "summary": "POST /api/v1/open/work_order",
-        "description": "来源：src/routes/workOrder.ts:440\n\n服务端响应状态码（代码扫描）：200, 201, 400\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
-        "security": [
-          {
-            "bearerAuth": []
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "HTTP 200",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "description": "骨架占位：字段以服务端实现为准"
-                }
-              }
-            }
-          },
-          "201": {
-            "description": "HTTP 201",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "description": "骨架占位：字段以服务端实现为准"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "HTTP 400",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "description": "骨架占位：字段以服务端实现为准"
-                }
-              }
-            }
-          }
-        },
-        "requestBody": {
-          "required": false,
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object",
-                "additionalProperties": true,
-                "description": "骨架占位：请求字段以服务端实现为准"
-              }
-            }
-          }
-        }
-      }
-    },
     "/api/v1/open/work_order/{id}/transition": {
       "post": {
         "tags": [
@@ -3266,73 +3202,6 @@
             }
           }
         }
-      }
-    },
-    "/api/v1/open/work_order/available": {
-      "get": {
-        "tags": [
-          "workOrder"
-        ],
-        "summary": "— 返回某状态下可执行的转移规则（前端动态渲染/权限判断用）。",
-        "description": "status 省略时返回初始态(initial)的可用转移。\n\n来源：src/routes/workOrder.ts:720\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
-        "security": [
-          {
-            "bearerAuth": []
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "HTTP 200",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "description": "骨架占位：字段以服务端实现为准"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/open/work_order/{id}/events": {
-      "get": {
-        "tags": [
-          "workOrder"
-        ],
-        "summary": "— 工单事件流（前端工单详情时间线）",
-        "description": "来源：src/routes/workOrder.ts:740\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
-        "security": [
-          {
-            "bearerAuth": []
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "HTTP 200",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "description": "骨架占位：字段以服务端实现为准"
-                }
-              }
-            }
-          }
-        },
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            },
-            "description": "路径参数（原代码声明形如 :param）"
-          }
-        ]
       }
     },
     "/api/v1/open/work_order/{id}": {
@@ -3683,57 +3552,6 @@
         }
       }
     },
-    "/api/v1/open/work_order/{id}/urge": {
-      "post": {
-        "tags": [
-          "workOrder"
-        ],
-        "summary": "— P6 自动派单率/自动闭环率口径（诚实，不编造演示数据）",
-        "description": "权限墙（修复批次 X-8）：挂 dashboard.view——默认矩阵 admin/operator/dispatcher/reviewer/\nservice_desk 均含该权限点，worker 不含（403）。调用方核实：FE Dashboard.tsx:216 /\nDataScreen.tsx:144 / Statistics.tsx:55（MainLayout.tsx:109,125-126 三页菜单本就按\ndashboard.view 过滤，挂墙与 FE 既有口径完全对齐）+ mp overview.js:33 / report.js:45\n两个 admin 页。worker/未登录端点层零调用 → 挂墙零回归。\n— 报修人/管理员催办（2026-11-14 方向 C）\n口径：\n- 仅活跃态可催办（完成/取消等终态 409）；\n- 发起人 = 建单人本人，或持 ticket.manage 的管理角色；\n- 同人同单 30 分钟限一次（ticket_event 结构性防重），避免重复轰炸处理人；\n- 通知在身处理人；无处理人时通知租户管理员。\n\n来源：src/routes/workOrder.ts:1093\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
-        "security": [
-          {
-            "bearerAuth": []
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "HTTP 200",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "description": "骨架占位：字段以服务端实现为准"
-                }
-              }
-            }
-          }
-        },
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            },
-            "description": "路径参数（原代码声明形如 :param）"
-          }
-        ],
-        "requestBody": {
-          "required": false,
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object",
-                "additionalProperties": true,
-                "description": "骨架占位：请求字段以服务端实现为准"
-              }
-            }
-          }
-        }
-      }
-    },
     "/api/v1/stats": {
       "get": {
         "tags": [
@@ -3788,97 +3606,6 @@
             }
           }
         },
-        "requestBody": {
-          "required": false,
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object",
-                "additionalProperties": true,
-                "description": "骨架占位：请求字段以服务端实现为准"
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/sla/scan": {
-      "post": {
-        "tags": [
-          "workOrder"
-        ],
-        "summary": "— P4 SLA 守护：扫本租户超时单，标记升级并 emit sla_escalated 事件",
-        "description": "拆雷三件套②（2026-08-31）：扫描实现抽到 src/scheduler/slaScheduler.ts 的 runSlaScanForTenant，\n本端点与进程内 cron 共用同一实现；命中同时落通知（在身 assignee + 租户管理员），契约不变。\n\n来源：src/routes/workOrder.ts:1209\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
-        "security": [
-          {
-            "bearerAuth": []
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "HTTP 200",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "description": "骨架占位：字段以服务端实现为准"
-                }
-              }
-            }
-          }
-        },
-        "requestBody": {
-          "required": false,
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object",
-                "additionalProperties": true,
-                "description": "骨架占位：请求字段以服务端实现为准"
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/open/work_order/{id}/change-department": {
-      "post": {
-        "tags": [
-          "workOrder"
-        ],
-        "summary": "— 改部门（服务台转台的替代）",
-        "description": "门禁：dispatch.override。只改 department_id，不自动改状态/处理人。\n\n来源：src/routes/workOrder.ts:1230\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
-        "security": [
-          {
-            "bearerAuth": []
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "HTTP 200",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "description": "骨架占位：字段以服务端实现为准"
-                }
-              }
-            }
-          }
-        },
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            },
-            "description": "路径参数（原代码声明形如 :param）"
-          }
-        ],
         "requestBody": {
           "required": false,
           "content": {
@@ -3966,34 +3693,6 @@
                 "type": "object",
                 "additionalProperties": true,
                 "description": "骨架占位：请求字段以服务端实现为准"
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/open/dispatch-recommend": {
-      "get": {
-        "tags": [
-          "workOrder"
-        ],
-        "summary": "— 派单智能推荐（DMR 可解释呈现，dispatcher 端）。",
-        "description": "当前工人（token 身份）今日工作台统计见下方 /open/me/summary。\n只读推荐：基于 技能匹配 + 当前负载 的确定性评分，不写回任何配置（AUTO_TUNE 无关）。\n诚实口径：无 worker 级满意度数据 → 理由不编造满意度；技能匹配 = 分类名/码与 worker.skill_tags 子串包含（≥2 字符）。\n冷启动（无 dispatch_rule/UCB 数据）时依然有区分度：技能命中优先、负载低次之。\n\n来源：src/routes/workOrder.ts:1478\n\n服务端响应状态码（代码扫描）：200\n\n\n\n请求/响应体为骨架占位（宽松 object），字段以服务端实现为准。",
-        "security": [
-          {
-            "bearerAuth": []
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "HTTP 200",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "additionalProperties": true,
-                  "description": "骨架占位：字段以服务端实现为准"
-                }
               }
             }
           }
@@ -14939,6 +14638,289 @@
                 }
               }
             }
+          }
+        }
+      }
+    },
+    "/api/v1/admin/work-orders": {
+      "get": {
+        "tags": [
+          "workOrderAdmin"
+        ],
+        "summary": "管理端工单列表",
+        "description": "需要 work_order 模块启用；用于 PC/员工管理面。",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "HTTP 200"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "workOrderAdmin"
+        ],
+        "summary": "管理端新建工单",
+        "description": "需要 work_order 模块启用；移动端执行面不使用此端点。",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "HTTP 200"
+          }
+        }
+      }
+    },
+    "/api/v1/admin/work-orders/available": {
+      "get": {
+        "tags": [
+          "workOrderAdmin"
+        ],
+        "summary": "管理端可流转状态",
+        "description": "需要 work_order 模块启用。",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "HTTP 200"
+          }
+        }
+      }
+    },
+    "/api/v1/admin/work-orders/queue/claim-hall": {
+      "get": {
+        "tags": [
+          "workOrderAdmin"
+        ],
+        "summary": "管理端抢单/待派池",
+        "description": "需要 work_order 模块启用；worker 执行面使用 /open/claim-hall。",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "HTTP 200"
+          }
+        }
+      }
+    },
+    "/api/v1/admin/work-orders/dispatch/recommend": {
+      "get": {
+        "tags": [
+          "workOrderAdmin"
+        ],
+        "summary": "管理端派单推荐",
+        "description": "需要 work_order 模块启用。",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "HTTP 200"
+          }
+        }
+      }
+    },
+    "/api/v1/admin/work-orders/ops/sla-scan": {
+      "post": {
+        "tags": [
+          "workOrderAdmin"
+        ],
+        "summary": "管理端触发 SLA 扫描",
+        "description": "需要 work_order 模块启用。",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "HTTP 200"
+          }
+        }
+      }
+    },
+    "/api/v1/admin/work-orders/{id}": {
+      "get": {
+        "tags": [
+          "workOrderAdmin"
+        ],
+        "summary": "管理端工单详情",
+        "description": "需要 work_order 模块启用；worker 执行面使用 /open/work_order/{id}。",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "HTTP 200"
+          }
+        }
+      }
+    },
+    "/api/v1/admin/work-orders/{id}/events": {
+      "get": {
+        "tags": [
+          "workOrderAdmin"
+        ],
+        "summary": "管理端工单事件",
+        "description": "需要 work_order 模块启用。",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "HTTP 200"
+          }
+        }
+      }
+    },
+    "/api/v1/admin/work-orders/{id}/transition": {
+      "post": {
+        "tags": [
+          "workOrderAdmin"
+        ],
+        "summary": "管理端工单流转",
+        "description": "需要 work_order 模块启用；worker 执行面使用 /open/work_order/{id}/transition。",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "HTTP 200"
+          }
+        }
+      }
+    },
+    "/api/v1/admin/work-orders/{id}/claim": {
+      "post": {
+        "tags": [
+          "workOrderAdmin"
+        ],
+        "summary": "管理端代认领/派单",
+        "description": "需要 work_order 模块启用。",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "HTTP 200"
+          }
+        }
+      }
+    },
+    "/api/v1/admin/work-orders/{id}/urge": {
+      "post": {
+        "tags": [
+          "workOrderAdmin"
+        ],
+        "summary": "管理端催办",
+        "description": "需要 work_order 模块启用。",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "HTTP 200"
+          }
+        }
+      }
+    },
+    "/api/v1/admin/work-orders/{id}/change-department": {
+      "post": {
+        "tags": [
+          "workOrderAdmin"
+        ],
+        "summary": "管理端改部门",
+        "description": "需要 work_order 模块启用。",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "HTTP 200"
+          }
+        }
+      }
+    },
+    "/api/v1/admin/work-orders/{id}/ext": {
+      "patch": {
+        "tags": [
+          "workOrderAdmin"
+        ],
+        "summary": "管理端工单扩展字段",
+        "description": "需要 work_order 模块启用；worker 执行面使用 /open/work_order/{id}/ext。",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "HTTP 200"
+          }
+        }
+      }
+    },
+    "/api/v1/admin/work-orders/{id}/photos": {
+      "post": {
+        "tags": [
+          "workOrderAdmin"
+        ],
+        "summary": "管理端工单补照片",
+        "description": "需要 work_order 模块启用；与执行面 /open/work_order/{id}/photos 共用 handler。",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "HTTP 200"
+          }
+        }
+      }
+    },
+    "/api/v1/admin/work-orders/{id}/voice": {
+      "post": {
+        "tags": [
+          "workOrderAdmin"
+        ],
+        "summary": "管理端工单补语音",
+        "description": "需要 work_order 模块启用；与执行面 /open/work_order/{id}/voice 共用 handler。",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "HTTP 200"
           }
         }
       }

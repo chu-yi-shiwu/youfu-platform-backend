@@ -101,7 +101,7 @@ describe('角色数据范围收敛：路由不再注入 MASTER_ROLES scope', () 
 
   it('operator 不传 assignee：不注入本人 scope（运营看全局）', async () => {
     const calls = makeClient(listHandlers());
-    const r = await get('/open/work_orders', 'operator');
+    const r = await get('/admin/work-orders', 'operator');
     expect(r.status).toBe(200);
     const listCall = calls.find((c) => c.text.includes('FROM work_orders wo') && c.text.includes('ORDER BY'));
     expect(listCall).toBeTruthy();
@@ -110,7 +110,7 @@ describe('角色数据范围收敛：路由不再注入 MASTER_ROLES scope', () 
 
   it('admin 不传 assignee：不注入本人 scope', async () => {
     const calls = makeClient(listHandlers());
-    const r = await get('/open/work_orders', 'admin');
+    const r = await get('/admin/work-orders', 'admin');
     expect(r.status).toBe(200);
     const listCall = calls.find((c) => c.text.includes('FROM work_orders wo') && c.text.includes('ORDER BY'));
     expect(listCall!.params).not.toContainEqual(['W0001']);
@@ -124,7 +124,7 @@ describe('角色数据范围收敛：路由不再注入 MASTER_ROLES scope', () 
 
   it('operator 详情：RLS 可见（findOne 返回行）→ 200', async () => {
     makeClient(detailHandlers({ id: 'wo-x', order_no: 'WO_X', status: 'assigned', assignee_id: 'W0002', def_version: 0 }));
-    const r = await get('/open/work_order/wo-x', 'operator');
+    const r = await get('/admin/work-orders/wo-x', 'operator');
     expect(r.status).toBe(200);
   });
 });

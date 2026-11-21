@@ -86,7 +86,8 @@ afterAll(async () => {
 });
 
 async function transition(to = 'processing'): Promise<{ status: number; body: Record<string, any> }> {
-  const r = await fetch(`${baseUrl}/open/work_order/${WO}/transition`, {
+  const basePath = currentAuth.role === 'worker' ? '/open/work_order' : '/admin/work-orders';
+  const r = await fetch(`${baseUrl}${basePath}/${WO}/transition`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ to }),
@@ -160,7 +161,7 @@ describe('评价主体守卫', () => {
       },
       defHandler,
     ]);
-    const r = await fetch(`${baseUrl}/open/work_order/${WO}/transition`, {
+    const r = await fetch(`${baseUrl}/admin/work-orders/${WO}/transition`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ to: 'evaluated', score: 5 }),
@@ -184,7 +185,7 @@ describe('工单催办', () => {
       rowCount: 1,
     }),
   });
-  const urge = () => fetch(`${baseUrl}/open/work_order/${WO}/urge`, {
+  const urge = () => fetch(`${baseUrl}/admin/work-orders/${WO}/urge`, {
     method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
   }).then(async (r) => ({ status: r.status, body: (await r.json().catch(() => ({}))) as Record<string, any> }));
 

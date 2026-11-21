@@ -3,7 +3,7 @@
 //  - POST /api/v1/open/work_order/:id/transition
 //  - GET  /api/v1/open/work_orders
 //  - POST /api/v1/scan                    (M3 真实解析：目录/资产码识别)
-import { Router } from 'express';
+import { Router, type RequestHandler } from 'express';
 import { z } from 'zod';
 import type { PoolClient } from 'pg';
 import { withTenantClient } from '../db/pool.js';
@@ -15,6 +15,7 @@ import { pickWorker, resolveDispatch, getActiveRules } from '../engine/dispatch.
 import { resolveNeed } from '../engine/dispatch/needResolver.js';
 import { AppError } from '../middleware/error.js';
 import { requirePermission, requireAnyPermission, assertOpsRole, hasPerm } from '../middleware/role.js';
+import { requireModule } from '../middleware/moduleGuard.js';
 import { isSelfScope } from '../middleware/dataScope.js';
 import { resolveScanFromDb } from '../scan.js';
 import { resolveWorkbenchBuckets } from '../engine/workbenchBuckets.js';
@@ -55,6 +56,18 @@ import { autoCreateSettlementForOrder, AUTO_SETTLEMENT_OPERATOR } from '../repo/
 import { autoRedispatchAfterReturn } from '../services/autoRedispatch.js'; // 洞①：退回自动回派
 
 const router = Router();
+
+// 管理面模块边界：/admin/work-orders/* 统一要求 work_order 模块。
+// 移动端执行端点仍走 /open/*，但只允许 worker 角色，且只看到自己的任务。
+router.use('/admin/work-orders', requireModule('work_order'));
+
+const requireWorkerExecution: RequestHandler = (_req, res, next) => {
+  const auth = res.locals.auth as { role?: string } | undefined;
+  if (!auth || auth.role !== 'worker') {
+    return next(new AppError('FORBIDDEN', 'worker execution endpoint', 403));
+  }
+  return next();
+};
 
 /**
  * 建单后自动派单（2026-08-29 从 POST /open/work_order handler 抽取为共享函数）：
@@ -437,7 +450,7 @@ export function toCreateRes(row: any, autoFlow: boolean, assignee: string | null
 }
 
 // POST /api/v1/open/work_order
-router.post('/open/work_order', async (req, res, next) => {
+const handleCreateWorkOrder: RequestHandler = async (req, res, next) => {
   try {
     const tenantId = res.locals.auth.tenantId;
     const idem = res.locals.auth.idempotencyKey;
@@ -524,10 +537,11 @@ router.post('/open/work_order', async (req, res, next) => {
   } catch (e) {
     next(e);
   }
-});
+};
+router.post('/admin/work-orders', handleCreateWorkOrder);
 
 // POST /api/v1/open/work_order/:id/transition
-router.post('/open/work_order/:id/transition', async (req, res, next) => {
+const handleWorkOrderTransition: RequestHandler = async (req, res, next) => {
   try {
     const tenantId = res.locals.auth.tenantId;
     // 批次三（QA 修复②）：via 已从 schema 移除；显式丢弃 body 里的 via（防 passthrough 污染 fields/payload）
@@ -615,10 +629,12 @@ router.post('/open/work_order/:id/transition', async (req, res, next) => {
   } catch (e) {
     next(e);
   }
-});
+};
+router.post('/open/work_order/:id/transition', requireWorkerExecution, handleWorkOrderTransition);
+router.post('/admin/work-orders/:id/transition', handleWorkOrderTransition);
 
 // GET /api/v1/open/work_orders
-router.get('/open/work_orders', async (req, res, next) => {
+const handleListWorkOrders: RequestHandler = async (req, res, next) => {
   try {
     const tenantId = res.locals.auth.tenantId;
     const status = req.query.status as WorkOrderStatus | undefined;
@@ -713,11 +729,13 @@ router.get('/open/work_orders', async (req, res, next) => {
   } catch (e) {
     next(e);
   }
-});
+};
+router.get('/open/work_orders', requireWorkerExecution, handleListWorkOrders);
+router.get('/admin/work-orders', handleListWorkOrders);
 
 // GET /api/v1/open/work_order/available?status=  —— 返回某状态下可执行的转移规则（前端动态渲染/权限判断用）。
 // status 省略时返回初始态(initial)的可用转移。
-router.get('/open/work_order/available', async (req, res, next) => {
+const handleWorkOrderAvailable: RequestHandler = async (req, res, next) => {
   try {
     const tenantId = res.locals.auth.tenantId;
     const def = await withTenantClient(tenantId, (client) => getWorkflowDef(client, tenantId, 'work_order'));
@@ -734,10 +752,11 @@ router.get('/open/work_order/available', async (req, res, next) => {
   } catch (e) {
     next(e);
   }
-});
+};
+router.get('/admin/work-orders/available', handleWorkOrderAvailable);
 
 // GET /api/v1/open/work_order/:id/events —— 工单事件流（前端工单详情时间线）
-router.get('/open/work_order/:id/events', async (req, res, next) => {
+const handleWorkOrderEvents: RequestHandler = async (req, res, next) => {
   try {
     const tenantId = res.locals.auth.tenantId;
     const items = await withTenantClient(tenantId, (client) =>
@@ -753,11 +772,12 @@ router.get('/open/work_order/:id/events', async (req, res, next) => {
   } catch (e) {
     next(e);
   }
-});
+};
+router.get('/admin/work-orders/:id/events', handleWorkOrderEvents);
 
 // GET /api/v1/open/work_order/:id —— 工单详情（单条）：含当前状态可执行的转移规则 + 事件流。
 // A+ Phase4：供 SPA TicketDetail 动态渲染动作按钮（不再前端硬编码状态→事件映射）。
-router.get('/open/work_order/:id', async (req, res, next) => {
+const handleWorkOrderDetail: RequestHandler = async (req, res, next) => {
   try {
     const tenantId = res.locals.auth.tenantId;
     const result = await withTenantClient(tenantId, async (client) => {
@@ -802,7 +822,9 @@ router.get('/open/work_order/:id', async (req, res, next) => {
   } catch (e) {
     next(e);
   }
-});
+};
+router.get('/open/work_order/:id', requireWorkerExecution, handleWorkOrderDetail);
+router.get('/admin/work-orders/:id', handleWorkOrderDetail);
 
 // POST /api/v1/open/work_order/:id/photos —— P0 移动 H5「现场拍照真落库」
 // 把 base64 data URL 追加进 ext.photos（租户内隔离，跨 PC/H5 可见、刷新不丢）。
@@ -815,7 +837,7 @@ const voiceSchema = z.object({
   url: z.string().min(1).max(500),           // /upload 返回的 URL
   voices: z.array(z.string().max(500)).optional(),
 });
-router.post('/open/work_order/:id/photos', async (req, res, next) => {
+const handleWorkOrderPhotos: RequestHandler = async (req, res, next) => {
   try {
     const tenantId = res.locals.auth.tenantId;
     const { photo, caption } = photoSchema.parse(req.body);
@@ -837,10 +859,13 @@ router.post('/open/work_order/:id/photos', async (req, res, next) => {
   } catch (e) {
     next(e);
   }
-});
+};
+router.post('/open/work_order/:id/photos', requireWorkerExecution, handleWorkOrderPhotos);
+// 管理面代报修创建后同样要能补照片；与执行面共用同一个 handler，只按契约分路径。
+router.post('/admin/work-orders/:id/photos', handleWorkOrderPhotos);
 
 // D1：语音留言追加（worker 录语音 → /upload 得 URL → 追加 ext.voice 数组）
-router.post('/open/work_order/:id/voice', async (req, res, next) => {
+const handleWorkOrderVoice: RequestHandler = async (req, res, next) => {
   try {
     const tenantId = res.locals.auth.tenantId;
     const { url, voices } = voiceSchema.parse(req.body);
@@ -863,7 +888,9 @@ router.post('/open/work_order/:id/voice', async (req, res, next) => {
   } catch (e) {
     next(e);
   }
-});
+};
+router.post('/open/work_order/:id/voice', requireWorkerExecution, handleWorkOrderVoice);
+router.post('/admin/work-orders/:id/voice', handleWorkOrderVoice);
 
 // GET /api/v1/open/notifications —— 通知列表（?recipient= 可选过滤；缺省=本人收件箱）
 // 审查修复：合并原 454(recipient 版) 与 585(全量版) 重复注册——Express 先注册先匹配，585 版永不生效。
@@ -1006,7 +1033,7 @@ router.post('/open/notify/selftest', async (req, res, next) => {
 //   保留键 public_view_token / attachments / voice 仍硬拒（uploads.ts / 专属端点依赖）。
 const extPatchSchema = z.object({ patch: z.record(z.string(), z.unknown()) });
 const EXT_RESERVED_KEYS: readonly string[] = ['public_view_token', 'attachments', 'voice'];
-router.patch('/open/work_order/:id/ext', async (req, res, next) => {
+const handleWorkOrderExt: RequestHandler = async (req, res, next) => {
   try {
     const auth = res.locals.auth;
     const tenantId = auth.tenantId;
@@ -1076,7 +1103,9 @@ router.patch('/open/work_order/:id/ext', async (req, res, next) => {
   } catch (e) {
     next(e);
   }
-});
+};
+router.patch('/open/work_order/:id/ext', requireWorkerExecution, handleWorkOrderExt);
+router.patch('/admin/work-orders/:id/ext', handleWorkOrderExt);
 
 // GET /api/v1/stats —— P6 自动派单率/自动闭环率口径（诚实，不编造演示数据）
 // 权限墙（修复批次 X-8）：挂 dashboard.view——默认矩阵 admin/operator/dispatcher/reviewer/
@@ -1090,7 +1119,7 @@ router.patch('/open/work_order/:id/ext', async (req, res, next) => {
 //   - 发起人 = 建单人本人，或持 ticket.manage 的管理角色；
 //   - 同人同单 30 分钟限一次（ticket_event 结构性防重），避免重复轰炸处理人；
 //   - 通知在身处理人；无处理人时通知租户管理员。
-router.post('/open/work_order/:id/urge', async (req, res, next) => {
+const handleUrgeWorkOrder: RequestHandler = async (req, res, next) => {
   try {
     const auth = res.locals.auth;
     const tenantId = auth.tenantId;
@@ -1151,7 +1180,8 @@ router.post('/open/work_order/:id/urge', async (req, res, next) => {
   } catch (e) {
     next(e);
   }
-});
+};
+router.post('/admin/work-orders/:id/urge', handleUrgeWorkOrder);
 
 // GET /stats 已迁移到 routes/stats.ts，由 server.ts 统一挂 requireModule('analytics')。
 // 不要再在共享 workOrderRouter 里注册第二份，否则模块关闭时共享路由仍可访问。
@@ -1179,7 +1209,7 @@ router.post('/scan', async (req, res, next) => {
 // POST /api/v1/sla/scan —— P4 SLA 守护：扫本租户超时单，标记升级并 emit sla_escalated 事件
 // 拆雷三件套②（2026-08-31）：扫描实现抽到 src/scheduler/slaScheduler.ts 的 runSlaScanForTenant，
 // 本端点与进程内 cron 共用同一实现；命中同时落通知（在身 assignee + 租户管理员），契约不变。
-router.post('/sla/scan', async (req, res, next) => {
+const handleSlaScan: RequestHandler = async (req, res, next) => {
   try {
     const tenantId = res.locals.auth.tenantId;
     // 审查修复（QA🟡7）：SLA 扫描会写 escalated_at + 发通知触发全租户扫描，属运维动作——
@@ -1196,11 +1226,12 @@ router.post('/sla/scan', async (req, res, next) => {
   } catch (e) {
     next(e);
   }
-});
+};
+router.post('/admin/work-orders/ops/sla-scan', handleSlaScan);
 
 // POST /api/v1/open/work_order/:id/change-department —— 改部门（服务台转台的替代）
 // 门禁：dispatch.override。只改 department_id，不自动改状态/处理人。
-router.post('/open/work_order/:id/change-department', async (req, res, next) => {
+const handleChangeDepartment: RequestHandler = async (req, res, next) => {
   try {
     const auth = res.locals.auth;
     const tenantId = auth.tenantId;
@@ -1283,10 +1314,11 @@ router.post('/open/work_order/:id/change-department', async (req, res, next) => 
   } catch (e) {
     next(e);
   }
-});
+};
+router.post('/admin/work-orders/:id/change-department', handleChangeDepartment);
 
 // GET /api/v1/open/claim-hall —— 抢单大厅：列出可被认领的工单（池态由流程派生），可按部门过滤
-router.get('/open/claim-hall', async (req, res, next) => {
+const handleClaimHall: RequestHandler = async (req, res, next) => {
   try {
     const tenantId = res.locals.auth.tenantId;
     const department = (req.query.department_id ?? req.query.department) as string | undefined;
@@ -1408,7 +1440,9 @@ router.get('/open/claim-hall', async (req, res, next) => {
   } catch (e) {
     next(e);
   }
-});
+};
+router.get('/open/claim-hall', requireWorkerExecution, handleClaimHall);
+router.get('/admin/work-orders/queue/claim-hall', handleClaimHall);
 
 // POST /api/v1/open/work_order/:id/claim —— 抢单（人员认领未分配工单，部门不匹配驳回）
 // F6（2026-10-19）：本体抽去 services/claimWorkOrder.ts，并入 transition() 主通道——
@@ -1416,7 +1450,7 @@ router.get('/open/claim-hall', async (req, res, next) => {
 //   全部生效（与此前自动派单 F4 同一次根治）；目标态从客户 def 的认领边派生。
 //   门禁单一事实源 = transition()（本文件不再另写角色白名单，两处口径不再漂移）。
 // C-2 身份根治：token userId 即 worker.id（id 同源），body workerId 不一致 403。
-router.post('/open/work_order/:id/claim', async (req, res, next) => {
+const handleClaimWorkOrder: RequestHandler = async (req, res, next) => {
   try {
     const tenantId = res.locals.auth.tenantId;
     const role = res.locals.auth.role;
@@ -1441,14 +1475,16 @@ router.post('/open/work_order/:id/claim', async (req, res, next) => {
   } catch (e) {
     next(e);
   }
-});
+};
+router.post('/open/work_order/:id/claim', requireWorkerExecution, handleClaimWorkOrder);
+router.post('/admin/work-orders/:id/claim', handleClaimWorkOrder);
 
 // GET /api/v1/open/dispatch-recommend —— 派单智能推荐（DMR 可解释呈现，dispatcher 端）。
 // 当前工人（token 身份）今日工作台统计见下方 /open/me/summary。
 // 只读推荐：基于 技能匹配 + 当前负载 的确定性评分，不写回任何配置（AUTO_TUNE 无关）。
 // 诚实口径：无 worker 级满意度数据 → 理由不编造满意度；技能匹配 = 分类名/码与 worker.skill_tags 子串包含（≥2 字符）。
 // 冷启动（无 dispatch_rule/UCB 数据）时依然有区分度：技能命中优先、负载低次之。
-router.get('/open/dispatch-recommend', async (req, res, next) => {
+const handleDispatchRecommend: RequestHandler = async (req, res, next) => {
   try {
     const tenantId = res.locals.auth.tenantId;
     const category = String((req.query as Record<string, string>).category || '').trim();
@@ -1478,9 +1514,10 @@ router.get('/open/dispatch-recommend', async (req, res, next) => {
   } catch (e) {
     next(e);
   }
-});
+};
+router.get('/admin/work-orders/dispatch/recommend', handleDispatchRecommend);
 
-router.get('/open/me/summary', async (req, res, next) => {
+router.get('/open/me/summary', requireWorkerExecution, async (req, res, next) => {
   try {
     const tenantId = res.locals.auth.tenantId;
     const wid = res.locals.auth.userId;

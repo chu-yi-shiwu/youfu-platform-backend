@@ -38,7 +38,7 @@ export const KNOWN_V1_SEGMENTS: ReadonlySet<string> = new Set([
   'generate', 'generate-from-theme', 'health', 'inventory', 'invites', 'items', 'jssdk-config',
   'materials', 'meta', 'open', 'open-api-logs', 'optimize', 'orders', 'plans', 'points',
   'preview', 'process-mining', 'product-catalog', 'public', 'records', 'scan',
-  'settlements', 'similar', 'sla', 'stats', 'summary', 'tasks',
+  'settlements', 'similar', 'stats', 'summary', 'tasks',
   'template-contributions', 'templates', 'tenant', 'tenant-info', 'tenants', 'themes',
   // 🔴 'tickets' 已于 2026-10-28 移除：原 POST /api/v1/tickets（代申告）随代申告下线删除，
   //    全仓再无 router 以 tickets 作首段。留着会被 routerRegistry 的

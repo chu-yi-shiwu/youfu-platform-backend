@@ -98,11 +98,11 @@ const get = async (path: string) => {
   return { status: r.status, body: (await r.json()) as Record<string, any> };
 };
 // ==================== 任务一（决策 #8）：列表服务端筛选 ====================
-describe('任务一：GET /open/work_orders 服务端筛选四参', () => {
+describe('任务一：GET /admin/work-orders 服务端筛选四参', () => {
   it('department 单独过滤生效（SQL 条件 + 参数）', async () => {
     const { client, calls } = makeClient(listHandlers([{ id: WO_ID, order_no: 'WO_1', status: 'open', department_id: DEPT_UUID, department_name: '护理部', assignee_name: null }]));
     h.client = client;
-    const r = await get('/open/work_orders?department_id=' + DEPT_UUID);
+    const r = await get('/admin/work-orders?department_id=' + DEPT_UUID);
     expect(r.status).toBe(200);
     expect(r.body.ok).toBe(true);
     const listCall = calls.find((c) => c.text.includes('ORDER BY wo.created_at'));
@@ -119,7 +119,7 @@ describe('任务一：GET /open/work_orders 服务端筛选四参', () => {
     ] as const) {
       const { client, calls } = makeClient(listHandlers([]));
       h.client = client;
-      const r = await get(`/open/work_orders?${qs}`);
+      const r = await get(`/admin/work-orders?${qs}`);
       expect(r.status).toBe(200);
       const listCall = calls.find((c) => c.text.includes('ORDER BY wo.created_at'));
       expect(listCall!.text).toContain(cond);
@@ -130,7 +130,7 @@ describe('任务一：GET /open/work_orders 服务端筛选四参', () => {
   it('四参与 status 组合生效（同一条 SQL 同时携带全部条件）', async () => {
     const { client, calls } = makeClient(listHandlers([]));
     h.client = client;
-    const r = await get('/open/work_orders?status=open&department_id=' + DEPT_UUID + '&priority=urgent&source=phone');
+    const r = await get('/admin/work-orders?status=open&department_id=' + DEPT_UUID + '&priority=urgent&source=phone');
     expect(r.status).toBe(200);
     const listCall = calls.find((c) => c.text.includes('ORDER BY wo.created_at'));
     expect(listCall!.text).toContain('wo.status = ANY(');
@@ -145,7 +145,7 @@ describe('任务一：GET /open/work_orders 服务端筛选四参', () => {
   it('回归：四参全不传时 SQL 不出现新条件，行为与旧版一致', async () => {
     const { client, calls } = makeClient(listHandlers([]));
     h.client = client;
-    const r = await get('/open/work_orders?limit=5');
+    const r = await get('/admin/work-orders?limit=5');
     expect(r.status).toBe(200);
     const listCall = calls.find((c) => c.text.includes('ORDER BY wo.created_at'));
     expect(listCall).toBeTruthy();
@@ -164,7 +164,7 @@ describe('任务二：列表/详情下发 assignee_name', () => {
   it('列表项透传 assignee_name（LEFT JOIN worker）', async () => {
     const { client } = makeClient(listHandlers([{ id: WO_ID, order_no: 'WO_1', status: 'assigned', assignee_id: 'w-1', assignee_name: '张三' }]));
     h.client = client;
-    const r = await get('/open/work_orders');
+    const r = await get('/admin/work-orders');
     expect(r.status).toBe(200);
     expect(r.body.items[0].assignee_name).toBe('张三');
   });
@@ -177,7 +177,7 @@ describe('任务二：列表/详情下发 assignee_name', () => {
       { match: (t) => t.includes('FROM ticket_event'), reply: () => ({ rows: [] }) },
     ]);
     h.client = client;
-    const r = await get(`/open/work_order/${WO_ID}`);
+    const r = await get(`/admin/work-orders/${WO_ID}`);
     expect(r.status).toBe(200);
     expect(r.body.ticket.assignee_name).toBe('李四');
     expect(r.body.ticket.code).toBe('WO_1'); // DEF-2 口径未被破坏
@@ -194,7 +194,7 @@ describe('任务二：列表/详情下发 assignee_name', () => {
       { match: (t) => t.includes('FROM ticket_event'), reply: () => ({ rows: [] }) },
     ]);
     h.client = client;
-    const r = await get(`/open/work_order/${WO_ID}`);
+    const r = await get(`/admin/work-orders/${WO_ID}`);
     expect(r.status).toBe(200);
     expect(r.body.ticket.assignee_name).toBeNull();
   });

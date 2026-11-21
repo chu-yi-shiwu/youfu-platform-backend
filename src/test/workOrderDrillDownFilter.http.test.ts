@@ -1,6 +1,6 @@
 // workOrderDrillDownFilter.http.test.ts —— 工作台下钻（#949 续）纯加法三参的真·HTTP 层回归护栏。
 //
-//   GET /open/work_orders 新增三个可选筛选（全不传 = 旧版行为零变化）：
+//   GET /admin/work-orders 新增三个可选筛选（全不传 = 旧版行为零变化）：
 //     auto_flow=1 → 只回自动流转单（wo.auto_flow = true，工作台"自动派单"卡下钻）；
 //     today=1     → 只回当日创建单（wo.created_at::date = CURRENT_DATE，与统计卡 today_new 同口径）；
 //     timeout=1   → 只回超时且未闭环单（sla_due_at 已过且未进终态；终态排除集复用 SLA 扫描
@@ -112,11 +112,11 @@ const get = async (path: string) => {
 const findListCall = (calls: Array<{ text: string; params?: unknown[] }>) => calls.find((c) => c.text.includes('ORDER BY wo.created_at'));
 
 // ==================== 工作台下钻（#949 续）：列表三参筛选 ====================
-describe('工作台下钻：GET /open/work_orders 三参筛选（纯加法）', () => {
+describe('工作台下钻：GET /admin/work-orders 三参筛选（纯加法）', () => {
   it('auto_flow=1：SQL 只拼 wo.auto_flow = true（无参数，硬编码布尔）', async () => {
     const { client, calls } = makeClient(listHandlers([{ id: WO_ID, order_no: 'WO_1', status: 'processing', auto_flow: true, assignee_name: null }]));
     h.client = client;
-    const r = await get('/open/work_orders?auto_flow=1');
+    const r = await get('/admin/work-orders?auto_flow=1');
     expect(r.status).toBe(200);
     expect(r.body.ok).toBe(true);
     const listCall = findListCall(calls);
@@ -130,7 +130,7 @@ describe('工作台下钻：GET /open/work_orders 三参筛选（纯加法）', 
   it("auto_flow='true' 与 '1' 等价（qstr 风格布尔归一）", async () => {
     const { client, calls } = makeClient(listHandlers([]));
     h.client = client;
-    const r = await get('/open/work_orders?auto_flow=true');
+    const r = await get('/admin/work-orders?auto_flow=true');
     expect(r.status).toBe(200);
     expect(findListCall(calls)!.text).toContain('wo.auto_flow = true');
   });
@@ -138,7 +138,7 @@ describe('工作台下钻：GET /open/work_orders 三参筛选（纯加法）', 
   it('today=1：SQL 拼 wo.created_at::date = CURRENT_DATE（与 /stats today_new 同口径）', async () => {
     const { client, calls } = makeClient(listHandlers([]));
     h.client = client;
-    const r = await get('/open/work_orders?today=1');
+    const r = await get('/admin/work-orders?today=1');
     expect(r.status).toBe(200);
     const listCall = findListCall(calls);
     expect(listCall!.text).toContain('wo.created_at::date = CURRENT_DATE');
@@ -148,7 +148,7 @@ describe('工作台下钻：GET /open/work_orders 三参筛选（纯加法）', 
   it("today='true' 与 '1' 等价", async () => {
     const { client, calls } = makeClient(listHandlers([]));
     h.client = client;
-    const r = await get('/open/work_orders?today=true');
+    const r = await get('/admin/work-orders?today=true');
     expect(r.status).toBe(200);
     expect(findListCall(calls)!.text).toContain('wo.created_at::date = CURRENT_DATE');
   });
@@ -156,7 +156,7 @@ describe('工作台下钻：GET /open/work_orders 三参筛选（纯加法）', 
   it("timeout=1：SQL 拼超时三段条件，排除集=def 派生终态并集（DEFAULT def 下为 ['completed']）", async () => {
     const { client, calls } = makeClient(listHandlers([]));
     h.client = client;
-    const r = await get('/open/work_orders?timeout=1');
+    const r = await get('/admin/work-orders?timeout=1');
     expect(r.status).toBe(200);
     const listCall = findListCall(calls);
     expect(listCall).toBeTruthy();
@@ -178,7 +178,7 @@ describe('工作台下钻：GET /open/work_orders 三参筛选（纯加法）', 
   it('timeout=1 与 status 组合：两条件同时出现在同一条 SQL', async () => {
     const { client, calls } = makeClient(listHandlers([]));
     h.client = client;
-    const r = await get('/open/work_orders?timeout=1&status=processing');
+    const r = await get('/admin/work-orders?timeout=1&status=processing');
     expect(r.status).toBe(200);
     const listCall = findListCall(calls);
     expect(listCall!.text).toContain('wo.status = ANY(');
@@ -188,7 +188,7 @@ describe('工作台下钻：GET /open/work_orders 三参筛选（纯加法）', 
   it('三参组合（auto_flow=1&today=1&timeout=1）：三条件同条 SQL 齐发', async () => {
     const { client, calls } = makeClient(listHandlers([]));
     h.client = client;
-    const r = await get('/open/work_orders?auto_flow=1&today=1&timeout=1');
+    const r = await get('/admin/work-orders?auto_flow=1&today=1&timeout=1');
     expect(r.status).toBe(200);
     const listCall = findListCall(calls);
     expect(listCall!.text).toContain('wo.auto_flow = true');
@@ -199,7 +199,7 @@ describe('工作台下钻：GET /open/work_orders 三参筛选（纯加法）', 
   it('回归：三参全不传时 SQL 不出现新条件，行为与旧版一致', async () => {
     const { client, calls } = makeClient(listHandlers([{ id: WO_ID, order_no: 'WO_1', status: 'draft', auto_flow: false, assignee_name: null }]));
     h.client = client;
-    const r = await get('/open/work_orders?limit=5');
+    const r = await get('/admin/work-orders?limit=5');
     expect(r.status).toBe(200);
     const listCall = findListCall(calls);
     expect(listCall).toBeTruthy();
@@ -214,7 +214,7 @@ describe('工作台下钻：GET /open/work_orders 三参筛选（纯加法）', 
   it("回归：传非布尔值（如 auto_flow=0 / timeout=yes）不触发过滤（与 unsettled 同风格）", async () => {
     const { client, calls } = makeClient(listHandlers([]));
     h.client = client;
-    const r = await get('/open/work_orders?auto_flow=0&today=0&timeout=yes');
+    const r = await get('/admin/work-orders?auto_flow=0&today=0&timeout=yes');
     expect(r.status).toBe(200);
     const listCall = findListCall(calls);
     expect(listCall!.text).not.toContain('wo.auto_flow =');
