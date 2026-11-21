@@ -143,7 +143,38 @@ r2 额外修复：`router.use(guard)` 未限定路径会把后续所有请求一
 
 r4 前端改动为 lint 清理与 CI 接入，无运行时行为变化；前端 dist 已重新部署并验证主站/ pilot 页面 200。小程序 5.9.28 需在微信后台手动点「设为体验版」后再由体验成员验收。
 
-## 9. 约束
+## 9. r5 巡检/任务列表修复
+
+| 项 | 值 |
+| --- | --- |
+| 代码 commit | `e666ee4ec95e78d70e113adaa19c8132f89789af` |
+| 文档 commit | `bcc4af52d137aa40921a0ad24b7608fa0fcbacc7` |
+| tag | `release-20261121-r5` |
+| backend CI | run `44781023814`（代码）、`44782728675`（文档），success |
+| release ID | `20261120T172304-bcc4af52d137` |
+| 服务器 current | `/opt/youfu/releases/20261120T172304-bcc4af52d137` |
+| 巡检终态写记录 | 409 `TASK_CLOSED`，负控制通过 |
+| live 今日完成 | `done_count=2`、`today_done=1` PASS |
+| 小程序 pilot | 5.9.29 已上传开发版本；manifest digest `6bbbc51ef6fb...` |
+
+## 10. r6 工作台四类任务统计
+
+| 项 | 值 |
+| --- | --- |
+| 后端代码 commit | `cb4e583f8f620150b9c5c23376c4b580d5e4c435` |
+| tag | `release-20261121-r6` |
+| backend CI | run `44868458546`，success |
+| artifact | `youfu-release-cb4e583f8f620150b9c5c23376c4b580d5e4c435`，638,070 bytes |
+| release ID | `20261121T045626-cb4e583f8f62` |
+| 服务器 current | `/opt/youfu/releases/20261121T045626-cb4e583f8f62` |
+| 后端全量 | 220 文件 / 2613 用例 |
+| 小程序 pilot | 5.9.30 已上传开发版本；manifest digest `3d40b2b0a13e...` |
+| 小程序主站 | commit `4822eef`；39 / 39 通过 |
+| live 四类统计 | `active=4`、`done=12`、`today_done=4`、`today_new=8` PASS |
+
+r6 把工作台统计从仅 `work_orders` 扩展到维修/巡检/运送/能耗四表，并新增 `stats_by_type`；`today_done` 只认成功完成态且按业务完成字段的 Asia/Shanghai 本地日计算。live 审计专门把三天前完成任务的 `updated_at` 改成今天，确认不会重新计入今日完成。
+
+## 11. 约束
 
 - `release-manifest.json` / `release-baseline.json` 是可复现发布 artifact，不进入源码库；
 - `release-baseline.mjs` 默认 fail-closed：commit 缺失或工作树不干净直接退出 1；
