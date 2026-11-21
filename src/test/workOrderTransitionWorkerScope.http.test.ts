@@ -185,9 +185,12 @@ describe('工单催办', () => {
       rowCount: 1,
     }),
   });
-  const urge = () => fetch(`${baseUrl}/admin/work-orders/${WO}/urge`, {
-    method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
-  }).then(async (r) => ({ status: r.status, body: (await r.json().catch(() => ({}))) as Record<string, any> }));
+  const urge = () => {
+    const basePath = currentAuth.role === 'worker' ? '/open/work_order' : '/admin/work-orders';
+    return fetch(`${baseUrl}${basePath}/${WO}/urge`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
+    }).then(async (r) => ({ status: r.status, body: (await r.json().catch(() => ({}))) as Record<string, any> }));
+  };
 
   it('建单人催办 → 200 + urge 事件 + 通知处理人', async () => {
     currentAuth = { role: 'worker', userId: 'u-creator', username: 'creator' };

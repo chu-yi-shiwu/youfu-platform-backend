@@ -14946,6 +14946,25 @@
           }
         }
       }
+    },
+    "/api/v1/open/work_order/{id}/urge": {
+      "post": {
+        "tags": [
+          "workOrder"
+        ],
+        "summary": "Worker execution urge (creator only)",
+        "description": "Worker-only execution contract for the order creator; management urge uses /admin/work-orders/{id}/urge.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "HTTP 200"
+          }
+        }
+      }
     }
   },
   "components": {

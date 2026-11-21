@@ -62,6 +62,19 @@ const router = Router();
 // 移动端执行端点仍走 /open/*，但只允许 worker 角色，且只看到自己的任务。
 router.use('/admin/work-orders', requireModule('work_order'));
 
+// 管理面角色边界：worker 只能走 /open 执行面，不能借 /admin 读取事件、
+// 派单推荐或触发管理动作。dev 模式与 requireModule 同口径放行。
+const MANAGEMENT_ROLES = new Set(['admin', 'operator', 'dispatcher', 'reviewer', 'service_desk']);
+const requireManagementRole: RequestHandler = (_req, res, next) => {
+  const auth = res.locals.auth as { role?: string; authMode?: string } | undefined;
+  if (auth?.authMode === 'dev') return next();
+  if (!auth || !auth.role || !MANAGEMENT_ROLES.has(auth.role)) {
+    return next(new AppError('FORBIDDEN', 'management endpoint', 403));
+  }
+  return next();
+};
+router.use('/admin/work-orders', requireManagementRole);
+
 const requireWorkerExecution: RequestHandler = (_req, res, next) => {
   const auth = res.locals.auth as { role?: string } | undefined;
   if (!auth || auth.role !== 'worker') {
@@ -1187,6 +1200,8 @@ const handleUrgeWorkOrder: RequestHandler = async (req, res, next) => {
     next(e);
   }
 };
+// 执行面：建单人（含 worker）可催办自己创建的工单；管理面保留全租户催办。
+router.post('/open/work_order/:id/urge', requireWorkerExecution, handleUrgeWorkOrder);
 router.post('/admin/work-orders/:id/urge', handleUrgeWorkOrder);
 
 // GET /stats 已迁移到 routes/stats.ts，由 server.ts 统一挂 requireModule('analytics')。

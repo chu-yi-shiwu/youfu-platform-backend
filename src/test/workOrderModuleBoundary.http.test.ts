@@ -88,6 +88,15 @@ describe('work_order 模块边界', () => {
     expect(r.status).toBe(200);
   });
 
+  it('模块开启：worker 仍不能进入管理面 /admin/work-orders', async () => {
+    h.moduleEnabled = true;
+    h.role = 'worker';
+    h.userId = 'w-1';
+    const r = await fetch(`${base}/admin/work-orders`);
+    expect(r.status).toBe(403);
+    expect(((await r.json()) as { message: string }).message).toContain('management endpoint');
+  });
+
   it('模块关闭：管理面代报修补照片/语音 403 MODULE_DISABLED', async () => {
     h.moduleEnabled = false;
     const photo = await fetch(`${base}/admin/work-orders/wo-1/photos`, {

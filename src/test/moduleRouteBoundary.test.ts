@@ -15,6 +15,11 @@ describe('work_order 模块路由边界', () => {
     expect(workOrder).toContain("router.use('/admin/work-orders', requireModule('work_order'))");
   });
 
+  it('管理面 /admin/work-orders 统一挂管理角色门禁，worker 不能进入', () => {
+    expect(workOrder).toContain("router.use('/admin/work-orders', requireManagementRole)");
+    expect(workOrder).toContain("'management endpoint'");
+  });
+
   it('共享执行路由必须带 requireWorkerExecution，不能靠角色分支绕过', () => {
     for (const route of [
       "router.post('/open/work_order', requireWorkerExecution",
@@ -22,6 +27,7 @@ describe('work_order 模块路由边界', () => {
       "router.post('/open/work_order/:id/transition', requireWorkerExecution",
       "router.get('/open/work_order/:id', requireWorkerExecution",
       "router.post('/open/work_order/:id/claim', requireWorkerExecution",
+      "router.post('/open/work_order/:id/urge', requireWorkerExecution",
       "router.get('/open/claim-hall', requireWorkerExecution",
       "router.patch('/open/work_order/:id/ext', requireWorkerExecution",
     ]) {
@@ -40,7 +46,6 @@ describe('work_order 模块路由边界', () => {
     for (const route of [
       "router.get('/open/work_order/available',",
       "router.get('/open/work_order/:id/events',",
-      "router.post('/open/work_order/:id/urge',",
       "router.post('/open/work_order/:id/change-department',",
       "router.get('/open/dispatch-recommend',",
     ]) {
