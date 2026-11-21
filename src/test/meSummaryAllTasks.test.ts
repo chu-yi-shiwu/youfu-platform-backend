@@ -140,6 +140,6 @@ describe('GET /api/v1/open/me/summary 四类任务全覆盖', () => {
     expect(workOrder.text).toContain("COALESCE(completed_at, rated_at, updated_at) AT TIME ZONE 'Asia/Shanghai'");
     expect(inspection.text).toContain("done_at AT TIME ZONE 'Asia/Shanghai'");
     expect(transport.text).toContain("COALESCE(sign_at, arrive_at, updated_at) AT TIME ZONE 'Asia/Shanghai'");
-    expect(energy.text).toContain("COALESCE((NULLIF(data->>'submitted_at', ''))::timestamptz, updated_at) AT TIME ZONE 'Asia/Shanghai'");
+    expect(energy.text).toContain("COALESCE(public.youfu_safe_timestamptz(data->>'submitted_at'), updated_at) AT TIME ZONE 'Asia/Shanghai'");
   });
 });

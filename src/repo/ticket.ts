@@ -371,6 +371,11 @@ export async function transition(
   // stateMachine.STATUS_TIMESTAMP_COLUMNS），transition 是工单流转唯一收口写路径，此处回填
   // 即覆盖人工/接口全部流转；自动派单与抢单旁路在 workOrder.ts / linkedWorkOrder.ts 各自同步回填。
   const milestoneCol = timestampColumnFor(to);
+  // 自定义完成态兜底：租户可能把 doneStates 配成 finished/archived 等非内置状态。
+  // 这类状态没有里程碑列映射；若不补 completed_at，工作台 today_done 只能回退 updated_at，
+  // 后续评价/归档一改就会把旧完成算进今天。COALESCE 保证 closed 等后置完成态不覆盖首次完成时间。
+  const completedAtFallbackSql =
+    !milestoneCol && doneStates(def).includes(to) ? ', completed_at = COALESCE(completed_at, now())' : '';
   // F4（2026-10-19）：auto_flow 三态口径——①显式声明 autoFlow → 听声明（自动派单=true；
   //   自动审核推进不带 assignee 也不许把单打成人工）；②未声明且带 assignee → false
   //   （P0-6 人工派单口径，存量行为逐字不变）；③未声明且无 assignee → 不写该列。
@@ -397,7 +402,7 @@ export async function transition(
     scoreSql = `, satisfaction_score = $${updParams.length}`;
   }
   const upd = await client.query<WorkOrderRow>(
-    `UPDATE work_orders SET status = $1, updated_at = now()${assignee ? ', assignee_id = $4' : ''}${deptSql}${scoreSql}${autoFlowSql}${milestoneCol ? `, ${milestoneCol} = now()` : ''} WHERE id = $2 AND tenant_id = $3 RETURNING work_orders.*,
+    `UPDATE work_orders SET status = $1, updated_at = now()${assignee ? ', assignee_id = $4' : ''}${deptSql}${scoreSql}${autoFlowSql}${milestoneCol ? `, ${milestoneCol} = now()` : completedAtFallbackSql} WHERE id = $2 AND tenant_id = $3 RETURNING work_orders.*,
        (SELECT d.name FROM dept d
          WHERE d.tenant_id = work_orders.tenant_id AND d.id = work_orders.department_id) AS department_name`,
     updParams,

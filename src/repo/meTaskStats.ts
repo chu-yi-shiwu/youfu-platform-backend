@@ -152,8 +152,8 @@ const ENERGY_STATS_SQL = `
     COUNT(*) FILTER (WHERE status = ANY($6::text[]))::int AS done_count,
     COUNT(*) FILTER (
       WHERE status = ANY($5::text[])
-        AND COALESCE((NULLIF(data->>'submitted_at', ''))::timestamptz, updated_at) IS NOT NULL
-        AND (COALESCE((NULLIF(data->>'submitted_at', ''))::timestamptz, updated_at) AT TIME ZONE 'Asia/Shanghai')::date
+        AND COALESCE(public.youfu_safe_timestamptz(data->>'submitted_at'), updated_at) IS NOT NULL
+        AND (COALESCE(public.youfu_safe_timestamptz(data->>'submitted_at'), updated_at) AT TIME ZONE 'Asia/Shanghai')::date
           = (now() AT TIME ZONE 'Asia/Shanghai')::date
     )::int AS today_done,
     COUNT(*) FILTER (

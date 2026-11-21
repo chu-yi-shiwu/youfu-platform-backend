@@ -9,6 +9,7 @@ import {
   STATUS_TIMESTAMP_COLUMNS,
   timestampColumnFor,
   canTransition,
+  type WorkflowDef,
 } from '../engine/stateMachine.js';
 import { transition } from '../repo/ticket.js';
 
@@ -73,14 +74,14 @@ describe('RICH 模板新增 arrived 态（074）', () => {
 // ── transition() 回填断言（fake client 捕获 UPDATE SQL）──
 // 说明：RICH def 存于 workflow_def 表，fake client 按 SQL 片段路由返回；
 //       流转选取避开 assignee 增减（cur.assignee_id 固定），避免牵动 load/影子回填旁路。
-function fakeClient(cur: Record<string, unknown>) {
+function fakeClient(cur: Record<string, unknown>, def: WorkflowDef = RICH_WORK_ORDER_DEF) {
   const captured: Array<{ sql: string; params: unknown[] }> = [];
   const client = {
     query: async (sql: string, params: unknown[] = []) => {
       captured.push({ sql, params });
       if (sql.includes('FOR UPDATE')) return { rows: [cur], rowCount: 1 };
       if (sql.includes('FROM workflow_def')) {
-        return { rows: [{ def: JSON.parse(JSON.stringify(RICH_WORK_ORDER_DEF)) }], rowCount: 1 };
+        return { rows: [{ def: JSON.parse(JSON.stringify(def)) }], rowCount: 1 };
       }
       if (sql.trimStart().toUpperCase().startsWith('UPDATE WORK_ORDERS')) {
         return { rows: [{ ...cur }], rowCount: 1 };
@@ -148,5 +149,32 @@ describe('transition() 里程碑列回填', () => {
     const { client, captured } = fakeClient({ id: 'wo1', tenant_id: 't1', status: 'assigned', assignee_id: 'w1' });
     await transition(client, 't1', 'wo1', 'processing', { actor: 'w1', role: 'worker' });
     expect(lastUpdateSql(captured)).toContain('started_at = now()');
+  });
+
+  it('自定义完成态：没有里程碑映射时补 completed_at，避免今日完成回退 updated_at', async () => {
+    const custom: WorkflowDef = {
+      initial: 'processing',
+      states: ['processing', 'finished'],
+      transitions: [{ from: 'processing', to: 'finished', event: 'finish' }],
+      config: { doneStates: ['finished'] },
+    };
+    const { client, captured } = fakeClient(
+      { id: 'wo1', tenant_id: 't1', status: 'processing', assignee_id: null },
+      custom,
+    );
+    await transition(client, 't1', 'wo1', 'finished', { actor: 'admin', role: 'admin' });
+    expect(lastUpdateSql(captured)).toContain('completed_at = COALESCE(completed_at, now())');
+  });
+
+  it('built-in closed 后置完成态：只补空值，不覆盖首次 completed_at', async () => {
+    const { client, captured } = fakeClient({ id: 'wo1', tenant_id: 't1', status: 'completed', assignee_id: null });
+    await transition(client, 't1', 'wo1', 'closed', {
+      actor: 'admin',
+      role: 'admin',
+      fields: { close_reason: '已回访' },
+    });
+    const sql = lastUpdateSql(captured);
+    expect(sql).toContain('completed_at = COALESCE(completed_at, now())');
+    expect(sql).not.toContain('completed_at = now()');
   });
 });
