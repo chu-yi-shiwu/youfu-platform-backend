@@ -310,7 +310,7 @@ worker 执行建单走 `/open/work_order` 且仅 worker；管理建单走 `/admi
 | release ID | `20261121T132002-0a22c9f75682` |
 | 服务器 current | `/opt/youfu/releases/20261121T132002-0a22c9f75682` |
 | 小程序 pilot | 5.9.35；manifest digest `da6a309a0572...`；44 / 44 通过 |
-| 小程序主站 | commit `21311d8`；42 / 42 通过 |
+| 小程序主站 | 5.9.36 开发版已上传；manifest digest `2b86ca7366b8...`；源码 commit `f4a6d92`；42 / 42 通过 |
 | live 边界烟测 | worker 在模块关闭的 uat 租户建单 201；admin open 仍 403；真实租户只读复核 PASS |
 
 r11.1 live 证据（uat 租户测后删除，行数归零）：
