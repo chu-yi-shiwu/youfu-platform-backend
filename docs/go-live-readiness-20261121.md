@@ -53,6 +53,8 @@ Pilot 关键角色绑定：admin 0/1、operator 0/1、worker 1/1。管理员/运
 
 需要完成：关键角色绑定、订阅模板授权、一次真实发送回执验证。
 
+配置侧已确认：主站与 pilot 的 `MP_APPID`、`MP_APPSECRET`、`WX_MP_TEMPLATE_ID` 均已设置；pilot 存在 1 条真实 delivered=true 记录，说明微信发送链路本身可用。当前失败主要是接收人未绑定 openid 或未订阅模板，不是网关配置缺失。
+
 ### 2.4 发布流程闭环
 
 - 前端 CI 在线状态无法匿名确认（私有仓库 API 404）；本地 36 文件 / 269 用例、typecheck、lint、build 均通过。
