@@ -174,7 +174,24 @@ r4 前端改动为 lint 清理与 CI 接入，无运行时行为变化；前端 
 
 r6 把工作台统计从仅 `work_orders` 扩展到维修/巡检/运送/能耗四表，并新增 `stats_by_type`；`today_done` 只认成功完成态且按业务完成字段的 Asia/Shanghai 本地日计算。live 审计专门把三天前完成任务的 `updated_at` 改成今天，确认不会重新计入今日完成。
 
-## 11. 约束
+## 11. r7 复审补强
+
+| 项 | 值 |
+| --- | --- |
+| 后端代码 commit | `6fc099900538c894f9e90ed1aac1973e74f8ebf1` |
+| tag | `release-20261121-r7` |
+| backend CI | run `44870201468`，success |
+| artifact | `youfu-release-6fc099900538c894f9e90ed1aac1973e74f8ebf1`，638,212 bytes |
+| release ID | `20261121T051753-6fc099900538` |
+| 服务器 current | `/opt/youfu/releases/20261121T051753-6fc099900538` |
+| 后端全量 | 220 文件 / 2614 用例 |
+| 小程序 pilot | 5.9.31 已上传开发版本；manifest digest `61efecc6c8ae...` |
+| 小程序主站 | commit `e8ea961`；39 / 39 通过 |
+| live 四类统计 | 复跑 PASS，`active=4`、`done=12`、`today_done=4`、`today_new=8` |
+
+r7 复审修复：巡检通用 `/transition` 进入 `done` 时强制写 `done_at`；补齐能耗/运送状态中文标签；工作台“累计完成”改为“累计完成/结束”，明确 `done_count` 包含取消/异常终态。
+
+## 12. 约束
 
 - `release-manifest.json` / `release-baseline.json` 是可复现发布 artifact，不进入源码库；
 - `release-baseline.mjs` 默认 fail-closed：commit 缺失或工作树不干净直接退出 1；

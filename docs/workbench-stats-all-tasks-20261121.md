@@ -118,7 +118,7 @@
 
 | 项 | 结果 |
 | --- | --- |
-| 后端全量 | **220 文件 / 2613 用例通过** |
+| 后端全量 | **220 文件 / 2614 用例通过** |
 | 小程序 pilot | **40 / 40 通过** + 绑定自检 |
 | 小程序主站 | **39 / 39 通过** + 绑定自检 |
 
@@ -146,9 +146,30 @@ PASS 四类任务 active=4 done=12 today_done=4 today_new=8
 
 审计结束自动清理 `uat-stats-*`，不触碰真实 pilot 租户。
 
-## 6. 发布
+## 6. 复审补强
+
+上线后按代码审查回看，又修了三处：
+
+1. **巡检通用 `/transition` 完成可能漏写 `done_at`**  
+   原实现只有 `/complete` 明确写 `done_at`；如果管理端/接口调用通用 `/transition` 把状态推到 `done`，工作台 `today_done` 会漏计。  
+   现在把“进入 `done` 必写 `done_at`”收口到 `transitionTask`，并加了负控制测试。
+
+2. **能耗/运送状态没有中文标签**  
+   `submitted/reviewed/archived/transporting/created/dispatched` 会直接显示英文原值。已补到 `format.js` 与 `labels.js` 的兜底词典，测试断言 `submitted → 已提交`、`dispatched → 已下发`。
+
+3. **“累计完成”实际包含取消/异常**  
+   `done_count` 是全部终态口径，已把工作台文案改为“累计完成/结束”，避免把取消单说成完成单。
+
+### 仍建议后续优化（非本轮阻塞）
+
+- `inspection_task(tenant_id, assignee)`、`business_flow_tasks(tenant_id, entity_type, assignee)`、`business_flow_tasks(data->>'worker_ref')` 目前数据量小未加索引；量上来前建议补索引。
+- 若历史能耗任务存在非法 `data.submitted_at`，`::timestamptz` 会让整个 summary 500；当前主站/pilot 数据已核验合法，后续接入新租户前建议加一次清洗/约束。
+- 维修工单若使用租户自定义的“完成态”且不是 `completed/closed/evaluated`，`completed_at` 可能为空，今日完成会回退到 `updated_at`；建议后续在工单流转里对自定义完成态也补写 `completed_at`。
+
+## 7. 发布
 
 - 后端已部署主站 / pilot，readiness 均 `ready`、`db=up`；
-- pilot 小程序 **5.9.30** 已上传开发版本，预览码 `preview_qr_v5930.png`；
-- pilot release manifest digest：`3d40b2b0a13ef608807decda7a89d9bfc1d04787ccd7eabc461a6b3271a111d6`；
-- 主站小程序代码同步，生产上传需产品确认后执行。
+- 后端 r7 release ID：`20261121T051753-6fc099900538`；
+- pilot 小程序 **5.9.31** 已上传开发版本，预览码 `preview_qr_v5931.png`；
+- pilot release manifest digest：`61efecc6c8ae5d465e930a54506b3e720bc039aa2c154b3328c372eb37199f53`；
+- 主站小程序 commit `e8ea961`，生产上传需产品确认后执行。
