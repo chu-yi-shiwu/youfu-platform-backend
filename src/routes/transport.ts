@@ -98,6 +98,13 @@ export async function transitionOrder(
   if (!target) {
     throw new AppError('BAD_STATE', `illegal transition ${t.status} --${event}-->`, 422);
   }
+  // 完成时间收口：任何路径进入 done 都必须落 sign_at/arrive_at，不能只依赖 HTTP 路由
+  // 对 event==='complete' 的分支。否则适配器/脚本直接调用 transitionOrder 时，
+  // 工作台 today_done 会回退到 updated_at，后续复核一改就可能把旧完成算进今天。
+  if (target === 'done') {
+    if (extra.sign_at == null || extra.sign_at === '') extra.sign_at = 'now()';
+    if (extra.arrive_at == null || extra.arrive_at === '') extra.arrive_at = 'now()';
+  }
   // P1（B2 接 allowedRoles）：TRANSPORT_DEF 声明的角色门禁此前只在工作单线强制
   // （repo/ticket.ts transition()），运送线 applyEvent 仅校验 from+event——被指派工人
   // 可对自己单子执行声明上仅 admin/operator 可用的 cancel。口径对齐工单线：
@@ -531,10 +538,6 @@ router.post('/orders/:id/transition', async (req, res, next) => {
       // 两个字段都接受，统一落到 carrier，避免“必填了 assignee 但车/人列为空”。
       const carrier = fields.carrier ?? fields.assignee;
       if (carrier) extra.carrier = String(carrier);
-    }
-    if (event === 'complete') {
-      extra.arrive_at = 'now()';
-      extra.sign_at = 'now()';
     }
     const item = await withTenantClient(tenantId, async (client) => {
       // #583 归属守卫：worker 仅可流转自己的运送单

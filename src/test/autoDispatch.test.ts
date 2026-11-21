@@ -598,6 +598,21 @@ describe('运送线 worker.load 净结算（least_load 的分母）', () => {
     }
   });
 
+  it('完成时间收口：直接调用 transitionOrder(complete, extra={}) 也写 sign_at/arrive_at', async () => {
+    const { client, calls } = makeClient(
+      transportHandler({
+        current: { id: TRANSPORT_ORDER_ID, status: 'transporting', carrier: 'wt-2', def_version: 0 },
+      }),
+    );
+    const outcome = await settle(
+      transitionOrder(client, T_TRANSPORT, TRANSPORT_ORDER_ID, 'complete', {}, {}, 'u-1', 'worker'),
+    );
+    expect(outcome.ok, `complete 应成功（${outcome.code}）`).toBe(true);
+    const upd = calls.find((c) => c.text.includes('UPDATE transport_order'));
+    expect(upd?.text).toContain('sign_at = now()');
+    expect(upd?.text).toContain('arrive_at = now()');
+  });
+
   it('④ 改派（旧 carrier → 新 carrier）⇒ 旧 -1、新 +1，两条 UPDATE 都要出现', async () => {
     // 【为什么用 receive 边】TRANSPORT_DEF 里没有 assigned→assigned 的改派边，不为此发明
     //   新边（= 新增变量，且没有消费方）。用真实 def 里唯一一条「活跃态→活跃态」的边
