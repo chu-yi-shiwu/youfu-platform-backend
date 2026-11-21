@@ -187,7 +187,7 @@ PASS 四类任务 active=4 done=12 today_done=4 today_new=8
 
 | 项 | 结果 |
 | --- | --- |
-| 后端全量 | **220 文件 / 2617 用例通过** |
+| 后端全量 | **221 文件 / 2621 用例通过** |
 | 安全检查 | `youfu_safe_timestamptz('bad') IS NULL` 为 true |
 | 约束负控制 | 非法 `submitted_at` 插入被 CHECK 拒绝 |
 | 索引核验 | 三个索引在主站/pilot 均存在 |
@@ -252,7 +252,18 @@ npm run release-gate:live
 
 默认 `npm run release-gate` 不依赖真实租户，保持离线可跑；只有带 `--live-audit` 时才要求 `AUDIT_TENANT`。pilot 发布把 `API_BASE` 换成 `http://127.0.0.1:4101/api/v1`、`AUDIT_TENANT=zixing-hospital`。
 
-### 6.6 机构解析与 operator 通知入口
+### 6.6 analytics 模块机制隔离（r10）
+
+- `/stats` 从共享 `workOrderRouter` 彻底移出，归并到 `statsRouter`；
+- `statsRouter` 自身挂 `requireModule('analytics')`，任何挂载方都无法漏挂；
+- 不再通过在共享接口里判断角色来打补丁；
+- 移动端工单执行端点完全不动；
+- 新增：
+  - analytics 关闭 → 管理面 403 `MODULE_DISABLED`；
+  - analytics 开启 → 200；
+  - `moduleRouteBoundary` 静态回归，防止 `/stats` 再次回到共享路由。
+
+### 6.7 机构解析与 operator 通知入口
 
 - 新增小程序共享层 `utils/org.js`：
   - `youfu_mp_org` 缓存
@@ -277,7 +288,7 @@ npm run release-gate:live
 ## 7. 发布
 
 - 后端已部署主站 / pilot，readiness 均 `ready`、`db=up`；
-- 后端 r9 release ID：`20261121T062503-799eef5bc541`；
+- 后端 r10 release ID：`20261121T114245-bcd54d11f142`；
 - 数据库迁移：`128_task_stats_indexes_and_energy_time.sql` 已应用主站/pilot；
 - pilot 小程序 **5.9.33** 已上传开发版本，预览码 `preview_qr_v5933.png`；
 - pilot release manifest digest：`dc793a2a47d3219664a2518087d006b8033f522880d8b4e006f024cea58ae433`；

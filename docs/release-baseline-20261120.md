@@ -236,7 +236,31 @@ r9 收口：
 - 运送完成时间从 HTTP 路由分支移入 `transitionOrder` 内核，任何路径进入 `done` 都写 `sign_at/arrive_at`；
 - 新增 `scripts/audit-duplicate-workers.mjs` 只读审计，先监测同一账号多条 worker 档案，不在统计层做半套对齐。
 
-## 14. 约束
+## 14. r10 analytics 模块机制隔离
+
+| 项 | 值 |
+| --- | --- |
+| 后端代码 commit | `bcd54d11f142fcd4e7248455415045404a4cae37` |
+| tag | `release-20261121-r10` |
+| backend CI | run `44900395965`，success |
+| artifact | `youfu-release-bcd54d11f142fcd4e7248455415045404a4cae37`，638,792 bytes |
+| artifact sha256 | `0d250d3dfc307545f1da13a9bf4b4091c72913cd2e4bc80c6b8434c3a27a845f` |
+| migrations | 135 |
+| release ID | `20261121T114245-bcd54d11f142` |
+| 服务器 current | `/opt/youfu/releases/20261121T114245-bcd54d11f142` |
+| 后端全量 | 221 文件 / 2621 用例 |
+| 小程序 pilot | 5.9.33；manifest digest `dc793a2a47d3...` |
+| 小程序主站 | commit `aaaa8b0`；42 / 42 通过 |
+| live analytics 烟测 | 主站/pilot `/stats`、`/stats/by-catalog` 均 200 |
+
+r10 机制修复：
+- `/stats` 从共享 `workOrderRouter` 移出，归并到 `statsRouter`；
+- `statsRouter` 自身挂 `requireModule('analytics')`；
+- 模块关闭时管理面 403 `MODULE_DISABLED`，开启时 200；
+- 移动端工单执行端点不受影响；
+- 新增路由边界静态回归，防止 `/stats` 回到共享路由。
+
+## 15. 约束
 
 - `release-manifest.json` / `release-baseline.json` 是可复现发布 artifact，不进入源码库；
 - `release-baseline.mjs` 默认 fail-closed：commit 缺失或工作树不干净直接退出 1；
