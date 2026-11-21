@@ -291,6 +291,7 @@ r11 live 边界证据（模块只在 uat 开关，真实 pilot 只读）：
 - 模块关闭：worker `/open/work_orders` 200，`/open/me/summary` 不被模块门禁拦截；
 - admin 访问 `/open/work_orders` 始终 403 `worker execution endpoint`；
 - 模块开启：admin 列表 200、claim-hall 200、补照片进入 handler（无单 404，不是 403）。
+- 真实租户只读复核：主站 `t-verification`、pilot `zixing-hospital` 均为 admin 列表 200 / admin 走 open 403 / worker open 200；未切换真实租户模块开关。
 
 ## 16. 约束
 
