@@ -372,6 +372,17 @@ describe('inspection.ts · 流转引擎（checkin/complete/exception/transition/
     expect(callParams(updIdx)[2]).toBe('cancelled');
   });
 
+  it('通用 /transition 完成也必须写 done_at（不能只改状态导致今日完成漏计）', async () => {
+    taskRow.status = 'in_progress';
+    updatedRow = { ...taskRow, status: 'done', done_at: new Date().toISOString() };
+    fakeClient.query.mockClear();
+    const r = await req('POST', '/api/v1/inspection/tasks/it-1/transition', { event: 'complete' });
+    expect(r.status).toBe(200);
+    const updIdx = calls().findIndex((s) => s.includes('UPDATE inspection_task SET'));
+    expect(updIdx).toBeGreaterThan(-1);
+    expect(calls()[updIdx]).toContain('done_at = now()');
+  });
+
   it('⑰convert：非 exception 态 → 409；exception 态 → 转标准维修工单 + linked_wo_id + convert 事件', async () => {
     expect((await req('POST', '/api/v1/inspection/tasks/it-1/convert')).status).toBe(409);
     taskRow.status = 'exception';

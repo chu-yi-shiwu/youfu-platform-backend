@@ -68,6 +68,12 @@ async function transitionTask(
       throw new AppError('BAD_REQUEST', `missing required fields: ${missing.join(',')}`, 422);
     }
   }
+  // 完成写入门禁：所有进入 done 的路径都必须落 done_at，
+  // 不能依赖前端只调用 /complete（通用 /transition 也可能推进到 done）。
+  // 否则工作台 today_done 会漏掉这类巡检单。
+  if (target === 'done' && (extra.done_at === undefined || extra.done_at === null || extra.done_at === '')) {
+    extra.done_at = 'now()';
+  }
   // 防御纵深：仅允许白名单物理列被 SET，杜绝任意列名拼入 SQL（🔴① 修复）
   // 2026-11-01：加入 'assignee'——抢单池统一后，"认领"是一条真实流转边（pending--claim-->pending），
   //   归属要随该边一起落地。值由服务端取 token 身份反查得到，不接受请求体传入，故不构注入面。
