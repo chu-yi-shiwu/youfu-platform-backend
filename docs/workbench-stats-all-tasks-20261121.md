@@ -99,7 +99,9 @@
 
 - 工作台三格统计直接消费后端统一结果；
 - `onShow` 每次刷新，完成/提交返回后立即更新；
-- “我的任务”入口文案明确为“四类任务”。
+- “我的任务”入口文案明确为“四类任务”；
+- 工作台增加维修/巡检/运送/能耗四类拆分，展示每类在办与今日完成；
+- 点分类直接进入待办页并自动套用对应类型筛选。
 
 ## 5. 验证
 
@@ -196,6 +198,6 @@ PASS 四类任务 active=4 done=12 today_done=4 today_new=8
 - 后端已部署主站 / pilot，readiness 均 `ready`、`db=up`；
 - 后端 r8 release ID：`20261121T053546-b0e028200085`；
 - 数据库迁移：`128_task_stats_indexes_and_energy_time.sql` 已应用主站/pilot；
-- pilot 小程序 **5.9.31** 已上传开发版本，预览码 `preview_qr_v5931.png`；
-- pilot release manifest digest：`61efecc6c8ae5d465e930a54506b3e720bc039aa2c154b3328c372eb37199f53`；
-- 主站小程序 commit `e8ea961`，生产上传需产品确认后执行。
+- pilot 小程序 **5.9.32** 已上传开发版本，预览码 `preview_qr_v5932.png`；
+- pilot release manifest digest：`7d089ba7fd053575da7789822894b47d238614345376ae8993c6aa1a6e6f463a`；
+- 主站小程序 commit `b9e14a0`，生产上传需产品确认后执行。
