@@ -217,5 +217,30 @@ try {
   fail('存在 SQL 列漂移（见上方 check_sql_columns 输出；批次三两起 live 事故的同型根因）');
 }
 
+// 6) 可选 live 对账（默认静态门禁不跑：需要真实租户、真实 API、JWT_SECRET）
+//   跑法：
+//     AUDIT_TENANT=t-verification API_BASE=http://127.0.0.1:4001/api/v1 \
+//       npm run release-gate:live
+const liveAudit = process.argv.includes('--live-audit');
+if (liveAudit) {
+  console.log('[live] 工作台统计与重复 worker 档案对账');
+  if (!process.env.AUDIT_TENANT) {
+    fail('live 对账缺少 AUDIT_TENANT（主站示例 t-verification；pilot 示例 zixing-hospital）');
+  } else {
+    try {
+      execSync('node scripts/audit-workbench-stats.mjs', { cwd: root, stdio: 'inherit' });
+      pass('工作台统计与数据库独立计数一致');
+    } catch {
+      fail('工作台统计对账失败');
+    }
+  }
+  try {
+    execSync('node scripts/audit-duplicate-workers.mjs', { cwd: root, stdio: 'inherit' });
+    pass('未发现同一账号多条 worker 档案');
+  } catch {
+    fail('发现同一账号多条 worker 档案，需先清洗数据');
+  }
+}
+
 console.log(failed ? '发布闸门：未通过 ❌' : '发布闸门：通过 ✅');
 process.exit(failed ? 1 : 0);

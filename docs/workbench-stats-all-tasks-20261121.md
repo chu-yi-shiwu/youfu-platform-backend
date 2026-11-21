@@ -234,6 +234,24 @@ API {"active_count":4,"done_count":2,"today_done":0,"today_new":0}
 DB  {"active_count":4,"done_count":2,"today_done":0,"today_new":0}
 ```
 
+### 6.5 纳入发布闸门
+
+新增可选 live 门禁：
+
+```bash
+AUDIT_TENANT=t-verification \
+API_BASE=http://127.0.0.1:4001/api/v1 \
+npm run release-gate:live
+```
+
+执行内容：
+
+- 原有静态门禁（迁移命名、SQL 注入、迁移幂等、RLS、SQL 列契约）；
+- 工作台统计对账；
+- 重复 worker 档案审计。
+
+默认 `npm run release-gate` 不依赖真实租户，保持离线可跑；只有带 `--live-audit` 时才要求 `AUDIT_TENANT`。pilot 发布把 `API_BASE` 换成 `http://127.0.0.1:4101/api/v1`、`AUDIT_TENANT=zixing-hospital`。
+
 ## 7. 发布
 
 - 后端已部署主站 / pilot，readiness 均 `ready`、`db=up`；

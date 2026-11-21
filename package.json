@@ -32,6 +32,7 @@
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "release-gate": "tsx scripts/releaseGate.ts",
+    "release-gate:live": "tsx scripts/releaseGate.ts --live-audit",
     "seed:energy-collection": "tsx scripts/seed-energy-collection-def.ts",
     "seed:energy-collection:reset": "tsx scripts/seed-energy-collection-def.ts --reset",
     "preflight:asset-workflow": "node scripts/asset-workflow-preflight.mjs",
