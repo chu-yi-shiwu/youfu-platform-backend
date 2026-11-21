@@ -352,6 +352,30 @@ r11.2 修复：
 - 主库 API 烟测：admin 列表 200 total=6、stats/workbench 200、worker 列表 200、me/summary 200；
 - pilot 仍是当前写入源；最终切换前需冻结写入并用 `--replace` 重放一次。
 
+## 15.3 r11.3：管理面角色边界与 worker 催办
+
+| 项 | 值 |
+| --- | --- |
+| 后端代码 commit | `0188b3516f62fff584d50ffdc76b406f64f44ab8` |
+| tag | `release-20261121-r11.3` |
+| backend CI | run `44927019738`，success |
+| artifact | `youfu-release-0188b3516f62fff584d50ffdc76b406f64f44ab8`，639,865 bytes |
+| artifact zip sha256 | `13db7669697914346bbd1f5cd22c60e604633929dc00de2842701fdc48a847c0` |
+| 本地构建 dist | 153 文件；sha256 `c80099ffd967b4d5dae8432d7354b63337f87c7ea4448fd3a40528b862ee1170` |
+| migrations | 135 |
+| release ID | `20261121T165348-0188b3516f62` |
+| 服务器 current | `/opt/youfu/releases/20261121T165348-0188b3516f62` |
+| 后端全量 | 223 文件 / 2637 用例 |
+| 前端 H5 | commit `c0f02de`；asset `assets/index-BfMCWmSp.js` |
+| 小程序主站 | 5.9.36 开发版不变 |
+| live 角色边界 | admin 200 / admin 走 open 403 / worker open 200 / worker admin 403 / worker events 403 / worker dispatch-recommend 403 / escort detail 200 |
+
+r11.3 修复：
+- `/admin/work-orders/*` 在模块门禁之外新增管理角色门禁，worker 不能读取管理事件流、派单推荐或触发管理动作；
+- worker 建单人催办保留在 `/open/work_order/:id/urge`，管理催办仍在 `/admin/work-orders/:id/urge`；
+- H5 代报修/任务详情按角色选择 `/open` 或 `/admin`，worker 不再被管理门禁误伤；
+- OpenAPI 恢复 worker urge 路径，静态/HTTP 边界测试与 live 烟测同步更新。
+
 ## 16. 约束
 
 - `release-manifest.json` / `release-baseline.json` 是可复现发布 artifact，不进入源码库；

@@ -4,14 +4,15 @@
 
 | 项 | 状态 |
 | --- | --- |
-| 后端发布 | r11.2，当前 `/opt/youfu/releases/20261121T145813-369ed77327a8` |
-| 后端 CI | run `44916642257`，success |
+| 后端发布 | r11.3，当前 `/opt/youfu/releases/20261121T165348-0188b3516f62` |
+| 后端 CI | run `44927019738`，success |
 | 主站前端 | 已部署，index asset `assets/index-CYAhwecN.js` |
 | PC pilot 前端 | 已部署，index asset `assets/index-Dx2eg-Dm.js` |
-| H5 | 已部署，index asset `assets/index-B5gsG1LV.js` |
+| H5 | 已部署，index asset `assets/index-BfMCWmSp.js`；worker/admin 双契约 |
 | pilot 小程序 | 5.9.35 开发版；manifest digest `da6a309a0572...`；44 / 44 |
 | 主站小程序 | 5.9.36 开发版；manifest digest `2b86ca7366b8...`；42 / 42 |
 | live 边界烟测 | uat 租户 PASS，测后清理；真实租户只读复核 PASS |
+| live 角色边界 | worker admin/events/dispatch-recommend 均 403；worker open 200；admin 200 |
 | 生产租户迁移 | `zixing-hospital` 已迁移到主库（75 表 / 463 行，媒体 6 文件） |
 | 主库生产租户口径 | workbench audit PASS：active=1 done=6 today_done=1 today_new=0；重复 worker PASS |
 | 工作台统计/重复 worker | 主站 + pilot PASS |
@@ -74,7 +75,11 @@
 
 配置侧已确认：主站与 pilot 的 `MP_APPID`、`MP_APPSECRET`、`WX_MP_TEMPLATE_ID` 均已设置；pilot 存在 1 条真实 delivered=true 记录，说明微信发送链路本身可用。当前失败主要是接收人未绑定 openid 或未订阅模板，不是网关配置缺失。
 
-### 2.4 发布流程闭环
+### 2.4 管理面角色边界
+
+r11.3 已补：`/admin/work-orders/*` 除模块门禁外增加管理角色门禁。worker 访问管理列表/事件/派单推荐均 403；worker 建单人催办保留在 `/open/work_order/:id/urge`。H5 代报修/详情按角色选择 `/open` 或 `/admin`，避免 worker 被管理门禁误伤。
+
+### 2.5 发布流程闭环
 
 - 前端 CI 在线状态无法匿名确认（私有仓库 API 404）；本地 36 文件 / 269 用例、typecheck、lint、build 均通过。
 - 本次后端部署使用同 commit 本地构建；CI artifact 已生成并记录 digest，但未直接下载 artifact 部署。若制度要求“artifact 即部署物”，需补下载/重放。
