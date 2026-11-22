@@ -86,6 +86,7 @@ r11.3 已补：`/admin/work-orders/*` 除模块门禁外增加管理角色门禁
 - 主站小程序 release manifest 已补；pilot/main 上传记录、二维码、digest 已归档到 release 目录。
 - 迁移前已备份 `youfu` / `youfu_pilot`（`/opt/youfu/backups/migration-20261121T224914`）。
 - 正式上线前做一次回滚演练：切 `releases/current`、恢复备份 dist、重启、健康检查；数据回滚优先恢复迁移前数据库备份。
+- Live 边界复跑：`ENV_FILE=.env AUDIT_TENANT=zixing-hospital npm run smoke:workorder-boundary`（只读，验证 admin/worker open/admin/events/dispatch 边界）。
 
 ## 3. 上线顺序建议
 
