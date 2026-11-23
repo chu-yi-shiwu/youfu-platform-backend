@@ -6,7 +6,7 @@ import { AppError } from '../middleware/error.js';
 import { listPerms } from '../middleware/role.js';
 import type { AuthLocals } from '../middleware/auth.js';
 import { DEFAULT_WORK_ORDER_DEF, isKnownState, doneStates, terminalStates, activeStates, timestampColumnFor, isTransitionAllowed, type WorkOrderStatus, type WorkflowTransition, type WorkflowDef } from '../engine/stateMachine.js';
-import { getDefEntriesAcrossAllVersions, getWorkflowDefAtVersion, getWorkflowDefVersion } from '../engine/workflowDef.js';
+import { getWorkflowDefAtVersion, getWorkflowDefVersion } from '../engine/workflowDef.js';
 import { pickAutoRule, TERMINAL_STATES } from '../engine/autoRules.js'; // 地基④：自动审核
 import { listEnabledAutoRules } from '../repo/autoRule.js';
 import { emitDomainEvent } from '../db/eventBus.js';
@@ -18,6 +18,7 @@ import { withTenantClient } from '../db/pool.js';
 import { getAuthContext } from '../db/authContext.js';
 import { resolveDepartment } from './departmentResolver.js';
 import { buildWorkOrderWhere } from './workOrderWhere.js';
+import { appendTimeoutExclusion } from './timeoutScope.js';
 
 export interface CreateDto {
   id: string;
@@ -668,23 +669,7 @@ export async function list(
   //   【版本键来自 getDefEntriesAcrossAllVersions】版本探测（含哨兵 0）只有一份真源，
   //     本处不手抄 `SELECT DISTINCT def_version`。
   if (filter.timeoutOnly) {
-    const entries = await getDefEntriesAcrossAllVersions(
-      client, tenantId, 'work_order', 'work_orders', DEFAULT_WORK_ORDER_DEF,
-    );
-    const whens: string[] = [];
-    for (const { version, def } of entries) {
-      const terminals = Array.from(new Set<string>([...doneStates(def), ...terminalStates(def)]));
-      params.push(version);
-      const vIdx = params.length;
-      params.push(terminals);
-      whens.push(`WHEN $${vIdx} THEN $${params.length}::text[]`);
-    }
-    // ELSE 兜底：版本号落在探测之外（并发插入了更新版本的行）⇒ 给空集 ⇒ 不排除任何状态
-    // ⇒ 仍是"宁可多显示，绝不静默丢单"。CASE 无 WHEN 分支时 Postgres 走 ELSE，语法亦合法。
-    const perRowExclude = `CASE wo.def_version ${whens.join(' ')} ELSE '{}'::text[] END`;
-    conds.push(
-      `wo.sla_due_at IS NOT NULL AND wo.sla_due_at < now() AND wo.status <> ALL(${perRowExclude})`,
-    );
+    conds.push(await appendTimeoutExclusion(client, tenantId, params, 'wo'));
   }
   const where = conds.join(' AND ');
   const totalR = await client.query<{ c: string }>(

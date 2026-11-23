@@ -7,8 +7,7 @@ import { processMetrics, ticketStats, workerLoadDrift } from '../repo/stats.js';
 import { workbenchStats } from '../repo/workbenchStats.js';
 import { AppError } from '../middleware/error.js';
 import { qualityReport } from '../services/dataQuality.js';
-import { getDefsAcrossAllVersions, intersectStates } from '../engine/workflowDef.js';
-import { doneStates, DEFAULT_WORK_ORDER_DEF } from '../engine/stateMachine.js';
+import { appendTimeoutExclusion } from '../repo/timeoutScope.js';
 import { requirePermission } from '../middleware/role.js';
 import { requireModule } from '../middleware/moduleGuard.js';
 
@@ -116,11 +115,9 @@ router.get('/stats/overdue', async (req, res, next) => {
       req.query.department_unassigned === '1' || req.query.department_unassigned === 'true';
     const out = await withTenantClient(tenantId, async (client) => {
       await requirePermission(res.locals.auth, client, 'dashboard.view');
-      // T1-B 多版本并存兜底：这里是「排除」判定（NOT status = ANY(done)），取各版本**交集**——
-      //   只把"所有版本都认是完成态"的状态排除掉，否则老单会被当成已完成 ⇒ **逾期数少报**。
-      const defs = await getDefsAcrossAllVersions(client, tenantId, 'work_order', 'work_orders', DEFAULT_WORK_ORDER_DEF);
-      const done = intersectStates(defs.map(doneStates));
-      const params: unknown[] = [tenantId, done];
+      // 与工作台 timeout/list 共用同一「按 def_version 排除终态」口径，避免两个超时数字打架。
+      const params: unknown[] = [tenantId];
+      const timeoutCond = await appendTimeoutExclusion(client, tenantId, params, 'wo');
       const deptCond = departmentUnassigned
         ? 'AND department_id IS NULL'
         : departmentId
@@ -131,13 +128,14 @@ router.get('/stats/overdue', async (req, res, next) => {
            COUNT(*)::int AS overdue_total,
            COALESCE(MIN(sla_due_at), NULL)::text AS earliest_due,
            COALESCE(AVG(EXTRACT(EPOCH FROM (now() - sla_due_at)) / 60)::int, 0) AS avg_overdue_min
-         FROM work_orders
-         WHERE tenant_id = $1 AND sla_due_at IS NOT NULL AND sla_due_at < now() AND NOT (status = ANY($2::text[]))
+         FROM work_orders wo
+         WHERE tenant_id = $1 AND ${timeoutCond}
            ${deptCond}`,
         params,
       );
       const row = r.rows[0];
-      const byCatalogParams: unknown[] = [tenantId, done];
+      const byCatalogParams: unknown[] = [tenantId];
+      const byCatalogTimeoutCond = await appendTimeoutExclusion(client, tenantId, byCatalogParams, 't');
       const byCatalogDeptCond = departmentUnassigned
         ? 'AND t.department_id IS NULL'
         : departmentId
@@ -147,7 +145,7 @@ router.get('/stats/overdue', async (req, res, next) => {
         `SELECT COALESCE(NULLIF(fc.name, ''), NULLIF(t.catalog, ''), '未分类') AS catalog, COUNT(*)::int AS count
          FROM work_orders t
          LEFT JOIN fault_category fc ON fc.tenant_id = t.tenant_id AND (fc.code = t.catalog OR fc.id::text = t.catalog)
-         WHERE t.tenant_id = $1 AND t.sla_due_at IS NOT NULL AND t.sla_due_at < now() AND NOT (t.status = ANY($2::text[]))
+         WHERE t.tenant_id = $1 AND ${byCatalogTimeoutCond}
            ${byCatalogDeptCond}
          GROUP BY 1 ORDER BY count DESC, 1 LIMIT 5`,
         byCatalogParams,

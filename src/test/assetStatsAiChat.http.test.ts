@@ -93,7 +93,7 @@ const processMetrics = vi.fn(async (_c: unknown, tenantId: string): Promise<any>
 vi.mock('../repo/stats.js', () => ({ processMetrics: (...a: unknown[]) => (processMetrics as any)(...a) }));
 const qualityReport = vi.fn(async (_c: unknown, _t: string): Promise<any> => ({ score: 1.0, note: '无数据' }));
 vi.mock('../services/dataQuality.js', () => ({ qualityReport: (...a: unknown[]) => (qualityReport as any)(...a) }));
-const getWorkflowDef = vi.fn(async (..._a: unknown[]): Promise<any> => ({ key: 'work_order', states: [] }));
+const getWorkflowDef = vi.fn(async (..._a: unknown[]): Promise<any> => ({ key: 'work_order', states: [], transitions: [] }));
 // 批 5：/stats/overdue 的逾期排除集改走「各版本名单」⇒ 桩必须补上新导出，否则取不到即 500。
 //   这里只有一份 def（单版本桩）⇒ 并集/交集结果都等于它自己，与改造前逐字节等价。
 vi.mock('../engine/workflowDef.js', async (importOriginal) => {
@@ -102,6 +102,7 @@ vi.mock('../engine/workflowDef.js', async (importOriginal) => {
     ...actual,
     getWorkflowDef: (...a: unknown[]) => (getWorkflowDef as any)(...a),
     getDefsAcrossAllVersions: async () => [await (getWorkflowDef as any)()],
+    getDefEntriesAcrossAllVersions: async () => [{ version: 0, def: await (getWorkflowDef as any)() }],
   };
 });
 const doneStates = vi.fn((): string[] => ['done', 'cancelled']);
@@ -416,10 +417,13 @@ describe('stats.ts · 报表大屏 4 端点', () => {
     expect(j.overdue.overdue_total).toBe(3);
     expect(j.overdue.avg_overdue_min).toBe(42);
     expect(j.overdue.by_catalog[0].catalog).toBe('空调');
-    expect(getWorkflowDef).toHaveBeenCalledTimes(1);
-    expect(doneStates).toHaveBeenCalledTimes(1);
+    expect(getWorkflowDef).toHaveBeenCalledTimes(2); // count + by-catalog 两次同一口径
+    expect(doneStates).toHaveBeenCalledTimes(2);
     const total = fakeClient.query.mock.calls.find((c: unknown[]) => String(c[0]).includes('overdue_total'));
-    expect((total![1] as unknown[])[1]).toEqual(['done', 'cancelled']); // 完成态 exclusion 参数
+    const overdueParams = total![1] as unknown[];
+    expect(overdueParams[0]).toBe(TENANT);
+    expect(overdueParams).toContain(0);
+    expect(overdueParams.some((x) => Array.isArray(x) && x.includes('done'))).toBe(true);
   });
 
   it('㉔stats 依赖抛错 → 500（errorMiddleware 兜底）', async () => {
