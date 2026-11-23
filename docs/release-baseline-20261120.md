@@ -406,6 +406,29 @@ r11.3 修复：
 
 live 复核：`timeout=1` 与 `overdue_total=1` 一致；`today_new=0`、`today_done=0`、buckets 与主库一致。
 
+## 15.5 r11.6：数据大屏「需要关注」与 SLA 老化
+
+| 项 | 值 |
+| --- | --- |
+| 后端 commit | `c9b971e8afc2df349986098a12dca954744ddbc6` |
+| tag | `release-20261123-r11.6` |
+| backend CI | run `45101020247`，success |
+| artifact | `youfu-release-c9b971e8afc2df349986098a12dca954744ddbc6`，640,834 bytes |
+| artifact zip sha256 | `6e70cd834d0d8ec679258bb8eaa83c28321d3c607a484132eb593548d90af47f` |
+| 本地构建 dist | 154 文件；sha256 `c2deb9f9bb6765653e66b55cc2d6b9fa0e8d249ebe644d1026118c4dc0d510dc` |
+| release ID | `20261123T024540-c9b971e8afc2` |
+| 服务器 current | `/opt/youfu/releases/20261123T024540-c9b971e8afc2` |
+| 前端 commit | `f2e6368`，tag `release-20261123-dashboard-r2` |
+| 主站 PC asset | `assets/index-DSABYt5p.js` |
+| PC pilot asset | `assets/index-DtpTLBz2.js` |
+| 后端全量 | 223 文件 / 2637 用例 |
+| 前端全量 | 38 文件 / 273 用例 |
+
+r11.6 增补：
+- 数据大屏新增「需要关注」Top5：超时 + 待派，点击直达工单详情；
+- 超时预警新增 SLA 老化分段：≤1h / 1–4h / 4–24h / >24h；
+- live 复核：`timeout=1`、`overdue_total=1`、`age_buckets.gt_24h=1`、attention=`WO_20261121_3525015335`。
+
 ## 16. 约束
 
 - `release-manifest.json` / `release-baseline.json` 是可复现发布 artifact，不进入源码库；
