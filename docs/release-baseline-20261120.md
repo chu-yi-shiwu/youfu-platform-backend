@@ -477,7 +477,7 @@ r11.8 增补：
 - 超时升级收件人从 admin 扩展到 admin/operator/dispatcher，统一走 `activeSlaStaff`；
 - 数据大屏新增阶段时长面板与电视墙模式（总览/风险/人员三屏，20s 轮播，可手动切屏）；
 - 主域名 `/pilot/api`、`/pilot/uploads`、`/pilot/health*` 由 `127.0.0.1:4101`（隔离 pilot 库）切到 `127.0.0.1:4001`（主库），nginx 变更前备份随 release 目录归档为 `nginx-youfu.banerz.cn.conf.bak`；
-- 主站小程序 5.9.38：`wx.getLocation` 已开通；确认实际建单页无地图选点后，移除未使用的 `wx.chooseLocation` 调用与声明，地点字段改为手输/字典，不再申请该接口权限。提交单见 `docs/mp-5.9.38-review-20261123.md`。
+- 主站小程序 5.9.39：`wx.getLocation` 已开通；确认实际建单页无地图选点后，移除未使用的地图选点调用，并把含接口字面量的测试文件排除出上传包（170→145 文件），地点字段保持手输/字典，不再申请该接口权限。提交单见 `docs/mp-5.9.39-review-20261123.md`。
 
 live 复核（2026-11-23）：
 - `/stats/work-order-durations` 200；`sample.total=6`、`total.p50=19min`、`total.p90=68min`；
