@@ -4,16 +4,16 @@
 
 | 项 | 状态 |
 | --- | --- |
-| 后端发布 | r11.7，当前 `/opt/youfu/releases/20261123T030534-6054ccca999b` |
-| 后端 CI | run `45103675638`，success |
-| 主站前端 | 已部署，index asset `assets/index-zHNN3cL1.js`；commit `5fc9b06` |
-| PC pilot 前端 | 已部署，index asset `assets/index-BvoxXvec.js` |
+| 后端发布 | r11.8，当前 `/opt/youfu/releases/20261123T034529-fc99b6726f9e` |
+| 后端 CI | run `45107645347`，success |
+| 主站前端 | 已部署，index asset `assets/index-zx6sjUbH.js`；commit `b053a73` |
+| PC pilot 前端 | 已部署，index asset `assets/index-CJoZdUDz.js` |
 | H5 | 已部署，index asset `assets/index-CWohyopO.js`；commit `130bb2b`；worker/admin 双契约 |
 | pilot 小程序 | 5.9.35 开发版；manifest digest `da6a309a0572...`；44 / 44 |
 | 主站小程序 | 5.9.36 开发版；manifest digest `2b86ca7366b8...`；42 / 42 |
 | live 边界烟测 | uat 租户 PASS，测后清理；真实租户只读复核 PASS |
 | live 角色边界 | worker admin/events/dispatch-recommend 均 403；worker open 200；admin 200 |
-| 数据大屏 | r11.7；部门筛选、今日/超时/积压 KPI、需要关注 Top5、SLA 老化、师傅负载 Top5、下钻；timeout 与 overdue 已统一为 1 |
+| 数据大屏 | r11.8；部门筛选、今日/超时/积压 KPI、需要关注 Top5、SLA 老化、师傅负载 Top5、阶段时长 P50/P90、电视墙三屏轮播、部门过程挖掘、下钻；timeout 与 overdue 已统一为 1 |
 | 生产租户迁移 | `zixing-hospital` 已迁移到主库（75 表 / 463 行，媒体 6 文件） |
 | 主库生产租户口径 | workbench audit PASS：active=1 done=6 today_done=1 today_new=0；重复 worker PASS |
 | 工作台统计/重复 worker | 主站 + pilot PASS |
@@ -41,7 +41,7 @@
 3. 主库 API 复核：admin total=6、stats total=6、worker total=5、me/summary active=1 done=6；
 4. 陪检单 `escort-*` 详情 200；
 5. 工作台统计对账 PASS；重复 worker PASS；
-6. 主库为唯一写入源，pilot API 当前 `502`（服务已停），避免双写。
+6. 主库为唯一写入源，`youfu-pilot.service` 已停；主域名 `/pilot/api` 已改由主后端 `127.0.0.1:4001` 处理，5.9.35 正式小程序链路恢复读取主库，避免双写；隔离域名 `pilot.banerz.cn` 仍停。
 
 切换回滚：主库备份 `/opt/youfu/backups/cutover-20261121T231057/youfu.dump`；如需回退，恢复主库并重启 `youfu-pilot.service`。
 
@@ -49,7 +49,7 @@
 
 - 线上生产包仍为 5.9.10，不包含本次 `/admin/work-orders` 契约。
 - 主站 5.9.36 已上传开发版，但尚未设体验版、未提交审核、未发布。
-- **pilot 已停服，主站 5.9.36 尚未发布；在 5.9.36 审核发布前，正式用户暂时不可用。**
+- 主站 5.9.36 尚未发布；但主域名 `/pilot/api` 已恢复到主后端，5.9.35 正式链路可继续使用主库（live 复核 200，total=6、timeout=1）。5.9.36 仍需尽快过审。
 - 5.9.36 已设体验版，但“提交审核”被微信接口权限拦截：`暂无权限接口：wx.getLocation`。
   - `app.json` 已正确声明 `requiredPrivateInfos: ["getLocation"]` 与 `scope.userLocation`；
   - 代码中巡检签到/运送轨迹依赖 `wx.getLocation`，不能为过审直接删除声明或代码；

@@ -452,6 +452,37 @@ r11.7 增补：
 - 数据大屏把「模数共振」替换为「师傅负载 Top5」，显示在办单数与系统 load；
 - live 复核：worker-load 200，Top5 返回；超时/attention 口径不变。
 
+## 15.7 r11.8：阶段时长、部门过程挖掘、到期前预警
+
+| 项 | 值 |
+| --- | --- |
+| 后端 commit | `fc99b6726f9e805667eaf382d5462548be16a242` |
+| tag | `release-20261123-r11.8` |
+| backend CI | run `45107645347`，success |
+| artifact | `youfu-release-fc99b6726f9e805667eaf382d5462548be16a242`，645,091 bytes |
+| artifact zip sha256 | `51be12b45e4429c26d45231978d1d197442810706140f45a31cebd0731f54f2d` |
+| 本地构建 dist | 155 文件；sha256 `e70434d084876758c0b7dff7751d7605bc8712c4bab93ce81176fabe1738b6eb` |
+| release ID | `20261123T034529-fc99b6726f9e` |
+| 前端 commit | `b053a73`，tag `release-20261123-dashboard-r4` |
+| 主站 PC asset | `assets/index-zx6sjUbH.js` |
+| PC pilot asset | `assets/index-CJoZdUDz.js` |
+| 后端全量 | 226 文件 / 2653 用例 |
+| 前端全量 | 38 文件 / 275 用例 |
+
+r11.8 增补：
+- `/stats/work-order-durations`：派单响应、到场、到场→开工、处理、端到端的 P50/P90；只统计两个端点都存在的单，空部门返回 `null` 而非 0；
+- 过程挖掘 `department_id` / `department_unassigned` 同时作用于事件主查询、学习命中数和自动派发数；
+- `department_id` / `department_unassigned` 参数解析收口到 `routes/departmentScope.ts`，统计与挖掘共用互斥契约；
+- SLA 到期前 30 分钟预警：`ticket_event(type='sla_warning')` 幂等去重，通知 assignee + admin/operator/dispatcher；
+- 超时升级收件人从 admin 扩展到 admin/operator/dispatcher，统一走 `activeSlaStaff`；
+- 数据大屏新增阶段时长面板与电视墙模式（总览/风险/人员三屏，20s 轮播，可手动切屏）。
+
+live 复核（2026-11-23）：
+- `/stats/work-order-durations` 200；`sample.total=6`、`total.p50=19min`、`total.p90=68min`；
+- `/process-mining` 全租户 9 case；按部门 6 case，`scope.department_id` 正确回显；
+- `/pilot/api/v1/stats/workbench` 经主域名返回 200（total=6、timeout=1），证明 5.9.35 正式链路已接回主后端；
+- 后端 scheduler 启动无报错。
+
 ## 16. 约束
 
 - `release-manifest.json` / `release-baseline.json` 是可复现发布 artifact，不进入源码库；
