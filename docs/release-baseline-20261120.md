@@ -429,6 +429,29 @@ r11.6 增补：
 - 超时预警新增 SLA 老化分段：≤1h / 1–4h / 4–24h / >24h；
 - live 复核：`timeout=1`、`overdue_total=1`、`age_buckets.gt_24h=1`、attention=`WO_20261121_3525015335`。
 
+## 15.6 r11.7：师傅负载 Top5
+
+| 项 | 值 |
+| --- | --- |
+| 后端 commit | `6054ccca999b2c01b2ec5c8ade9b5603144f97e9` |
+| tag | `release-20261123-r11.7` |
+| backend CI | run `45103675638`，success |
+| artifact | `youfu-release-6054ccca999b2c01b2ec5c8ade9b5603144f97e9`，640,952 bytes |
+| artifact zip sha256 | `42b7e04e222922d1fe95e77a0ce77fecc6199fa251d4919416eabe8328515674` |
+| 本地构建 dist | 154 文件；sha256 `b4dfb0772b321179d6aa61f7d7b86b9aa006ea4eabb49f4ad68a1d99c25da228` |
+| release ID | `20261123T030534-6054ccca999b` |
+| 服务器 current | `/opt/youfu/releases/20261123T030534-6054ccca999b` |
+| 前端 commit | `5fc9b06`，tag `release-20261123-dashboard-r3` |
+| 主站 PC asset | `assets/index-zHNN3cL1.js` |
+| PC pilot asset | `assets/index-BvoxXvec.js` |
+| 后端全量 | 223 文件 / 2637 用例 |
+| 前端全量 | 38 文件 / 273 用例 |
+
+r11.7 增补：
+- `/stats/worker-load-drift` 支持 `department_id` / `department_unassigned`；
+- 数据大屏把「模数共振」替换为「师傅负载 Top5」，显示在办单数与系统 load；
+- live 复核：worker-load 200，Top5 返回；超时/attention 口径不变。
+
 ## 16. 约束
 
 - `release-manifest.json` / `release-baseline.json` 是可复现发布 artifact，不进入源码库；

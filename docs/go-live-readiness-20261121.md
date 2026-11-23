@@ -4,16 +4,16 @@
 
 | 项 | 状态 |
 | --- | --- |
-| 后端发布 | r11.6，当前 `/opt/youfu/releases/20261123T024540-c9b971e8afc2` |
-| 后端 CI | run `45101020247`，success |
-| 主站前端 | 已部署，index asset `assets/index-DSABYt5p.js`；commit `f2e6368` |
-| PC pilot 前端 | 已部署，index asset `assets/index-DtpTLBz2.js` |
+| 后端发布 | r11.7，当前 `/opt/youfu/releases/20261123T030534-6054ccca999b` |
+| 后端 CI | run `45103675638`，success |
+| 主站前端 | 已部署，index asset `assets/index-zHNN3cL1.js`；commit `5fc9b06` |
+| PC pilot 前端 | 已部署，index asset `assets/index-BvoxXvec.js` |
 | H5 | 已部署，index asset `assets/index-CWohyopO.js`；commit `130bb2b`；worker/admin 双契约 |
 | pilot 小程序 | 5.9.35 开发版；manifest digest `da6a309a0572...`；44 / 44 |
 | 主站小程序 | 5.9.36 开发版；manifest digest `2b86ca7366b8...`；42 / 42 |
 | live 边界烟测 | uat 租户 PASS，测后清理；真实租户只读复核 PASS |
 | live 角色边界 | worker admin/events/dispatch-recommend 均 403；worker open 200；admin 200 |
-| 数据大屏 | r11.6；部门筛选、今日/超时/积压 KPI、需要关注 Top5、SLA 老化、下钻；timeout 与 overdue 已统一为 1 |
+| 数据大屏 | r11.7；部门筛选、今日/超时/积压 KPI、需要关注 Top5、SLA 老化、师傅负载 Top5、下钻；timeout 与 overdue 已统一为 1 |
 | 生产租户迁移 | `zixing-hospital` 已迁移到主库（75 表 / 463 行，媒体 6 文件） |
 | 主库生产租户口径 | workbench audit PASS：active=1 done=6 today_done=1 today_new=0；重复 worker PASS |
 | 工作台统计/重复 worker | 主站 + pilot PASS |
