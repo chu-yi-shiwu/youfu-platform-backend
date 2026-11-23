@@ -301,11 +301,21 @@ export interface WorkerLoadDrift {
  * 只读对账：逐工人比对 worker.load 与真实在身单数。
  * 活跃态口径与 load 净结算同源（activeStates(def)），杜绝两处口径漂移。
  */
-export async function workerLoadDrift(client: PoolClient, tenantId: string): Promise<WorkerLoadDrift[]> {
+export async function workerLoadDrift(
+  client: PoolClient,
+  tenantId: string,
+  opts: { departmentId?: string; departmentUnassigned?: boolean } = {},
+): Promise<WorkerLoadDrift[]> {
   // T1-B 多版本并存兜底：工人负载是「包含」计数，取各版本**并集**——
   //   老单不计入某工人名下 ⇒ 该工人看起来更闲 ⇒ **派单会给他派更多，实际过载**。
   const defs = await getDefsAcrossAllVersions(client, tenantId, 'work_order', 'work_orders', DEFAULT_WORK_ORDER_DEF);
   const active = unionStates(defs.map(activeStates));
+  const params: unknown[] = [tenantId, active];
+  const deptCond = opts.departmentUnassigned
+    ? 'AND w.department_id IS NULL'
+    : opts.departmentId
+      ? `AND w.department_id::text = $${params.push(opts.departmentId)}`
+      : '';
   const r = await client.query<{ id: string; name: string; load: number; c: string }>(
     `SELECT w.id, w.name, w.load, COALESCE(a.cnt, 0)::text AS c
        FROM worker w
@@ -315,8 +325,9 @@ export async function workerLoadDrift(client: PoolClient, tenantId: string): Pro
           GROUP BY assignee_id
        ) a ON a.assignee_id = w.id
       WHERE w.tenant_id = $1
+        ${deptCond}
       ORDER BY ABS(w.load - COALESCE(a.cnt, 0)) DESC, w.id`,
-    [tenantId, active],
+    params,
   );
   return r.rows.map((x) => {
     const activeOrders = Number(x.c);

@@ -218,9 +218,16 @@ router.get('/stats/workbench', async (req, res, next) => {
 router.get('/stats/worker-load-drift', async (req, res, next) => {
   try {
     const tenantId = res.locals.auth.tenantId;
+    const qstr = (k: string): string | undefined => {
+      const v = req.query[k];
+      return typeof v === 'string' && v ? v : undefined;
+    };
+    const departmentId = qstr('department_id') ?? qstr('department');
+    const departmentUnassigned =
+      req.query.department_unassigned === '1' || req.query.department_unassigned === 'true';
     const items = await withTenantClient(tenantId, async (client) => {
       await requirePermission(res.locals.auth, client, 'dashboard.view');
-      return workerLoadDrift(client, tenantId);
+      return workerLoadDrift(client, tenantId, { departmentId, departmentUnassigned });
     });
     return res.json({ ok: true, code: 0, items });
   } catch (e) {
