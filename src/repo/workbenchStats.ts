@@ -33,6 +33,7 @@ export interface WorkbenchStats {
   bucketStatuses: Record<WorkbenchBucket, string[]>;
   timeout: number;
   today_new: number;
+  today_done: number;
   rates: {
     auto_dispatch: number;
     cancellation: number;
@@ -116,6 +117,7 @@ export async function workbenchStats(
 
   const defs = await getDefsAcrossAllVersions(client, tenantId, 'work_order', 'work_orders', DEFAULT_WORK_ORDER_DEF);
   const done = Array.from(new Set(defs.flatMap((d) => [...doneStates(d), ...terminalStates(d)])));
+  const doneOnly = Array.from(new Set(defs.flatMap((d) => [...doneStates(d)])));
   const cancelled = Array.from(new Set(defs.flatMap((d) => cancelledStates(d))));
   const evaluated = Array.from(new Set(defs.flatMap((d) => evaluatedStates(d))));
 
@@ -124,6 +126,7 @@ export async function workbenchStats(
     cancelled: string;
     auto_dispatched: string;
     auto_closed: string;
+    today_done: string;
     satisfaction_avg: string | null;
     satisfaction_count: string;
   }>(
@@ -132,11 +135,12 @@ export async function workbenchStats(
        COUNT(*) FILTER (WHERE status = ANY($${params.length + 1}::text[]))::text AS cancelled,
        COUNT(*) FILTER (WHERE auto_flow = true)::text AS auto_dispatched,
        COUNT(*) FILTER (WHERE auto_flow = true AND status = ANY($${params.length + 2}::text[]))::text AS auto_closed,
+       COUNT(*) FILTER (WHERE completed_at::date = CURRENT_DATE AND status = ANY($${params.length + 3}::text[]))::text AS today_done,
        AVG(satisfaction_score)::text AS satisfaction_avg,
        COUNT(satisfaction_score)::text AS satisfaction_count
      FROM work_orders wo
      WHERE ${where}`,
-    [...params, cancelled, done],
+    [...params, cancelled, done, doneOnly],
   );
   const a = agg.rows[0];
   const aggTotal = Number(a?.total ?? 0);
@@ -162,6 +166,7 @@ export async function workbenchStats(
     bucketStatuses,
     timeout: timeoutRes.total,
     today_new: todayRes.total,
+    today_done: Number(a?.today_done ?? 0),
     rates: {
       auto_dispatch: rate(autoDispatched, aggTotal),
       cancellation: rate(cancelledN, aggTotal),

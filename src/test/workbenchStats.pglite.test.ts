@@ -38,7 +38,8 @@ beforeAll(async () => {
       department_id uuid, department_source text, auto_flow boolean NOT NULL DEFAULT false,
       assets jsonb NOT NULL DEFAULT '[]'::jsonb, ext jsonb NOT NULL DEFAULT '{}'::jsonb,
       sla_due_at timestamptz, created_at timestamptz NOT NULL DEFAULT now(),
-      updated_at timestamptz NOT NULL DEFAULT now(), satisfaction_score smallint,
+      updated_at timestamptz NOT NULL DEFAULT now(), completed_at timestamptz,
+      satisfaction_score smallint,
       def_version int NOT NULL DEFAULT 0
     );
   `);
@@ -47,12 +48,12 @@ beforeAll(async () => {
     [T, JSON.stringify(RICH_WORK_ORDER_DEF)],
   );
   await db.query(
-    `INSERT INTO work_orders (id, tenant_id, order_no, status, department_id, auto_flow, sla_due_at, satisfaction_score, created_at) VALUES
-      ('wo-pending',$1,'P','assigned','00000000-0000-4000-8000-000000000001',true,now()-interval '1 hour',NULL,now()),
-      ('wo-active',$1,'A','processing','00000000-0000-4000-8000-000000000001',true,now()-interval '2 hour',NULL,now()),
-      ('wo-done',$1,'D','completed','00000000-0000-4000-8000-000000000001',true,NULL,NULL,now()),
-      ('wo-eval',$1,'E','evaluated','00000000-0000-4000-8000-000000000001',false,NULL,NULL,now()),
-      ('wo-cancel',$1,'C','cancelled','00000000-0000-4000-8000-000000000001',false,NULL,NULL,now())`,
+    `INSERT INTO work_orders (id, tenant_id, order_no, status, department_id, auto_flow, sla_due_at, satisfaction_score, created_at, completed_at) VALUES
+      ('wo-pending',$1,'P','assigned','00000000-0000-4000-8000-000000000001',true,now()-interval '1 hour',NULL,now(),NULL),
+      ('wo-active',$1,'A','processing','00000000-0000-4000-8000-000000000001',true,now()-interval '2 hour',NULL,now(),NULL),
+      ('wo-done',$1,'D','completed','00000000-0000-4000-8000-000000000001',true,NULL,NULL,now(),now()),
+      ('wo-eval',$1,'E','evaluated','00000000-0000-4000-8000-000000000001',false,NULL,NULL,now(),now()),
+      ('wo-cancel',$1,'C','cancelled','00000000-0000-4000-8000-000000000001',false,NULL,NULL,now(),NULL)`,
     [T],
   );
 });
@@ -72,6 +73,7 @@ describe('workbenchStats', () => {
     expect(stats.buckets.cancelled).toBe(1);
     expect(stats.timeout).toBe(2);
     expect(stats.today_new).toBe(5);
+    expect(stats.today_done).toBe(2);
     expect(stats.data_quality.evaluated_missing_score).toBe(1);
 
     const timeoutList = await list(asClient(), T, { timeoutOnly: true, limit: 1, offset: 0 } as never);

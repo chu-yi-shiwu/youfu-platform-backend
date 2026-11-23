@@ -107,29 +107,50 @@ router.get('/stats/data-quality', async (req, res, next) => {
 router.get('/stats/overdue', async (req, res, next) => {
   try {
     const tenantId = res.locals.auth.tenantId;
+    const qstr = (k: string): string | undefined => {
+      const v = req.query[k];
+      return typeof v === 'string' && v ? v : undefined;
+    };
+    const departmentId = qstr('department_id') ?? qstr('department');
+    const departmentUnassigned =
+      req.query.department_unassigned === '1' || req.query.department_unassigned === 'true';
     const out = await withTenantClient(tenantId, async (client) => {
       await requirePermission(res.locals.auth, client, 'dashboard.view');
       // T1-B 多版本并存兜底：这里是「排除」判定（NOT status = ANY(done)），取各版本**交集**——
       //   只把"所有版本都认是完成态"的状态排除掉，否则老单会被当成已完成 ⇒ **逾期数少报**。
       const defs = await getDefsAcrossAllVersions(client, tenantId, 'work_order', 'work_orders', DEFAULT_WORK_ORDER_DEF);
       const done = intersectStates(defs.map(doneStates));
+      const params: unknown[] = [tenantId, done];
+      const deptCond = departmentUnassigned
+        ? 'AND department_id IS NULL'
+        : departmentId
+          ? `AND department_id::text = $${params.push(departmentId)}`
+          : '';
       const r = await client.query(
         `SELECT
            COUNT(*)::int AS overdue_total,
-           COALESCE(MAX(sla_due_at), NULL)::text AS earliest_due,
+           COALESCE(MIN(sla_due_at), NULL)::text AS earliest_due,
            COALESCE(AVG(EXTRACT(EPOCH FROM (now() - sla_due_at)) / 60)::int, 0) AS avg_overdue_min
          FROM work_orders
-         WHERE tenant_id = $1 AND sla_due_at IS NOT NULL AND sla_due_at < now() AND NOT (status = ANY($2::text[]))`,
-        [tenantId, done],
+         WHERE tenant_id = $1 AND sla_due_at IS NOT NULL AND sla_due_at < now() AND NOT (status = ANY($2::text[]))
+           ${deptCond}`,
+        params,
       );
       const row = r.rows[0];
+      const byCatalogParams: unknown[] = [tenantId, done];
+      const byCatalogDeptCond = departmentUnassigned
+        ? 'AND t.department_id IS NULL'
+        : departmentId
+          ? `AND t.department_id::text = $${byCatalogParams.push(departmentId)}`
+          : '';
       const byCatalog = await client.query(
         `SELECT COALESCE(NULLIF(fc.name, ''), NULLIF(t.catalog, ''), '未分类') AS catalog, COUNT(*)::int AS count
          FROM work_orders t
          LEFT JOIN fault_category fc ON fc.tenant_id = t.tenant_id AND (fc.code = t.catalog OR fc.id::text = t.catalog)
          WHERE t.tenant_id = $1 AND t.sla_due_at IS NOT NULL AND t.sla_due_at < now() AND NOT (t.status = ANY($2::text[]))
+           ${byCatalogDeptCond}
          GROUP BY 1 ORDER BY count DESC, 1 LIMIT 5`,
-        [tenantId, done],
+        byCatalogParams,
       );
       return {
         overdue_total: row ? Number(row.overdue_total) : 0,
