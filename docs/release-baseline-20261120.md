@@ -475,7 +475,8 @@ r11.8 增补：
 - `department_id` / `department_unassigned` 参数解析收口到 `routes/departmentScope.ts`，统计与挖掘共用互斥契约；
 - SLA 到期前 30 分钟预警：`ticket_event(type='sla_warning')` 幂等去重，通知 assignee + admin/operator/dispatcher；
 - 超时升级收件人从 admin 扩展到 admin/operator/dispatcher，统一走 `activeSlaStaff`；
-- 数据大屏新增阶段时长面板与电视墙模式（总览/风险/人员三屏，20s 轮播，可手动切屏）。
+- 数据大屏新增阶段时长面板与电视墙模式（总览/风险/人员三屏，20s 轮播，可手动切屏）；
+- 主域名 `/pilot/api`、`/pilot/uploads`、`/pilot/health*` 由 `127.0.0.1:4101`（隔离 pilot 库）切到 `127.0.0.1:4001`（主库），nginx 变更前备份随 release 目录归档为 `nginx-youfu.banerz.cn.conf.bak`。
 
 live 复核（2026-11-23）：
 - `/stats/work-order-durations` 200；`sample.total=6`、`total.p50=19min`、`total.p90=68min`；
