@@ -14,8 +14,8 @@
 | 开发版上传 | 2026-11-23 12:15，已进「开发版本」 |
 | 预览二维码 | `preview_qr_v5937.png` |
 | `wx.getLocation` | 2026-11-23 显示“已开通” |
-| `wx.chooseLocation` | 已补入 `requiredPrivateInfos`；如后台仍提示无权限，需点“申请权限” |
-| 审核提交 | **待微信后台页面提交 5.9.37** |
+| `wx.chooseLocation` | `requiredPrivateInfos` 已声明；接口权限待微信后台申请（弹窗：接口无权限） |
+| 审核提交 | **待 `wx.chooseLocation` 权限通过后提交 5.9.37** |
 | 生产发布 | 审核通过后发布 |
 
 > 5.9.36 不再提交。5.9.36 的 `app.json` 只声明了 `getLocation`，但通用表单地点字段实际调用 `wx.chooseLocation`，审核弹窗会提示“接口未正确配置：wx.chooseLocation（暂无权限）”。5.9.37 已修复该根因。
@@ -27,6 +27,35 @@
 - 修复后：`requiredPrivateInfos: ["getLocation", "chooseLocation"]`；
 - 版本门禁新增两条断言：代码存在 `wx.chooseLocation` 调用面、`app.json` 必须声明 `chooseLocation`；
 - 位置用途不变：巡检签到、运送轨迹上报、现场地点选择，均用于工单履约留痕。
+
+## 2.1 第二次审核阻塞：`wx.chooseLocation` 接口权限
+
+5.9.37 已正确声明 `requiredPrivateInfos`，但提交审核时微信仍弹出：
+
+```text
+接口无权限
+app.json文件中部分接口暂无权限，请删除接口，或前往
+「微信公众平台 > 开发管理 > 接口设置」申请相关权限。
+暂无权限接口：wx.chooseLocation
+```
+
+处理路径：
+
+1. 点弹窗里的「去申请」；
+2. 或进入「开发管理 → 接口设置」；
+3. 找到地理位置相关接口中的 `wx.chooseLocation`；
+4. 提交申请理由（可直接用下面文案）；
+5. 权限通过后回到「版本管理 → 开发版本 → 5.9.37 → 提交审核」。
+
+申请理由建议：
+
+```text
+用于现场人员在通用业务表单中选择服务地点、设备位置或客户地址，
+便于工单履约、到达证明和后续统计。仅在用户主动点击地点字段时打开地图选择，
+不进行后台持续定位，不采集与业务无关的位置。
+```
+
+注意：不要为过审删除 `wx.chooseLocation` 或 `wx.getLocation` 调用；地点选择是通用表单的真实生产能力。
 
 ## 3. 为什么必须在后台页面提交
 
@@ -52,7 +81,7 @@ wxa/get_page             -> 86000 should be called only from third party
 3. 左侧「管理」→「版本管理」；
 4. 在「开发版本」找到 `5.9.37`（上传时间 2026-11-23 12:15）；
 5. 点「提交审核」；
-6. 如果仍弹出 `wx.chooseLocation（暂无权限）`，点「申请权限」并开通 `wx.chooseLocation`，不要点“继续提交”绕过；
+6. 如果仍弹出 `wx.chooseLocation` 接口无权限，点「去申请」并开通 `wx.chooseLocation`，通过后再提交；不要删除接口绕过；
 7. 按后台表单确认类目、标签、页面路径、截图/视频和审核说明；
 8. 提交后记录审核编号、提交时间和当前状态。
 
