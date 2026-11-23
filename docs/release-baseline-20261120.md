@@ -376,6 +376,36 @@ r11.3 修复：
 - H5 代报修/任务详情按角色选择 `/open` 或 `/admin`，worker 不再被管理门禁误伤；
 - OpenAPI 恢复 worker urge 路径，静态/HTTP 边界测试与 live 烟测同步更新。
 
+## 15.4 r11.4 / r11.5：数据大屏运营化
+
+| 项 | 值 |
+| --- | --- |
+| r11.4 后端 commit | `081cea020e8c2c2a12aa7693b92934e968fb246f` |
+| r11.5 后端 commit | `4e8178dc9579c682f5630f0229e40e2c0bca93fe` |
+| tag | `release-20261123-r11.5` |
+| backend CI | run `45098893607`，success |
+| artifact | `youfu-release-4e8178dc9579c682f5630f0229e40e2c0bca93fe`，640,694 bytes |
+| artifact zip sha256 | `bdb1bc398ffee9876fac9e2d0063d1c1db4e61cb5d05665c92c52fb48e8c4425` |
+| 本地构建 dist | 154 文件；sha256 `07fe78b3ed652db2e1fbf369e18f1d9b3e102916be2e7fdffa9318cba5fea758` |
+| release ID | `20261123T021257-4e8178dc9579` |
+| 服务器 current | `/opt/youfu/releases/20261123T021257-4e8178dc9579` |
+| 前端 commit | `07c2a66`，tag `release-20261123-dashboard` |
+| 主站 PC asset | `assets/index-6yjDDfMI.js` |
+| PC pilot asset | `assets/index-C87QZXUs.js` |
+| 后端全量 | 223 文件 / 2637 用例 |
+| 前端全量 | 38 文件 / 273 用例 |
+
+数据大屏从“统计展示”改为“运营指挥”：
+- 接入全局部门筛选；工单 KPI/超时按部门口径，满意度/趋势/过程挖掘明确标注全租户；
+- 首屏改为今日新增、待处理、处理中、超时、今日完成、工单总量；
+- 状态分布改为实时流转桶（待处理/待接单/处理中/已完成/已取消/其他），可点击下钻工单列表；
+- 新增超时预警（数量、最早到期、平均超时、分类 Top），可下钻超时列表；
+- 满意度无评价时显示“暂无评价”，星级分布分母改为已评价数，不再显示误导性的 0.0/100% 未评价；
+- 实时轮询 30s，过程挖掘 5min；增加上次更新时间、局部刷新失败提示；
+- 后端新增 `today_done`、超时部门过滤，并把工作台/超时预警统一到 `appendTimeoutExclusion` 同一按版本终态口径；`earliest_due` 修正为 MIN。
+
+live 复核：`timeout=1` 与 `overdue_total=1` 一致；`today_new=0`、`today_done=0`、buckets 与主库一致。
+
 ## 16. 约束
 
 - `release-manifest.json` / `release-baseline.json` 是可复现发布 artifact，不进入源码库；
