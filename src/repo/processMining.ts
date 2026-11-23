@@ -10,6 +10,7 @@
 import type { PoolClient } from 'pg';
 import { canTransition, isKnownState, doneStates, learningTriggerStates, autoRouteStates, autoRouteFor, type WorkflowDef } from '../engine/stateMachine.js';
 import { getWorkflowDef } from '../engine/workflowDef.js';
+import { appendDepartmentScope, buildWorkOrderWhere } from './workOrderWhere.js';
 
 export interface RawEvent {
   entity_id: string | null;
@@ -79,7 +80,13 @@ export interface ProcessMiningResult {
   tenant_id: string;
   entity_type: string;
   generated_at: string;
-  scope: { days: number; from: string; to: string };
+  scope: {
+    days: number;
+    from: string;
+    to: string;
+    department_id: string | null;
+    department_unassigned: boolean;
+  };
   overview: { case_count: number; event_count: number; available_entity_types: string[] };
   variants: Variant[];
   bottlenecks: {
@@ -297,6 +304,9 @@ export interface ProcessMiningOpts {
   entityType?: string;
   days?: number;
   limit?: number;
+  /** 仅 work_order 生效；与 departmentUnassigned 互斥（路由层校验）。 */
+  departmentId?: string;
+  departmentUnassigned?: boolean;
 }
 
 export async function processMining(
@@ -317,14 +327,27 @@ export async function processMining(
   );
   const available = etR.rows.map((r) => r.entity_type);
 
-  // 选中 entity_type 在范围内的事件（按 case+时间排序，便于回放）
+  // 选中 entity_type 在范围内的事件（按 case+时间排序，便于回放）。
+  // 部门过滤必须作用在事件主查询上，否则"按部门看过程"只会过滤面板标题、轨迹仍是全租户。
+  const eventParams: unknown[] = [tenantId, entityType, from, to];
+  const eventDeptConds: string[] = [];
+  appendDepartmentScope(eventDeptConds, eventParams, opts, 'wo');
+  const eventDeptFilter = eventDeptConds.length && entityType === 'work_order'
+    ? `AND EXISTS (
+         SELECT 1 FROM work_orders wo
+         WHERE wo.tenant_id = de.tenant_id AND wo.id = de.entity_id
+           AND ${eventDeptConds.join(' AND ')}
+       )`
+    : '';
+  eventParams.push(limit);
   const evR = await client.query<RawEvent>(
-    `SELECT entity_id, type, actor, created_at
-     FROM domain_event
-     WHERE tenant_id = $1 AND entity_type = $2 AND created_at >= $3 AND created_at <= $4
-     ORDER BY entity_id, created_at
-     LIMIT $5`,
-    [tenantId, entityType, from, to, limit],
+    `SELECT de.entity_id, de.type, de.actor, de.created_at
+     FROM domain_event de
+     WHERE de.tenant_id = $1 AND de.entity_type = $2 AND de.created_at >= $3 AND de.created_at <= $4
+       ${eventDeptFilter}
+     ORDER BY de.entity_id, de.created_at
+     LIMIT $${eventParams.length}`,
+    eventParams,
   );
   const rows = evR.rows;
 
@@ -352,15 +375,35 @@ export async function processMining(
     const r = autoRouteFor(def, from)!;
     return { from, to: r.to, strategy: r.strategy ?? null };
   });
+  // 共振命中数也必须跟部门同口径：否则主视图按部门、命中数仍按全租户，管理者会被误导。
+  const hitParams: unknown[] = [tenantId, lt, from, to];
+  const hitDeptConds: string[] = [];
+  appendDepartmentScope(hitDeptConds, hitParams, opts, 'wo');
+  const hitDeptFilter = hitDeptConds.length && entityType === 'work_order'
+    ? `AND EXISTS (
+         SELECT 1 FROM work_orders wo
+         WHERE wo.tenant_id = te.tenant_id AND wo.id = te.work_order_id
+           AND ${hitDeptConds.join(' AND ')}
+       )`
+    : '';
   const hitR = await client.query<{ n: number }>(
-    `SELECT COUNT(DISTINCT work_order_id)::int AS n
-     FROM ticket_event
-     WHERE tenant_id = $1 AND to_status = ANY($2::text[]) AND created_at >= $3 AND created_at <= $4`,
-    [tenantId, lt, from, to],
+    `SELECT COUNT(DISTINCT te.work_order_id)::int AS n
+     FROM ticket_event te
+     WHERE te.tenant_id = $1 AND te.to_status = ANY($2::text[]) AND te.created_at >= $3 AND te.created_at <= $4
+       ${hitDeptFilter}`,
+    hitParams,
   );
+  const autoWhere = buildWorkOrderWhere(tenantId, {
+    departmentId: opts.departmentId,
+    departmentUnassigned: opts.departmentUnassigned,
+    createdSince: from,
+  });
+  autoWhere.params.push(to);
+  autoWhere.conds.push(`wo.created_at <= $${autoWhere.params.length}`);
+  autoWhere.conds.push('wo.auto_flow = true');
   const autoR = await client.query<{ n: number }>(
-    `SELECT COUNT(*)::int AS n FROM work_orders WHERE tenant_id = $1 AND auto_flow = true AND created_at >= $2 AND created_at <= $3`,
-    [tenantId, from, to],
+    `SELECT COUNT(*)::int AS n FROM work_orders wo WHERE ${autoWhere.conds.join(' AND ')}`,
+    autoWhere.params,
   );
   const mvR = await client.query<{ version: number }>(
     `SELECT version FROM model_state WHERE tenant_id = $1 AND model_key = $2`,
@@ -381,7 +424,13 @@ export async function processMining(
     tenant_id: tenantId,
     entity_type: entityType,
     generated_at: new Date().toISOString(),
-    scope: { days, from: from.toISOString(), to: to.toISOString() },
+    scope: {
+      days,
+      from: from.toISOString(),
+      to: to.toISOString(),
+      department_id: opts.departmentId ?? null,
+      department_unassigned: !!opts.departmentUnassigned,
+    },
     overview: { case_count: traces.length, event_count: rows.length, available_entity_types: available },
     variants,
     bottlenecks,

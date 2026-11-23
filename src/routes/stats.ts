@@ -3,13 +3,14 @@
 // 诚实口径：满意度数据后端暂无，大屏不显示或标注"待满意度模块接入"，禁止编造（见 repo/stats.ts）。
 import { Router } from 'express';
 import { withTenantClient } from '../db/pool.js';
-import { processMetrics, ticketStats, workerLoadDrift } from '../repo/stats.js';
+import { processMetrics, ticketStats, workerLoadDrift, workOrderDurations } from '../repo/stats.js';
 import { workbenchStats } from '../repo/workbenchStats.js';
 import { AppError } from '../middleware/error.js';
 import { qualityReport } from '../services/dataQuality.js';
 import { appendTimeoutExclusion } from '../repo/timeoutScope.js';
 import { requirePermission } from '../middleware/role.js';
 import { requireModule } from '../middleware/moduleGuard.js';
+import { parseDepartmentScope } from './departmentScope.js';
 
 const router = Router();
 
@@ -106,13 +107,7 @@ router.get('/stats/data-quality', async (req, res, next) => {
 router.get('/stats/overdue', async (req, res, next) => {
   try {
     const tenantId = res.locals.auth.tenantId;
-    const qstr = (k: string): string | undefined => {
-      const v = req.query[k];
-      return typeof v === 'string' && v ? v : undefined;
-    };
-    const departmentId = qstr('department_id') ?? qstr('department');
-    const departmentUnassigned =
-      req.query.department_unassigned === '1' || req.query.department_unassigned === 'true';
+    const { departmentId, departmentUnassigned } = parseDepartmentScope(req.query);
     const out = await withTenantClient(tenantId, async (client) => {
       await requirePermission(res.locals.auth, client, 'dashboard.view');
       // 与工作台 timeout/list 共用同一「按 def_version 排除终态」口径，避免两个超时数字打架。
@@ -189,12 +184,7 @@ router.get('/stats/workbench', async (req, res, next) => {
     if (bucket && status) {
       throw new AppError('BAD_PARAM', 'bucket 与 status 互斥，不能同时传', 400);
     }
-    const departmentId = qstr('department_id') ?? qstr('department');
-    const departmentUnassigned =
-      req.query.department_unassigned === '1' || req.query.department_unassigned === 'true';
-    if (departmentId && departmentUnassigned) {
-      throw new AppError('BAD_PARAM', 'department_id 与 department_unassigned 互斥，不能同时传', 400);
-    }
+    const { departmentId, departmentUnassigned } = parseDepartmentScope(req.query);
 
     const tenantId = res.locals.auth.tenantId;
     const stats = await withTenantClient(tenantId, async (client) => {
@@ -218,18 +208,32 @@ router.get('/stats/workbench', async (req, res, next) => {
 router.get('/stats/worker-load-drift', async (req, res, next) => {
   try {
     const tenantId = res.locals.auth.tenantId;
-    const qstr = (k: string): string | undefined => {
-      const v = req.query[k];
-      return typeof v === 'string' && v ? v : undefined;
-    };
-    const departmentId = qstr('department_id') ?? qstr('department');
-    const departmentUnassigned =
-      req.query.department_unassigned === '1' || req.query.department_unassigned === 'true';
+    const { departmentId, departmentUnassigned } = parseDepartmentScope(req.query);
     const items = await withTenantClient(tenantId, async (client) => {
       await requirePermission(res.locals.auth, client, 'dashboard.view');
       return workerLoadDrift(client, tenantId, { departmentId, departmentUnassigned });
     });
     return res.json({ ok: true, code: 0, items });
+  } catch (e) {
+    next(e);
+  }
+});
+
+// 工单阶段时长 P50/P90：管理大屏用，部门口径与 KPI/列表共用 parseDepartmentScope。
+router.get('/stats/work-order-durations', async (req, res, next) => {
+  try {
+    const { departmentId, departmentUnassigned } = parseDepartmentScope(req.query);
+    const rawDays = req.query.days;
+    const days = typeof rawDays === 'string' ? Number(rawDays) : undefined;
+    if (rawDays !== undefined && (!Number.isFinite(days) || (days as number) < 1)) {
+      throw new AppError('BAD_PARAM', 'days must be a positive finite number', 400);
+    }
+    const tenantId = res.locals.auth.tenantId;
+    const out = await withTenantClient(tenantId, async (client) => {
+      await requirePermission(res.locals.auth, client, 'dashboard.view');
+      return workOrderDurations(client, tenantId, { days, departmentId, departmentUnassigned });
+    });
+    return res.json({ ok: true, code: 0, ...out });
   } catch (e) {
     next(e);
   }

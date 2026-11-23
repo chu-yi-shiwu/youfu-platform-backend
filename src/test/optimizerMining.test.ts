@@ -9,7 +9,7 @@ function stub(over: Partial<ProcessMiningResult> = {}): ProcessMiningResult {
     tenant_id: 't',
     entity_type: 'work_order',
     generated_at: new Date().toISOString(),
-    scope: { days: 30, from: '', to: '' },
+    scope: { days: 30, from: '', to: '', department_id: null, department_unassigned: false },
     overview: { case_count: 0, event_count: 0, available_entity_types: [] },
     variants: [],
     bottlenecks: { per_activity: [], per_edge: [], slowest_edge: null, slowest_activity: null },

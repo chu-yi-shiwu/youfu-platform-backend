@@ -24,7 +24,7 @@ vi.mock('../db/pool.js', () => ({
   withTenantClient: vi.fn(async (_tenantId: string, fn: (c: any) => Promise<any>) => fn(h.client)),
 }));
 
-const { runSlaScanForTenant, runSlaSchedulerOnce, runTransportSlaScanForTenant } = await import(
+const { runSlaScanForTenant, runSlaSchedulerOnce, runTransportSlaScanForTenant, runSlaWarningScanForTenant } = await import(
   '../scheduler/slaScheduler.js'
 );
 
@@ -32,6 +32,7 @@ const TENANT = 't-verification';
 const WO = '55555555-5555-4555-8555-555555555555';
 const W1 = 'worker-001';
 const ADMIN = 'admin-001';
+const OPERATOR = 'operator-001';
 
 type QueryFn = (text: string, params?: any[]) => Promise<{ rows: any[]; rowCount?: number }>;
 
@@ -41,13 +42,40 @@ function makeClient(scanRows: any[]) {
     query: (async (text: string, params?: any[]) => {
       calls.push({ text, params });
       if (text.includes('SELECT def FROM workflow_def')) return { rows: [] }; // DEFAULT 状态机
+      // 到期前预警查询带 sla_warning 标记；这个 mock 只验证超时升级，不返回预警候选。
+      if (text.includes("type = 'sla_warning'")) return { rows: [] };
       if (text.includes('FROM work_orders') && text.includes('status <> ALL')) {
         // 模拟 SQL 的暂停过滤：暂停中（sla_paused_at 非空）不进入扫描
         const rows = text.includes('sla_paused_at IS NULL') ? scanRows.filter((r) => !r.sla_paused_at) : scanRows;
         return { rows };
       }
-      if (text.includes('FROM account_user')) return { rows: [{ id: ADMIN }] };
+      if (text.includes('FROM account_user')) return { rows: [{ id: ADMIN }, { id: OPERATOR }] };
       return { rows: [] }; // UPDATE / INSERT ticket_event / domain_event / notification / webhook_subscription
+    }) as QueryFn,
+  } as any;
+  return { client, calls };
+}
+
+function makeWarningClient(rows: any[]) {
+  const calls: Array<{ text: string; params?: any[] }> = [];
+  const client = {
+    query: (async (text: string, params?: any[]) => {
+      calls.push({ text, params });
+      if (text.includes('SELECT DISTINCT def_version FROM work_orders')) return { rows: [] };
+      if (text.includes('FROM work_orders') && text.includes("type = 'sla_warning'")) {
+        const window = Number(params?.[2] ?? 30);
+        const now = Date.now();
+        return {
+          rows: rows.filter((r) => {
+            if (r.hasWarning) return false;
+            const diff = new Date(r.sla_due_at).getTime() - now;
+            return diff > 0 && diff <= window * 60_000;
+          }),
+        };
+      }
+      if (text.includes('SELECT def FROM workflow_def')) return { rows: [] };
+      if (text.includes('FROM account_user')) return { rows: [{ id: ADMIN }, { id: OPERATOR }] };
+      return { rows: [] };
     }) as QueryFn,
   } as any;
   return { client, calls };
@@ -72,10 +100,14 @@ describe('runSlaScanForTenant（SLA 闭环回归护栏）', () => {
     expect(hits[0].escalMinutes).toBeGreaterThanOrEqual(10);
     expect(calls.find((c) => c.text.includes('UPDATE work_orders SET escalated_at'))).toBeTruthy();
     const notes = calls.filter((c) => c.text.includes('INSERT INTO notification'));
-    expect(notes).toHaveLength(2);
-    // 第一条：worker（在身 assignee）；第二条：account（租户管理员）
+    expect(notes).toHaveLength(3);
+    // 第一条：worker（在身 assignee）；后两条：account（管理员 + 运营/调度）。
     expect(notes[0].params).toEqual(expect.arrayContaining([W1, 'worker']));
     expect(notes[1].params).toEqual(expect.arrayContaining([ADMIN, 'account']));
+    expect(notes[2].params).toEqual(expect.arrayContaining([OPERATOR, 'account']));
+    const staffQuery = calls.find((c) => c.text.includes('FROM account_user'));
+    expect(staffQuery?.text).toContain("role IN ('admin','operator','dispatcher')");
+    expect(staffQuery?.text).toContain('active=true');
   });
 
   it('未超时 → 零命中、零通知、不动 escalated_at', async () => {
@@ -330,6 +362,57 @@ describe('work_order SLA 按行 def_version 精确判定', () => {
     const hits = await runSlaScanForTenant(TENANT);
     expect(hits).toHaveLength(0);
     expect(calls.find((c) => c.text.includes('UPDATE work_orders SET escalated_at'))).toBeUndefined();
+    expect(calls.find((c) => c.text.includes('INSERT INTO notification'))).toBeUndefined();
+  });
+});
+
+describe('runSlaWarningScanForTenant（到期前预警）', () => {
+  const warningRow = {
+    id: WO,
+    status: 'assigned',
+    sla_due_at: new Date(Date.now() + 10 * 60_000),
+    assignee_id: W1,
+    order_no: 'WO-WARN-1',
+    def_version: 0,
+  };
+
+  it('30 分钟内到期 → 写一次 sla_warning + 通知 assignee/admin/operator', async () => {
+    const { client, calls } = makeWarningClient([warningRow]);
+    h.client = client;
+    const hits = await runSlaWarningScanForTenant(TENANT);
+    expect(hits).toHaveLength(1);
+    expect(hits[0].workOrderId).toBe(WO);
+    expect(hits[0].minutesLeft).toBeGreaterThan(0);
+    expect(hits[0].minutesLeft).toBeLessThanOrEqual(10);
+
+    const warningEvent = calls.find((c) => c.text.includes('INSERT INTO ticket_event') && c.text.includes('sla_warning'));
+    expect(warningEvent).toBeTruthy();
+    expect(warningEvent?.params).toEqual(expect.arrayContaining([WO, 'assigned']));
+    expect(calls.find((c) => c.text.includes('UPDATE work_orders SET escalated_at'))).toBeUndefined();
+
+    const notes = calls.filter((c) => c.text.includes('INSERT INTO notification'));
+    expect(notes).toHaveLength(3);
+    expect(notes[0].params).toEqual(expect.arrayContaining([W1, 'worker']));
+    expect(notes[1].params).toEqual(expect.arrayContaining([ADMIN, 'account']));
+    expect(notes[2].params).toEqual(expect.arrayContaining([OPERATOR, 'account']));
+  });
+
+  it('超过 30 分钟窗口 → 不预警、不通知', async () => {
+    const { client, calls } = makeWarningClient([
+      { ...warningRow, sla_due_at: new Date(Date.now() + 60 * 60_000) },
+    ]);
+    h.client = client;
+    const hits = await runSlaWarningScanForTenant(TENANT);
+    expect(hits).toHaveLength(0);
+    expect(calls.find((c) => c.text.includes('INSERT INTO ticket_event'))).toBeUndefined();
+    expect(calls.find((c) => c.text.includes('INSERT INTO notification'))).toBeUndefined();
+  });
+
+  it('已有 sla_warning 事件 → 幂等跳过，不再轰炸', async () => {
+    const { client, calls } = makeWarningClient([{ ...warningRow, hasWarning: true }]);
+    h.client = client;
+    const hits = await runSlaWarningScanForTenant(TENANT);
+    expect(hits).toHaveLength(0);
     expect(calls.find((c) => c.text.includes('INSERT INTO notification'))).toBeUndefined();
   });
 });

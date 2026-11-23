@@ -9,6 +9,7 @@
 import type { PoolClient } from 'pg';
 import { getDefsAcrossAllVersions, unionStates, intersectStates } from '../engine/workflowDef.js';
 import { doneStates, terminalStates, activeStates, cancelledStates, DEFAULT_WORK_ORDER_DEF } from '../engine/stateMachine.js';
+import { buildWorkOrderWhere } from './workOrderWhere.js';
 
 // P-5：统计聚合短 TTL 缓存（单进程部署足够；对齐 DataScreen 30s 刷新，降低重复聚合压力）。
 // 按租户键隔离；仅缓存最终计算结果，不影响 RLS（结果已按租户算出）。
@@ -338,5 +339,142 @@ export async function workerLoadDrift(
       active_orders: activeOrders,
       drift: (Number(x.load) || 0) - activeOrders,
     };
+  });
+}
+
+// ============ 工单阶段时长分位值（管理大屏） ============
+// 口径（与 074 里程碑列一一对应，禁止在页面里重新用 updated_at 猜时间）：
+//   dispatch = created_at → assigned_at  （派单响应）
+//   arrive   = created_at → arrived_at   （到场）
+//   start    = arrived_at → started_at  （到场到开工）
+//   handle   = started_at → completed_at（处理）
+//   total    = created_at → completed_at（端到端闭环）
+// 只统计两个端点都存在且顺序合法的单；缺里程碑的单不计入对应分位值，避免把 NULL 当 0。
+export interface DurationPercentiles {
+  p50: number | null;
+  p90: number | null;
+  count: number;
+}
+
+export interface WorkOrderDurationsResult {
+  days: number;
+  from: string;
+  to: string;
+  sample: {
+    total: number;
+    completed: number;
+    with_assigned: number;
+    with_arrived: number;
+    with_started: number;
+  };
+  dispatch: DurationPercentiles;
+  arrive: DurationPercentiles;
+  start: DurationPercentiles;
+  handle: DurationPercentiles;
+  total: DurationPercentiles;
+}
+
+/**
+ * 按部门/未分配部门 + 最近 N 天统计工单阶段时长 P50/P90。
+ * 部门条件复用 buildWorkOrderWhere，和列表/工作台/超时/负载同一口径。
+ */
+export async function workOrderDurations(
+  client: PoolClient,
+  tenantId: string,
+  opts: { days?: number; departmentId?: string; departmentUnassigned?: boolean } = {},
+): Promise<WorkOrderDurationsResult> {
+  const days = Math.min(Math.max(Math.trunc(opts.days ?? 30), 1), 365);
+  const to = new Date();
+  const from = new Date(to.getTime() - days * 86_400_000);
+  const cacheKey = `workOrderDurations:${tenantId}:${days}:${opts.departmentId ?? ''}:${opts.departmentUnassigned ? '1' : '0'}`;
+  const hit = cachedResult<WorkOrderDurationsResult>(cacheKey);
+  if (hit) return hit;
+
+  const { conds, params } = buildWorkOrderWhere(tenantId, {
+    departmentId: opts.departmentId,
+    departmentUnassigned: opts.departmentUnassigned,
+    createdSince: from,
+  });
+  // percentile_cont 在空集合返回 NULL；count 用 FILTER 与分位值同条件，保证 count>0 才可能有值。
+  const r = await client.query<Record<string, string | number | null>>(
+    `SELECT
+       COUNT(*)::int AS total,
+       COUNT(completed_at)::int AS completed,
+       COUNT(assigned_at)::int AS with_assigned,
+       COUNT(arrived_at)::int AS with_arrived,
+       COUNT(started_at)::int AS with_started,
+       percentile_cont(0.5) WITHIN GROUP (
+         ORDER BY (EXTRACT(EPOCH FROM (assigned_at - created_at)) / 60)::float8
+       ) FILTER (WHERE assigned_at IS NOT NULL AND assigned_at >= created_at) AS dispatch_p50,
+       percentile_cont(0.9) WITHIN GROUP (
+         ORDER BY (EXTRACT(EPOCH FROM (assigned_at - created_at)) / 60)::float8
+       ) FILTER (WHERE assigned_at IS NOT NULL AND assigned_at >= created_at) AS dispatch_p90,
+       COUNT(*) FILTER (WHERE assigned_at IS NOT NULL AND assigned_at >= created_at)::int AS dispatch_n,
+       percentile_cont(0.5) WITHIN GROUP (
+         ORDER BY (EXTRACT(EPOCH FROM (arrived_at - created_at)) / 60)::float8
+       ) FILTER (WHERE arrived_at IS NOT NULL AND arrived_at >= created_at) AS arrive_p50,
+       percentile_cont(0.9) WITHIN GROUP (
+         ORDER BY (EXTRACT(EPOCH FROM (arrived_at - created_at)) / 60)::float8
+       ) FILTER (WHERE arrived_at IS NOT NULL AND arrived_at >= created_at) AS arrive_p90,
+       COUNT(*) FILTER (WHERE arrived_at IS NOT NULL AND arrived_at >= created_at)::int AS arrive_n,
+       percentile_cont(0.5) WITHIN GROUP (
+         ORDER BY (EXTRACT(EPOCH FROM (started_at - arrived_at)) / 60)::float8
+       ) FILTER (WHERE started_at IS NOT NULL AND arrived_at IS NOT NULL AND started_at >= arrived_at) AS start_p50,
+       percentile_cont(0.9) WITHIN GROUP (
+         ORDER BY (EXTRACT(EPOCH FROM (started_at - arrived_at)) / 60)::float8
+       ) FILTER (WHERE started_at IS NOT NULL AND arrived_at IS NOT NULL AND started_at >= arrived_at) AS start_p90,
+       COUNT(*) FILTER (WHERE started_at IS NOT NULL AND arrived_at IS NOT NULL AND started_at >= arrived_at)::int AS start_n,
+       percentile_cont(0.5) WITHIN GROUP (
+         ORDER BY (EXTRACT(EPOCH FROM (completed_at - started_at)) / 60)::float8
+       ) FILTER (WHERE completed_at IS NOT NULL AND started_at IS NOT NULL AND completed_at >= started_at) AS handle_p50,
+       percentile_cont(0.9) WITHIN GROUP (
+         ORDER BY (EXTRACT(EPOCH FROM (completed_at - started_at)) / 60)::float8
+       ) FILTER (WHERE completed_at IS NOT NULL AND started_at IS NOT NULL AND completed_at >= started_at) AS handle_p90,
+       COUNT(*) FILTER (WHERE completed_at IS NOT NULL AND started_at IS NOT NULL AND completed_at >= started_at)::int AS handle_n,
+       percentile_cont(0.5) WITHIN GROUP (
+         ORDER BY (EXTRACT(EPOCH FROM (completed_at - created_at)) / 60)::float8
+       ) FILTER (WHERE completed_at IS NOT NULL AND completed_at >= created_at) AS total_p50,
+       percentile_cont(0.9) WITHIN GROUP (
+         ORDER BY (EXTRACT(EPOCH FROM (completed_at - created_at)) / 60)::float8
+       ) FILTER (WHERE completed_at IS NOT NULL AND completed_at >= created_at) AS total_p90,
+       COUNT(*) FILTER (WHERE completed_at IS NOT NULL AND completed_at >= created_at)::int AS total_n
+     FROM work_orders wo
+     WHERE ${conds.join(' AND ')}`,
+    params,
+  );
+
+  const row = r.rows[0] ?? {};
+  const num = (key: string): number => {
+    const value = row[key];
+    return value == null ? 0 : Number(value);
+  };
+  const minutes = (key: string): number | null => {
+    const value = row[key];
+    if (value == null) return null;
+    const n = Number(value);
+    return Number.isFinite(n) ? Math.round(n) : null;
+  };
+  const stat = (prefix: 'dispatch' | 'arrive' | 'start' | 'handle' | 'total'): DurationPercentiles => ({
+    p50: minutes(`${prefix}_p50`),
+    p90: minutes(`${prefix}_p90`),
+    count: num(`${prefix}_n`),
+  });
+
+  return storeResult(cacheKey, {
+    days,
+    from: from.toISOString(),
+    to: to.toISOString(),
+    sample: {
+      total: num('total'),
+      completed: num('completed'),
+      with_assigned: num('with_assigned'),
+      with_arrived: num('with_arrived'),
+      with_started: num('with_started'),
+    },
+    dispatch: stat('dispatch'),
+    arrive: stat('arrive'),
+    start: stat('start'),
+    handle: stat('handle'),
+    total: stat('total'),
   });
 }

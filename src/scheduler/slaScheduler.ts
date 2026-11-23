@@ -118,6 +118,124 @@ function deadStatesOf(d: WorkflowDef): string[] {
   return Array.from(new Set([...doneStates(d), ...terminalStates(d), ...holdStates(d)]));
 }
 
+// SLA 告警的收件人策略唯一实现：管理员 + 运营 + 调度。
+// 不能只发 admin：现场运营/调度才是实际派人处置的角色；角色清单写死在一处，避免
+// 「超时升级发给 admin、待接超时发给 operator」两套口径。
+const SLA_STAFF_SQL = `SELECT id FROM account_user
+  WHERE tenant_id=$1 AND role IN ('admin','operator','dispatcher') AND active=true`;
+function activeSlaStaff(client: PoolClient, tenantId: string) {
+  return client.query<{ id: string }>(SLA_STAFF_SQL, [tenantId]);
+}
+
+/** 到期前预警命中记录（与超时升级 SlaHit 区分：此时还没超时）。 */
+export interface SlaWarningHit {
+  workOrderId: string;
+  orderNo: string;
+  fromStatus: string;
+  minutesLeft: number;
+  dueAt: Date;
+}
+
+/**
+ * 到期前预警扫描：只扫「30 分钟内到期、仍在活跃态、未挂起、未升级」的工单。
+ * 幂等：用 ticket_event(type='sla_warning') 做一次性标记，不新增列；
+ * 通知收件人与超时升级共用 activeSlaStaff（admin/operator/dispatcher）。
+ */
+export async function runSlaWarningScanForTenant(
+  tenantId: string,
+  windowMinutes = 30,
+): Promise<SlaWarningHit[]> {
+  const window = Math.max(1, Math.min(Math.trunc(windowMinutes), 24 * 60));
+  return withSystemTenantClient(tenantId, async (client) => {
+    const defs = await getDefsAcrossAllVersions(
+      client, tenantId, 'work_order', 'work_orders', DEFAULT_WORK_ORDER_DEF,
+    );
+    const slaExclude = intersectStates(
+      defs.map((d) => Array.from(new Set([...doneStates(d), ...terminalStates(d)]))),
+    );
+    const rows = await client.query<{
+      id: string;
+      status: string;
+      sla_due_at: Date;
+      assignee_id: string | null;
+      order_no: string;
+      def_version: number | null;
+    }>(
+      `SELECT w.id, w.status, w.sla_due_at, w.assignee_id, w.order_no, w.def_version
+         FROM work_orders w
+        WHERE w.tenant_id = $1 AND w.status <> ALL($2::text[])
+          AND w.sla_paused_at IS NULL AND w.escalated_at IS NULL
+          AND w.sla_due_at IS NOT NULL
+          AND w.sla_due_at > now()
+          AND w.sla_due_at <= now() + make_interval(mins => $3::int)
+          AND NOT EXISTS (
+            SELECT 1 FROM ticket_event e
+             WHERE e.tenant_id = w.tenant_id AND e.work_order_id = w.id
+               AND e.type = 'sla_warning'
+          )`,
+      [tenantId, slaExclude, window],
+    );
+    if (rows.rows.length === 0) return [];
+
+    const defsByVersion = await getDefsForVersions(
+      client, tenantId, 'work_order', rows.rows, DEFAULT_WORK_ORDER_DEF, true,
+    );
+    const precise = rows.rows.filter((r) => {
+      const d = defsByVersion.get(Number(r.def_version) || 0);
+      if (!d) return false;
+      const status = String(r.status);
+      if (deadStatesOf(d).includes(status)) return false;
+      return engineActiveStates(d).includes(status as WorkOrderStatus);
+    });
+
+    const staff = await activeSlaStaff(client, tenantId);
+    const hits: SlaWarningHit[] = [];
+    for (const r of precise) {
+      const dueAt = new Date(r.sla_due_at);
+      const minutesLeft = Math.max(0, Math.round((dueAt.getTime() - Date.now()) / 60_000));
+      await client.query(
+        `INSERT INTO ticket_event (tenant_id, work_order_id, type, from_status, to_status, actor, payload)
+         VALUES ($1,$2,'sla_warning',$3,$3,'system',$4)`,
+        [tenantId, r.id, r.status, JSON.stringify({ due_at: dueAt, minutes_left: minutesLeft })],
+      );
+      await emitDomainEvent(client, {
+        tenantId, entityType: 'work_order', entityId: r.id, type: 'sla_warning', actor: 'system',
+        payload: { due_at: dueAt, minutes_left: minutesLeft, status: r.status },
+      });
+      const title = '工单即将超时';
+      const body = `工单 ${r.order_no} 将于 ${minutesLeft} 分钟后到期（状态 ${r.status}），请尽快处理`;
+      if (r.assignee_id) {
+        await insertNotification(client, {
+          tenantId, recipient: r.assignee_id, recipientKind: 'worker', type: 'sla_warning',
+          workOrderId: r.id, title, body,
+          payload: {
+            order_no: r.order_no, due_at: dueAt, minutes_left: minutesLeft, status: r.status,
+            page: `pages/worker/task-detail/task-detail?id=${r.id}`,
+          },
+        });
+      }
+      for (const a of staff.rows) {
+        await insertNotification(client, {
+          tenantId, recipient: a.id, recipientKind: 'account', type: 'sla_warning',
+          workOrderId: r.id, title, body,
+          payload: {
+            order_no: r.order_no, due_at: dueAt, minutes_left: minutesLeft, status: r.status,
+            assignee_id: r.assignee_id,
+          },
+        });
+      }
+      hits.push({
+        workOrderId: r.id,
+        orderNo: r.order_no,
+        fromStatus: r.status,
+        minutesLeft,
+        dueAt,
+      });
+    }
+    return hits;
+  });
+}
+
 /** P1（B2 补 SLA）：运送线 SLA 命中记录（与工单线 SlaHit 分离，字段语义不同）。 */
 export interface TransportSlaHit {
   transportOrderId: string;
@@ -209,10 +327,7 @@ export async function runTransportSlaScanForTenant(tenantId: string): Promise<Tr
           payload: { entity_type: 'transport_order', code: r.code ?? null, from_status: r.status },
         });
       }
-      const admins = await client.query<{ id: string }>(
-        `SELECT id FROM account_user WHERE tenant_id=$1 AND role='admin' AND active=true`,
-        [tenantId],
-      );
+      const admins = await activeSlaStaff(client, tenantId);
       for (const a of admins.rows) {
         await insertNotification(client, {
           tenantId, recipient: a.id, recipientKind: 'account', type: 'sla_escalated',
@@ -309,10 +424,7 @@ export async function runSlaScanForTenant(tenantId: string): Promise<SlaHit[]> {
           payload: { order_no: orderNo, from_status: h.fromStatus, escal_minutes: h.escalMinutes },
         });
       }
-      const admins = await client.query<{ id: string }>(
-        `SELECT id FROM account_user WHERE tenant_id=$1 AND role='admin' AND active=true`,
-        [tenantId],
-      );
+      const admins = await activeSlaStaff(client, tenantId);
       for (const a of admins.rows) {
         await insertNotification(client, {
           tenantId, recipient: a.id, recipientKind: 'account', type: 'sla_escalated', workOrderId: h.workOrderId,
@@ -333,8 +445,19 @@ export async function runSlaSchedulerOnce(): Promise<number> {
   try {
     const { rows } = await pool.query('SELECT tenant_id FROM sla_escalation_tenants()');
     let total = 0;
+    let wTotal = 0;
     let tTotal = 0; // P1：运送线命中数（单独计数，日志分线，返回值仍为工单线命中数保持既有语义）
     for (const r of rows) {
+      try {
+        // 到期前预警先跑：给现场留出 30 分钟处置窗口；已升级/已预警的单由 SQL 幂等排除。
+        const wHits = await runSlaWarningScanForTenant(r.tenant_id);
+        wTotal += wHits.length;
+        for (const h of wHits) {
+          console.warn(`[scheduler] SLA warning tenant=${r.tenant_id} wo=${h.workOrderId} left=${h.minutesLeft}min`);
+        }
+      } catch (e) {
+        console.error('[scheduler] tenant', r.tenant_id, 'sla warning scan failed:', e);
+      }
       try {
         const hits = await runSlaScanForTenant(r.tenant_id);
         total += hits.length;
@@ -364,6 +487,7 @@ export async function runSlaSchedulerOnce(): Promise<number> {
         console.error('[scheduler] tenant', r.tenant_id, 'claim_hall timeout scan failed:', e);
       }
     }
+    if (wTotal > 0) console.log(`[scheduler] sla warned ${wTotal} work orders`);
     if (total > 0) console.log(`[scheduler] sla escalated ${total} work orders`);
     if (tTotal > 0) console.log(`[scheduler] sla escalated ${tTotal} transport orders`);
     return total;

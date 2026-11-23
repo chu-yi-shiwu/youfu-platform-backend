@@ -10,6 +10,7 @@ function withSystemTenantClient<T>(tenantId: string, fn: (client: PoolClient) =>
   return withTenantClient(tenantId, fn, { system: true });
 }
 import { processMining } from '../repo/processMining.js';
+import { parseDepartmentScope } from './departmentScope.js';
 
 const router = Router();
 
@@ -17,6 +18,15 @@ router.get('/process-mining', async (req, res, next) => {
   try {
     const tenantId = res.locals.auth.tenantId;
     const entityType = typeof req.query.entityType === 'string' ? req.query.entityType : undefined;
+    const { departmentId, departmentUnassigned } = parseDepartmentScope(req.query);
+    // 部门过滤只对 work_order 有语义；其他实体没有 department_id，必须显式拒绝而不是静默忽略。
+    if ((departmentId || departmentUnassigned) && (entityType ?? 'work_order') !== 'work_order') {
+      return res.status(400).json({
+        ok: false,
+        code: 'BAD_PARAM',
+        message: 'department filters only support entityType=work_order',
+      });
+    }
     const days = typeof req.query.days === 'string' ? Number(req.query.days) : undefined;
     // P-3：limit 强制上限（默认由 repo 取 50000 用于挖掘；显式传参封顶 200000，防滥用）。
     const limit = typeof req.query.limit === 'string' ? Math.min(Math.max(1, Number(req.query.limit)), 200000) : undefined;
@@ -28,7 +38,7 @@ router.get('/process-mining', async (req, res, next) => {
       return res.status(400).json({ ok: false, code: 'BAD_PARAM', message: 'limit must be a finite number' });
     }
     const result = await withSystemTenantClient(tenantId, (client) =>
-      processMining(client, tenantId, { entityType, days, limit }),
+      processMining(client, tenantId, { entityType, days, limit, departmentId, departmentUnassigned }),
     );
     return res.json({ ok: true, code: 0, result });
   } catch (e) {

@@ -14,6 +14,26 @@ export interface WorkOrderFilter {
   unsettledOnly?: boolean;
 }
 
+/**
+ * 部门口径的唯一 SQL 拼接实现：工单列表、工作台、超时、负载、过程挖掘都必须走这里，
+ * 禁止各端点各写一套 `department_id` 条件导致"看板按部门、列表不按部门"的漂移。
+ * params 由调用方持有，函数只追加，占位符编号与 params.length 对齐。
+ */
+export function appendDepartmentScope(
+  conds: string[],
+  params: unknown[],
+  filter: { departmentId?: string; departmentUnassigned?: boolean },
+  alias: string,
+): void {
+  if (filter.departmentId) {
+    params.push(filter.departmentId);
+    conds.push(`${alias}.department_id = $${params.length}`);
+  }
+  if (filter.departmentUnassigned) {
+    conds.push(`${alias}.department_id IS NULL`);
+  }
+}
+
 export function buildWorkOrderWhere(
   tenantId: string,
   filter: WorkOrderFilter,
@@ -35,13 +55,7 @@ export function buildWorkOrderWhere(
       conds.push(`wo.assignee_id = $${params.length}`);
     }
   }
-  if (filter.departmentId) {
-    params.push(filter.departmentId);
-    conds.push(`wo.department_id = $${params.length}`);
-  }
-  if (filter.departmentUnassigned) {
-    conds.push('wo.department_id IS NULL');
-  }
+  appendDepartmentScope(conds, params, filter, 'wo');
   if (filter.priority) {
     params.push(filter.priority);
     conds.push(`wo.priority = $${params.length}`);
