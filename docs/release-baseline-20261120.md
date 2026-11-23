@@ -477,7 +477,7 @@ r11.8 增补：
 - 超时升级收件人从 admin 扩展到 admin/operator/dispatcher，统一走 `activeSlaStaff`；
 - 数据大屏新增阶段时长面板与电视墙模式（总览/风险/人员三屏，20s 轮播，可手动切屏）；
 - 主域名 `/pilot/api`、`/pilot/uploads`、`/pilot/health*` 由 `127.0.0.1:4101`（隔离 pilot 库）切到 `127.0.0.1:4001`（主库），nginx 变更前备份随 release 目录归档为 `nginx-youfu.banerz.cn.conf.bak`；
-- 主站小程序 5.9.37：`wx.getLocation` 已开通，补齐 `wx.chooseLocation` 的 `requiredPrivateInfos` 声明；`wx.chooseLocation` 接口权限仍待微信后台申请，通过后提交审核。提交单见 `docs/mp-5.9.37-review-20261123.md`。
+- 主站小程序 5.9.37：`wx.getLocation` 已开通，补齐 `wx.chooseLocation` 的 `requiredPrivateInfos` 声明；`wx.chooseLocation` 在接口设置页待点「开通」，开通后提交审核。提交单见 `docs/mp-5.9.37-review-20261123.md`。
 
 live 复核（2026-11-23）：
 - `/stats/work-order-durations` 200；`sample.total=6`、`total.p50=19min`、`total.p90=68min`；
