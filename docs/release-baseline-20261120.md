@@ -389,9 +389,9 @@ r11.3 修复：
 | 本地构建 dist | 154 文件；sha256 `07fe78b3ed652db2e1fbf369e18f1d9b3e102916be2e7fdffa9318cba5fea758` |
 | release ID | `20261123T021257-4e8178dc9579` |
 | 服务器 current | `/opt/youfu/releases/20261123T021257-4e8178dc9579` |
-| 前端 commit | `07c2a66`，tag `release-20261123-dashboard` |
-| 主站 PC asset | `assets/index-6yjDDfMI.js` |
-| PC pilot asset | `assets/index-C87QZXUs.js` |
+| 前端 commit | `70f624b`（follow-up `07c2a66`），tag `release-20261123-dashboard` |
+| 主站 PC asset | `assets/index-D4drDnbx.js` |
+| PC pilot asset | `assets/index-D6aQBlE7.js` |
 | 后端全量 | 223 文件 / 2637 用例 |
 | 前端全量 | 38 文件 / 273 用例 |
 

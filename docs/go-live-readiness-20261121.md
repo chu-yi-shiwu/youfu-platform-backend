@@ -6,8 +6,8 @@
 | --- | --- |
 | 后端发布 | r11.5，当前 `/opt/youfu/releases/20261123T021257-4e8178dc9579` |
 | 后端 CI | run `45098893607`，success |
-| 主站前端 | 已部署，index asset `assets/index-6yjDDfMI.js` |
-| PC pilot 前端 | 已部署，index asset `assets/index-C87QZXUs.js` |
+| 主站前端 | 已部署，index asset `assets/index-D4drDnbx.js`；commit `70f624b` |
+| PC pilot 前端 | 已部署，index asset `assets/index-D6aQBlE7.js` |
 | H5 | 已部署，index asset `assets/index-CWohyopO.js`；commit `130bb2b`；worker/admin 双契约 |
 | pilot 小程序 | 5.9.35 开发版；manifest digest `da6a309a0572...`；44 / 44 |
 | 主站小程序 | 5.9.36 开发版；manifest digest `2b86ca7366b8...`；42 / 42 |
