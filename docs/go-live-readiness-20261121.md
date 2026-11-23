@@ -10,7 +10,7 @@
 | PC pilot 前端 | 已部署，index asset `assets/index-CJoZdUDz.js` |
 | H5 | 已部署，index asset `assets/index-CWohyopO.js`；commit `130bb2b`；worker/admin 双契约 |
 | pilot 小程序 | 5.9.35 开发版；manifest digest `da6a309a0572...`；44 / 44 |
-| 主站小程序 | 5.9.37 开发版；manifest digest `553ac0eb5cc1...`；42 / 42 |
+| 主站小程序 | 5.9.38 开发版；manifest digest `446680a5240f...`；42 / 42 |
 | live 边界烟测 | uat 租户 PASS，测后清理；真实租户只读复核 PASS |
 | live 角色边界 | worker admin/events/dispatch-recommend 均 403；worker open 200；admin 200 |
 | 数据大屏 | r11.8；部门筛选、今日/超时/积压 KPI、需要关注 Top5、SLA 老化、师傅负载 Top5、阶段时长 P50/P90、电视墙三屏轮播、部门过程挖掘、下钻；timeout 与 overdue 已统一为 1 |
@@ -48,13 +48,13 @@
 ### 2.2 主站小程序仍是旧生产包
 
 - 线上生产包仍为 5.9.10，不包含本次 `/admin/work-orders` 契约。
-- 主站 5.9.37 已上传开发版；`wx.getLocation` 接口权限已于 2026-11-23 显示“已开通”，5.9.37 同时补齐 `wx.chooseLocation` 的 `requiredPrivateInfos` 声明；`wx.chooseLocation` 在「开发管理 → 接口设置」显示「开通」按钮，点击开通后即可提交审核。
-- 主站 5.9.37 尚未发布；但主域名 `/pilot/api` 已恢复到主后端，5.9.35 正式链路可继续使用主库（live 复核 200，total=6、timeout=1）。5.9.37 仍需尽快过审。
-- `app.json` 已声明 `requiredPrivateInfos: ["getLocation", "chooseLocation"]` 与 `scope.userLocation`；代码中巡检签到/运送轨迹依赖 `wx.getLocation`，通用表单地点字段依赖 `wx.chooseLocation`，不能为过审删除声明或代码；提交审核弹窗“接口无权限：wx.chooseLocation”指向「开发管理 → 接口设置 → 地理位置」，点 `wx.chooseLocation` 右侧「开通」即可，不要批量开通无关定位接口。
-- 5.9.36 因只声明 `getLocation`、未声明 `chooseLocation`，审核弹窗会拦截，已由 5.9.37 取代；不要再提交 5.9.36。
-- 审核提交需在微信后台页面操作（普通小程序不能调用 `wxa/submit_audit`，接口返回 `86000 should be called only from third party`）；提交材料与说明见 `docs/mp-5.9.37-review-20261123.md`。
-- 若正式环境已有 5.9.10 用户，后端升级后旧包管理端会 403；必须尽快发布 5.9.37 或确认无旧版在线用户。
-- pilot 与主站共用 appid `wxb99197ac59cfa519`，同一 app 的体验版/正式版互斥；当前应把 5.9.37 提交审核并发布，不再回到 pilot 包。
+- 主站 5.9.38 已上传开发版；`wx.getLocation` 接口权限已于 2026-11-23 显示“已开通”，仅用于巡检签到/运送轨迹。
+- 主站 5.9.38 尚未发布；但主域名 `/pilot/api` 已恢复到主后端，5.9.35 正式链路可继续使用主库（live 复核 200，total=6、timeout=1）。5.9.38 仍需尽快过审。
+- 实际工作单建单页没有地图选点，`wx.chooseLocation` 只存在于未走到的通用表单组件；5.9.38 已删除该调用和 `app.json` 声明，地点字段改为手输/字典，不再申请 `chooseLocation` 接口权限。
+- 5.9.36 / 5.9.37 不再提交；5.9.38 的 `requiredPrivateInfos` 仅保留 `getLocation`，审核不应再弹 `wx.chooseLocation` 无权限。
+- 审核提交需在微信后台页面操作（普通小程序不能调用 `wxa/submit_audit`，接口返回 `86000 should be called only from third party`）；提交材料与说明见 `docs/mp-5.9.38-review-20261123.md`。
+- 若正式环境已有 5.9.10 用户，后端升级后旧包管理端会 403；必须尽快发布 5.9.38 或确认无旧版在线用户。
+- pilot 与主站共用 appid `wxb99197ac59cfa519`，同一 app 的体验版/正式版互斥；当前应把 5.9.38 提交审核并发布，不再回到 pilot 包。
 
 ### 2.3 真实员工绑定与订阅不足
 
@@ -97,9 +97,9 @@ r11.3 已补：`/admin/work-orders/*` 除模块门禁外增加管理角色门禁
 ## 3. 上线顺序建议
 
 1. ✅ 已冻结 pilot 写入，完成最后一次 `--replace` 重放并复核。
-2. `wx.getLocation` 已开通、`chooseLocation` 已声明；先在「开发管理 → 接口设置 → 地理位置」点 `wx.chooseLocation` 右侧「开通」，成功后在「版本管理 → 开发版本 → 5.9.37 → 提交审核」。
+2. `wx.getLocation` 已开通；5.9.38 已移除未使用的 `chooseLocation`，直接在「版本管理 → 开发版本 → 5.9.38 → 提交审核」，不再申请接口权限。
 3. 完成关键角色微信绑定/订阅，验证真实通知回执。
-4. 5.9.37 审核通过后发布正式版。
+4. 5.9.38 审核通过后发布正式版。
 5. 前端 CI/artifact/回滚确认。
 6. 生产烟测：admin 200、worker 200、模块关闭 403、通知真实回执。
 7. 灰度/正式放量。
