@@ -127,7 +127,11 @@ router.get('/stats/overdue', async (req, res, next) => {
         `SELECT
            COUNT(*)::int AS overdue_total,
            COALESCE(MIN(sla_due_at), NULL)::text AS earliest_due,
-           COALESCE(AVG(EXTRACT(EPOCH FROM (now() - sla_due_at)) / 60)::int, 0) AS avg_overdue_min
+           COALESCE(AVG(EXTRACT(EPOCH FROM (now() - sla_due_at)) / 60)::int, 0) AS avg_overdue_min,
+           COUNT(*) FILTER (WHERE now() - sla_due_at <= interval '1 hour')::int AS age_lt_1h,
+           COUNT(*) FILTER (WHERE now() - sla_due_at > interval '1 hour' AND now() - sla_due_at <= interval '4 hours')::int AS age_1_4h,
+           COUNT(*) FILTER (WHERE now() - sla_due_at > interval '4 hours' AND now() - sla_due_at <= interval '24 hours')::int AS age_4_24h,
+           COUNT(*) FILTER (WHERE now() - sla_due_at > interval '24 hours')::int AS age_gt_24h
          FROM work_orders wo
          WHERE tenant_id = $1 AND ${timeoutCond}
            ${deptCond}`,
@@ -154,6 +158,12 @@ router.get('/stats/overdue', async (req, res, next) => {
         overdue_total: row ? Number(row.overdue_total) : 0,
         earliest_due: row ? row.earliest_due : null,
         avg_overdue_min: row ? Number(row.avg_overdue_min) : 0,
+        age_buckets: {
+          lt_1h: row ? Number(row.age_lt_1h) : 0,
+          h1_4: row ? Number(row.age_1_4h) : 0,
+          h4_24: row ? Number(row.age_4_24h) : 0,
+          gt_24h: row ? Number(row.age_gt_24h) : 0,
+        },
         by_catalog: byCatalog.rows.map((x) => ({ catalog: x.catalog, count: Number(x.count) })),
       };
     });

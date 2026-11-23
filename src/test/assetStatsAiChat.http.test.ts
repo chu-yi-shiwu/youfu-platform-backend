@@ -63,7 +63,7 @@ const fakeClient = {
     if (sql.includes('FROM asset WHERE') && sql.includes('ORDER BY created_at DESC'))
       return { rows: [detailRow], rowCount: 1 };
     if (sql.includes('COUNT(*)::int AS overdue_total'))
-      return { rows: [{ overdue_total: 3, earliest_due: '2026-09-05T10:00:00Z', avg_overdue_min: 42 }], rowCount: 1 };
+      return { rows: [{ overdue_total: 3, earliest_due: '2026-09-05T10:00:00Z', avg_overdue_min: 42, age_lt_1h: 1, age_1_4h: 1, age_4_24h: 1, age_gt_24h: 0 }], rowCount: 1 };
     if (sql.includes('LEFT JOIN fault_category'))
       return { rows: [{ catalog: '空调', count: 2 }], rowCount: 1 };
     if (sql.includes('GROUP BY catalog ORDER BY count DESC'))
@@ -416,6 +416,7 @@ describe('stats.ts · 报表大屏 4 端点', () => {
     const j = (await r.json()) as any;
     expect(j.overdue.overdue_total).toBe(3);
     expect(j.overdue.avg_overdue_min).toBe(42);
+    expect(j.overdue.age_buckets).toEqual({ lt_1h: 1, h1_4: 1, h4_24: 1, gt_24h: 0 });
     expect(j.overdue.by_catalog[0].catalog).toBe('空调');
     expect(getWorkflowDef).toHaveBeenCalledTimes(2); // count + by-catalog 两次同一口径
     expect(doneStates).toHaveBeenCalledTimes(2);
